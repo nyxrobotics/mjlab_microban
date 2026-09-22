@@ -71,12 +71,7 @@ from mjlab_microban.tasks.mdp import (
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
     upright as local_upright,
-    FootTargetCommandCfg,
-    foot_target_offset_b,
-    foot_target_tracking_error_exp,
-    HandTargetCommandCfg,
-    hand_target_offset_b,
-    hand_target_tracking_error_exp,
+    randomize_upper_body_pose,
 )
 
 SCENE_CFG = SceneCfg(
@@ -165,15 +160,16 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # Excludes head and neck_roll/neck_pitch only: keeping neck orientation decoupled
-    # from the walking policy keeps head/camera motion predictable (see
-    # microban_teleop/docs/design.md) instead of the policy discovering it can
-    # wag the neck to help balance. Arms stay IN the RL action/observation space: arm
-    # swing couples into whole-body angular momentum/CoM, so an externally-IK-driven arm
-    # the policy can't see would be an unobserved disturbance source. Hand tracking is
-    # instead a reward term (foot_target_tracking's sibling, hand tracking, below)
-    # layered on top of the same 18-DOF (12 leg + 6 arm) action space.
-    dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
+    # Legs only (12 DOF). Arms and neck/head are driven mathematically once deployed
+    # (arm IK toward VR controller targets, the closed-form neck stabilization law) —
+    # not by this policy. Trying to unify them into one RL policy (arms in the action
+    # space, tracking rewards for hands/feet) repeatedly failed to learn to stand at
+    # all across several attempts (see microban_teleop/docs/design.md); going back to a
+    # legs-only policy, made robust to arbitrary (randomized per episode, see
+    # randomize_upper_body_pose below) arm/neck pose instead of needing to coordinate
+    # with them, is the simpler, lower-risk fallback.
+    excluded_dofs = r".*(head|neck_roll|neck_pitch|shoulder_pitch|shoulder_roll|elbow)$"
+    dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)(?<!shoulder_pitch)(?<!shoulder_roll)(?<!elbow)$"
 
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -219,28 +215,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_min_lag = 0
     cfg.observations["actor"].terms["projected_gravity"].delay_max_lag = 3
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
-
-    # Foot-target offset (whole-body leg tracking, see Commands section below): the
-    # policy needs to see this to decide whether/how much to hold a foot target vs walk.
-    cfg.observations["actor"].terms["foot_target"] = ObservationTermCfg(
-        func=foot_target_offset_b,
-        params={"command_name": "foot_target"},
-    )
-    cfg.observations["critic"].terms["foot_target"] = ObservationTermCfg(
-        func=foot_target_offset_b,
-        params={"command_name": "foot_target"},
-    )
-
-    # Hand target offset + per-hand active flag (whether that hand's controller
-    # trigger is held, in the real teleop bridge) — see HandTargetCommand.
-    cfg.observations["actor"].terms["hand_target"] = ObservationTermCfg(
-        func=hand_target_offset_b,
-        params={"command_name": "hand_target"},
-    )
-    cfg.observations["critic"].terms["hand_target"] = ObservationTermCfg(
-        func=hand_target_offset_b,
-        params={"command_name": "hand_target"},
-    )
 
     #---------------------------- Rewards ---------------------------
     cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
@@ -345,33 +319,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Starts low and ramps up via the staged curriculum below (stage "add foot tracking").
-    # Protected by its own velocity fade too, but staying low at first keeps stage 0 to
-    # "walking only" cleanly, matching hand_target_tracking's staging below.
-    cfg.rewards["foot_target_tracking"] = RewardTermCfg(
-        func=foot_target_tracking_error_exp,
-        weight=0.1,
-        params={
-            "command_name": "foot_target",
-            "std": 0.05,
-            "velocity_command_name": "twist",
-            "velocity_fade_range": (0.0, 0.15),
-        },
-    )
-
-    # Starts low and ramps up via the staged curriculum below (stage "add hand tracking"):
-    # at full weight from iteration 0, this reward has no fade (unlike foot_target_tracking)
-    # and directly competes for the same arm DOF that also matter for whole-body balance,
-    # so it can dominate the gradient before basic standing/walking is established.
-    cfg.rewards["hand_target_tracking"] = RewardTermCfg(
-        func=hand_target_tracking_error_exp,
-        weight=0.1,
-        params={
-            "command_name": "hand_target",
-            "std": 0.05,
-        },
-    )
-
     #---------------------------- Commands --------------------------
     command = cfg.commands["twist"]
     command.build = lambda env, _cmd=command: UniformVelocityCommandWithRotation(_cmd, env)
@@ -387,34 +334,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     command.rotation_env_ang_vel_range = (-1.5, 1.5)
     command.rotation_min_ang_vel = 0.5
-
-    # Whole-body leg tracking target (single-leg-stance capable "full body tracking"
-    # mode, unified into this same policy — see microban_teleop/docs/retargeting_research.md
-    # for why this isn't kinematic IK). Reward fades out as the twist command grows
-    # (foot_target_tracking_error_exp below), so walking always takes priority.
-    # rel_single_support_envs starts at 0.0 (ramped to 0.3 by the staged curriculum
-    # below) so stage 0 doesn't just downweight this reward but keeps the command
-    # itself quiet (always zero offset) — otherwise the observation still carries a
-    # randomly-sampled target the network has no reason to attend to yet, adding noise
-    # to the "pure walking" phase for no benefit.
-    cfg.commands["foot_target"] = FootTargetCommandCfg(
-        resampling_time_range=(3.0, 8.0),
-        rel_single_support_envs=0.0,
-        lift_height_range=(0.01, 0.05),
-        reach_xy_range=(-0.03, 0.03),
-    )
-
-    # Hand keypoint target (feature #4, arm tracking) — per-hand active flag mirrors
-    # each controller's own trigger in the real teleop bridge (see
-    # microban_teleop/docs/design.md). No velocity fade: hands track whenever active,
-    # regardless of walking. rel_active starts at 0.0 for the same reason as
-    # foot_target's rel_single_support_envs above (ramped to 0.7 by the curriculum).
-    cfg.commands["hand_target"] = HandTargetCommandCfg(
-        resampling_time_range=(3.0, 8.0),
-        rel_active=0.0,
-        reach_xy_range=(-0.08, 0.08),
-        reach_z_range=(-0.08, 0.08),
-    )
 
     #---------------------------- Events ----------------------------
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.01)
@@ -456,6 +375,20 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
+    # Arms/neck/head aren't RL-controlled (see Actions above) — pose them randomly each
+    # episode and hold them there, so the leg policy learns to balance under whatever
+    # arm/neck configuration the (eventual IK/stabilization-driven) upper body happens
+    # to be in, rather than only ever having seen the fixed default pose.
+    cfg.events["randomize_upper_body_pose"] = EventTermCfg(
+        mode="reset",
+        func=randomize_upper_body_pose,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=(excluded_dofs,), actuator_names=(excluded_dofs,)
+            ),
+        },
+    )
+
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {}
 
@@ -463,22 +396,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=step_based_staged_curriculum,
         params={
             "stages": [
-                {
-                    "name": "ramp up hand tracking",
-                    "step": 1000 * 24,
-                    "apply": lambda env: (
-                        env.reward_manager.get_term_cfg("hand_target_tracking").__setattr__("weight", 1.0),
-                        env.command_manager.get_term_cfg("hand_target").__setattr__("rel_active", 0.7),
-                    ),
-                },
-                {
-                    "name": "ramp up foot tracking",
-                    "step": 2000 * 24,
-                    "apply": lambda env: (
-                        env.reward_manager.get_term_cfg("foot_target_tracking").__setattr__("weight", 2.0),
-                        env.command_manager.get_term_cfg("foot_target").__setattr__("rel_single_support_envs", 0.3),
-                    ),
-                },
                 {
                     "name": "penalize stepping + increase velocity",
                     "step": 3000 * 24,
@@ -514,11 +431,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         
         cfg.commands["twist"].rel_standing_envs = 0.0
         cfg.commands["twist"].rel_rotation_envs = 0.0
-
-        # Isolate the velocity-tracking behavior: never give an active foot/hand
-        # keypoint target, so only walking is being exercised in the viewer.
-        cfg.commands["foot_target"].rel_single_support_envs = 0.0
-        cfg.commands["hand_target"].rel_active = 0.0
 
         cfg.events["push_robot"].params["velocity_range"] = {
             "x": (0.0, 0.0),

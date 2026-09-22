@@ -656,6 +656,37 @@ def set_stepping_parameters(
     if rel_rotation_envs is not None:
         env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
 
+def randomize_upper_body_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Pose the given joints (arms/neck/head) to a random position within their own
+    soft limits at reset, and set their position actuators to hold there for the rest
+    of the episode.
+
+    These joints aren't RL-controlled — they're driven mathematically (IK for the
+    arms, the closed-form stabilization law for the neck) once deployed. This event
+    approximates that during training: instead of a fixed default pose, the legs learn
+    to balance under a different, but per-episode-fixed, arm/neck configuration each
+    time, so the walking policy is robust to whatever pose the operator's tracking
+    happens to be commanding rather than only ever having seen one.
+
+    asset_cfg must resolve both joint_names and actuator_names to the SAME set of
+    joints (in corresponding order — each actuator drives its own like-named joint).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+
+    joint_ids = asset_cfg.joint_ids
+    limits = asset.data.soft_joint_pos_limits[env_ids][:, joint_ids]
+    r = torch.rand(limits.shape[0], limits.shape[1], device=env.device)
+    pose = limits[..., 0] + r * (limits[..., 1] - limits[..., 0])
+    zero_vel = torch.zeros_like(pose)
+
+    asset.write_joint_state_to_sim(pose, zero_vel, joint_ids=joint_ids, env_ids=env_ids)
+    asset.write_ctrl_to_sim(pose, ctrl_ids=asset_cfg.actuator_ids, env_ids=env_ids)
+
+
 def set_push_parameters(
     env,
     velocity_range: dict[str, tuple[float, float]] | None = None,
