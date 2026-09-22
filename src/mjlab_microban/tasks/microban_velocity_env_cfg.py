@@ -345,9 +345,12 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
+    # Starts low and ramps up via the staged curriculum below (stage "add foot tracking").
+    # Protected by its own velocity fade too, but staying low at first keeps stage 0 to
+    # "walking only" cleanly, matching hand_target_tracking's staging below.
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
-        weight=2.0,
+        weight=0.1,
         params={
             "command_name": "foot_target",
             "std": 0.05,
@@ -460,6 +463,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     "apply": lambda env: env.reward_manager.get_term_cfg(
                         "hand_target_tracking"
                     ).__setattr__("weight", 1.0),
+                },
+                {
+                    "name": "ramp up foot tracking",
+                    "step": 2000 * 24,
+                    "apply": lambda env: env.reward_manager.get_term_cfg(
+                        "foot_target_tracking"
+                    ).__setattr__("weight", 2.0),
                 },
                 {
                     "name": "penalize stepping + increase velocity",
