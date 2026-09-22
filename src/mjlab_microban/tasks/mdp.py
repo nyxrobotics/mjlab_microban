@@ -656,6 +656,32 @@ def set_stepping_parameters(
     if rel_rotation_envs is not None:
         env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
 
+def hold_at_default_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Set the given joints' position TARGET (not raw ctrl) to default_joint_pos at
+    reset.
+
+    BAM actuators (bam.mjlab.BamActuator, used for all 21 joints here) compute force
+    from ``data.joint_pos_target``, not from MuJoCo's raw ``ctrl`` — writing ctrl
+    directly (e.g. via Entity.write_ctrl_to_sim) gets overwritten the next physics
+    step regardless. EntityData resets joint_pos_target to 0.0 for every joint on
+    every episode reset, and the action pipeline (JointPositionAction) only ever
+    updates it for the actuators it owns — so any actuator OUTSIDE the RL action term
+    (measured 2026-09-22) has its target silently left at 0 rather than
+    default_joint_pos, driving joints like the elbows/shoulders (whose default is far
+    from 0: -20/±10 deg) to visibly drift there every episode. That's an unintended
+    disturbance injected into every training run that excluded them from actions —
+    likely the real cause behind repeated failed attempts at a legs-only policy, more
+    than any of the reward/curriculum/observation changes tried first.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    default_pos = asset.data.default_joint_pos[env_ids][:, asset_cfg.joint_ids]
+    asset.set_joint_position_target(default_pos, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1))
+
+
 def randomize_upper_body_pose_reset(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
@@ -678,7 +704,7 @@ def randomize_upper_body_pose_reset(
     zero_vel = torch.zeros_like(pose)
 
     asset.write_joint_state_to_sim(pose, zero_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
-    asset.write_ctrl_to_sim(pose, ctrl_ids=asset_cfg.actuator_ids, env_ids=env_ids)
+    asset.set_joint_position_target(pose, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1))
 
 
 def randomize_upper_body_pose_interval(
@@ -699,7 +725,7 @@ def randomize_upper_body_pose_interval(
     """
     asset: Entity = env.scene[asset_cfg.name]
     pose = _sample_upper_body_pose(env, env_ids, asset_cfg)
-    asset.write_ctrl_to_sim(pose, ctrl_ids=asset_cfg.actuator_ids, env_ids=env_ids)
+    asset.set_joint_position_target(pose, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1))
 
 
 def _sample_upper_body_pose(

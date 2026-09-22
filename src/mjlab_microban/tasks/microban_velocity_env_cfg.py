@@ -73,6 +73,7 @@ from mjlab_microban.tasks.mdp import (
     upright as local_upright,
     randomize_upper_body_pose_reset,
     randomize_upper_body_pose_interval,
+    hold_at_default_pose,
 )
 
 SCENE_CFG = SceneCfg(
@@ -376,25 +377,23 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Arms/neck/head aren't RL-controlled (see Actions above) — pose them randomly and
-    # keep RE-posing them throughout each episode (not just once at reset), so the leg
-    # policy learns to balance against an upper body that's actually moving — as it
-    # will be for real, continuously retargeted by arm IK / the neck stabilization law
-    # while the operator walks — not just holding one fixed pose per episode.
+    # Arms/neck/head aren't RL-controlled (see Actions above). JointPositionAction only
+    # ever writes ctrl for the actuators it owns (the 12 leg actuators), so without an
+    # explicit hold, these actuators' ctrl sits wherever mjlab left it — measured to be
+    # near 0 regardless of the joint's actual default_joint_pos, which visibly drifted
+    # elbows/shoulders away from their (non-zero) neutral pose every episode. This holds
+    # them rigidly at default_joint_pos instead, the behavior every earlier attempt
+    # assumed it already had.
     upper_body_asset_cfg = SceneEntityCfg(
         "robot", joint_names=(excluded_dofs,), actuator_names=(excluded_dofs,)
     )
-    cfg.events["randomize_upper_body_pose_reset"] = EventTermCfg(
+    cfg.events["hold_upper_body_at_default"] = EventTermCfg(
         mode="reset",
-        func=randomize_upper_body_pose_reset,
+        func=hold_at_default_pose,
         params={"asset_cfg": upper_body_asset_cfg},
     )
-    cfg.events["randomize_upper_body_pose_interval"] = EventTermCfg(
-        mode="interval",
-        interval_range_s=(0.5, 2.0),
-        func=randomize_upper_body_pose_interval,
-        params={"asset_cfg": upper_body_asset_cfg},
-    )
+    # randomize_upper_body_pose_reset/_interval (mdp.py) can replace the line above once
+    # this fixed-pose baseline is confirmed to train correctly.
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {}
