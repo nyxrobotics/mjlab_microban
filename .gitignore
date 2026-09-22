@@ -8,3 +8,4 @@ uv.lock
 
 logs/*
 wandb/*
+policy.onnx

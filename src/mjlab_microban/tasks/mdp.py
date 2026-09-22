@@ -14,10 +14,11 @@ from dataclasses import dataclass
 import torch
 from mjlab.entity import Entity
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
+from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply_inverse, subtract_frame_transforms
 from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommand,
     UniformVelocityCommandCfg,
@@ -94,6 +95,224 @@ class UniformVelocityCommandWithRotationCfg(UniformVelocityCommandCfg):
     def build(self, env: ManagerBasedRlEnv) -> UniformVelocityCommandWithRotation:
         return UniformVelocityCommandWithRotation(self, env)
     
+
+class FootTargetCommand(CommandTerm):
+    """Live per-env target offset (dx, dy, dz) for each foot, relative to that foot's
+    own position measured right after reset (i.e. the robot's default/home stance),
+    expressed in the trunk frame.
+
+    This drives the "whole-body tracking" leg behavior: trained alongside the existing
+    velocity command so ONE policy learns both walking and holding a commanded foot
+    pose (including single-leg stances), rather than switching to a kinematic-IK leg
+    controller when idle — kinematic IK can't provide the continuous balance
+    correction a single-leg stance needs (see microban_teleop/docs/retargeting_research.md).
+
+    Most sampled episodes keep both targets at zero offset (normal stance). A fraction
+    lift one foot (randomly chosen) to train single-support balance.
+    """
+
+    cfg: "FootTargetCommandCfg"
+
+    def __init__(self, cfg: "FootTargetCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self.robot: Entity = env.scene[cfg.entity_name]
+
+        self._foot_asset_cfg = SceneEntityCfg(cfg.entity_name, site_names=cfg.foot_site_names)
+        self._foot_asset_cfg.resolve(env.scene)
+
+        # Offset target (dx, dy, dz) per env, per foot (left, right), in the trunk frame.
+        self.foot_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self.is_single_support_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.lifted_foot_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Per-episode reference ("zero offset") foot position, snapshotted at reset time
+        # (see _resample_command) since it depends on wherever reset_robot_joints landed.
+        self._default_foot_pos_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
+
+        self.metrics["error_pos"] = torch.zeros(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.foot_target_offset_b.view(self.num_envs, -1)
+
+    def current_foot_pos_b(self) -> torch.Tensor:
+        """Live foot positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        trunk_pos_w = self.robot.data.root_link_pos_w
+        trunk_quat_w = self.robot.data.root_link_quat_w
+        foot_pos_w = self.robot.data.site_pos_w[:, self._foot_asset_cfg.site_ids, :]
+        num_feet = foot_pos_w.shape[1]
+        pos_b, _ = subtract_frame_transforms(
+            trunk_pos_w[:, None, :].repeat(1, num_feet, 1).reshape(-1, 3),
+            trunk_quat_w[:, None, :].repeat(1, num_feet, 1).reshape(-1, 4),
+            foot_pos_w.reshape(-1, 3),
+        )
+        return pos_b.view(self.num_envs, num_feet, 3)
+
+    def _update_metrics(self) -> None:
+        error = torch.sum(
+            torch.square(self.current_foot_pos_b() - self._default_foot_pos_b - self.foot_target_offset_b),
+            dim=-1,
+        )
+        self.metrics["error_pos"] += error.mean(-1)
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        # Snapshot each foot's current (post-reset, default-stance) position as this
+        # episode's zero-offset reference.
+        if not hasattr(self, "_default_foot_pos_b"):
+            self._default_foot_pos_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self._default_foot_pos_b[env_ids] = self.current_foot_pos_b()[env_ids]
+
+        self.foot_target_offset_b[env_ids] = 0.0
+
+        r = torch.empty(len(env_ids), device=self.device)
+        self.is_single_support_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_single_support_envs
+
+        support_ids = env_ids[self.is_single_support_env[env_ids]]
+        if len(support_ids) == 0:
+            return
+
+        r2 = torch.empty(len(support_ids), device=self.device)
+        self.lifted_foot_idx[support_ids] = (r2.uniform_(0.0, 1.0) < 0.5).long()
+
+        dx = torch.empty(len(support_ids), device=self.device).uniform_(*self.cfg.reach_xy_range)
+        dy = torch.empty(len(support_ids), device=self.device).uniform_(*self.cfg.reach_xy_range)
+        dz = torch.empty(len(support_ids), device=self.device).uniform_(*self.cfg.lift_height_range)
+
+        offsets = torch.stack([dx, dy, dz], dim=-1)  # (n, 3)
+        self.foot_target_offset_b[support_ids, self.lifted_foot_idx[support_ids], :] = offsets
+
+    def _update_command(self) -> None:
+        pass
+
+
+@dataclass(kw_only=True)
+class FootTargetCommandCfg(CommandTermCfg):
+    """Configuration for FootTargetCommand."""
+
+    entity_name: str = "robot"
+    foot_site_names: tuple[str, str] = ("left_foot", "right_foot")
+    rel_single_support_envs: float = 0.3
+    """Fraction of environments that get a single-leg-stance target (one foot lifted)."""
+    lift_height_range: tuple[float, float] = (0.01, 0.05)
+    reach_xy_range: tuple[float, float] = (-0.03, 0.03)
+
+    def build(self, env: ManagerBasedRlEnv) -> FootTargetCommand:
+        return FootTargetCommand(self, env)
+
+
+class HandTargetCommand(CommandTerm):
+    """Live per-env, per-hand target offset (dx, dy, dz), relative to that hand's own
+    position measured right after reset, in the trunk frame.
+
+    Activation is PER HAND (independent left/right), matching the real controller UX:
+    each hand's tracking is meant to be enabled by that hand's own controller trigger,
+    not tied to walking state (see foot_target_tracking_error_exp's velocity-based fade
+    — hands have no such fade, they track whenever that hand is "active").
+
+    A hand with no active target (``is_active`` False, e.g. trigger not held / that
+    controller not connected) contributes nothing to the tracking reward at all (not
+    "pulled to zero offset"), so that arm is free to move however helps gait/balance,
+    rather than being locked toward a rest position it was never asked to hold.
+    ``command`` exposes ``is_active`` (one flag per hand) alongside the offsets so the
+    actor can tell "holding position zero" and "not tracking at all" apart.
+    """
+
+    cfg: "HandTargetCommandCfg"
+
+    def __init__(self, cfg: "HandTargetCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self.robot: Entity = env.scene[cfg.entity_name]
+
+        self._hand_asset_cfg = SceneEntityCfg(cfg.entity_name, site_names=cfg.hand_site_names)
+        self._hand_asset_cfg.resolve(env.scene)
+
+        self.hand_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self._default_hand_pos_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self.is_active = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+
+        self.metrics["error_pos"] = torch.zeros(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return torch.cat(
+            [self.hand_target_offset_b.view(self.num_envs, -1), self.is_active.float()],
+            dim=-1,
+        )
+
+    def current_hand_pos_b(self) -> torch.Tensor:
+        """Live hand positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        trunk_pos_w = self.robot.data.root_link_pos_w
+        trunk_quat_w = self.robot.data.root_link_quat_w
+        hand_pos_w = self.robot.data.site_pos_w[:, self._hand_asset_cfg.site_ids, :]
+        num_hands = hand_pos_w.shape[1]
+        pos_b, _ = subtract_frame_transforms(
+            trunk_pos_w[:, None, :].repeat(1, num_hands, 1).reshape(-1, 3),
+            trunk_quat_w[:, None, :].repeat(1, num_hands, 1).reshape(-1, 4),
+            hand_pos_w.reshape(-1, 3),
+        )
+        return pos_b.view(self.num_envs, num_hands, 3)
+
+    def _update_metrics(self) -> None:
+        error = torch.sum(
+            torch.square(self.current_hand_pos_b() - self._default_hand_pos_b - self.hand_target_offset_b),
+            dim=-1,
+        )
+        active = self.is_active.float()
+        self.metrics["error_pos"] += (error * active).sum(-1) / active.sum(-1).clamp(min=1.0)
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        self._default_hand_pos_b[env_ids] = self.current_hand_pos_b()[env_ids]
+
+        r = torch.empty(len(env_ids), 2, device=self.device)
+        self.is_active[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_active
+
+        offsets = torch.zeros(len(env_ids), 2, 3, device=self.device)
+        lo_xy, hi_xy = self.cfg.reach_xy_range
+        lo_z, hi_z = self.cfg.reach_z_range
+        r2 = torch.empty(len(env_ids), 2, 3, device=self.device)
+        r2[..., 0].uniform_(lo_xy, hi_xy)
+        r2[..., 1].uniform_(lo_xy, hi_xy)
+        r2[..., 2].uniform_(lo_z, hi_z)
+        active_mask = self.is_active[env_ids].unsqueeze(-1)
+        offsets = torch.where(active_mask, r2, offsets)
+        self.hand_target_offset_b[env_ids] = offsets
+
+    def _update_command(self) -> None:
+        pass
+
+
+@dataclass(kw_only=True)
+class HandTargetCommandCfg(CommandTermCfg):
+    """Configuration for HandTargetCommand."""
+
+    entity_name: str = "robot"
+    hand_site_names: tuple[str, str] = ("left_hand", "right_hand")
+    reach_xy_range: tuple[float, float] = (-0.08, 0.08)
+    reach_z_range: tuple[float, float] = (-0.08, 0.08)
+    rel_active: float = 0.7
+    """Per-hand probability of being active at each resample (independent left/right,
+    matching each controller's own trigger). Inactive hands contribute nothing to the
+    tracking reward, so the policy learns that arm is free to move naturally."""
+
+    def build(self, env: ManagerBasedRlEnv) -> HandTargetCommand:
+        return HandTargetCommand(self, env)
+
+
+########################## OBSERVATIONS ############################
+
+def foot_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target foot
+    offset, in the trunk frame. Lets the actor see what leg-tracking target (if any) is
+    currently commanded, alongside the velocity command."""
+    command: FootTargetCommand = env.command_manager.get_term(command_name)
+    return command.command
+
+
+def hand_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target hand
+    offset, in the trunk frame."""
+    command: HandTargetCommand = env.command_manager.get_term(command_name)
+    return command.command
+
 
 ############################ REWARDS ##############################
 
@@ -173,6 +392,61 @@ def feet_distance_penalty(
     foot_pos_xy = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2, 2]
     dist = torch.norm(foot_pos_xy[:, 0] - foot_pos_xy[:, 1], dim=-1)  # [B]
     return torch.clamp(min_dist - dist, min=0.0)
+
+
+def foot_target_tracking_error_exp(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    std: float,
+    velocity_command_name: str = "twist",
+    velocity_fade_range: tuple[float, float] = (0.0, 0.15),
+) -> torch.Tensor:
+    """Reward for matching the commanded per-foot target offset (FootTargetCommand),
+    faded out smoothly as the velocity command grows so legs prioritize walking over
+    holding a static foot target once actually moving. This is a continuous weight
+    (no hard cutoff/mode switch): at velocity_fade_range[0] and below, full weight;
+    at velocity_fade_range[1] and above, zero; linear in between.
+    """
+    command: FootTargetCommand = env.command_manager.get_term(command_name)
+    error = torch.sum(
+        torch.square(
+            command.current_foot_pos_b() - command._default_foot_pos_b - command.foot_target_offset_b
+        ),
+        dim=-1,
+    ).mean(-1)
+    tracking_reward = torch.exp(-error / std**2)
+
+    velocity_command = env.command_manager.get_command(velocity_command_name)
+    speed = torch.norm(velocity_command[:, :2], dim=-1) + torch.abs(velocity_command[:, 2])
+    lo, hi = velocity_fade_range
+    fade = 1.0 - torch.clamp((speed - lo) / (hi - lo), 0.0, 1.0)
+
+    return tracking_reward * fade
+
+
+def hand_target_tracking_error_exp(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    std: float,
+) -> torch.Tensor:
+    """Reward for matching the commanded per-hand target offset (HandTargetCommand).
+
+    No velocity-based fade: hand tracking is meant to be on whenever that hand is
+    active (unlike foot_target_tracking_error_exp), since the arms don't need to give
+    way to locomotion the way legs do. Averaged over active hands only — an inactive
+    hand contributes nothing (positive or negative) so it's free to move naturally; an
+    env with neither hand active gets zero from this term entirely.
+    """
+    command: HandTargetCommand = env.command_manager.get_term(command_name)
+    error = torch.sum(
+        torch.square(
+            command.current_hand_pos_b() - command._default_hand_pos_b - command.hand_target_offset_b
+        ),
+        dim=-1,
+    )
+    per_hand_reward = torch.exp(-error / std**2)
+    active = command.is_active.float()
+    return (per_hand_reward * active).sum(-1) / active.sum(-1).clamp(min=1.0)
 
 
 def no_stepping_penalty(

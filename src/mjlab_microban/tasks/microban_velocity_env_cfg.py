@@ -71,6 +71,12 @@ from mjlab_microban.tasks.mdp import (
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
     upright as local_upright,
+    FootTargetCommandCfg,
+    foot_target_offset_b,
+    foot_target_tracking_error_exp,
+    HandTargetCommandCfg,
+    hand_target_offset_b,
+    hand_target_tracking_error_exp,
 )
 
 SCENE_CFG = SceneCfg(
@@ -159,8 +165,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # Excludes head AND the new neck_roll/neck_pitch (2026-09): the neck should hold its
-    # default pose independently of the walking policy, not be used for balance.
+    # Excludes head and neck_roll/neck_pitch only: the neck should hold its default pose
+    # independently of the walking policy, not be used for balance (explicit user
+    # requirement). Arms stay IN the RL action/observation space (2026-09-22): arm swing
+    # couples into whole-body angular momentum/CoM, so an externally-IK-driven arm the
+    # policy can't see would be an unobserved disturbance source. Hand tracking is instead
+    # a reward term (see foot_target_tracking's sibling, hand tracking, below) layered on
+    # top of the same 18-DOF (12 leg + 6 arm) action space.
     dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
 
     joint_pos_action = cfg.actions["joint_pos"]
@@ -202,6 +213,28 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_min_lag = 0
     cfg.observations["actor"].terms["projected_gravity"].delay_max_lag = 3
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
+
+    # Foot-target offset (whole-body leg tracking, see Commands section below): the
+    # policy needs to see this to decide whether/how much to hold a foot target vs walk.
+    cfg.observations["actor"].terms["foot_target"] = ObservationTermCfg(
+        func=foot_target_offset_b,
+        params={"command_name": "foot_target"},
+    )
+    cfg.observations["critic"].terms["foot_target"] = ObservationTermCfg(
+        func=foot_target_offset_b,
+        params={"command_name": "foot_target"},
+    )
+
+    # Hand target offset + per-hand active flag (whether that hand's controller
+    # trigger is held, in the real teleop bridge) — see HandTargetCommand.
+    cfg.observations["actor"].terms["hand_target"] = ObservationTermCfg(
+        func=hand_target_offset_b,
+        params={"command_name": "hand_target"},
+    )
+    cfg.observations["critic"].terms["hand_target"] = ObservationTermCfg(
+        func=hand_target_offset_b,
+        params={"command_name": "hand_target"},
+    )
 
     #---------------------------- Rewards ---------------------------
     cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
@@ -306,6 +339,26 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
+    cfg.rewards["foot_target_tracking"] = RewardTermCfg(
+        func=foot_target_tracking_error_exp,
+        weight=2.0,
+        params={
+            "command_name": "foot_target",
+            "std": 0.05,
+            "velocity_command_name": "twist",
+            "velocity_fade_range": (0.0, 0.15),
+        },
+    )
+
+    cfg.rewards["hand_target_tracking"] = RewardTermCfg(
+        func=hand_target_tracking_error_exp,
+        weight=2.0,
+        params={
+            "command_name": "hand_target",
+            "std": 0.05,
+        },
+    )
+
     #---------------------------- Commands --------------------------
     command = cfg.commands["twist"]
     command.build = lambda env, _cmd=command: UniformVelocityCommandWithRotation(_cmd, env)
@@ -321,6 +374,28 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     command.rotation_env_ang_vel_range = (-1.5, 1.5)
     command.rotation_min_ang_vel = 0.5
+
+    # Whole-body leg tracking target (single-leg-stance capable "full body tracking"
+    # mode, unified into this same policy — see microban_teleop/docs/retargeting_research.md
+    # for why this isn't kinematic IK). Reward fades out as the twist command grows
+    # (foot_target_tracking_error_exp below), so walking always takes priority.
+    cfg.commands["foot_target"] = FootTargetCommandCfg(
+        resampling_time_range=(3.0, 8.0),
+        rel_single_support_envs=0.3,
+        lift_height_range=(0.01, 0.05),
+        reach_xy_range=(-0.03, 0.03),
+    )
+
+    # Hand keypoint target (feature #4, arm tracking) — per-hand active flag mirrors
+    # each controller's own trigger in the real teleop bridge (see
+    # microban_teleop/docs/design.md). No velocity fade: hands track whenever active,
+    # regardless of walking.
+    cfg.commands["hand_target"] = HandTargetCommandCfg(
+        resampling_time_range=(3.0, 8.0),
+        rel_active=0.7,
+        reach_xy_range=(-0.08, 0.08),
+        reach_z_range=(-0.08, 0.08),
+    )
 
     #---------------------------- Events ----------------------------
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.01)
