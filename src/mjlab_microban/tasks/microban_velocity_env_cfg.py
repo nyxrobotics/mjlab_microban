@@ -356,9 +356,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
+    # Starts low and ramps up via the staged curriculum below (stage "add hand tracking"):
+    # at full weight from iteration 0, this reward has no fade (unlike foot_target_tracking)
+    # and directly competes for the same arm DOF that also matter for whole-body balance,
+    # so it can dominate the gradient before basic standing/walking is established.
     cfg.rewards["hand_target_tracking"] = RewardTermCfg(
         func=hand_target_tracking_error_exp,
-        weight=2.0,
+        weight=0.1,
         params={
             "command_name": "hand_target",
             "std": 0.05,
@@ -451,6 +455,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             "stages": [
                 {
+                    "name": "ramp up hand tracking",
+                    "step": 1000 * 24,
+                    "apply": lambda env: env.reward_manager.get_term_cfg(
+                        "hand_target_tracking"
+                    ).__setattr__("weight", 1.0),
+                },
+                {
                     "name": "penalize stepping + increase velocity",
                     "step": 3000 * 24,
                     "apply": lambda env: {
@@ -485,6 +496,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         
         cfg.commands["twist"].rel_standing_envs = 0.0
         cfg.commands["twist"].rel_rotation_envs = 0.0
+
+        # Isolate the velocity-tracking behavior: never give an active foot/hand
+        # keypoint target, so only walking is being exercised in the viewer.
+        cfg.commands["foot_target"].rel_single_support_envs = 0.0
+        cfg.commands["hand_target"].rel_active = 0.0
 
         cfg.events["push_robot"].params["velocity_range"] = {
             "x": (0.0, 0.0),
