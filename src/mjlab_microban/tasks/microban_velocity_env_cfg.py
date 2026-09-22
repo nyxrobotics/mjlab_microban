@@ -71,7 +71,8 @@ from mjlab_microban.tasks.mdp import (
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
     upright as local_upright,
-    randomize_upper_body_pose,
+    randomize_upper_body_pose_reset,
+    randomize_upper_body_pose_interval,
 )
 
 SCENE_CFG = SceneCfg(
@@ -375,18 +376,24 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Arms/neck/head aren't RL-controlled (see Actions above) — pose them randomly each
-    # episode and hold them there, so the leg policy learns to balance under whatever
-    # arm/neck configuration the (eventual IK/stabilization-driven) upper body happens
-    # to be in, rather than only ever having seen the fixed default pose.
-    cfg.events["randomize_upper_body_pose"] = EventTermCfg(
+    # Arms/neck/head aren't RL-controlled (see Actions above) — pose them randomly and
+    # keep RE-posing them throughout each episode (not just once at reset), so the leg
+    # policy learns to balance against an upper body that's actually moving — as it
+    # will be for real, continuously retargeted by arm IK / the neck stabilization law
+    # while the operator walks — not just holding one fixed pose per episode.
+    upper_body_asset_cfg = SceneEntityCfg(
+        "robot", joint_names=(excluded_dofs,), actuator_names=(excluded_dofs,)
+    )
+    cfg.events["randomize_upper_body_pose_reset"] = EventTermCfg(
         mode="reset",
-        func=randomize_upper_body_pose,
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(excluded_dofs,), actuator_names=(excluded_dofs,)
-            ),
-        },
+        func=randomize_upper_body_pose_reset,
+        params={"asset_cfg": upper_body_asset_cfg},
+    )
+    cfg.events["randomize_upper_body_pose_interval"] = EventTermCfg(
+        mode="interval",
+        interval_range_s=(0.5, 2.0),
+        func=randomize_upper_body_pose_interval,
+        params={"asset_cfg": upper_body_asset_cfg},
     )
 
     #---------------------------- Curriculum ------------------------
