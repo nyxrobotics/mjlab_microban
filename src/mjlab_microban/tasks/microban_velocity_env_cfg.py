@@ -184,17 +184,22 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     del cfg.observations["actor"].terms["height_scan"]
     del cfg.observations["critic"].terms["height_scan"]
 
+    # Actor observes ALL joints (including neck/head, which stay out of the action
+    # space) so it can see/anticipate neck-driven disturbances rather than being blind
+    # to them — same reasoning as why arms moved from external IK into this policy.
+    # Action stays restricted to dofs_filter (legs+arms); this only widens what the
+    # actor can look at, not what it can move.
     cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
         func=mdp.joint_pos_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
-        noise=Unoise(n_min=-0.001, n_max=0.001),    
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",))},
+        noise=Unoise(n_min=-0.001, n_max=0.001),
         delay_min_lag=0,
         delay_max_lag=0,
     )
 
     cfg.observations["actor"].terms["joint_vel"] = ObservationTermCfg(
         func=mdp.joint_vel_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",))},
         noise=Unoise(n_min=-0.25, n_max=0.25),
         delay_min_lag=0,
         delay_max_lag=1,
