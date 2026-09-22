@@ -71,9 +71,6 @@ from mjlab_microban.tasks.mdp import (
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
     upright as local_upright,
-    randomize_upper_body_pose_reset,
-    randomize_upper_body_pose_interval,
-    hold_at_default_pose,
 )
 
 SCENE_CFG = SceneCfg(
@@ -162,16 +159,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # Legs only (12 DOF). Arms and neck/head are driven mathematically once deployed
-    # (arm IK toward VR controller targets, the closed-form neck stabilization law) —
-    # not by this policy. Trying to unify them into one RL policy (arms in the action
-    # space, tracking rewards for hands/feet) repeatedly failed to learn to stand at
-    # all across several attempts (see microban_teleop/docs/design.md); going back to a
-    # legs-only policy, made robust to arbitrary (randomized per episode, see
-    # randomize_upper_body_pose below) arm/neck pose instead of needing to coordinate
-    # with them, is the simpler, lower-risk fallback.
-    excluded_dofs = r".*(head|neck_roll|neck_pitch|shoulder_pitch|shoulder_roll|elbow)$"
-    dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)(?<!shoulder_pitch)(?<!shoulder_roll)(?<!elbow)$"
+    # Excludes head AND the new neck_roll/neck_pitch (2026-09): the neck should hold its
+    # default pose independently of the walking policy, not be used for balance.
+    dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
 
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -183,22 +173,17 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     del cfg.observations["actor"].terms["height_scan"]
     del cfg.observations["critic"].terms["height_scan"]
 
-    # Actor observes ALL joints (including neck/head, which stay out of the action
-    # space) so it can see/anticipate neck-driven disturbances rather than being blind
-    # to them — same reasoning as why arms moved from external IK into this policy.
-    # Action stays restricted to dofs_filter (legs+arms); this only widens what the
-    # actor can look at, not what it can move.
     cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
         func=mdp.joint_pos_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",))},
-        noise=Unoise(n_min=-0.001, n_max=0.001),
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
+        noise=Unoise(n_min=-0.001, n_max=0.001),    
         delay_min_lag=0,
         delay_max_lag=0,
     )
 
     cfg.observations["actor"].terms["joint_vel"] = ObservationTermCfg(
         func=mdp.joint_vel_rel,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",))},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
         noise=Unoise(n_min=-0.25, n_max=0.25),
         delay_min_lag=0,
         delay_max_lag=1,
@@ -376,24 +361,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ranges": (0.9, 1.1),
         },
     )
-
-    # Arms/neck/head aren't RL-controlled (see Actions above). JointPositionAction only
-    # ever writes ctrl for the actuators it owns (the 12 leg actuators), so without an
-    # explicit hold, these actuators' ctrl sits wherever mjlab left it — measured to be
-    # near 0 regardless of the joint's actual default_joint_pos, which visibly drifted
-    # elbows/shoulders away from their (non-zero) neutral pose every episode. This holds
-    # them rigidly at default_joint_pos instead, the behavior every earlier attempt
-    # assumed it already had.
-    upper_body_asset_cfg = SceneEntityCfg(
-        "robot", joint_names=(excluded_dofs,), actuator_names=(excluded_dofs,)
-    )
-    cfg.events["hold_upper_body_at_default"] = EventTermCfg(
-        mode="reset",
-        func=hold_at_default_pose,
-        params={"asset_cfg": upper_body_asset_cfg},
-    )
-    # randomize_upper_body_pose_reset/_interval (mdp.py) can replace the line above once
-    # this fixed-pose baseline is confirmed to train correctly.
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {}
