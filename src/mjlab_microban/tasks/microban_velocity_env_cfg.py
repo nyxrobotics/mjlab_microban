@@ -392,9 +392,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # mode, unified into this same policy — see microban_teleop/docs/retargeting_research.md
     # for why this isn't kinematic IK). Reward fades out as the twist command grows
     # (foot_target_tracking_error_exp below), so walking always takes priority.
+    # rel_single_support_envs starts at 0.0 (ramped to 0.3 by the staged curriculum
+    # below) so stage 0 doesn't just downweight this reward but keeps the command
+    # itself quiet (always zero offset) — otherwise the observation still carries a
+    # randomly-sampled target the network has no reason to attend to yet, adding noise
+    # to the "pure walking" phase for no benefit.
     cfg.commands["foot_target"] = FootTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
-        rel_single_support_envs=0.3,
+        rel_single_support_envs=0.0,
         lift_height_range=(0.01, 0.05),
         reach_xy_range=(-0.03, 0.03),
     )
@@ -402,10 +407,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Hand keypoint target (feature #4, arm tracking) — per-hand active flag mirrors
     # each controller's own trigger in the real teleop bridge (see
     # microban_teleop/docs/design.md). No velocity fade: hands track whenever active,
-    # regardless of walking.
+    # regardless of walking. rel_active starts at 0.0 for the same reason as
+    # foot_target's rel_single_support_envs above (ramped to 0.7 by the curriculum).
     cfg.commands["hand_target"] = HandTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
-        rel_active=0.7,
+        rel_active=0.0,
         reach_xy_range=(-0.08, 0.08),
         reach_z_range=(-0.08, 0.08),
     )
@@ -460,16 +466,18 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 {
                     "name": "ramp up hand tracking",
                     "step": 1000 * 24,
-                    "apply": lambda env: env.reward_manager.get_term_cfg(
-                        "hand_target_tracking"
-                    ).__setattr__("weight", 1.0),
+                    "apply": lambda env: (
+                        env.reward_manager.get_term_cfg("hand_target_tracking").__setattr__("weight", 1.0),
+                        env.command_manager.get_term_cfg("hand_target").__setattr__("rel_active", 0.7),
+                    ),
                 },
                 {
                     "name": "ramp up foot tracking",
                     "step": 2000 * 24,
-                    "apply": lambda env: env.reward_manager.get_term_cfg(
-                        "foot_target_tracking"
-                    ).__setattr__("weight", 2.0),
+                    "apply": lambda env: (
+                        env.reward_manager.get_term_cfg("foot_target_tracking").__setattr__("weight", 2.0),
+                        env.command_manager.get_term_cfg("foot_target").__setattr__("rel_single_support_envs", 0.3),
+                    ),
                 },
                 {
                     "name": "penalize stepping + increase velocity",
