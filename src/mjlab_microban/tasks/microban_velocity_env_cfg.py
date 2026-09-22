@@ -165,13 +165,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # Excludes head and neck_roll/neck_pitch only: the neck should hold its default pose
-    # independently of the walking policy, not be used for balance (explicit user
-    # requirement). Arms stay IN the RL action/observation space (2026-09-22): arm swing
-    # couples into whole-body angular momentum/CoM, so an externally-IK-driven arm the
-    # policy can't see would be an unobserved disturbance source. Hand tracking is instead
-    # a reward term (see foot_target_tracking's sibling, hand tracking, below) layered on
-    # top of the same 18-DOF (12 leg + 6 arm) action space.
+    # Excludes head and neck_roll/neck_pitch only: keeping neck orientation decoupled
+    # from the walking policy keeps head/camera motion predictable (see
+    # microban_teleop/docs/design.md) instead of the policy discovering it can
+    # wag the neck to help balance. Arms stay IN the RL action/observation space: arm
+    # swing couples into whole-body angular momentum/CoM, so an externally-IK-driven arm
+    # the policy can't see would be an unobserved disturbance source. Hand tracking is
+    # instead a reward term (foot_target_tracking's sibling, hand tracking, below)
+    # layered on top of the same 18-DOF (12 leg + 6 arm) action space.
     dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
 
     joint_pos_action = cfg.actions["joint_pos"]
