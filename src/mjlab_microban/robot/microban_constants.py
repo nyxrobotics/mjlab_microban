@@ -25,6 +25,8 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, 0.168), #0.1676),
     joint_pos={
         "head": float(np.deg2rad(0.0)),
+        "neck_roll": float(np.deg2rad(0.0)),
+        "neck_pitch": float(np.deg2rad(0.0)),
         "left_shoulder_roll": float(np.deg2rad(10.0)),
         "right_shoulder_roll": float(np.deg2rad(-10.0)),
         "left_shoulder_pitch": float(np.deg2rad(0.0)),
@@ -54,17 +56,33 @@ FULL_COLLISION = CollisionCfg(
     friction={r"^(left|right)_foot_collision$": (1.0,)},
 )
 
+import bam.actuators
 from bam.mjlab import BamActuatorCfg
+from bam.testbench import Pendulum
 
+from mjlab_microban.robot.xc330_actuator import XC330Actuator
+
+# This bam branch has no built-in XC330-T288-T definition, so register one before
+# BamActuatorCfg's json_path (below) needs to look it up by the "actuator" key the
+# JSON was fit with. See xc330_actuator.py for why the class exists at all.
+bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
+
+# Updated 2026-09-22: the robot is now XC330-T288-T + 3S (was XL330-M288-T + 2S).
+# json_path points at a real bam identification (tools/actuator_id/ in the main
+# microban repo; 30 recordings, m6 model) instead of the bundled xl330/m6 preset.
+# vin_range/vin_min follow a 3S LiPo (was 2S: 7.0-8.0V range, 6.0V min).
+# max_current is XC330-T288-T's firmware current limit (was XL330's 1.75A).
+# vin_drop_gain_range is UNCHANGED (still XL330-tuned): it's an empirical pack-level
+# V/Nm coefficient (battery + wiring resistance across all 21 servos), not derivable
+# from a single motor's R/kt, so it needs its own re-tuning/measurement pass.
 actuators = BamActuatorCfg(
-    motor_name="xl330",
-    model="m6",
+    json_path=str(Path(os.path.dirname(__file__)) / "xc330_params.json"),
     target_names_expr=(r".*",),
     kp_fw=125,
-    vin_range=(7.0, 8.0),
+    vin_range=(9.0, 12.6),
     vin_drop_gain_range=(0.0, 0.2),
-    vin_min=6.0,
-    max_current=1.75,
+    vin_min=9.0,
+    max_current=0.91,
     delay_min_lag=3,
     delay_max_lag=6,
 )
