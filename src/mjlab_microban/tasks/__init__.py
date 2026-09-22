@@ -13,11 +13,23 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
     make_microban_velocity_env_cfg,
     MicrobanVelocityRlCfg,
 )
+from mjlab_microban.tasks.microban_getup_env_cfg import (
+    make_microban_getup_env_cfg,
+    MicrobanGetupRlCfg,
+)
 
 register_mjlab_task(
     task_id="Mjlab-Velocity-Microban",
     env_cfg=make_microban_velocity_env_cfg(),
     play_env_cfg=make_microban_velocity_env_cfg(play=True),
     rl_cfg=MicrobanVelocityRlCfg,
+    runner_cls=VelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban",
+    env_cfg=make_microban_getup_env_cfg(),
+    play_env_cfg=make_microban_getup_env_cfg(play=True),
+    rl_cfg=MicrobanGetupRlCfg,
     runner_cls=VelocityOnPolicyRunner,
 )

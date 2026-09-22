@@ -369,6 +369,20 @@ class upright:
         del env_ids  # Unused.
 
 
+def getup_height_reward(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense reward proportional to trunk height, capped once standing height is
+    reached. Rewards progress toward standing from any starting orientation, without
+    assuming which direction is "up" relative to the trunk (unlike upright, which needs
+    the trunk already close to vertical to give a useful gradient)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    height = asset.data.root_link_pos_w[:, 2]
+    return torch.clamp(height / target_height, min=0.0, max=1.0)
+
+
 def feet_distance_penalty(
     env: ManagerBasedRlEnv,
     min_dist: float,
