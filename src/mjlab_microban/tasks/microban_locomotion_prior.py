@@ -9,11 +9,14 @@
 """Short-lived privileged locomotion prior for Microban teleoperation.
 
 The prior is deliberately unavailable to the actor.  During the first 1,000
-PPO updates it gives only the asymmetric critic and two training rewards a
-retargeted, forward-walking reference.  Episodes that are latched onto the
-prior start at frame 109, advance to frame 267 at a command-scaled rate, and
-terminate instead of looping.  Reset writes only the twelve leg joints plus
-the floating root, preserving all six arm and three HMD-owned joint states.
+PPO updates it gives the asymmetric critic, two training rewards and the
+training-only actor teacher a retargeted, forward-walking reference.  Early
+episodes start directly at frame 109.  That teleport probability then fades
+while non-teleported episodes receive a smooth 20-step launch from their real
+reset pose into frame 109.  The clip advances to frame 267 at a command-scaled
+rate and terminates instead of looping.  A teleport writes only the twelve leg
+joints plus the floating root, preserving all six arm and three HMD-owned joint
+states.
 """
 
 from __future__ import annotations
@@ -56,6 +59,9 @@ MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S = 0.0780311897
 MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S = (0.06, 0.11)
 MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP = 500 * 24
 MICROBAN_LOCOMOTION_PRIOR_FADE_END_STEP = 1000 * 24
+MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP = 100 * 24
+MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP = 500 * 24
+MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS = 20
 MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH = 39
 
 MICROBAN_LOCOMOTION_PRIOR_JOINT_NAMES: tuple[str, ...] = (
@@ -113,6 +119,25 @@ def locomotion_prior_blend(global_step: int) -> float:
         - MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP
     )
     elapsed = global_step - MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP
+    return 1.0 - elapsed / fade_steps
+
+
+def locomotion_prior_teleport_probability(global_step: int) -> float:
+    """Fade reset teleport before imitation fades, exposing real launch states."""
+
+    if isinstance(global_step, bool) or not isinstance(global_step, int):
+        raise TypeError("global_step must be an integer")
+    if global_step < 0:
+        raise ValueError("global_step must be non-negative")
+    if global_step <= MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP:
+        return 1.0
+    if global_step >= MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP:
+        return 0.0
+    fade_steps = (
+        MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP
+        - MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP
+    )
+    elapsed = global_step - MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP
     return 1.0 - elapsed / fade_steps
 
 
@@ -301,6 +326,24 @@ class LocomotionPriorCommand(CommandTerm):
         self.phase_rate = torch.zeros_like(self.phase)
         self.eligible = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.finished = torch.zeros_like(self.eligible)
+        self.teleported = torch.zeros_like(self.eligible)
+        self.launching = torch.zeros_like(self.eligible)
+        self.launch_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.launch_start_joint_pos = torch.zeros(
+            (self.num_envs, len(MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES)),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.launch_dt = float(env.step_dt)
+        if not math.isclose(
+            self.launch_dt,
+            1.0 / MICROBAN_LOCOMOTION_PRIOR_FPS,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
+            raise ValueError("Locomotion prior requires an exact 50 Hz policy step")
         # MjLab auto-reset happens inside ``env.step`` immediately before the
         # command manager's positive-dt compute.  Mark reset rows so that call
         # does not advance a reference whose reset pose has not been simulated.
@@ -334,18 +377,71 @@ class LocomotionPriorCommand(CommandTerm):
 
     @property
     def reference_joint_pos(self) -> torch.Tensor:
-        return self._interpolate(self.arrays.joint_pos, self.phase)
+        reference = self._interpolate(self.arrays.joint_pos, self.phase)
+        launch = self._launch_joint_pos(lookahead_source_frames=0.0)
+        return torch.where(self.launching.unsqueeze(-1), launch, reference)
 
     @property
     def reference_joint_vel(self) -> torch.Tensor:
         velocity = self._interpolate(self.arrays.joint_vel, self.phase)
-        return velocity * self.phase_rate.unsqueeze(-1)
+        velocity = velocity * self.phase_rate.unsqueeze(-1)
+        progress = self.launch_step.to(dtype=torch.float32) / float(
+            MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS
+        )
+        progress = torch.clamp(progress, min=0.0, max=1.0)
+        smoothstep_derivative = 6.0 * progress * (1.0 - progress)
+        launch_velocity = (
+            self.arrays.joint_pos[MICROBAN_LOCOMOTION_PRIOR_START_FRAME]
+            - self.launch_start_joint_pos
+        ) * (
+            smoothstep_derivative
+            / (MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS * self.launch_dt)
+        ).unsqueeze(-1)
+        return torch.where(self.launching.unsqueeze(-1), launch_velocity, velocity)
 
     @property
     def lead_joint_pos(self) -> torch.Tensor:
-        return self._interpolate(
+        reference = self._interpolate(
             self.arrays.joint_pos,
             self.phase + float(MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES),
+        )
+        launch = self._launch_joint_pos(
+            lookahead_source_frames=float(MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES)
+        )
+        return torch.where(self.launching.unsqueeze(-1), launch, reference)
+
+    def _launch_joint_pos(self, *, lookahead_source_frames: float) -> torch.Tensor:
+        """Evaluate launch and source-frame lookahead without a join jump."""
+
+        safe_phase_rate = torch.where(
+            self.phase_rate > 0.0,
+            self.phase_rate,
+            torch.ones_like(self.phase_rate),
+        )
+        future_step = self.launch_step.to(dtype=torch.float32) + (
+            lookahead_source_frames / safe_phase_rate
+        )
+        progress = torch.clamp(
+            future_step / float(MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS),
+            min=0.0,
+            max=1.0,
+        )
+        smoothstep = torch.square(progress) * (3.0 - 2.0 * progress)
+        frame_109 = self.arrays.joint_pos[MICROBAN_LOCOMOTION_PRIOR_START_FRAME]
+        transition = self.launch_start_joint_pos + smoothstep.unsqueeze(-1) * (
+            frame_109 - self.launch_start_joint_pos
+        )
+        overflow_steps = torch.clamp(
+            future_step - float(MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS), min=0.0
+        )
+        clip_phase = float(MICROBAN_LOCOMOTION_PRIOR_START_FRAME) + (
+            overflow_steps * self.phase_rate
+        )
+        clip = self._interpolate(self.arrays.joint_pos, clip_phase)
+        return torch.where(
+            (future_step <= MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS).unsqueeze(-1),
+            transition,
+            clip,
         )
 
     @property
@@ -442,6 +538,10 @@ class LocomotionPriorCommand(CommandTerm):
         self.phase_rate[env_ids] = 0.0
         self.eligible[env_ids] = False
         self.finished[env_ids] = False
+        self.teleported[env_ids] = False
+        self.launching[env_ids] = False
+        self.launch_step[env_ids] = 0
+        self.launch_start_joint_pos[env_ids] = 0.0
         self._skip_next_advance[env_ids] = True
 
         if not self.cfg.enabled or self.blend <= 0.0:
@@ -454,7 +554,28 @@ class LocomotionPriorCommand(CommandTerm):
             twist[eligible_ids, 0]
             / MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S
         )
-        self._write_reference_reset(eligible_ids)
+        probability = locomotion_prior_teleport_probability(
+            int(self._env.common_step_counter)
+        )
+        if probability >= 1.0:
+            teleported_ids = eligible_ids
+            launch_ids = eligible_ids[:0]
+        elif probability <= 0.0:
+            teleported_ids = eligible_ids[:0]
+            launch_ids = eligible_ids
+        else:
+            teleport_local = (
+                torch.rand(eligible_ids.numel(), device=self.device) < probability
+            )
+            teleported_ids = eligible_ids[teleport_local]
+            launch_ids = eligible_ids[~teleport_local]
+        self.teleported[teleported_ids] = True
+        self.launching[launch_ids] = True
+        if launch_ids.numel() > 0:
+            self.launch_start_joint_pos[launch_ids] = self.robot.data.joint_pos[
+                launch_ids.unsqueeze(-1), self.leg_joint_ids
+            ]
+        self._write_reference_reset(teleported_ids)
         return {}
 
     def compute(self, dt: float) -> None:
@@ -471,10 +592,19 @@ class LocomotionPriorCommand(CommandTerm):
             & (self.blend > 0.0)
         )
         self._skip_next_advance.zero_()
-        next_phase = self.phase + torch.where(
-            active, self.phase_rate, torch.zeros_like(self.phase_rate)
+        launch_active = active & self.launching
+        walking_active = active & ~self.launching
+        self.launch_step[launch_active] += 1
+        launch_finished = launch_active & (
+            self.launch_step >= MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS
         )
-        newly_finished = active & (next_phase >= MICROBAN_LOCOMOTION_PRIOR_END_FRAME)
+        self.launching[launch_finished] = False
+        next_phase = self.phase + torch.where(
+            walking_active, self.phase_rate, torch.zeros_like(self.phase_rate)
+        )
+        newly_finished = walking_active & (
+            next_phase >= MICROBAN_LOCOMOTION_PRIOR_END_FRAME
+        )
         self.finished |= newly_finished
         self.phase[:] = torch.clamp(
             next_phase, max=float(MICROBAN_LOCOMOTION_PRIOR_END_FRAME)
@@ -484,6 +614,10 @@ class LocomotionPriorCommand(CommandTerm):
         self.cfg.enabled = False
         self.eligible.zero_()
         self.finished.zero_()
+        self.teleported.zero_()
+        self.launching.zero_()
+        self.launch_step.zero_()
+        self.launch_start_joint_pos.zero_()
         self.phase_rate.zero_()
         self._skip_next_advance.zero_()
 

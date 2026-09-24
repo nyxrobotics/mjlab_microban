@@ -14,7 +14,7 @@ import hashlib
 import math
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -26,17 +26,22 @@ from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_FADE_END_STEP,
     MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S,
     MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP,
+    MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP,
+    MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS,
+    MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES,
     MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES,
     MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S,
     MICROBAN_LOCOMOTION_PRIOR_PATH,
     MICROBAN_LOCOMOTION_PRIOR_SHA256,
     MICROBAN_LOCOMOTION_PRIOR_START_FRAME,
+    MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP,
     LocomotionPriorCommand,
     _load_locomotion_prior,
     locomotion_prior_action_target_error_exp,
     locomotion_prior_blend,
     locomotion_prior_clip_finished,
     locomotion_prior_joint_position_error_exp,
+    locomotion_prior_teleport_probability,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -58,7 +63,9 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
 
 def _prior_term(num_envs: int = 2) -> LocomotionPriorCommand:
     term = object.__new__(LocomotionPriorCommand)
-    term._env = SimpleNamespace(num_envs=num_envs, common_step_counter=0, device="cpu")
+    term._env = SimpleNamespace(
+        num_envs=num_envs, common_step_counter=0, device="cpu", step_dt=0.02
+    )
     term.cfg = SimpleNamespace(enabled=True)
     term.arrays = _load_locomotion_prior(
         MICROBAN_LOCOMOTION_PRIOR_PATH,
@@ -69,6 +76,11 @@ def _prior_term(num_envs: int = 2) -> LocomotionPriorCommand:
     term.phase_rate = torch.ones(num_envs)
     term.eligible = torch.ones(num_envs, dtype=torch.bool)
     term.finished = torch.zeros(num_envs, dtype=torch.bool)
+    term.teleported = torch.ones(num_envs, dtype=torch.bool)
+    term.launching = torch.zeros(num_envs, dtype=torch.bool)
+    term.launch_step = torch.zeros(num_envs, dtype=torch.long)
+    term.launch_start_joint_pos = torch.zeros(num_envs, 12)
+    term.launch_dt = 0.02
     term.leg_joint_ids = torch.arange(12, dtype=torch.long)
     term.leg_action_ids = torch.tensor(
         [
@@ -162,6 +174,30 @@ class LocomotionPriorScheduleTest(unittest.TestCase):
         self.assertEqual(
             locomotion_prior_blend(MICROBAN_LOCOMOTION_PRIOR_FADE_END_STEP + 1),
             0.0,
+        )
+
+    def test_teleport_fades_before_imitation_and_reaches_exact_zero(self) -> None:
+        self.assertEqual(locomotion_prior_teleport_probability(0), 1.0)
+        self.assertEqual(
+            locomotion_prior_teleport_probability(
+                MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP
+            ),
+            1.0,
+        )
+        midpoint = (
+            MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP
+            + MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP
+        ) // 2
+        self.assertEqual(locomotion_prior_teleport_probability(midpoint), 0.5)
+        self.assertEqual(
+            locomotion_prior_teleport_probability(
+                MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            locomotion_prior_blend(MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP),
+            1.0,
         )
 
     def test_command_is_39_wide_non_looping_and_play_can_be_exact_zero(self) -> None:
@@ -298,6 +334,166 @@ class LocomotionPriorResetTest(unittest.TestCase):
         torch.testing.assert_close(
             root_state[0, 3:7], torch.tensor([1.0, 0.0, 0.0, 0.0])
         )
+
+    def test_nonteleported_reset_uses_smooth_launch_then_enters_clip(self) -> None:
+        term = _prior_term(num_envs=1)
+        term.cfg = SimpleNamespace(
+            enabled=True,
+            velocity_command_name="twist",
+            forward_velocity_range_m_s=(0.06, 0.11),
+        )
+        start = torch.linspace(-0.12, 0.10, 12).unsqueeze(0)
+        term.robot = SimpleNamespace(
+            data=SimpleNamespace(joint_pos=start.clone()),
+            write_joint_state_to_sim=Mock(),
+            set_joint_position_target=Mock(),
+            write_root_state_to_sim=Mock(),
+        )
+        twist = torch.tensor(
+            [[MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S, 0.0, 0.0]]
+        )
+        term._env = SimpleNamespace(
+            num_envs=1,
+            common_step_counter=(MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP),
+            device="cpu",
+            step_dt=0.02,
+            command_manager=SimpleNamespace(get_command=lambda name: twist),
+            scene=SimpleNamespace(env_origins=torch.zeros(1, 3)),
+        )
+        term.command_counter = torch.ones(1, dtype=torch.long)
+        term.time_left = torch.zeros(1)
+
+        term.reset(torch.tensor([0]))
+
+        self.assertFalse(term.teleported.item())
+        self.assertTrue(term.launching.item())
+        term.robot.write_joint_state_to_sim.assert_not_called()
+        torch.testing.assert_close(term.reference_joint_pos, start)
+        frame_109 = term.arrays.joint_pos[MICROBAN_LOCOMOTION_PRIOR_START_FRAME]
+        expected_lead_progress = (
+            MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES
+            / MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS
+        )
+        expected_smoothstep = expected_lead_progress**2 * (
+            3.0 - 2.0 * expected_lead_progress
+        )
+        torch.testing.assert_close(
+            term.lead_joint_pos,
+            start + expected_smoothstep * (frame_109 - start),
+        )
+
+        # An automatic reset is followed by a positive-dt command update in
+        # the same env.step.  That update consumes the marker without using up
+        # the first of the twenty launch steps.
+        term.compute(0.02)
+        self.assertTrue(term.launching.item())
+        self.assertEqual(term.launch_step.item(), 0)
+        for _ in range(MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS):
+            term.compute(0.02)
+        self.assertFalse(term.launching.item())
+        self.assertEqual(
+            term.launch_step.item(), MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS
+        )
+        self.assertEqual(term.phase.item(), MICROBAN_LOCOMOTION_PRIOR_START_FRAME)
+        torch.testing.assert_close(term.reference_joint_pos, frame_109.unsqueeze(0))
+        term.compute(0.02)
+        self.assertEqual(term.phase.item(), MICROBAN_LOCOMOTION_PRIOR_START_FRAME + 1)
+
+    def test_launch_lead_joins_clip_by_one_policy_step_at_all_rates(self) -> None:
+        minimum, maximum = MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S
+        rates = (
+            minimum / MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S,
+            1.0,
+            maximum / MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S,
+        )
+        for rate in rates:
+            with self.subTest(rate=rate):
+                term = _prior_term(num_envs=1)
+                term.phase_rate.fill_(rate)
+                term.teleported.zero_()
+                term.launching.fill_(True)
+                term.launch_step.fill_(MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS - 1)
+                term.launch_start_joint_pos.copy_(
+                    torch.linspace(-0.12, 0.10, 12).unsqueeze(0)
+                )
+
+                before_join = term.lead_joint_pos.clone()
+                expected_before = term._interpolate(
+                    term.arrays.joint_pos,
+                    torch.tensor(
+                        [
+                            MICROBAN_LOCOMOTION_PRIOR_START_FRAME
+                            + MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES
+                            - rate
+                        ]
+                    ),
+                )
+                torch.testing.assert_close(before_join, expected_before)
+
+                term.compute(0.02)
+                self.assertFalse(term.launching.item())
+                after_join = term.lead_joint_pos
+                expected_after = term._interpolate(
+                    term.arrays.joint_pos,
+                    torch.tensor(
+                        [
+                            MICROBAN_LOCOMOTION_PRIOR_START_FRAME
+                            + MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES
+                        ]
+                    ),
+                )
+                torch.testing.assert_close(after_join, expected_after)
+
+    def test_partial_teleport_selects_only_eligible_forward_rows(self) -> None:
+        term = _prior_term(num_envs=5)
+        term.cfg = SimpleNamespace(
+            enabled=True,
+            velocity_command_name="twist",
+            forward_velocity_range_m_s=(0.06, 0.11),
+        )
+        term.robot = SimpleNamespace(
+            data=SimpleNamespace(joint_pos=torch.zeros(5, 21)),
+            write_joint_state_to_sim=Mock(),
+            set_joint_position_target=Mock(),
+            write_root_state_to_sim=Mock(),
+        )
+        twist = torch.tensor(
+            [
+                [0.06, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.08, 0.0, 0.0],
+                [0.11, 0.0, 0.0],
+                [0.08, 0.1, 0.0],
+            ]
+        )
+        midpoint = (
+            MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP
+            + MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP
+        ) // 2
+        term._env = SimpleNamespace(
+            num_envs=5,
+            common_step_counter=midpoint,
+            device="cpu",
+            step_dt=0.02,
+            command_manager=SimpleNamespace(get_command=lambda name: twist),
+            scene=SimpleNamespace(env_origins=torch.zeros(5, 3)),
+        )
+        term.command_counter = torch.ones(5, dtype=torch.long)
+        term.time_left = torch.zeros(5)
+
+        # p=0.5 at the midpoint.  Draws correspond only to eligible rows
+        # [0, 2, 3], proving that non-forward rows cannot leak into either set.
+        with patch(
+            "mjlab_microban.tasks.microban_locomotion_prior.torch.rand",
+            return_value=torch.tensor([0.1, 0.9, 0.2]),
+        ):
+            term.reset(torch.arange(5))
+
+        self.assertEqual(term.eligible.tolist(), [True, False, True, True, False])
+        self.assertEqual(term.teleported.tolist(), [True, False, False, True, False])
+        self.assertEqual(term.launching.tolist(), [False, False, True, False, False])
+        written_ids = term.robot.write_joint_state_to_sim.call_args.kwargs["env_ids"]
+        self.assertEqual(written_ids.tolist(), [0, 3])
 
 
 class LocomotionPriorRewardTest(unittest.TestCase):

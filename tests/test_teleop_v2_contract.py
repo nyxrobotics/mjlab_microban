@@ -650,12 +650,9 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
     def test_latent_ppo_construct_fails_closed_on_wrapper_and_extensions(self) -> None:
         obs = TensorDict({"policy": torch.zeros(1, 1)}, batch_size=[1])
         valid_env = SimpleNamespace(clip_actions=None, num_actions=18)
-        with patch.object(PPO, "construct_algorithm", return_value="sentinel"):
-            self.assertEqual(
-                LatentActionPPO.construct_algorithm(
-                    obs, valid_env, {"algorithm": {}}, "cpu"
-                ),
-                "sentinel",
+        with self.assertRaisesRegex(ValueError, "BC fields are missing"):
+            LatentActionPPO.construct_algorithm(
+                obs, valid_env, {"algorithm": {}}, "cpu"
             )
 
         invalid_cases = (
@@ -806,6 +803,22 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "adaptive")
         self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_coefficient, 0.5
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_error_scale_rad,
+            0.15,
+        )
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_chunks, 4)
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_max_target_projection_rad,
+            1.0e-3,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_neutral_anchor_relative_weight,
+            1.0,
+        )
+        self.assertEqual(
             MicrobanTeleopRlCfg.algorithm.class_name,
             "mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO",
         )
@@ -944,6 +957,10 @@ class TeleopConfigurationTest(unittest.TestCase):
         prior.cfg = prior_cfg
         prior.eligible = torch.ones(1, dtype=torch.bool)
         prior.finished = torch.ones(1, dtype=torch.bool)
+        prior.teleported = torch.ones(1, dtype=torch.bool)
+        prior.launching = torch.ones(1, dtype=torch.bool)
+        prior.launch_step = torch.ones(1, dtype=torch.long)
+        prior.launch_start_joint_pos = torch.ones(1, 12)
         prior.phase_rate = torch.ones(1)
         prior._skip_next_advance = torch.ones(1, dtype=torch.bool)
         reward_cfgs = {
@@ -1640,6 +1657,10 @@ class CheckpointContractTest(unittest.TestCase):
         prior.cfg = prior_cfg
         prior.eligible = torch.ones(2, dtype=torch.bool)
         prior.finished = torch.ones(2, dtype=torch.bool)
+        prior.teleported = torch.ones(2, dtype=torch.bool)
+        prior.launching = torch.ones(2, dtype=torch.bool)
+        prior.launch_step = torch.ones(2, dtype=torch.long)
+        prior.launch_start_joint_pos = torch.ones(2, 12)
         prior.phase_rate = torch.ones(2)
         prior._skip_next_advance = torch.ones(2, dtype=torch.bool)
         reward_cfgs = {

@@ -9,6 +9,7 @@ cd -- "${PROJECT_ROOT}"
 uv lock --check
 uv run --locked --with pytest python -m pytest -q \
     tests/test_bounded_std_projection.py \
+    tests/test_locomotion_prior_bc.py \
     tests/test_locomotion_prior.py \
     tests/test_microban_policy_export.py \
     tests/test_signed_axis_velocity_command.py \

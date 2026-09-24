@@ -91,6 +91,17 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
 )
 
 
+@dataclass
+class MicrobanTeleopPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO settings plus the finite privileged locomotion-teacher contract."""
+
+    locomotion_prior_bc_coefficient: float = 0.5
+    locomotion_prior_bc_error_scale_rad: float = 0.15
+    locomotion_prior_bc_chunks: int = 4
+    locomotion_prior_bc_max_target_projection_rad: float = 1.0e-3
+    locomotion_prior_bc_neutral_anchor_relative_weight: float = 1.0
+
+
 def _microban_soft_joint_position_clip() -> dict[str, tuple[float, float]]:
     """Derive action target clips with Entity's soft-limit formula.
 
@@ -405,7 +416,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rotation_env_ang_vel_range = (
             MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
         )
-        # V8h first uses the exact speed range represented by the retargeted
+        # V8i first uses the exact speed range represented by the retargeted
         # forward clip.  Update 500 introduces every signed axis while the
         # imitation blend fades; update 1000 restores the original v8g sampler.
         initial_twist.signed_axis_probabilities = deepcopy(
@@ -663,7 +674,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"command_name": "locomotion_prior"},
     )
 
-    # V8h uses a short privileged gait prior, then acquires one signed axis at a
+    # V8i uses a short privileged gait prior/direct teacher, then acquires one
+    # signed axis at a
     # time before introducing mixed commands.  The first two stages are internal
     # to the existing 1,500-update external gate: at 500 the prior starts fading
     # while non-forward commands appear, and at 1,000 it is permanently disabled.
@@ -947,7 +959,7 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         activation="elu",
         obs_normalization=True,
     ),
-    algorithm=RslRlPpoAlgorithmCfg(
+    algorithm=MicrobanTeleopPpoAlgorithmCfg(
         class_name=("mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO"),
         value_loss_coef=1.0,
         use_clipped_value_loss=True,

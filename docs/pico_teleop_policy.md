@@ -11,11 +11,13 @@ commands and compact end-effector targets every control tick, then produces the
 18 arm/leg joint targets that must keep the physical robot balanced.
 
 BeyondMimic/TWIST2-style full-motion tracking remains an offline reference
-pipeline, not a command streamed to the robot. V8h does use one audited
-retargeted walking clip as a **critic-only training prior** for the first 1,000
-updates. It is faded to zero and disabled before the first 1,500-update gate;
-the deployed actor never observes it. The exact reset, reward, phase and
-provenance contract is in
+pipeline, not a command streamed to the robot. V8i uses one audited retargeted
+walking clip as a **critic-only training prior and direct actor teacher** for the
+first 1,000 updates. It is faded to zero and disabled before the first
+1,500-update gate; the deployed actor never observes it. The exact loss,
+isolation and provenance contract is in
+[`teleop_v8i_direct_locomotion_bc.md`](teleop_v8i_direct_locomotion_bc.md), with
+the underlying reset and phase behavior in
 [`teleop_v8h_locomotion_prior.md`](teleop_v8h_locomotion_prior.md).
 
 ## Deployment contract
@@ -35,9 +37,10 @@ The actor observation is 83 floats in this exact term order:
 
 `base_lin_vel`, global/root position and terrain height scans are forbidden from
 the actor because the real robot does not provide them. The critic may use
-simulation-only signals during asymmetric actor-critic training. In v8h that
+simulation-only signals during asymmetric actor-critic training. In v8i that
 includes a 39-value `[blend, sin, cos, q_ref, dq_ref, q_lead_5]` locomotion-prior
-command. It is never appended to the 83-value actor observation.
+command. The bounded actor is supervised against `q_lead_5` only during
+training; the payload is never appended to the 83-value actor observation.
 
 > **Supported-robot acceptance blocker:** the `microban` `PicoHybridMove` now
 > rotates the raw BMI088 gyro with `IMU_MOUNT_QUAT` before constructing
@@ -204,7 +207,7 @@ wrappers reject all bootstrap/pristine options. V8 requires a clean actor start.
 
 ### What v8 changes
 
-After the short v8h prior, the velocity command sampler is an exclusive
+After the short v8i prior/teacher, the velocity command sampler is an exclusive
 categorical distribution over
 `standing`, forward, backward, left, right, yaw-left, yaw-right and (later)
 mixed motion. Early training gives each signed direction its own examples rather
@@ -242,7 +245,7 @@ effective-action feedback, predicted joint-state guard and independent actuator
 target clip remain in force.
 
 The exact semantic recipe marker is `microban_teleop_recipe_revision =
-v8h_clean_shoulder_std1_twist2_locomotion_prior_v1`.
+v8i_clean_shoulder_std1_twist2_direct_bc_launch_v2`.
 The non-vanishing linear/yaw L1 tracking weights are `-4.0/-1.0`; this doubles
 only the tracking incentive after the v8f diagnostic remained safely static.
 Pose, joint-limit, collision, and bounded-action safety terms are unchanged.

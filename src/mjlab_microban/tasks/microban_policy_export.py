@@ -102,7 +102,9 @@ MICROBAN_TELEOP_NUM_STEPS_PER_ENV = 24
 MICROBAN_TELEOP_ACTOR_INITIALIZATION = (
     "clean_random_except_inward_shoulder_roll_v1_nonshoulder_std_1_v1"
 )
-MICROBAN_TELEOP_RECIPE_REVISION = "v8h_clean_shoulder_std1_twist2_locomotion_prior_v1"
+MICROBAN_TELEOP_RECIPE_REVISION = (
+    "v8i_clean_shoulder_std1_twist2_direct_bc_launch_v2"
+)
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"

@@ -81,8 +81,9 @@ scripts/train_microban_teleop.sh train
 The complete observation/action contract, staged curriculum, resume and safe
 18-action ONNX export procedure are in
 [`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
-The v8h TWIST2-derived critic-only warm-start is specified separately in
-[`docs/teleop_v8h_locomotion_prior.md`](docs/teleop_v8h_locomotion_prior.md).
+The v8i TWIST2-derived critic prior and direct, training-only locomotion teacher
+are specified in
+[`docs/teleop_v8i_direct_locomotion_bc.md`](docs/teleop_v8i_direct_locomotion_bc.md).
 
 Evaluate a saved hybrid checkpoint headlessly before export or hardware use:
 

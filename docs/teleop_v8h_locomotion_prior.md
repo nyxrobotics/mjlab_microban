@@ -1,5 +1,10 @@
 # V8h privileged locomotion prior
 
+> Historical base specification: V8i retains this artifact, payload, phase and
+> reward design, but supersedes the all-teleport reset schedule with a fading
+> teleport plus smooth launch and adds direct actor BC. See
+> [`teleop_v8i_direct_locomotion_bc.md`](teleop_v8i_direct_locomotion_bc.md).
+
 This note is the reproducible specification for the short-lived TWIST2-derived
 locomotion prior used by `Mjlab-Teleop-Microban`. It does **not** change the
 deployed actor: the actor remains 83 observations and 18 actions, and no motion

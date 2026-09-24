@@ -41,8 +41,13 @@ from mjlab_microban.tasks.mdp import (
     HandTargetCommand,
     HandTargetCommandCfg,
 )
+from mjlab_microban.tasks.microban_locomotion_prior import (
+    MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
+    MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
@@ -51,6 +56,8 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_OBSERVATION_WIDTH,
+    validate_microban_teleop_observation_contract,
 )
 
 # Runtime command limits from microban/src/moves/hmd_head.py.  The event further
@@ -595,10 +602,52 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         return torch.distributions.kl_divergence(old_dist, new_dist).sum(dim=-1)
 
 
-class LatentActionPPO(PPO):
-    """Store/score exact Gaussian latents while stepping bounded actions."""
+def _constant_action_vector(
+    value: float | torch.Tensor,
+    *,
+    width: int,
+    name: str,
+) -> tuple[float, ...]:
+    """Resolve a scalar/per-joint/per-env action parameter to one host vector."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    tensor = torch.as_tensor(value, dtype=torch.float32).detach().cpu()
+    if tensor.ndim == 0:
+        tensor = tensor.expand(width)
+    elif tensor.shape == (width,):
+        pass
+    elif tensor.ndim == 2 and tensor.shape[1] == width:
+        if tensor.shape[0] == 0:
+            raise ValueError(f"{name} must contain at least one environment")
+        first = tensor[0]
+        if not torch.equal(tensor, first.expand_as(tensor)):
+            raise ValueError(f"{name} must be identical in every environment")
+        tensor = first
+    else:
+        raise ValueError(
+            f"{name} must be scalar, ({width},), or (num_envs, {width}); "
+            f"got {tuple(tensor.shape)}"
+        )
+    if not bool(torch.isfinite(tensor).all().item()):
+        raise ValueError(f"{name} must be finite")
+    return tuple(float(item) for item in tensor.tolist())
+
+
+class LatentActionPPO(PPO):
+    """Bounded-action PPO with a short-lived on-policy locomotion teacher.
+
+    The deployment actor remains exactly ``83 -> 18``.  During the first
+    curriculum segment only, the raw critic observation carries a privileged
+    TWIST2 reference.  One post-PPO optimizer step teaches the deterministic
+    actor's twelve leg outputs to reach the +5-frame joint target.  The teacher
+    is therefore absent from inference and from every actor observation.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        locomotion_prior_bc_cfg: Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         if not isinstance(
             self.actor.distribution, AsymmetricBoundedGaussianDistribution
@@ -620,6 +669,134 @@ class LatentActionPPO(PPO):
         self._std_projection_hook_handle = self.optimizer.register_step_post_hook(
             self._project_std_after_optimizer_step
         )
+        self._locomotion_prior_bc_cfg = self._validate_locomotion_prior_bc_cfg(
+            locomotion_prior_bc_cfg
+        )
+
+    def _validate_locomotion_prior_bc_cfg(
+        self, cfg: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if cfg is None:
+            return None
+        if self.is_multi_gpu:
+            raise ValueError("Locomotion-prior auxiliary BC currently requires one GPU")
+        required = {
+            "coefficient",
+            "error_scale_rad",
+            "chunks",
+            "critic_group",
+            "actor_group",
+            "prior_start",
+            "prior_stop",
+            "command_start",
+            "command_stop",
+            "action_scale",
+            "action_offset",
+            "leg_action_ids",
+            "max_target_projection_rad",
+            "neutral_anchor_relative_weight",
+        }
+        if set(cfg) != required:
+            raise ValueError(
+                "Locomotion-prior BC config fields mismatch: "
+                f"expected {sorted(required)}, got {sorted(cfg)}"
+            )
+        coefficient = float(cfg["coefficient"])
+        error_scale = float(cfg["error_scale_rad"])
+        max_projection = float(cfg["max_target_projection_rad"])
+        neutral_anchor_weight = float(cfg["neutral_anchor_relative_weight"])
+        chunks = cfg["chunks"]
+        start = cfg["prior_start"]
+        stop = cfg["prior_stop"]
+        critic_group = cfg["critic_group"]
+        actor_group = cfg["actor_group"]
+        if not math.isfinite(coefficient) or coefficient <= 0.0:
+            raise ValueError("Locomotion-prior BC coefficient must be positive")
+        if not math.isfinite(error_scale) or error_scale <= 0.0:
+            raise ValueError("Locomotion-prior BC error scale must be positive")
+        if not math.isfinite(max_projection) or max_projection < 0.0:
+            raise ValueError(
+                "Locomotion-prior BC target projection limit must be non-negative"
+            )
+        if (
+            not math.isfinite(neutral_anchor_weight)
+            or not 0.0 <= neutral_anchor_weight <= 1.0
+        ):
+            raise ValueError(
+                "Locomotion-prior BC neutral anchor weight must be in [0, 1]"
+            )
+        if isinstance(chunks, bool) or not isinstance(chunks, int) or chunks <= 0:
+            raise ValueError("Locomotion-prior BC chunks must be a positive integer")
+        if not isinstance(critic_group, str) or not critic_group:
+            raise ValueError("Locomotion-prior BC critic group must be non-empty")
+        if not isinstance(actor_group, str) or not actor_group:
+            raise ValueError("Locomotion-prior BC actor group must be non-empty")
+        if (
+            isinstance(start, bool)
+            or isinstance(stop, bool)
+            or not isinstance(start, int)
+            or not isinstance(stop, int)
+            or start < 0
+            or stop - start != MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH
+        ):
+            raise ValueError("Locomotion-prior BC critic slice must be 39-wide")
+        command_start = cfg["command_start"]
+        command_stop = cfg["command_stop"]
+        if (
+            isinstance(command_start, bool)
+            or isinstance(command_stop, bool)
+            or not isinstance(command_start, int)
+            or not isinstance(command_stop, int)
+            or command_start < 0
+            or command_stop - command_start != 3
+        ):
+            raise ValueError("Locomotion-prior BC actor command slice must be 3-wide")
+
+        action_scale = torch.as_tensor(
+            cfg["action_scale"], dtype=torch.float32, device=self.device
+        )
+        action_offset = torch.as_tensor(
+            cfg["action_offset"], dtype=torch.float32, device=self.device
+        )
+        leg_action_ids = torch.as_tensor(
+            cfg["leg_action_ids"], dtype=torch.long, device=self.device
+        )
+        if action_scale.shape != (MICROBAN_TELEOP_ACTION_WIDTH,):
+            raise ValueError("Locomotion-prior BC action scale must be 18-wide")
+        if action_offset.shape != (MICROBAN_TELEOP_ACTION_WIDTH,):
+            raise ValueError("Locomotion-prior BC action offset must be 18-wide")
+        if leg_action_ids.shape != (len(MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES),):
+            raise ValueError("Locomotion-prior BC must target exactly twelve legs")
+        if not bool(torch.isfinite(action_scale).all().item()) or not bool(
+            torch.all(action_scale > 0.0).item()
+        ):
+            raise ValueError("Locomotion-prior BC action scale must be positive")
+        if not bool(torch.isfinite(action_offset).all().item()):
+            raise ValueError("Locomotion-prior BC action offset must be finite")
+        expected_leg_ids = tuple(
+            MICROBAN_TELEOP_ACTION_JOINT_NAMES.index(name)
+            for name in MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES
+        )
+        if tuple(int(item) for item in leg_action_ids.cpu().tolist()) != (
+            expected_leg_ids
+        ):
+            raise ValueError("Locomotion-prior BC leg action order mismatch")
+        return {
+            "coefficient": coefficient,
+            "error_scale_rad": error_scale,
+            "chunks": chunks,
+            "critic_group": critic_group,
+            "actor_group": actor_group,
+            "prior_start": start,
+            "prior_stop": stop,
+            "command_start": command_start,
+            "command_stop": command_stop,
+            "action_scale": action_scale,
+            "action_offset": action_offset,
+            "leg_action_ids": leg_action_ids,
+            "max_target_projection_rad": max_projection,
+            "neutral_anchor_relative_weight": neutral_anchor_weight,
+        }
 
     def _project_std_after_optimizer_step(
         self,
@@ -653,7 +830,281 @@ class LatentActionPPO(PPO):
             raise ValueError("LatentActionPPO does not support RND")
         if algorithm_cfg.get("symmetry_cfg") is not None:
             raise ValueError("LatentActionPPO does not support symmetry augmentation")
+        semantic_names = (
+            "locomotion_prior_bc_coefficient",
+            "locomotion_prior_bc_error_scale_rad",
+            "locomotion_prior_bc_chunks",
+            "locomotion_prior_bc_max_target_projection_rad",
+            "locomotion_prior_bc_neutral_anchor_relative_weight",
+        )
+        missing = [name for name in semantic_names if name not in algorithm_cfg]
+        if missing:
+            raise ValueError(
+                "LatentActionPPO canonical locomotion-prior BC fields are missing: "
+                f"{missing}"
+            )
+        semantic = {name: algorithm_cfg.pop(name) for name in semantic_names}
+
+        raw_env = getattr(env, "unwrapped", None)
+        if raw_env is None or not hasattr(raw_env, "observation_manager"):
+            raise TypeError("LatentActionPPO requires an unwrapped manager-based env")
+        validate_microban_teleop_observation_contract(raw_env)
+        manager = raw_env.observation_manager
+        actor_group = "actor"
+        actor_names = tuple(manager.active_terms.get(actor_group, ()))
+        actor_dims = tuple(manager.group_obs_term_dim[actor_group])
+        actor_widths = tuple(math.prod(dim) for dim in actor_dims)
+        if actor_names.count("command") != 1:
+            raise ValueError("Microban actor must contain command exactly once")
+        command_index = actor_names.index("command")
+        if actor_widths[command_index] != 3:
+            raise ValueError("Microban actor command must be 3-wide")
+        command_start = sum(actor_widths[:command_index])
+        command_stop = command_start + 3
+        critic_group = "critic"
+        if not manager.group_obs_concatenate.get(critic_group, False):
+            raise ValueError("Microban critic observations must be concatenated")
+        names = tuple(manager.active_terms.get(critic_group, ()))
+        if names.count("locomotion_prior") != 1:
+            raise ValueError(
+                "Microban critic must contain locomotion_prior exactly once"
+            )
+        dims = tuple(manager.group_obs_term_dim[critic_group])
+        prior_index = names.index("locomotion_prior")
+        widths = tuple(math.prod(dim) for dim in dims)
+        if widths[prior_index] != MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH:
+            raise ValueError("Microban critic locomotion prior must be 39-wide")
+        prior_start = sum(widths[:prior_index])
+        prior_stop = prior_start + widths[prior_index]
+        if critic_group not in obs or obs[critic_group].shape[-1] != sum(widths):
+            raise ValueError("Resolved critic observation shape is inconsistent")
+        if "actor" not in obs or obs["actor"].shape[-1] != (
+            MICROBAN_TELEOP_OBSERVATION_WIDTH
+        ):
+            raise ValueError("Resolved actor observation must be exactly 83-wide")
+
+        action = raw_env.action_manager.get_term("joint_pos")
+        if not isinstance(action, JointPositionAction):
+            raise TypeError("Microban joint_pos action must be JointPositionAction")
+        if tuple(action.target_names) != MICROBAN_TELEOP_ACTION_JOINT_NAMES:
+            raise ValueError("Microban action joint order mismatch for BC")
+        action_scale = _constant_action_vector(
+            action.scale,
+            width=MICROBAN_TELEOP_ACTION_WIDTH,
+            name="Microban joint_pos scale",
+        )
+        action_offset = _constant_action_vector(
+            action.offset,
+            width=MICROBAN_TELEOP_ACTION_WIDTH,
+            name="Microban joint_pos offset",
+        )
+        if any(value <= 0.0 for value in action_scale):
+            raise ValueError("Microban joint_pos scale must be strictly positive")
+        leg_action_ids = tuple(
+            MICROBAN_TELEOP_ACTION_JOINT_NAMES.index(name)
+            for name in MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES
+        )
+        algorithm_cfg["locomotion_prior_bc_cfg"] = {
+            "coefficient": semantic["locomotion_prior_bc_coefficient"],
+            "error_scale_rad": semantic["locomotion_prior_bc_error_scale_rad"],
+            "chunks": semantic["locomotion_prior_bc_chunks"],
+            "critic_group": critic_group,
+            "actor_group": actor_group,
+            "prior_start": prior_start,
+            "prior_stop": prior_stop,
+            "command_start": command_start,
+            "command_stop": command_stop,
+            "action_scale": action_scale,
+            "action_offset": action_offset,
+            "leg_action_ids": leg_action_ids,
+            "max_target_projection_rad": semantic[
+                "locomotion_prior_bc_max_target_projection_rad"
+            ],
+            "neutral_anchor_relative_weight": semantic[
+                "locomotion_prior_bc_neutral_anchor_relative_weight"
+            ],
+        }
         return PPO.construct_algorithm(obs, env, cfg, device)
+
+    def _prepare_locomotion_prior_bc(
+        self, observations: TensorDict
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]] | None:
+        cfg = self._locomotion_prior_bc_cfg
+        if cfg is None:
+            return None
+        critic_group = cfg["critic_group"]
+        if critic_group not in observations:
+            raise ValueError("Rollout is missing the configured critic observation")
+        critic = observations[critic_group]
+        prior = critic[:, cfg["prior_start"] : cfg["prior_stop"]]
+        if prior.shape[-1] != MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH:
+            raise ValueError("Stored locomotion-prior payload width drifted")
+        if not bool(torch.isfinite(prior).all().item()):
+            raise FloatingPointError("Stored locomotion-prior payload is non-finite")
+        weight = prior[:, 0].detach().clone()
+        if not bool(((weight >= 0.0) & (weight <= 1.0)).all().item()):
+            raise ValueError("Stored locomotion-prior BC weights must be in [0, 1]")
+        active = weight > 0.0
+        inactive = ~active
+        if bool(inactive.any().item()) and not bool(
+            torch.all(prior[inactive] == 0.0).item()
+        ):
+            raise ValueError("Inactive locomotion-prior payload must be exact zero")
+        if bool(active.any().item()):
+            phase_norm = torch.square(prior[active, 1]) + torch.square(prior[active, 2])
+            if not bool(
+                torch.allclose(
+                    phase_norm,
+                    torch.ones_like(phase_norm),
+                    atol=2.0e-5,
+                    rtol=0.0,
+                )
+            ):
+                raise ValueError("Active locomotion-prior phase is not unit length")
+
+        actor_group = cfg["actor_group"]
+        if actor_group not in observations:
+            raise ValueError("Rollout is missing the configured actor observation")
+        command = observations[actor_group][
+            :, cfg["command_start"] : cfg["command_stop"]
+        ]
+        if command.shape[-1] != 3 or not bool(torch.isfinite(command).all().item()):
+            raise ValueError("Stored actor velocity command is malformed")
+        standing = torch.all(torch.abs(command) <= 1.0e-6, dim=-1) & inactive
+
+        leg_ids = cfg["leg_action_ids"]
+        scale = cfg["action_scale"][leg_ids]
+        offset = cfg["action_offset"][leg_ids]
+        q_lead = prior[:, 27:39]
+        target = (q_lead - offset) / scale
+        distribution = self.actor.distribution
+        if not isinstance(distribution, AsymmetricBoundedGaussianDistribution):
+            raise TypeError("Locomotion-prior BC lost its bounded distribution")
+        reachable_lower = distribution._transform(distribution.mean_lower_bound)[
+            leg_ids
+        ]
+        reachable_upper = distribution._transform(distribution.mean_upper_bound)[
+            leg_ids
+        ]
+        projected = torch.clamp(target, min=reachable_lower, max=reachable_upper)
+        projection = torch.abs(projected - target)
+        if bool(active.any().item()):
+            maximum_projection = float(projection[active].max().item())
+            if maximum_projection > cfg["max_target_projection_rad"]:
+                raise ValueError(
+                    "Locomotion-prior BC target is outside the deterministic actor "
+                    f"closure by {maximum_projection:.9g} rad"
+                )
+            projected_count = torch.count_nonzero(projection[active] > 0.0)
+            projection_fraction = float(
+                projected_count.item() / projection[active].numel()
+            )
+        else:
+            projection_fraction = 0.0
+        target = torch.where(
+            active.unsqueeze(-1), projected, torch.zeros_like(projected)
+        ).detach()
+        global_teacher_weight = weight.max()
+        teacher_weight = weight + (
+            standing.to(dtype=weight.dtype)
+            * global_teacher_weight
+            * cfg["neutral_anchor_relative_weight"]
+        )
+        stats = {
+            "locomotion_prior_bc_active_fraction": float(
+                active.to(dtype=torch.float32).mean().item()
+            ),
+            "locomotion_prior_bc_neutral_anchor_fraction": float(
+                standing.to(dtype=torch.float32).mean().item()
+            ),
+            "locomotion_prior_bc_target_projection_fraction": projection_fraction,
+        }
+        return teacher_weight.detach(), target, stats
+
+    def _run_locomotion_prior_bc(
+        self,
+        observations: TensorDict,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        stats: dict[str, float],
+    ) -> dict[str, float]:
+        cfg = self._locomotion_prior_bc_cfg
+        assert cfg is not None
+        active = weight > 0.0
+        if not bool(active.any().item()):
+            return {
+                "locomotion_prior_bc": 0.0,
+                "locomotion_prior_bc_action_mae_rad": 0.0,
+                **stats,
+            }
+        batch_size = int(weight.numel())
+        if observations.batch_size != torch.Size((batch_size,)):
+            raise ValueError("Locomotion-prior BC rollout shape mismatch")
+        leg_ids = cfg["leg_action_ids"]
+        chunks = min(cfg["chunks"], batch_size)
+        chunk_size = math.ceil(batch_size / chunks)
+        error_scale = cfg["error_scale_rad"]
+        coefficient = cfg["coefficient"]
+        weighted_square_sum = torch.zeros((), device=self.device)
+        active_absolute_sum = torch.zeros((), device=self.device)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        for start in range(0, batch_size, chunk_size):
+            stop = min(start + chunk_size, batch_size)
+            prediction = self.actor(observations[start:stop])[:, leg_ids]
+            if not bool(torch.isfinite(prediction).all().item()):
+                raise FloatingPointError(
+                    "Locomotion-prior BC actor prediction became non-finite"
+                )
+            error = prediction - target[start:stop]
+            chunk_weight = weight[start:stop]
+            weighted_square = chunk_weight * torch.square(error).mean(dim=-1)
+            loss = coefficient * weighted_square.sum() / (batch_size * error_scale**2)
+            loss.backward()
+            weighted_square_sum += weighted_square.detach().sum()
+            chunk_active = active[start:stop]
+            if bool(chunk_active.any().item()):
+                active_absolute_sum += torch.abs(error[chunk_active]).detach().sum()
+
+        for parameter in self.actor.parameters():
+            if parameter.grad is not None and not bool(
+                torch.isfinite(parameter.grad).all().item()
+            ):
+                raise FloatingPointError(
+                    "Locomotion-prior BC produced a non-finite actor gradient"
+                )
+        gradient_norm = nn.utils.clip_grad_norm_(
+            self.actor.parameters(), self.max_grad_norm
+        )
+        if not bool(torch.isfinite(gradient_norm).item()):
+            raise FloatingPointError(
+                "Locomotion-prior BC actor gradient norm became non-finite"
+            )
+        self.optimizer.step()
+        active_element_count = int(active.sum().item()) * target.shape[1]
+        weighted_mse = weighted_square_sum / batch_size
+        return {
+            "locomotion_prior_bc": float(
+                (coefficient * weighted_mse / error_scale**2).item()
+            ),
+            "locomotion_prior_bc_action_mae_rad": float(
+                (active_absolute_sum / active_element_count).item()
+            ),
+            **stats,
+        }
+
+    def update(self) -> dict[str, float]:
+        if self._locomotion_prior_bc_cfg is None:
+            return super().update()
+        observations = self.storage.observations.flatten(0, 1)
+        prepared = self._prepare_locomotion_prior_bc(observations)
+        assert prepared is not None
+        weight, target, stats = prepared
+        losses = super().update()
+        losses.update(
+            self._run_locomotion_prior_bc(observations, weight, target, stats)
+        )
+        return losses
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         latent = super().act(obs)
