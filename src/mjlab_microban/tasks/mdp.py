@@ -18,7 +18,7 @@ from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse, subtract_frame_transforms
+from mjlab.utils.lab_api.math import quat_apply_inverse, sample_uniform, subtract_frame_transforms
 from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommand,
     UniformVelocityCommandCfg,
@@ -369,18 +369,308 @@ class upright:
         del env_ids  # Unused.
 
 
-def getup_height_reward(
+def extreme_joint_velocity(
     env: ManagerBasedRlEnv,
-    target_height: float,
+    max_joint_vel: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Dense reward proportional to trunk height, capped once standing height is
-    reached. Rewards progress toward standing from any starting orientation, without
-    assuming which direction is "up" relative to the trunk (unlike upright, which needs
-    the trunk already close to vertical to give a useful gradient)."""
+    """Terminate envs whose joint velocity has run away to an unphysical (but still
+    finite) magnitude, before it can corrupt reward accumulation / the value function.
+
+    ``nan_detection`` alone isn't enough: a state can spend several steps at an
+    enormous-but-finite velocity (observed directly: body_ang_vel reward reaching
+    ~1e12 in early hold_airborne training) before actually overflowing to NaN/Inf,
+    and by then the episode return and value-loss for that env are already ruined —
+    poisoning the batch mean that PPO's gradient step uses, which is how a single
+    still-diverging env corrupts every other env's policy via one bad update. No real
+    servo on this robot exceeds ~10 rad/s; 50 rad/s is a generous, clearly-diverging
+    threshold rather than a tuned operating limit.
+    """
     asset: Entity = env.scene[asset_cfg.name]
-    height = asset.data.root_link_pos_w[:, 2]
-    return torch.clamp(height / target_height, min=0.0, max=1.0)
+    joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    return joint_vel.abs().amax(dim=-1) > max_joint_vel
+
+
+def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    asset: Entity = env.scene[head_asset_cfg.name]
+    return asset.data.body_link_pos_w[:, head_asset_cfg.body_ids[0], 2]
+
+
+def standing_bonus(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    upright_std: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense reward active only once the robot is near-standing (head height above
+    height_threshold AND close to upright), rewarding staying there.
+
+    HoST's "post-task" mechanism (arXiv:2502.08378): since this only pays out once
+    standing is reached, reaching it earlier and holding it accumulates strictly more
+    of it over a fixed-length episode. Height/upright reward alone measurably plateaus
+    around 80% of target height without ever crossing into genuine standing (see
+    microban_teleop/docs/getup_research.md) — this term is a targeted "finish the job"
+    incentive that height/upright alone don't provide: partial credit for progress
+    isn't the same as a payoff specifically for completing it.
+
+    Gated on head height (see head_height_reward), not trunk height — an inverted-
+    but-elevated trunk shouldn't count as "near-standing" even before this term
+    existed to check orientation too.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+
+    if asset_cfg.body_ids:
+        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
+    else:
+        body_quat_w = asset.data.root_link_quat_w
+    gravity_w = asset.data.gravity_vec_w
+    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
+    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    projected_gravity_b_unit = projected_gravity_b / gravity_norm
+    upright_error = torch.square(projected_gravity_b_unit[:, 0]) + torch.square(projected_gravity_b_unit[:, 1])
+    upright_reward = torch.exp(-upright_error / upright_std**2)
+
+    is_standing = height > height_threshold
+    return torch.where(is_standing, upright_reward, torch.zeros_like(upright_reward))
+
+
+def standing_torque_penalty(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize total and peak joint torque, but only once (nearly) standing.
+
+    A more principled alternative to penalizing deviation from a specific default
+    pose: encourages settling into whichever stance costs the least continuous
+    effort to hold, rather than any height/upright/on-feet-satisfying configuration
+    regardless of torque cost (e.g. a wide-splayed stance with heavily tilted ankles
+    needs much more holding torque than a naturally balanced one). Gated like
+    standing_bonus — during the actual recovery motion large torques are necessary,
+    so this only applies once actually up.
+
+    Returns total |torque| + peak |torque| (single worst-loaded motor) — both matter:
+    total for overall effort/heat, peak for any one servo's real current/torque limit.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+    torque = torch.abs(asset.data.actuator_force[:, asset_cfg.actuator_ids])
+    total = torch.sum(torque, dim=-1)
+    peak = torch.amax(torque, dim=-1)
+    is_standing = height > height_threshold
+    return torch.where(is_standing, total + peak, torch.zeros_like(total))
+
+
+def standing_pose_reward(
+    env: ManagerBasedRlEnv,
+    gate_center: float,
+    gate_sharpness: float,
+    std: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward joint angles close to default pose, weighted by a steep sigmoid gate on
+    head height instead of a hard on/off threshold — near-zero below gate_center,
+    rapidly ramping to full strength just above it (gate_sharpness controls how
+    quickly; small values = steeper). A linear height-based scale was avoided because
+    it would keep this reward weak most of the way to the target instead of ever
+    really taking over there; this gives a clearer regime change once actually near
+    standing. Kept as a secondary nudge, not a dominant term — not falling over
+    matters more than exactly matching the default pose, so its configured weight
+    stays modest relative to height/standing_bonus/standing_torque.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+    joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    error = torch.sum(torch.square(joint_pos - default_pos), dim=-1)
+    pose_reward = torch.exp(-error / std**2)
+    gate = torch.sigmoid((height - gate_center) / gate_sharpness)
+    return gate * pose_reward
+
+
+def foot_flat_reward(
+    env: ManagerBasedRlEnv,
+    std: float,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward both feet flat/level (sole parallel to the ground) once standing.
+
+    on_feet_reward only checks that the feet are touching, not what angle they're
+    touching at — a foot resting on its edge or toe still counts. Same
+    projected-gravity-error shape as standing_bonus's orientation check, applied per
+    foot (asset_cfg should resolve to both foot bodies) and averaged. Gated on head
+    height, not trunk (see head_height_reward) — during recovery a tilted foot is
+    often unavoidable/necessary, so this only applies once actually up.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+    body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    gravity_w = asset.data.gravity_vec_w.unsqueeze(1).expand(-1, len(asset_cfg.body_ids), -1)
+    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
+    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    projected_gravity_b_unit = projected_gravity_b / gravity_norm
+    flat_error = torch.square(projected_gravity_b_unit[..., 0]) + torch.square(projected_gravity_b_unit[..., 1])
+    flat_reward = torch.exp(-flat_error / std**2).mean(dim=-1)
+    is_standing = height > height_threshold
+    return torch.where(is_standing, flat_reward, torch.zeros_like(flat_reward))
+
+
+def on_feet_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    target_height: float,
+    head_asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward both feet bearing weight (in contact) while the head is reasonably high
+    off the ground — distinguishes genuinely standing-on-feet from other stable-but-
+    not-standing configurations (e.g. sitting/kneeling) that could otherwise also
+    score reasonably on height+upright alone. Gated on head height, not trunk (see
+    head_height_reward).
+    """
+    found = env.scene[sensor_name].data.found
+    both_feet = (found > 0).all(dim=-1).float()
+    height_frac = torch.clamp(_head_height(env, head_asset_cfg) / target_height, min=0.0, max=1.0)
+    return both_feet * height_frac
+
+
+def head_height_reward(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg,
+    sensor_name: str | None = None,
+) -> torch.Tensor:
+    """Dense reward proportional to head height, capped once standing head height is
+    reached.
+
+    Using the head body rather than the trunk root: raw trunk-Z height alone is
+    orientation-blind (rewards getting the trunk high regardless of which way the
+    robot is facing, which gives a useful gradient from any starting pose, but can't
+    distinguish "trunk high, right-side up" from "trunk high, upside down" — e.g. some
+    inverted/handstand-like configuration). Head height doesn't have that failure
+    mode: an inverted pose has the head low even with the trunk high, so it only
+    rewards a genuinely upright-and-high pose, while keeping the same useful gradient
+    from a flat starting pose (head low there too). Matches HumanUP's
+    (arXiv:2502.12152) choice to reward head height directly rather than trunk height.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = asset.data.body_link_pos_w[:, asset_cfg.body_ids[0], 2]
+    reward = torch.clamp(height / target_height, min=0.0, max=1.0)
+    if sensor_name is not None:
+        airborne = _feet_airborne(env, sensor_name)
+        reward = torch.where(airborne, torch.zeros_like(reward), reward)
+    return reward
+
+
+def _feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    """True where neither foot has ground contact (bool, shape [B])."""
+    found = env.scene[sensor_name].data.found
+    return (found <= 0).all(dim=-1)
+
+
+class hold_airborne:
+    """Suspend the robot by applying a gravity-compensating external force to the
+    trunk for a sampled duration, with a cooldown between holds — simulates a human
+    picking the robot up and holding it. Mirrors mjlab's own
+    ``mjlab.envs.mdp.events.apply_body_impulse`` state-machine (cooldown -> trigger ->
+    sustain -> expire, one independent timer per env), but the force is biased upward
+    (toward weight support) instead of zero-centered.
+
+    Unlike a kinematic teleport of the root pose, this keeps the trunk dynamically
+    simulated — internal joint torques can still swing/tilt the body against the
+    supporting force, so a flailing policy visibly fights the hold instead of being
+    rigidly pinned, and a compliant one hangs still. write_external_wrench_to_sim
+    persists until overwritten (same assumption apply_body_impulse makes), so the
+    force only needs to be (re)written at trigger and expire, not every step.
+
+    Use with mode="step".
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        self._asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self._body_ids = cfg.params["asset_cfg"].body_ids
+        self._device = env.device
+        self._step_dt = env.step_dt
+        self._num_bodies = (
+            len(self._body_ids) if isinstance(self._body_ids, list) else self._asset.num_bodies
+        )
+        self._cooldown_s = cfg.params["cooldown_s"]
+
+        self._time_remaining = torch.zeros(env.num_envs, device=self._device)
+        # Staggered, not zero: an all-zero init makes every env's first hold trigger
+        # in lockstep on step 1 — reproduced as a real MuJoCo solver blowup (NaN
+        # qpos/qvel within ~65 steps at 4096 envs) from applying a near-mg force to
+        # every single env simultaneously, on top of the already-extreme randomized
+        # fallen pose reset. Sampling from cooldown_s here (and in reset()) spreads
+        # first triggers out like the ones after every subsequent expiry already are.
+        lo, hi = self._cooldown_s
+        self._interval_time_left = torch.rand(env.num_envs, device=self._device) * (hi - lo) + lo
+        self._active = torch.zeros(env.num_envs, device=self._device, dtype=torch.bool)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | None,
+        force_z_range: tuple[float, float],
+        force_lateral_range: tuple[float, float],
+        torque_range: tuple[float, float],
+        duration_s: tuple[float, float],
+        cooldown_s: tuple[float, float],
+        asset_cfg: SceneEntityCfg,
+    ) -> None:
+        del env, env_ids, asset_cfg  # Unused; step events always operate on all envs.
+        dt = self._step_dt
+
+        self._time_remaining[self._active] -= dt
+
+        expired = self._active & (self._time_remaining <= 0)
+        if expired.any():
+            expired_ids = expired.nonzero(as_tuple=False).squeeze(-1)
+            zeros = torch.zeros((len(expired_ids), self._num_bodies, 3), device=self._device)
+            self._asset.write_external_wrench_to_sim(
+                zeros, zeros, env_ids=expired_ids, body_ids=self._body_ids
+            )
+            self._active[expired_ids] = False
+            self._time_remaining[expired_ids] = 0.0
+            lo, hi = cooldown_s
+            self._interval_time_left[expired_ids] = (
+                torch.rand(len(expired_ids), device=self._device) * (hi - lo) + lo
+            )
+
+        self._interval_time_left -= dt
+
+        eligible = (~self._active) & (self._interval_time_left <= 0)
+        if eligible.any():
+            trigger_ids = eligible.nonzero(as_tuple=False).squeeze(-1)
+            n = len(trigger_ids)
+            forces = sample_uniform(*force_lateral_range, (n, self._num_bodies, 3), self._device)
+            forces[..., 2] = sample_uniform(*force_z_range, (n, self._num_bodies), self._device)
+            torques = sample_uniform(*torque_range, (n, self._num_bodies, 3), self._device)
+            self._asset.write_external_wrench_to_sim(
+                forces, torques, env_ids=trigger_ids, body_ids=self._body_ids
+            )
+
+            lo, hi = duration_s
+            self._time_remaining[trigger_ids] = torch.rand(n, device=self._device) * (hi - lo) + lo
+            self._active[trigger_ids] = True
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        # An env can reset mid-hold (episode end while _active); the external wrench
+        # written by __call__ otherwise persists onto the freshly-reset state.
+        zeros = torch.zeros((len(env_ids), self._num_bodies, 3), device=self._device)
+        self._asset.write_external_wrench_to_sim(zeros, zeros, env_ids=env_ids, body_ids=self._body_ids)
+
+        self._time_remaining[env_ids] = 0.0
+        lo, hi = self._cooldown_s
+        self._interval_time_left[env_ids] = (
+            torch.rand(len(env_ids), device=self._device) * (hi - lo) + lo
+        )
+        self._active[env_ids] = False
 
 
 def feet_distance_penalty(
