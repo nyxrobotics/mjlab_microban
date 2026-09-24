@@ -59,7 +59,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _assert_rotation_command_cfg(
-    command_cfg: object, *, expected_rel_rotation_envs: float
+    command_cfg: object,
+    *,
+    expected_rel_rotation_envs: float,
+    expected_rotation_range: tuple[float, float],
 ) -> None:
     """Check the rotation-only command contract survives config construction."""
 
@@ -84,7 +87,7 @@ def _assert_rotation_command_cfg(
             "Unexpected minimum rotation angular velocity: "
             f"{command_cfg.rotation_min_ang_vel}"
         )
-    if command_cfg.rotation_env_ang_vel_range != (-1.5, 1.5):
+    if command_cfg.rotation_env_ang_vel_range != expected_rotation_range:
         raise AssertionError(
             "Unexpected rotation-only angular velocity range: "
             f"{command_cfg.rotation_env_ang_vel_range}"
@@ -102,11 +105,17 @@ def main() -> None:
     if "hmd_neck_target_motion" in play_cfg.events:
         raise AssertionError("HMD target randomization must be disabled in play mode")
     _assert_rotation_command_cfg(
-        play_cfg.commands["twist"], expected_rel_rotation_envs=0.0
+        play_cfg.commands["twist"],
+        expected_rel_rotation_envs=0.0,
+        expected_rotation_range=(-1.5, 1.5),
     )
 
     cfg = make_microban_teleop_env_cfg(play=False)
-    _assert_rotation_command_cfg(cfg.commands["twist"], expected_rel_rotation_envs=0.1)
+    _assert_rotation_command_cfg(
+        cfg.commands["twist"],
+        expected_rel_rotation_envs=0.1,
+        expected_rotation_range=(-0.8, 0.8),
+    )
     cfg.scene.num_envs = args.num_envs
     cfg.seed = args.seed
     # Prevent the deliberately occasional neutral dwell from making the bounded
@@ -123,6 +132,7 @@ def main() -> None:
         _assert_rotation_command_cfg(
             env.command_manager.get_term_cfg("twist"),
             expected_rel_rotation_envs=0.1,
+            expected_rotation_range=(-0.8, 0.8),
         )
 
         action = env.action_manager.get_term("joint_pos")
@@ -372,28 +382,28 @@ def main() -> None:
             raise TypeError(f"Unexpected curriculum type: {type(curriculum).__name__}")
         env.common_step_counter = 3000 * 24
         env.curriculum_manager.compute()
-        if curriculum.current_stage != 3:
+        if curriculum.current_stage != 2:
             raise AssertionError(
                 "Resume curriculum materialized stage "
-                f"{curriculum.current_stage}, expected 3"
+                f"{curriculum.current_stage}, expected 2"
             )
-        if env.reward_manager.get_term_cfg("hand_target_tracking").weight != 1.0:
-            raise AssertionError("Hand curriculum stage was not materialized")
-        if env.reward_manager.get_term_cfg("foot_target_tracking").weight != 2.0:
-            raise AssertionError("Foot curriculum stage was not materialized")
-        if env.command_manager.get_term_cfg("hand_target").rel_active != 0.7:
-            raise AssertionError("Hand activation curriculum was not materialized")
+        if env.reward_manager.get_term_cfg("hand_target_tracking").weight != 0.0:
+            raise AssertionError("Hand tracking was enabled before locomotion canary")
+        if env.reward_manager.get_term_cfg("foot_target_tracking").weight != 0.0:
+            raise AssertionError("Foot tracking was enabled before locomotion canary")
+        if env.command_manager.get_term_cfg("hand_target").rel_active != 0.0:
+            raise AssertionError("Hand targets were enabled before their stage")
         if (
             env.command_manager.get_term_cfg("foot_target").rel_single_support_envs
-            != 0.3
+            != 0.0
         ):
-            raise AssertionError("Foot activation curriculum was not materialized")
-        if env.command_manager.get_term_cfg("twist").ranges.lin_vel_x != (-0.5, 0.6):
-            raise AssertionError("Intermediate velocity stage was not materialized")
-        if env.command_manager.get_term_cfg("twist").ranges.ang_vel_z != (-1.0, 1.0):
-            raise AssertionError("Intermediate yaw stage was not materialized")
-        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.1:
-            raise AssertionError("Both-foot curriculum was not materialized")
+            raise AssertionError("Foot targets were enabled before their stage")
+        if env.command_manager.get_term_cfg("twist").ranges.lin_vel_x != (-0.5, 0.7):
+            raise AssertionError("Final velocity envelope was not materialized")
+        if env.command_manager.get_term_cfg("twist").ranges.ang_vel_z != (-1.5, 1.5):
+            raise AssertionError("Final yaw envelope was not materialized")
+        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.0:
+            raise AssertionError("Both-foot targets were enabled before their stage")
         foot_cfg = env.command_manager.get_term_cfg("foot_target")
         if foot_cfg.lift_height_range != (
             MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
@@ -406,15 +416,15 @@ def main() -> None:
         ):
             raise AssertionError("Initial both-foot floor-band support drifted")
         env.curriculum_manager.compute()
-        if curriculum.current_stage != 3:
+        if curriculum.current_stage != 2:
             raise AssertionError("Curriculum stages were applied more than once")
 
-        env.common_step_counter = 6000 * 24
+        env.common_step_counter = 10000 * 24
         env.curriculum_manager.compute()
-        if curriculum.current_stage != 5:
+        if curriculum.current_stage != 6:
             raise AssertionError(
                 "Resume curriculum materialized stage "
-                f"{curriculum.current_stage}, expected 5"
+                f"{curriculum.current_stage}, expected 6"
             )
         twist_cfg = env.command_manager.get_term_cfg("twist")
         if twist_cfg.ranges.lin_vel_x != (-0.5, 0.7):
@@ -432,8 +442,23 @@ def main() -> None:
             0.02,
         ):
             raise AssertionError("Final both-foot floor-band support drifted")
+        hand_reward = env.reward_manager.get_term_cfg("hand_target_tracking")
+        if hand_reward.weight != 2.0 or hand_reward.params["std"] != 0.05:
+            raise AssertionError("Final hand tracking stage was not materialized")
+        foot_reward = env.reward_manager.get_term_cfg("foot_target_tracking")
+        if foot_reward.weight != 3.0 or foot_reward.params["std"] != 0.03:
+            raise AssertionError("Final foot tracking stage was not materialized")
+        if env.command_manager.get_term_cfg("hand_target").rel_active != 0.7:
+            raise AssertionError("Final hand activation was not materialized")
+        if (
+            env.command_manager.get_term_cfg("foot_target").rel_single_support_envs
+            != 0.3
+        ):
+            raise AssertionError("Final foot activation was not materialized")
+        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.1:
+            raise AssertionError("Final both-foot activation was not materialized")
         env.curriculum_manager.compute()
-        if curriculum.current_stage != 5:
+        if curriculum.current_stage != 6:
             raise AssertionError("Final curriculum stages were applied more than once")
 
         report = {

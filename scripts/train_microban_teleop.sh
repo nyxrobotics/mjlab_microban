@@ -106,6 +106,18 @@ for option in "$@"; do
     esac
 done
 
+if [[ "${mode}" == "resume" ]]; then
+    for option in "$@"; do
+        case "${option}" in
+            --agent.bootstrap-velocity-checkpoint|--agent.bootstrap-velocity-checkpoint=*|\
+            --agent.bootstrap-velocity-checkpoint-sha256|--agent.bootstrap-velocity-checkpoint-sha256=*)
+                echo "Velocity actor bootstrap is fresh-run-only and cannot be used with resume." >&2
+                exit 2
+                ;;
+        esac
+    done
+fi
+
 iterations_to_run="${TARGET_ITERS}"
 resume_args=()
 if [[ "${mode}" == "resume" ]]; then

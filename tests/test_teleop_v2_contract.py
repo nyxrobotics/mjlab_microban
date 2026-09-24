@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Focused tests for the Microban teleop-v2 training/deployment contract."""
+"""Focused tests for the Microban teleop-v3 training/deployment contract."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import torch
 from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
+from mjlab_microban.tasks.mdp import no_stepping_penalty
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
@@ -33,7 +34,10 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
     MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
+    MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
     MICROBAN_TELEOP_HAND_TRACKING_STD_M,
+    MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
     MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
@@ -44,8 +48,11 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     PerJointGaussianDistribution,
     ResetFixedFootTargetCommand,
     effective_action_after_target_clip,
+    linear_velocity_tracking_error_l1,
     normalized_target_clip_excess_huber,
+    normalized_target_near_limit_huber,
     raw_action_l2,
+    yaw_velocity_tracking_error_l1,
 )
 
 
@@ -111,6 +118,75 @@ class EffectiveActionTest(unittest.TestCase):
         )
         torch.testing.assert_close(
             normalized_target_clip_excess_huber(env), torch.zeros(1)
+        )
+
+    def test_near_limit_penalty_is_asymmetric_and_default_is_always_free(self) -> None:
+        raw = torch.tensor([[0.03, -0.15, 0.15], [0.0, 0.0, 0.0]])
+        offset = torch.tensor([[0.95, 0.0, 0.0], [0.95, 0.0, 0.0]])
+        env = _action_env(
+            raw,
+            offset=offset,
+            lower=-torch.ones_like(raw),
+            upper=torch.ones_like(raw),
+        )
+        penalty = normalized_target_near_limit_huber(env, margin_ratio=0.1, beta=0.1)
+        # Joint 0's default is inside the nominal upper margin. It must remain a
+        # valid zero-cost target, while excursions beyond that default are costly.
+        self.assertEqual(penalty[1].item(), 0.0)
+        self.assertGreater(penalty[0].item(), 0.0)
+
+
+class AcceptanceAlignedRewardTest(unittest.TestCase):
+    def test_velocity_l1_terms_match_body_frame_acceptance_errors(self) -> None:
+        entity = SimpleNamespace(
+            data=SimpleNamespace(
+                root_link_lin_vel_b=torch.tensor([[0.1, -0.2, 9.0], [-0.4, 0.3, -9.0]]),
+                root_link_ang_vel_b=torch.tensor([[8.0, 7.0, -0.25], [6.0, 5.0, 0.75]]),
+            )
+        )
+        command = torch.tensor([[0.4, 0.2, 0.75], [-0.4, -0.1, -0.25]])
+        env = SimpleNamespace(
+            scene={"robot": entity},
+            command_manager=SimpleNamespace(get_command=lambda name: command),
+        )
+        torch.testing.assert_close(
+            linear_velocity_tracking_error_l1(env),
+            torch.tensor([0.7, 0.4]),
+        )
+        torch.testing.assert_close(
+            yaw_velocity_tracking_error_l1(env),
+            torch.tensor([1.0, 1.0]),
+        )
+
+    def test_no_stepping_exempts_only_active_foot_target_rows(self) -> None:
+        command = torch.zeros((4, 3))
+        foot_target = SimpleNamespace(
+            is_single_support_env=torch.tensor([False, True, False, False]),
+            is_both_feet_env=torch.tensor([False, False, True, False]),
+        )
+        command_manager = SimpleNamespace(
+            get_command=lambda name: command,
+            get_term=lambda name: foot_target,
+        )
+        sensor = SimpleNamespace(
+            data=SimpleNamespace(
+                found=torch.tensor(
+                    [[False, True], [False, True], [False, False], [True, True]]
+                )
+            )
+        )
+        env = SimpleNamespace(
+            num_envs=4,
+            command_manager=command_manager,
+            scene=SimpleNamespace(sensors={"feet": sensor}),
+        )
+        torch.testing.assert_close(
+            no_stepping_penalty(
+                env,
+                sensor_name="feet",
+                foot_target_command_name="foot_target",
+            ),
+            torch.tensor([1.0, 0.0, 0.0, 0.0]),
         )
 
 
@@ -185,9 +261,19 @@ class TeleopConfigurationTest(unittest.TestCase):
             cfg.observations["critic"].terms["actions"].func,
             effective_action_after_target_clip,
         )
-        self.assertEqual(cfg.rewards["target_clip_excess"].weight, -0.5)
-        self.assertEqual(cfg.rewards["raw_action_l2"].weight, -0.002)
+        self.assertEqual(cfg.rewards["target_clip_excess"].weight, -10.0)
+        self.assertEqual(cfg.rewards["target_near_limit"].weight, -5.0)
+        self.assertEqual(cfg.rewards["raw_action_l2"].weight, -0.01)
         self.assertEqual(cfg.rewards["action_rate_l2"].weight, -0.02)
+        self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -2.0)
+        self.assertEqual(cfg.rewards["yaw_velocity_error_l1"].weight, -0.5)
+        self.assertEqual(cfg.rewards["dof_pos_limits"].weight, -10.0)
+        self.assertEqual(cfg.rewards["feet_distance"].weight, -100.0)
+        self.assertEqual(cfg.rewards["feet_distance"].params["min_dist"], 0.07)
+        self.assertEqual(
+            cfg.rewards["no_stepping"].params["foot_target_command_name"],
+            "foot_target",
+        )
         self.assertEqual(
             cfg.rewards["track_linear_velocity"].params["std"],
             MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
@@ -201,6 +287,9 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_HAND_TRACKING_STD_M,
         )
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.0)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-4)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "fixed")
         self.assertIs(
             MicrobanTeleopRlCfg.actor.distribution_cfg["class_name"],
             PerJointGaussianDistribution,
@@ -214,8 +303,31 @@ class TeleopConfigurationTest(unittest.TestCase):
         cfg = make_microban_teleop_env_cfg()
         stages = cfg.curriculum["staged_curriculum"].params["stages"]
         self.assertEqual(
+            cfg.commands["twist"].ranges.lin_vel_x,
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["lin_vel_x"],
+        )
+        self.assertEqual(
+            cfg.commands["twist"].ranges.lin_vel_y,
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["lin_vel_y"],
+        )
+        self.assertEqual(
+            cfg.commands["twist"].ranges.ang_vel_z,
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["ang_vel_z"],
+        )
+        self.assertEqual(
+            cfg.commands["twist"].rotation_env_ang_vel_range,
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"],
+        )
+        self.assertEqual(
             [stage["step"] for stage in stages],
-            [1000 * 24, 2000 * 24, 3000 * 24, 4500 * 24, 6000 * 24],
+            [
+                1000 * 24,
+                2500 * 24,
+                4500 * 24,
+                6500 * 24,
+                7500 * 24,
+                9500 * 24,
+            ],
         )
         self.assertEqual(cfg.commands["foot_target"].rel_both_feet_envs, 0.0)
         self.assertEqual(
@@ -242,7 +354,7 @@ class TeleopConfigurationTest(unittest.TestCase):
         foot = SimpleNamespace(cfg=cfg.commands["foot_target"])
         hand = SimpleNamespace(cfg=cfg.commands["hand_target"])
         reward_cfgs = {
-            name: SimpleNamespace(weight=term.weight)
+            name: SimpleNamespace(weight=term.weight, params=dict(term.params))
             for name, term in cfg.rewards.items()
         }
         command_manager = SimpleNamespace(
@@ -261,7 +373,8 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
-            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.016),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
         )
         for stage, expected_both_lift_range in zip(
@@ -297,6 +410,16 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(
             foot.cfg.both_feet_lift_height_range,
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
+        )
+        self.assertEqual(reward_cfgs["hand_target_tracking"].weight, 2.0)
+        self.assertEqual(
+            reward_cfgs["hand_target_tracking"].params["std"],
+            MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
+        )
+        self.assertEqual(reward_cfgs["foot_target_tracking"].weight, 3.0)
+        self.assertEqual(
+            reward_cfgs["foot_target_tracking"].params["std"],
+            MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
         )
 
     def test_both_foot_targets_force_only_their_rows_stationary(self) -> None:
@@ -432,10 +555,10 @@ class CheckpointContractTest(unittest.TestCase):
         torch.save({"iter": iteration, "infos": infos}, path)
         return path
 
-    def test_v2_marker_is_required_and_iteration_must_match_filename(self) -> None:
+    def test_v3_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "2")
+        self.assertEqual(parsed.version, "3")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
@@ -455,16 +578,39 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must match"):
             validate_teleop_checkpoint_contract(mismatched)
 
-    def test_save_adds_v2_marker_and_legacy_runner_cannot_write(self) -> None:
+        # A well-formed v2 checkpoint is still a non-resumable training contract,
+        # even though tensor shapes and previous-action semantics happen to match.
+        v2 = self._save(16, contract=True)
+        payload = torch.load(v2, map_location="cpu", weights_only=False)
+        payload["infos"]["microban_teleop_training_contract_version"] = "2"
+        torch.save(payload, v2)
+        with self.assertRaisesRegex(ValueError, "v1/v2"):
+            validate_teleop_checkpoint_contract(v2)
+
+    def test_save_adds_v3_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
+        fresh.velocity_actor_bootstrap_info = {
+            "mapping_version": "xc330_velocity_63_to_teleop_83_v1",
+            "source_checkpoint_sha256": "a" * 64,
+        }
         with patch.object(MjlabOnPolicyRunner, "save") as base_save:
-            fresh.save(str(self.root / "model_0.pt"), {"source": "test"})
+            fresh.save(
+                str(self.root / "model_0.pt"),
+                {
+                    "source": "test",
+                    "velocity_actor_bootstrap": {"forged": True},
+                },
+            )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "2")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "3")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+        )
+        self.assertEqual(
+            saved_infos["velocity_actor_bootstrap"],
+            fresh.velocity_actor_bootstrap_info,
         )
 
         legacy = object.__new__(MicrobanTeleopOnPolicyRunner)

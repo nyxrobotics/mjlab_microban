@@ -23,6 +23,7 @@ import math
 import re
 import subprocess
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -86,7 +87,7 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "2"
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "3"
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
@@ -254,12 +255,12 @@ def validate_teleop_checkpoint_contract(
 ) -> TeleopCheckpointContract:
     """Reject checkpoints trained with a different observation/action contract.
 
-    A v1 checkpoint has the same tensor widths as v2, so PyTorch can load it
-    without an error and an exporter could otherwise attach current v2 metadata
-    to incompatible weights.  Validation happens before any actor state is
-    loaded.  The only legacy escape hatch is explicitly marked diagnostic use;
-    callers must separately prevent it from producing a passing/deployable
-    report, and the runner forbids it when iteration/optimizer state is resumed.
+    Older checkpoints can have the same tensor widths as v3, so PyTorch can load
+    them without an error and an exporter could otherwise attach current v3
+    metadata to incompatible training semantics. Validation happens before any
+    actor state is loaded. The only legacy escape hatch is explicitly marked
+    diagnostic use for an unversioned v1 checkpoint; v2 must never resume into
+    v3, and the runner forbids optimizer/iteration resume in diagnostic mode.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
@@ -312,11 +313,11 @@ def validate_teleop_checkpoint_contract(
         )
     if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
         raise ValueError(
-            "Checkpoint is not Microban teleop training contract v2; legacy v1 "
+            "Checkpoint is not Microban teleop training contract v3; v1/v2 "
             "checkpoints require a clean retrain and cannot be resumed/exported"
         )
     if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
-        raise ValueError("Checkpoint previous-action semantics do not match v2")
+        raise ValueError("Checkpoint previous-action semantics do not match v3")
     return TeleopCheckpointContract(
         version=version,
         previous_action_semantics=semantics,
@@ -821,13 +822,94 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
     env: RslRlVecEnvWrapper
     loaded_checkpoint_contract: TeleopCheckpointContract | None = None
 
+    def __init__(
+        self,
+        env,
+        train_cfg: dict,
+        log_dir: str | None = None,
+        device: str = "cpu",
+    ) -> None:
+        """Construct a fresh v3 runner and optionally bootstrap its actor only.
+
+        Bootstrap options are removed before RSL-RL sees the config.  Requiring
+        both an explicit path and SHA-256 prevents a similarly named or replaced
+        velocity checkpoint from silently becoming the initialization source.
+        """
+
+        runner_cfg = deepcopy(train_cfg)
+        bootstrap_path = runner_cfg.pop("bootstrap_velocity_checkpoint", None)
+        bootstrap_sha256 = runner_cfg.pop("bootstrap_velocity_checkpoint_sha256", None)
+        if (bootstrap_path is None) != (bootstrap_sha256 is None):
+            raise ValueError(
+                "Velocity actor bootstrap requires both checkpoint path and SHA-256"
+            )
+        if bootstrap_path is not None and bool(runner_cfg.get("resume", False)):
+            raise ValueError(
+                "Velocity actor bootstrap is only valid for a fresh run and cannot "
+                "be combined with teleop checkpoint resume"
+            )
+
+        super().__init__(env, runner_cfg, log_dir=log_dir, device=device)
+        self.loaded_checkpoint_contract = None
+        self.bootstrap_velocity_provenance = None
+        self.velocity_actor_bootstrap_info = None
+        if bootstrap_path is None:
+            return
+
+        expected_joint_names = (
+            *MICROBAN_HMD_JOINT_NAMES,
+            *MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+        )
+        joint_names = tuple(self.env.unwrapped.scene["robot"].joint_names)
+        if joint_names != expected_joint_names:
+            raise ValueError(
+                "Velocity bootstrap requires teleop natural joint order "
+                f"{expected_joint_names}, got {joint_names}"
+            )
+
+        from mjlab_microban.tasks.microban_teleop_bootstrap import (
+            VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+            load_velocity_actor_bootstrap,
+        )
+
+        self.bootstrap_velocity_provenance = load_velocity_actor_bootstrap(
+            self.alg.get_policy(),
+            bootstrap_path,
+            bootstrap_sha256,
+        )
+        self.velocity_actor_bootstrap_info = {
+            "mapping_version": VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+            "source_checkpoint_path": str(
+                self.bootstrap_velocity_provenance.checkpoint_path
+            ),
+            "source_checkpoint_sha256": (
+                self.bootstrap_velocity_provenance.checkpoint_sha256
+            ),
+            "source_normalizer_count": (
+                self.bootstrap_velocity_provenance.source_normalizer_count
+            ),
+            "installed_normalizer_count": (
+                self.bootstrap_velocity_provenance.installed_normalizer_count
+            ),
+            "copied_state": "actor_normalizer_and_mlp_only",
+            "distribution_copied": False,
+            "critic_copied": False,
+            "optimizer_copied": False,
+        }
+        print(
+            "Initialized teleop actor shared inputs from pinned velocity checkpoint "
+            f"{self.bootstrap_velocity_provenance.checkpoint_path} "
+            f"(sha256={self.bootstrap_velocity_provenance.checkpoint_sha256}, "
+            "critic/distribution/optimizer not copied)"
+        )
+
     def _require_nonlegacy_deployment_contract(self) -> None:
         """Prevent diagnostic v1 weights from ever being saved or exported.
 
         ``allow_legacy_teleop_contract`` exists solely so the deterministic
         evaluator can characterize the final v1 run.  Once those weights are
         resident in a runner, every path that could create a checkpoint or ONNX
-        must fail before writing anything; otherwise current v2 metadata could
+        must fail before writing anything; otherwise current v3 metadata could
         be attached to an observation-incompatible actor.
         """
 
@@ -835,7 +917,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if contract is not None and contract.diagnostic_legacy:
             raise ValueError(
                 "Legacy teleop checkpoints are diagnostics-only and cannot be "
-                "saved, exported, or tagged with v2 metadata"
+                "saved, exported, or tagged with v3 metadata"
             )
 
     def load(
@@ -846,7 +928,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         map_location: str | None = None,
         allow_legacy_teleop_contract: bool = False,
     ) -> dict:
-        """Validate v2 semantics, then load at the next PPO iteration.
+        """Validate v3 semantics, then load at the next PPO iteration.
 
         RSL-RL stores the zero-based iteration that has just completed.  Its
         default loader resumes *at* that index, repeating one PPO update.  This
@@ -857,6 +939,11 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         actor-only diagnostics and can never resume training.
         """
 
+        if getattr(self, "bootstrap_velocity_provenance", None) is not None:
+            raise ValueError(
+                "A velocity-bootstrapped fresh runner cannot also load a teleop "
+                "checkpoint; construct a non-bootstrap runner to resume v3"
+            )
         loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
         contract = validate_teleop_checkpoint_contract(
             path,
@@ -884,6 +971,12 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             strict=strict,
             map_location=map_location,
         )
+        saved_bootstrap_info = infos.get("velocity_actor_bootstrap")
+        if saved_bootstrap_info is not None and not isinstance(
+            saved_bootstrap_info, dict
+        ):
+            raise TypeError("Checkpoint velocity_actor_bootstrap must be a dictionary")
+        self.velocity_actor_bootstrap_info = deepcopy(saved_bootstrap_info)
         if not loads_iteration:
             return infos
 
@@ -913,6 +1006,10 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             ),
             "previous_action_semantics": (MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS),
         }
+        contract_infos.pop("velocity_actor_bootstrap", None)
+        bootstrap_info = getattr(self, "velocity_actor_bootstrap_info", None)
+        if bootstrap_info is not None:
+            contract_infos["velocity_actor_bootstrap"] = deepcopy(bootstrap_info)
         super().save(path, contract_infos)
         policy_dir, _filename, onnx_path = self._get_export_paths(path)
         temporary_path = unique_teleop_onnx_temporary_path(onnx_path)
@@ -953,7 +1050,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         filename: str = "policy.onnx",
         verbose: bool = False,
     ) -> None:
-        """Export only fresh/resumed v2 weights, never legacy diagnostic weights."""
+        """Export only fresh/resumed v3 weights, never legacy diagnostic weights."""
 
         self._require_nonlegacy_deployment_contract()
         super().export_policy_to_onnx(path, filename, verbose)

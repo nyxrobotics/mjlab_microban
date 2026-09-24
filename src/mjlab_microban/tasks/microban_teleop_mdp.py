@@ -63,6 +63,8 @@ MICROBAN_HMD_RETARGET_INTERVAL_S = (0.35, 1.50)
 # above the floor band remains inside learned support.
 MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M = 0.0025
 
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
 
 class PerJointGaussianDistribution(GaussianDistribution):
     """RSL-RL Gaussian initialized with one exact standard deviation per joint.
@@ -188,6 +190,52 @@ def normalized_target_clip_excess_huber(
     ).mean(dim=-1)
 
 
+def normalized_target_near_limit_huber(
+    env: ManagerBasedRlEnv,
+    action_name: str = "joint_pos",
+    margin_ratio: float = 0.05,
+    beta: float = 0.1,
+) -> torch.Tensor:
+    """Keep action targets inside an asymmetric, default-safe limit margin.
+
+    A symmetric inward margin is unsafe for Microban's shoulder-roll joints:
+    their default pose is only one degree inside the articulation soft limit.
+    The lower/upper preferred bounds therefore move inward by ``margin_ratio``
+    only as far as the configured default action offset.  Raw action zero is
+    always penalty-free, while targets closer to a limit than that preferred
+    interval receive a normalized smooth-L1 cost.
+    """
+
+    if not math.isfinite(margin_ratio) or not 0.0 < margin_ratio < 0.5:
+        raise ValueError("margin_ratio must be finite and in (0, 0.5)")
+    if not math.isfinite(beta) or beta <= 0.0:
+        raise ValueError("beta must be finite and positive")
+
+    _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
+    action = env.action_manager.get_term(action_name)
+    assert isinstance(action, JointPositionAction)
+    default_target = torch.as_tensor(
+        action.offset, dtype=target.dtype, device=target.device
+    )
+    default_target = torch.broadcast_to(default_target, target.shape)
+    if not bool(
+        torch.all((default_target >= lower) & (default_target <= upper)).item()
+    ):
+        raise ValueError("joint-position default target must be inside action clips")
+
+    span = upper - lower
+    preferred_lower = torch.minimum(default_target, lower + margin_ratio * span)
+    preferred_upper = torch.maximum(default_target, upper - margin_ratio * span)
+    preferred_target = torch.clamp(target, min=preferred_lower, max=preferred_upper)
+    normalized_excess = (target - preferred_target) / (0.5 * span)
+    return torch.nn.functional.smooth_l1_loss(
+        normalized_excess,
+        torch.zeros_like(normalized_excess),
+        beta=beta,
+        reduction="none",
+    ).mean(dim=-1)
+
+
 def raw_action_l2(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
@@ -196,6 +244,30 @@ def raw_action_l2(
 
     raw, _, _, _, _ = _joint_position_action_tensors(env, action_name)
     return torch.square(raw).mean(dim=-1)
+
+
+def linear_velocity_tracking_error_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return body-frame planar velocity error with a non-vanishing gradient."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return torch.abs(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]).sum(dim=-1)
+
+
+def yaw_velocity_tracking_error_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Return absolute body-frame yaw-rate error."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return torch.abs(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
 
 
 class ResumeSafeStepBasedStagedCurriculum:

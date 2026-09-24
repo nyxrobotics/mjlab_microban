@@ -66,7 +66,7 @@ def _valid_command() -> dict[str, object]:
 
 
 class SimulationCommandTests(unittest.TestCase):
-    def test_floor_band_matches_clean_v2_training_contract(self) -> None:
+    def test_floor_band_matches_current_training_contract(self) -> None:
         self.assertEqual(FOOT_INACTIVE_Z_MAX_M, 0.0025)
         self.assertEqual(
             FOOT_INACTIVE_Z_MAX_M,

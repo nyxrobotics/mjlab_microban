@@ -758,15 +758,42 @@ def no_stepping_penalty(
     sensor_name: str,
     command_name: str = "twist",
     command_threshold: float = 0.01,
+    foot_target_command_name: str | None = None,
 ) -> torch.Tensor:
-    """
-    Penalizes feet in the air when the commanded speed is below threshold.
+    """Penalize feet in the air when the commanded speed is below threshold.
+
     Discourages marching in place when the robot should stand still.
+    When ``foot_target_command_name`` is provided, rows with an explicitly
+    active single- or two-foot target are exempt: lifting a commanded foot must
+    not simultaneously incur the stationary no-stepping cost.
+
     Returns the count of airborne feet per environment (use with a negative weight).
     """
     command = env.command_manager.get_command(command_name)  # (N, 3)
     cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
     below_threshold = cmd_speed < command_threshold
+    if foot_target_command_name is not None:
+        foot_target = env.command_manager.get_term(foot_target_command_name)
+        single_support = getattr(foot_target, "is_single_support_env", None)
+        if not isinstance(single_support, torch.Tensor) or single_support.shape != (
+            env.num_envs,
+        ):
+            raise ValueError(
+                "foot target command must expose is_single_support_env with "
+                "shape (num_envs,)"
+            )
+        active_foot_target = single_support.bool()
+        both_feet = getattr(foot_target, "is_both_feet_env", None)
+        if both_feet is not None:
+            if not isinstance(both_feet, torch.Tensor) or both_feet.shape != (
+                env.num_envs,
+            ):
+                raise ValueError(
+                    "foot target command is_both_feet_env must have shape "
+                    "(num_envs,)"
+                )
+            active_foot_target = active_foot_target | both_feet.bool()
+        below_threshold &= ~active_foot_target
 
     sensor = env.scene.sensors[sensor_name]
     found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)

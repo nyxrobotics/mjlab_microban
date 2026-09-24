@@ -1,0 +1,226 @@
+# Copyright 2026 Marc Duclusaud
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+"""Actor-only XC330 velocity-to-teleop bootstrap contract tests."""
+
+from __future__ import annotations
+
+import hashlib
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+from mjlab.rl.runner import MjlabOnPolicyRunner
+
+from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
+from mjlab_microban.tasks.microban_teleop_bootstrap import (
+    TELEOP_ACTOR_OBSERVATION_WIDTH,
+    VELOCITY_ACTOR_OBSERVATION_WIDTH,
+    VELOCITY_TO_TELEOP_OBSERVATION_INDEX,
+    bootstrap_teleop_actor_state,
+    expand_velocity_observation_to_teleop,
+    load_velocity_actor_bootstrap,
+)
+
+
+def _synthetic_states() -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    generator = torch.Generator().manual_seed(20260924)
+
+    def randn(*shape: int) -> torch.Tensor:
+        return torch.randn(shape, generator=generator)
+
+    source = {
+        "obs_normalizer._mean": randn(1, VELOCITY_ACTOR_OBSERVATION_WIDTH),
+        "obs_normalizer._var": torch.rand(
+            (1, VELOCITY_ACTOR_OBSERVATION_WIDTH), generator=generator
+        )
+        + 0.5,
+        "obs_normalizer._std": torch.rand(
+            (1, VELOCITY_ACTOR_OBSERVATION_WIDTH), generator=generator
+        )
+        + 0.5,
+        "obs_normalizer.count": torch.tensor(1_474_560_000.0),
+        "distribution.std_param": torch.full((18,), 9.0),
+        "mlp.0.weight": randn(7, VELOCITY_ACTOR_OBSERVATION_WIDTH),
+        "mlp.0.bias": randn(7),
+        "mlp.2.weight": randn(5, 7),
+        "mlp.2.bias": randn(5),
+        "mlp.4.weight": randn(3, 5),
+        "mlp.4.bias": randn(3),
+        "mlp.6.weight": randn(18, 3),
+        "mlp.6.bias": randn(18),
+    }
+    target = {
+        "obs_normalizer._mean": randn(1, TELEOP_ACTOR_OBSERVATION_WIDTH),
+        "obs_normalizer._var": torch.rand(
+            (1, TELEOP_ACTOR_OBSERVATION_WIDTH), generator=generator
+        )
+        + 0.5,
+        "obs_normalizer._std": torch.rand(
+            (1, TELEOP_ACTOR_OBSERVATION_WIDTH), generator=generator
+        )
+        + 0.5,
+        "obs_normalizer.count": torch.tensor(12.0),
+        "distribution.log_std_param": torch.full((18,), -3.0),
+        "mlp.0.weight": randn(7, TELEOP_ACTOR_OBSERVATION_WIDTH),
+        "mlp.0.bias": randn(7),
+        "mlp.2.weight": randn(5, 7),
+        "mlp.2.bias": randn(5),
+        "mlp.4.weight": randn(3, 5),
+        "mlp.4.bias": randn(3),
+        "mlp.6.weight": randn(18, 3),
+        "mlp.6.bias": randn(18),
+    }
+    return source, target
+
+
+def _actor_mean(
+    state: dict[str, torch.Tensor], observation: torch.Tensor
+) -> torch.Tensor:
+    value = (observation - state["obs_normalizer._mean"]) / state["obs_normalizer._std"]
+    for layer in (0, 2, 4):
+        value = torch.nn.functional.elu(
+            torch.nn.functional.linear(
+                value, state[f"mlp.{layer}.weight"], state[f"mlp.{layer}.bias"]
+            )
+        )
+    return torch.nn.functional.linear(value, state["mlp.6.weight"], state["mlp.6.bias"])
+
+
+class VelocityBootstrapMappingTest(unittest.TestCase):
+    def test_neutral_output_parity_and_new_columns_are_zero(self) -> None:
+        source, target = _synthetic_states()
+        mapped = bootstrap_teleop_actor_state(target, source)
+
+        neutral_velocity = torch.zeros((1, VELOCITY_ACTOR_OBSERVATION_WIDTH))
+        neutral_velocity[:, 5] = -1.0
+        neutral_teleop = expand_velocity_observation_to_teleop(neutral_velocity)
+        torch.testing.assert_close(
+            _actor_mean(source, neutral_velocity),
+            _actor_mean(mapped, neutral_teleop),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+        mapped_columns = {
+            target_index
+            for _source_index, target_index in VELOCITY_TO_TELEOP_OBSERVATION_INDEX
+        }
+        new_columns = sorted(
+            set(range(TELEOP_ACTOR_OBSERVATION_WIDTH)) - mapped_columns
+        )
+        torch.testing.assert_close(
+            mapped["mlp.0.weight"][:, new_columns],
+            torch.zeros_like(mapped["mlp.0.weight"][:, new_columns]),
+        )
+        torch.testing.assert_close(
+            mapped["obs_normalizer._mean"][:, new_columns],
+            torch.zeros_like(mapped["obs_normalizer._mean"][:, new_columns]),
+        )
+        for key in ("obs_normalizer._var", "obs_normalizer._std"):
+            torch.testing.assert_close(
+                mapped[key][:, new_columns],
+                torch.ones_like(mapped[key][:, new_columns]),
+            )
+
+    def test_only_actor_mlp_and_normalizer_are_copied(self) -> None:
+        source, target = _synthetic_states()
+        target_distribution = target["distribution.log_std_param"].clone()
+        mapped = bootstrap_teleop_actor_state(target, source)
+
+        torch.testing.assert_close(
+            mapped["distribution.log_std_param"], target_distribution
+        )
+        self.assertNotIn("distribution.std_param", mapped)
+        self.assertEqual(mapped["obs_normalizer.count"].item(), 1_000_000.0)
+        for key in (
+            "mlp.0.bias",
+            "mlp.2.weight",
+            "mlp.2.bias",
+            "mlp.4.weight",
+            "mlp.4.bias",
+            "mlp.6.weight",
+            "mlp.6.bias",
+        ):
+            torch.testing.assert_close(mapped[key], source[key])
+
+    def test_loader_requires_exact_sha_before_installing_actor(self) -> None:
+        source, target = _synthetic_states()
+
+        class TargetActor:
+            def __init__(self) -> None:
+                self.state = target
+                self.loaded: dict[str, torch.Tensor] | None = None
+
+            def state_dict(self) -> dict[str, torch.Tensor]:
+                return self.state
+
+            def load_state_dict(
+                self, state: dict[str, torch.Tensor], strict: bool
+            ) -> None:
+                self.loaded = state
+                if not strict:
+                    raise AssertionError("bootstrap must load strictly")
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "model_14999.pt"
+            torch.save(
+                {
+                    "actor_state_dict": source,
+                    "critic_state_dict": {"must_not_copy": torch.tensor(99.0)},
+                    "optimizer_state_dict": {"must_not_copy": 99},
+                    "iter": 14999,
+                },
+                checkpoint,
+            )
+            digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+            actor = TargetActor()
+            with self.assertRaisesRegex(ValueError, "mismatch"):
+                load_velocity_actor_bootstrap(actor, checkpoint, "0" * 64)  # type: ignore[arg-type]
+            self.assertIsNone(actor.loaded)
+
+            provenance = load_velocity_actor_bootstrap(  # type: ignore[arg-type]
+                actor, checkpoint, digest
+            )
+            self.assertEqual(provenance.checkpoint_sha256, digest)
+            self.assertIsNotNone(actor.loaded)
+            self.assertNotIn("must_not_copy", actor.loaded or {})
+
+
+class VelocityBootstrapRunnerGuardTest(unittest.TestCase):
+    def test_both_path_and_digest_are_required(self) -> None:
+        with (
+            patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
+            self.assertRaisesRegex(ValueError, "requires both"),
+        ):
+            MicrobanTeleopOnPolicyRunner(
+                None,
+                {"bootstrap_velocity_checkpoint": "/tmp/model.pt"},
+            )
+        base_init.assert_not_called()
+
+    def test_bootstrap_cannot_be_combined_with_resume(self) -> None:
+        with (
+            patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
+            self.assertRaisesRegex(ValueError, "fresh run"),
+        ):
+            MicrobanTeleopOnPolicyRunner(
+                None,
+                {
+                    "resume": True,
+                    "bootstrap_velocity_checkpoint": "/tmp/model.pt",
+                    "bootstrap_velocity_checkpoint_sha256": "0" * 64,
+                },
+            )
+        base_init.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

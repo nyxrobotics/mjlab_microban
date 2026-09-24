@@ -1105,10 +1105,10 @@ def build_report(
         limitations.append(
             "This is an explicitly requested legacy-v1 diagnostic using raw "
             "previous-action feedback and the v1 scalar Gaussian actor. It can "
-            "never pass the v2 deployment gate or be exported as v2."
+            "never pass the v3 deployment gate or be exported as v3."
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": status,
         "task": TASK,
         "checkpoint": str(checkpoint),
@@ -1121,7 +1121,7 @@ def build_report(
                 checkpoint_contract.previous_action_semantics
             ),
             "diagnostic_legacy": checkpoint_contract.diagnostic_legacy,
-            "v2_deployment_compatible": not checkpoint_contract.diagnostic_legacy,
+            "v3_deployment_compatible": not checkpoint_contract.diagnostic_legacy,
         },
         "device": device,
         "seed": seed,

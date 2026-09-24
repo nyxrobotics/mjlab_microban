@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from xml.etree import ElementTree
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -59,8 +59,11 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResetFixedHandTargetCommandCfg,
     ResumeSafeStepBasedStagedCurriculum,
     effective_action_after_target_clip,
+    linear_velocity_tracking_error_l1,
     normalized_target_clip_excess_huber,
+    normalized_target_near_limit_huber,
     raw_action_l2,
+    yaw_velocity_tracking_error_l1,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     make_microban_velocity_env_cfg,
@@ -101,6 +104,20 @@ def _microban_soft_joint_position_clip() -> dict[str, tuple[float, float]]:
 MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
+MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
+MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE = {
+    "lin_vel_x": (-0.2, 0.3),
+    "lin_vel_y": (-0.1, 0.1),
+    "ang_vel_z": (-0.4, 0.4),
+    "rotation_ang_vel_z": (-0.8, 0.8),
+}
+MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE = {
+    "lin_vel_x": (-0.4, 0.5),
+    "lin_vel_y": (-0.2, 0.2),
+    "ang_vel_z": (-0.8, 0.8),
+    "rotation_ang_vel_z": (-1.5, 1.5),
+}
 MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE = {
     "lin_vel_x": (-0.5, 0.7),
     "lin_vel_y": (-0.3, 0.3),
@@ -172,6 +189,21 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # proper dataclass before this config crosses the registry/Tyro CLI boundary.
     # In particular, do not carry over the dynamically assigned ``build`` lambda.
     cfg.commands["twist"] = _materialize_rotation_command_cfg(cfg.commands["twist"])
+    if not play:
+        initial_twist = cfg.commands["twist"]
+        initial_twist.ranges.lin_vel_x = MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE[
+            "lin_vel_x"
+        ]
+        initial_twist.ranges.lin_vel_y = MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE[
+            "lin_vel_y"
+        ]
+        initial_twist.ranges.ang_vel_z = MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE[
+            "ang_vel_z"
+        ]
+        initial_twist.rotation_env_ang_vel_range = (
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
+        )
+        initial_twist.rel_rotation_envs = 0.1
 
     # The current control runtime's NEUTRAL_POSE constant uses +10 degrees for
     # both shoulder-pitch joints.  This is a provisional software-contract match,
@@ -274,7 +306,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # independent of walking and their two active flags mask inactive hands.
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
-        weight=0.1,
+        weight=0.0,
         params={
             "command_name": "foot_target",
             "std": 0.05,
@@ -284,7 +316,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.rewards["hand_target_tracking"] = RewardTermCfg(
         func=hand_target_tracking_error_exp,
-        weight=0.1,
+        weight=0.0,
         params={
             "command_name": "hand_target",
             "std": MICROBAN_TELEOP_HAND_TRACKING_STD_M,
@@ -292,12 +324,21 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.rewards["target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_huber,
-        weight=-0.5,
+        weight=-10.0,
         params={"action_name": "joint_pos", "beta": 0.1},
+    )
+    cfg.rewards["target_near_limit"] = RewardTermCfg(
+        func=normalized_target_near_limit_huber,
+        weight=-5.0,
+        params={
+            "action_name": "joint_pos",
+            "margin_ratio": 0.05,
+            "beta": 0.1,
+        },
     )
     cfg.rewards["raw_action_l2"] = RewardTermCfg(
         func=raw_action_l2,
-        weight=-0.002,
+        weight=-0.01,
         params={"action_name": "joint_pos"},
     )
     # Keep only a light smoothing prior.  At -0.1 this raw-coordinate term
@@ -312,6 +353,25 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["track_angular_velocity"].params["std"] = (
         MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
     )
+    cfg.rewards["linear_velocity_error_l1"] = RewardTermCfg(
+        func=linear_velocity_tracking_error_l1,
+        weight=-2.0,
+        params={"command_name": "twist"},
+    )
+    cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
+        func=yaw_velocity_tracking_error_l1,
+        weight=-0.5,
+        params={"command_name": "twist"},
+    )
+
+    # V2 converged to a wide static stance because the inherited term penalized
+    # the 72 mm neutral foot spacing below an 80 mm threshold with weight -1000.
+    # Keep a collision-avoidance margin, but do not make neutral stance itself a
+    # dominant violation in this task.
+    cfg.rewards["feet_distance"].weight = -100.0
+    cfg.rewards["feet_distance"].params["min_dist"] = 0.07
+    cfg.rewards["dof_pos_limits"].weight = -10.0
+    cfg.rewards["no_stepping"].params["foot_target_command_name"] = "foot_target"
 
     # Six foot XYZ offsets, and six hand XYZ offsets plus left/right active
     # flags.  All offsets are expressed in the trunk frame and measured in metres.
@@ -334,86 +394,49 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reach_z_range=(-0.08, 0.08),
     )
 
-    # Locomotion comes first, then hands and feet.  Velocity/yaw support expands
-    # in three steps instead of the v1 task's abrupt jump.  The final values are
-    # the exact asymmetric limits applied by microban/src/input/input_source.py.
+    # V3 enforces a real capability order: establish locomotion over the complete
+    # runtime envelope, add hands with a broad then precise kernel, and only then
+    # introduce the more destabilizing single-/two-foot targets.  This avoids the
+    # v2 failure mode where every objective arrived before the actor had learned
+    # to respond to twist commands and a stable stationary policy won instead.
     cfg.curriculum = {
         "staged_curriculum": CurriculumTermCfg(
             func=ResumeSafeStepBasedStagedCurriculum,
             params={
                 "stages": [
                     {
-                        "name": "ramp up hand tracking",
+                        "name": "intermediate locomotion envelope",
                         "step": 1000 * 24,
                         "apply": lambda env: (
-                            env.reward_manager.get_term_cfg(
-                                "hand_target_tracking"
-                            ).__setattr__("weight", 1.0),
-                            env.command_manager.get_term_cfg("hand_target").__setattr__(
-                                "rel_active", 0.7
-                            ),
-                        ),
-                    },
-                    {
-                        "name": "ramp up foot tracking",
-                        "step": 2000 * 24,
-                        "apply": lambda env: (
-                            env.reward_manager.get_term_cfg(
-                                "foot_target_tracking"
-                            ).__setattr__("weight", 2.0),
-                            env.command_manager.get_term_cfg("foot_target").__setattr__(
-                                "rel_single_support_envs", 0.3
-                            ),
-                            env.command_manager.get_term_cfg("foot_target").__setattr__(
-                                "rel_both_feet_envs", 0.05
-                            ),
-                        ),
-                    },
-                    {
-                        "name": "first velocity and two-foot expansion",
-                        "step": 3000 * 24,
-                        "apply": lambda env: (
                             set_command_velocity(
                                 env,
-                                lin_vel_x=(-0.5, 0.6),
-                                ang_vel_z=(-1.0, 1.0),
-                                rotation_env_ang_vel_z=(-2.0, 2.0),
+                                lin_vel_x=(
+                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
+                                        "lin_vel_x"
+                                    ]
+                                ),
+                                lin_vel_y=(
+                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
+                                        "lin_vel_y"
+                                    ]
+                                ),
+                                ang_vel_z=(
+                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
+                                        "ang_vel_z"
+                                    ]
+                                ),
+                                rotation_env_ang_vel_z=(
+                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
+                                        "rotation_ang_vel_z"
+                                    ]
+                                ),
                             ),
-                            set_stepping_parameters(
-                                env,
-                                air_time_weight=3.0,
-                                no_stepping_penalty_weight=-1.0,
-                                rel_standing_envs=0.1,
-                                rel_rotation_envs=0.15,
-                            ),
-                            env.command_manager.get_term_cfg("foot_target").__setattr__(
-                                "rel_both_feet_envs", 0.1
-                            ),
+                            set_stepping_parameters(env, rel_rotation_envs=0.15),
                         ),
                     },
                     {
-                        "name": "second velocity expansion",
-                        "step": 4500 * 24,
-                        "apply": lambda env: (
-                            set_command_velocity(
-                                env,
-                                lin_vel_x=(-0.5, 0.65),
-                                ang_vel_z=(-1.25, 1.25),
-                                rotation_env_ang_vel_z=(-2.5, 2.5),
-                            ),
-                            set_stepping_parameters(
-                                env,
-                                rel_rotation_envs=0.2,
-                            ),
-                            env.command_manager.get_term_cfg("foot_target").__setattr__(
-                                "both_feet_lift_height_range",
-                                (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.016),
-                            ),
-                        ),
-                    },
-                    {
-                        "name": "final runtime command envelope",
-                        "step": 6000 * 24,
+                        "name": "final runtime locomotion envelope",
+                        "step": 2500 * 24,
                         "apply": lambda env: (
                             set_command_velocity(
                                 env,
@@ -434,7 +457,76 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                             ),
                             set_stepping_parameters(
                                 env,
+                                air_time_weight=3.0,
+                                no_stepping_penalty_weight=-1.0,
+                                rel_standing_envs=0.1,
                                 rel_rotation_envs=0.25,
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "enable broad hand tracking",
+                        "step": 4500 * 24,
+                        "apply": lambda env: (
+                            env.reward_manager.get_term_cfg(
+                                "hand_target_tracking"
+                            ).__setattr__("weight", 1.0),
+                            env.reward_manager.get_term_cfg(
+                                "hand_target_tracking"
+                            ).params.__setitem__(
+                                "std", MICROBAN_TELEOP_HAND_TRACKING_STD_M
+                            ),
+                            env.command_manager.get_term_cfg("hand_target").__setattr__(
+                                "rel_active", 0.7
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "tighten hand tracking",
+                        "step": 6500 * 24,
+                        "apply": lambda env: (
+                            env.reward_manager.get_term_cfg(
+                                "hand_target_tracking"
+                            ).__setattr__("weight", 2.0),
+                            env.reward_manager.get_term_cfg(
+                                "hand_target_tracking"
+                            ).params.__setitem__(
+                                "std", MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "enable broad foot tracking",
+                        "step": 7500 * 24,
+                        "apply": lambda env: (
+                            env.reward_manager.get_term_cfg(
+                                "foot_target_tracking"
+                            ).__setattr__("weight", 2.0),
+                            env.reward_manager.get_term_cfg(
+                                "foot_target_tracking"
+                            ).params.__setitem__("std", 0.05),
+                            env.command_manager.get_term_cfg("foot_target").__setattr__(
+                                "rel_single_support_envs", 0.3
+                            ),
+                            env.command_manager.get_term_cfg("foot_target").__setattr__(
+                                "rel_both_feet_envs", 0.05
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "tighten foot tracking",
+                        "step": 9500 * 24,
+                        "apply": lambda env: (
+                            env.reward_manager.get_term_cfg(
+                                "foot_target_tracking"
+                            ).__setattr__("weight", 3.0),
+                            env.reward_manager.get_term_cfg(
+                                "foot_target_tracking"
+                            ).params.__setitem__(
+                                "std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
+                            ),
+                            env.command_manager.get_term_cfg("foot_target").__setattr__(
+                                "rel_both_feet_envs", 0.1
                             ),
                             env.command_manager.get_term_cfg("foot_target").__setattr__(
                                 "both_feet_lift_height_range",
@@ -458,7 +550,15 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
-MicrobanTeleopRlCfg = RslRlOnPolicyRunnerCfg(
+@dataclass
+class MicrobanTeleopRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Runner configuration with an explicit, pinned velocity bootstrap opt-in."""
+
+    bootstrap_velocity_checkpoint: str | None = None
+    bootstrap_velocity_checkpoint_sha256: str | None = None
+
+
+MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
@@ -479,10 +579,10 @@ MicrobanTeleopRlCfg = RslRlOnPolicyRunnerCfg(
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.0,
-        num_learning_epochs=5,
+        num_learning_epochs=3,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
-        schedule="adaptive",
+        learning_rate=1.0e-4,
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
