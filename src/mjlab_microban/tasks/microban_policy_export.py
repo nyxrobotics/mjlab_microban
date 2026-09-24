@@ -17,10 +17,17 @@ resolved 18-joint target order instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
+import subprocess
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
+import numpy as np
 import onnx
 import torch
 import wandb
@@ -30,6 +37,7 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.rl.runner import MjlabOnPolicyRunner
+from onnx.reference import ReferenceEvaluator
 
 # Entity.find_joints_by_actuator_names resolves in the model's natural joint
 # order.  Keep this explicit contract next to the exporter and verify it at env
@@ -79,11 +87,373 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
 
+# A fixed, deterministic input corpus makes the checkpoint -> PyTorch -> ONNX
+# comparison reproducible on every export host.  The tolerances allow ordinary
+# float32 kernel reordering but are tight enough to catch wrong weights,
+# normalization, activation functions, or observation ordering.
+TELEOP_ONNX_GATE_VERSION = "1"
+TELEOP_ONNX_PARITY_SEED = 20260924
+TELEOP_ONNX_PARITY_SAMPLE_COUNT = 16
+TELEOP_ONNX_PARITY_ATOL = 1e-5
+TELEOP_ONNX_PARITY_RTOL = 1e-4
+
+_CHECKPOINT_NAME_RE = re.compile(r"model_(\d+)\.pt")
+
 if MICROBAN_TELEOP_OBSERVATION_WIDTH != 83:
     raise RuntimeError(
         "Microban teleop observation schema must total 83 values, got "
         f"{MICROBAN_TELEOP_OBSERVATION_WIDTH}"
     )
+
+
+@dataclass(frozen=True)
+class TeleopExportProvenance:
+    """Immutable identity of the checkpoint and exporter used for an ONNX."""
+
+    checkpoint_path: Path
+    checkpoint_iteration: int
+    checkpoint_sha256: str
+    exporter_source_commit: str
+    exporter_source_dirty: str
+    exporter_source_sha256: str
+
+    def metadata(self, *, parity_verified: bool = True) -> dict[str, str]:
+        """Return unambiguous string metadata for the deployment artifact."""
+
+        metadata = {
+            "checkpoint_filename": self.checkpoint_path.name,
+            "checkpoint_iteration": str(self.checkpoint_iteration),
+            "checkpoint_iteration_semantics": (
+                "zero_based_completed_update_index_from_model_filename"
+            ),
+            "checkpoint_completed_updates": str(self.checkpoint_iteration + 1),
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "exporter_source_commit": self.exporter_source_commit,
+            "exporter_source_dirty": self.exporter_source_dirty,
+            "exporter_source_sha256": self.exporter_source_sha256,
+            "onnx_parity_gate_version": TELEOP_ONNX_GATE_VERSION,
+            "onnx_parity_runtime": "onnx.reference.ReferenceEvaluator",
+            "onnx_parity_seed": str(TELEOP_ONNX_PARITY_SEED),
+            "onnx_parity_sample_count": str(TELEOP_ONNX_PARITY_SAMPLE_COUNT),
+            "onnx_parity_atol": str(TELEOP_ONNX_PARITY_ATOL),
+            "onnx_parity_rtol": str(TELEOP_ONNX_PARITY_RTOL),
+        }
+        if parity_verified:
+            metadata["onnx_parity_verified"] = "true"
+        return metadata
+
+
+@dataclass(frozen=True)
+class TeleopOnnxParityResult:
+    """Numerical error observed across the deterministic parity corpus."""
+
+    max_absolute_error: float
+    max_relative_error: float
+    sample_count: int
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def unique_teleop_onnx_temporary_path(output_path: str | Path) -> Path:
+    """Return a collision-resistant temporary path beside an ONNX output."""
+
+    output = Path(output_path)
+    return output.with_name(f".{output.name}.{uuid4().hex}.tmp")
+
+
+def _git_source_state(source_path: Path) -> tuple[str, str]:
+    """Return ``(HEAD, dirty)`` without making Git a deployment dependency."""
+
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(source_path.parent), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        repository = Path(root_result.stdout.strip())
+        commit_result = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status_result = subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "unavailable", "unknown"
+    return commit_result.stdout.strip(), str(bool(status_result.stdout.strip())).lower()
+
+
+def collect_teleop_export_provenance(
+    checkpoint_path: str | Path,
+) -> TeleopExportProvenance:
+    """Capture checkpoint bytes, iteration, and exporter source identity.
+
+    Checkpoints must retain RSL-RL's ``model_<N>.pt`` name.  Treating an
+    arbitrary filename as an iteration would make later audit/reproduction
+    ambiguous.
+    """
+
+    checkpoint = Path(checkpoint_path).resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+    match = _CHECKPOINT_NAME_RE.fullmatch(checkpoint.name)
+    if match is None:
+        raise ValueError(
+            "Checkpoint filename must be model_<iteration>.pt for provenance, "
+            f"got {checkpoint.name!r}"
+        )
+    iteration = int(match.group(1))
+    source_path = Path(__file__).resolve()
+    source_commit, source_dirty = _git_source_state(source_path)
+    return TeleopExportProvenance(
+        checkpoint_path=checkpoint,
+        checkpoint_iteration=iteration,
+        checkpoint_sha256=_sha256_file(checkpoint),
+        exporter_source_commit=source_commit,
+        exporter_source_dirty=source_dirty,
+        exporter_source_sha256=_sha256_file(source_path),
+    )
+
+
+def _representative_observation_bounds() -> tuple[np.ndarray, np.ndarray]:
+    """Return conservative finite bounds in the exact 83-value schema order."""
+
+    lower = np.asarray(
+        [-4.0] * 3
+        + [-1.0] * 3
+        + [-math.pi] * 21
+        + [-12.0] * 21
+        + [-1.0] * 18
+        + [-1.0, -1.0, -2.0]
+        + [-0.03, -0.03, 0.0] * 2
+        + [-0.08] * 6
+        + [0.0, 0.0],
+        dtype=np.float32,
+    )
+    upper = np.asarray(
+        [4.0] * 3
+        + [1.0] * 3
+        + [math.pi] * 21
+        + [12.0] * 21
+        + [1.0] * 18
+        + [1.0, 1.0, 2.0]
+        + [0.03, 0.03, 0.05] * 2
+        + [0.08] * 6
+        + [1.0, 1.0],
+        dtype=np.float32,
+    )
+    if lower.shape != (MICROBAN_TELEOP_OBSERVATION_WIDTH,) or upper.shape != (
+        MICROBAN_TELEOP_OBSERVATION_WIDTH,
+    ):
+        raise RuntimeError("Parity observation bounds do not match the 83-value schema")
+    return lower, upper
+
+
+def deterministic_teleop_parity_inputs(
+    *,
+    seed: int = TELEOP_ONNX_PARITY_SEED,
+    sample_count: int = TELEOP_ONNX_PARITY_SAMPLE_COUNT,
+) -> np.ndarray:
+    """Build repeatable neutral, boundary, and seeded finite observations."""
+
+    if sample_count < 4:
+        raise ValueError("Parity corpus requires at least four samples")
+    lower, upper = _representative_observation_bounds()
+    midpoint = (lower + upper) * np.float32(0.5)
+    neutral = np.zeros(MICROBAN_TELEOP_OBSERVATION_WIDTH, dtype=np.float32)
+    # A level robot observes gravity along -Z in the body frame.
+    neutral[5] = -1.0
+    rows = [neutral, lower, upper, midpoint]
+    rng = np.random.default_rng(seed)
+    if sample_count > len(rows):
+        random_rows = rng.uniform(
+            lower,
+            upper,
+            size=(sample_count - len(rows), MICROBAN_TELEOP_OBSERVATION_WIDTH),
+        ).astype(np.float32)
+        # The final two hand target values are activation flags, not positions.
+        random_rows[:, -2:] = rng.integers(0, 2, size=(random_rows.shape[0], 2)).astype(
+            np.float32
+        )
+        rows.extend(random_rows)
+    observations = np.stack(rows, axis=0).reshape(
+        sample_count, 1, MICROBAN_TELEOP_OBSERVATION_WIDTH
+    )
+    if not np.isfinite(observations).all():
+        raise RuntimeError("Parity corpus contains non-finite observations")
+    return observations
+
+
+def validate_pytorch_onnx_parity(
+    pytorch_policy: torch.nn.Module,
+    onnx_path: str | Path,
+    *,
+    seed: int = TELEOP_ONNX_PARITY_SEED,
+    sample_count: int = TELEOP_ONNX_PARITY_SAMPLE_COUNT,
+    atol: float = TELEOP_ONNX_PARITY_ATOL,
+    rtol: float = TELEOP_ONNX_PARITY_RTOL,
+) -> TeleopOnnxParityResult:
+    """Compare deterministic PyTorch and ONNX inference sample by sample."""
+
+    if atol < 0.0 or rtol < 0.0:
+        raise ValueError("Parity tolerances must be non-negative")
+    model = onnx.load(str(onnx_path))
+    onnx.checker.check_model(model)
+    evaluator = ReferenceEvaluator(model)
+    input_name = model.graph.input[0].name
+    output_name = model.graph.output[0].name
+    observations = deterministic_teleop_parity_inputs(
+        seed=seed, sample_count=sample_count
+    )
+
+    pytorch_policy.to("cpu")
+    pytorch_policy.eval()
+    max_absolute_error = 0.0
+    max_relative_error = 0.0
+    with torch.inference_mode():
+        for sample_index, observation in enumerate(observations):
+            torch_output = pytorch_policy(torch.from_numpy(observation))
+            if not isinstance(torch_output, torch.Tensor):
+                raise TypeError("PyTorch export policy must return one Tensor")
+            expected = torch_output.detach().cpu().numpy()
+            actual = np.asarray(
+                evaluator.run([output_name], {input_name: observation})[0]
+            )
+            expected_shape = (1, MICROBAN_TELEOP_ACTION_WIDTH)
+            if expected.shape != expected_shape or actual.shape != expected_shape:
+                raise ValueError(
+                    "Parity output shape mismatch at sample "
+                    f"{sample_index}: PyTorch {expected.shape}, ONNX {actual.shape}"
+                )
+            if not np.isfinite(expected).all() or not np.isfinite(actual).all():
+                raise ValueError(
+                    f"Non-finite policy output in parity sample {sample_index}"
+                )
+            absolute_error = np.abs(expected - actual)
+            relative_error = absolute_error / np.maximum(np.abs(expected), atol)
+            max_absolute_error = max(max_absolute_error, float(absolute_error.max()))
+            max_relative_error = max(max_relative_error, float(relative_error.max()))
+            if not np.allclose(expected, actual, atol=atol, rtol=rtol):
+                raise ValueError(
+                    "PyTorch/ONNX parity failed at sample "
+                    f"{sample_index}: max_abs={float(absolute_error.max()):.8g}, "
+                    f"max_rel={float(relative_error.max()):.8g}, "
+                    f"atol={atol}, rtol={rtol}"
+                )
+    return TeleopOnnxParityResult(
+        max_absolute_error=max_absolute_error,
+        max_relative_error=max_relative_error,
+        sample_count=sample_count,
+    )
+
+
+def _onnx_metadata(path: Path) -> dict[str, str]:
+    model = onnx.load(str(path))
+    values: dict[str, str] = {}
+    for entry in model.metadata_props:
+        if entry.key in values:
+            raise ValueError(f"Duplicate ONNX metadata key: {entry.key}")
+        values[entry.key] = entry.value
+    return values
+
+
+def publish_gated_teleop_onnx(
+    temporary_path: str | Path,
+    output_path: str | Path,
+    *,
+    pytorch_policy: torch.nn.Module,
+    policy_metadata: Mapping[str, list | str | float],
+    provenance: TeleopExportProvenance,
+) -> TeleopOnnxParityResult:
+    """Validate, provenance-tag, parity-check, and atomically publish an ONNX.
+
+    The temporary and final files must share a directory, which makes
+    ``Path.replace`` an atomic same-filesystem publication.  Any exception is
+    raised before replacement, preserving the last known-good output.
+    """
+
+    temporary = Path(temporary_path).resolve()
+    output = Path(output_path).resolve()
+    if temporary.parent != output.parent:
+        raise ValueError("Temporary and output ONNX must share a directory")
+    if temporary == output:
+        raise ValueError("Temporary and output ONNX paths must differ")
+
+    try:
+        validate_action_only_onnx(temporary)
+        pending_provenance_metadata = provenance.metadata(parity_verified=False)
+        verified_provenance_metadata = provenance.metadata()
+        overlap = set(policy_metadata).intersection(verified_provenance_metadata)
+        if overlap:
+            raise ValueError(
+                "Policy metadata collides with export provenance: "
+                + ", ".join(sorted(overlap))
+            )
+        existing = _onnx_metadata(temporary)
+        requested_keys = set(policy_metadata).union(verified_provenance_metadata)
+        existing_overlap = set(existing).intersection(requested_keys)
+        if existing_overlap:
+            raise ValueError(
+                "Exported ONNX already contains requested metadata keys: "
+                + ", ".join(sorted(existing_overlap))
+            )
+
+        attach_metadata_to_onnx(
+            str(temporary),
+            {**dict(policy_metadata), **pending_provenance_metadata},
+        )
+        validate_action_only_onnx(temporary)
+        attached = _onnx_metadata(temporary)
+        for key, expected in pending_provenance_metadata.items():
+            if attached.get(key) != expected:
+                raise ValueError(
+                    f"ONNX provenance metadata mismatch for {key}: "
+                    f"{attached.get(key)!r} != {expected!r}"
+                )
+        if "onnx_parity_verified" in attached:
+            raise ValueError("ONNX claimed parity verification before parity ran")
+
+        # Do not assert verification in the artifact until the graph has passed.
+        validate_pytorch_onnx_parity(pytorch_policy, temporary)
+        attach_metadata_to_onnx(str(temporary), {"onnx_parity_verified": "true"})
+
+        # Validate the metadata-bearing final bytes, including a second numerical
+        # pass after the metadata rewrite, before atomic publication.
+        validate_action_only_onnx(temporary)
+        attached = _onnx_metadata(temporary)
+        for key, expected in verified_provenance_metadata.items():
+            if attached.get(key) != expected:
+                raise ValueError(
+                    f"ONNX provenance metadata mismatch for {key}: "
+                    f"{attached.get(key)!r} != {expected!r}"
+                )
+        result = validate_pytorch_onnx_parity(pytorch_policy, temporary)
+
+        current_sha256 = _sha256_file(provenance.checkpoint_path)
+        if current_sha256 != provenance.checkpoint_sha256:
+            raise RuntimeError(
+                "Checkpoint changed while ONNX was being exported; refusing publication"
+            )
+        temporary.replace(output)
+        return result
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def validate_microban_teleop_observation_contract(
@@ -382,25 +752,31 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
 
     def save(self, path: str, infos=None) -> None:
         super().save(path, infos)
-        policy_dir, filename, onnx_path = self._get_export_paths(path)
-        temporary_filename = f".{filename}.tmp"
-        temporary_path = policy_dir / temporary_filename
+        policy_dir, _filename, onnx_path = self._get_export_paths(path)
+        temporary_path = unique_teleop_onnx_temporary_path(onnx_path)
+        temporary_filename = temporary_path.name
         try:
+            provenance = collect_teleop_export_provenance(path)
             # Publish only a fully validated, metadata-complete model.  Failed
             # exports must not replace the last known-good deployment artifact.
             self.export_policy_to_onnx(str(policy_dir), temporary_filename)
-            validate_action_only_onnx(temporary_path)
             run_name: str = (
                 wandb.run.name
                 if self.logger.logger_type == "wandb" and wandb.run
                 else "local"
             )
             metadata = get_microban_teleop_metadata(self.env.unwrapped, run_name)
-            attach_metadata_to_onnx(str(temporary_path), metadata)
-            # Metadata attachment rewrites the model; validate the final bytes,
-            # not merely the intermediate exporter output, before publication.
-            validate_action_only_onnx(temporary_path)
-            temporary_path.replace(onnx_path)
+            parity = publish_gated_teleop_onnx(
+                temporary_path,
+                onnx_path,
+                pytorch_policy=self.alg.get_policy().as_onnx(verbose=False),
+                policy_metadata=metadata,
+                provenance=provenance,
+            )
+            print(
+                "[INFO] Published parity-gated Microban teleop ONNX "
+                f"(max_abs={parity.max_absolute_error:.3g})"
+            )
             if self.logger.logger_type == "wandb" and self.cfg["upload_model"]:
                 wandb.save(str(onnx_path), base_path=str(policy_dir))
         except Exception as exc:  # noqa: BLE001 - export failure must not stop PPO.

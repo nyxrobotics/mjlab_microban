@@ -21,13 +21,14 @@ from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
-from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.os import get_checkpoint_path
 
 from mjlab_microban.tasks.microban_policy_export import (
+    collect_teleop_export_provenance,
     get_microban_teleop_metadata,
-    validate_action_only_onnx,
+    publish_gated_teleop_onnx,
+    unique_teleop_onnx_temporary_path,
 )
 
 TASK = "Mjlab-Teleop-Microban"
@@ -54,9 +55,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    checkpoint = args.checkpoint or get_checkpoint_path(LOG_ROOT)
+    checkpoint = Path(args.checkpoint or get_checkpoint_path(LOG_ROOT))
     if not checkpoint.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+    # Capture the exact bytes before loading.  Publication re-hashes the source
+    # checkpoint so a concurrently written/replaced checkpoint fails closed.
+    provenance = collect_teleop_export_provenance(checkpoint)
+    # Load the exact canonical path that was hashed.  In particular, a retargeted
+    # command-line symlink must not select different bytes after provenance capture.
+    checkpoint = provenance.checkpoint_path
 
     env_cfg = load_env_cfg(TASK, play=True)
     env_cfg.scene.num_envs = 1
@@ -75,23 +82,29 @@ def main() -> None:
         )
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        temporary_output = args.output.with_name(f".{args.output.name}.tmp")
-        temporary_output.unlink(missing_ok=True)
+        temporary_output = unique_teleop_onnx_temporary_path(args.output)
         try:
-            runner.export_policy_to_onnx(str(args.output.parent), temporary_output.name)
-            validate_action_only_onnx(temporary_output)
+            runner.export_policy_to_onnx(
+                str(temporary_output.parent), temporary_output.name
+            )
             metadata = get_microban_teleop_metadata(
                 raw_env, run_path=checkpoint.parent.name
             )
-            attach_metadata_to_onnx(str(temporary_output), metadata)
-            # Validate the metadata-bearing artifact itself before atomically
-            # replacing the last known-good deployment policy.
-            validate_action_only_onnx(temporary_output)
-            temporary_output.replace(args.output)
+            parity = publish_gated_teleop_onnx(
+                temporary_output,
+                args.output,
+                pytorch_policy=runner.alg.get_policy().as_onnx(verbose=False),
+                policy_metadata=metadata,
+                provenance=provenance,
+            )
         except Exception:
             temporary_output.unlink(missing_ok=True)
             raise
-        print(f"[INFO] Exported validated 18-action policy: {args.output}")
+        print(
+            "[INFO] Exported validated 18-action policy: "
+            f"{args.output} (checkpoint_sha256={provenance.checkpoint_sha256}, "
+            f"max_abs={parity.max_absolute_error:.3g})"
+        )
     finally:
         env.close()
 
