@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible v4 locomotion canary with the audited XC330 velocity actor.
+# Reproducible v5 bounded-actor canary with the audited XC330 velocity actor.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,4 +27,5 @@ export MICROBAN_TELEOP_SAVE_INTERVAL="${MICROBAN_TELEOP_SAVE_INTERVAL:-50}"
 exec "${SCRIPT_DIR}/train_microban_teleop.sh" train \
     --agent.bootstrap-velocity-checkpoint "${VELOCITY_CHECKPOINT}" \
     --agent.bootstrap-velocity-checkpoint-sha256 "${EXPECTED_SHA256}" \
+    --agent.save-pristine-checkpoint True \
     "$@"

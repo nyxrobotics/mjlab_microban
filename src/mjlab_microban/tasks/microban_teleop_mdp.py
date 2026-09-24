@@ -29,7 +29,9 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from rsl_rl.modules.distribution import GaussianDistribution
+from rsl_rl.modules.distribution import Distribution, GaussianDistribution
+from torch import nn
+from torch.distributions import Normal
 
 from mjlab_microban.tasks.mdp import (
     FootTargetCommand,
@@ -104,6 +106,243 @@ class PerJointGaussianDistribution(GaussianDistribution):
                 self.std_param.copy_(values)
             elif std_type == "log":
                 self.log_std_param.copy_(torch.log(values))
+
+
+class _AsymmetricArctanDeterministicOutput(nn.Module):
+    """Exportable zero-anchored map from latent actions to safe deltas."""
+
+    def __init__(self, lower_bound: torch.Tensor, upper_bound: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("lower_bound", lower_bound.detach().clone())
+        self.register_buffer("upper_bound", upper_bound.detach().clone())
+        zero = torch.zeros((), dtype=lower_bound.dtype, device=lower_bound.device)
+        self.register_buffer(
+            "inward_lower_bound", torch.nextafter(lower_bound, zero).detach().clone()
+        )
+        self.register_buffer(
+            "inward_upper_bound", torch.nextafter(upper_bound, zero).detach().clone()
+        )
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
+        action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
+        return torch.maximum(
+            torch.minimum(action, self.inward_upper_bound),
+            self.inward_lower_bound,
+        )
+
+
+class AsymmetricBoundedGaussianDistribution(Distribution):
+    """Diagonal Gaussian pushed through a zero-anchored bounded bijection.
+
+    The MLP emits an unconstrained latent action ``z``.  For a joint with raw
+    action bounds ``lower < 0 < upper``, the action sent to the environment is::
+
+        2 * upper / pi * atan(pi * z / (2 * upper))       if z >= 0
+        2 * (-lower) / pi * atan(pi * z / (2 * -lower))   if z < 0
+
+    This asymmetric arctangent is strictly monotonic, maps real numbers onto the
+    open action interval, satisfies ``T(0) == 0`` and has unit derivative at
+    zero on both sides.  A copied velocity actor therefore keeps its default
+    pose and its local action scale while no stochastic or deterministic output
+    can request a target beyond a teleoperation soft limit.
+
+    PPO operates on the actual bounded actions.  ``log_prob`` applies the exact
+    inverse-Jacobian correction, and KL is evaluated in latent Gaussian space;
+    KL is invariant under the same fixed bijection.  Entropy has no elementary
+    closed form for asymmetric arctan-normal distributions, so ``entropy`` is
+    the unbiased reparameterized ``-log p(T(z))`` estimate from the sample made
+    by the current ``update``/``sample`` call.  The task currently has zero
+    entropy weight, but the estimator remains finite, correctly shaped and
+    differentiable if that setting changes.
+    """
+
+    def __init__(
+        self,
+        output_dim: int,
+        init_std: Sequence[float],
+        lower_bound: Sequence[float],
+        upper_bound: Sequence[float],
+        std_type: str = "log",
+    ) -> None:
+        super().__init__(output_dim)
+        if isinstance(init_std, (str, bytes)):
+            raise TypeError("init_std must be a numeric sequence")
+        std_values = torch.as_tensor(tuple(init_std), dtype=torch.float32)
+        lower_values = torch.as_tensor(tuple(lower_bound), dtype=torch.float32)
+        upper_values = torch.as_tensor(tuple(upper_bound), dtype=torch.float32)
+        for name, values in (
+            ("init_std", std_values),
+            ("lower_bound", lower_values),
+            ("upper_bound", upper_values),
+        ):
+            if values.shape != (output_dim,):
+                raise ValueError(
+                    f"{name} must contain {output_dim} values, got {values.numel()}"
+                )
+            if not bool(torch.isfinite(values).all().item()):
+                raise ValueError(f"every {name} value must be finite")
+        if not bool(torch.all(std_values > 0.0).item()):
+            raise ValueError("every init_std value must be positive")
+        if not bool(torch.all(lower_values < 0.0).item()):
+            raise ValueError("every lower_bound must be strictly negative")
+        if not bool(torch.all(upper_values > 0.0).item()):
+            raise ValueError("every upper_bound must be strictly positive")
+
+        self.std_type = std_type
+        if std_type == "scalar":
+            self.std_param = nn.Parameter(std_values.clone())
+        elif std_type == "log":
+            self.log_std_param = nn.Parameter(torch.log(std_values))
+        else:
+            raise ValueError(
+                f"Unknown standard deviation type: {std_type}. "
+                "Should be 'scalar' or 'log'."
+            )
+        self.register_buffer("lower_bound", lower_values)
+        self.register_buffer("upper_bound", upper_values)
+        zero = torch.zeros((), dtype=lower_values.dtype)
+        self.register_buffer("inward_lower_bound", torch.nextafter(lower_values, zero))
+        self.register_buffer("inward_upper_bound", torch.nextafter(upper_values, zero))
+        self._distribution: Normal | None = None
+        self._latent_sample: torch.Tensor | None = None
+        self._action_sample: torch.Tensor | None = None
+        Normal.set_default_validate_args(False)
+
+    def _transform(self, latent: torch.Tensor) -> torch.Tensor:
+        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
+        action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
+
+        # A real-valued arctangent never reaches its asymptote.  At very large but
+        # finite float32 inputs, however, the result can round to the
+        # exact physical bound.  Move only that numerical endpoint one ULP
+        # inward.  Ordinary samples are unchanged, while every finite output is
+        # strictly inside the action/target soft limits.
+        return torch.maximum(
+            torch.minimum(action, self.inward_upper_bound),
+            self.inward_lower_bound,
+        )
+
+    def _inverse(self, action: torch.Tensor) -> torch.Tensor:
+        if action.shape[-1] != self.output_dim:
+            raise ValueError(
+                f"Bounded action must end in width {self.output_dim}, "
+                f"got {action.shape[-1]}"
+            )
+        valid = (
+            torch.isfinite(action)
+            & (action > self.lower_bound)
+            & (action < self.upper_bound)
+        )
+        if not bool(valid.all().item()):
+            raise ValueError(
+                "Bounded action log_prob requires finite values strictly inside "
+                "every joint's soft action bounds"
+            )
+        scale = torch.where(action >= 0.0, self.upper_bound, -self.lower_bound)
+        return (2.0 * scale / math.pi) * torch.tan(math.pi * action / (2.0 * scale))
+
+    def _log_abs_det_jacobian(self, latent: torch.Tensor) -> torch.Tensor:
+        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
+        absolute_scaled = torch.abs(math.pi * latent / (2.0 * scale))
+        # log(1 + x^2) in two finite branches.  Direct square overflows for a
+        # large but finite float32 latent, while logaddexp(0, 2*log(abs(x))) has
+        # an awkward log(0) gradient at the zero anchor.  Clamping each branch's
+        # unused magnitude keeps both forward and backward intermediates finite.
+        one = torch.ones((), dtype=latent.dtype, device=latent.device)
+        small = torch.minimum(absolute_scaled, one)
+        large = torch.maximum(absolute_scaled, one)
+        log_one_plus_square = torch.where(
+            absolute_scaled <= 1.0,
+            torch.log1p(torch.square(small)),
+            2.0 * torch.log(large) + torch.log1p(torch.square(1.0 / large)),
+        )
+        return -log_one_plus_square
+
+    def update(self, mlp_output: torch.Tensor) -> None:
+        if self.std_type == "scalar":
+            std = self.std_param.expand_as(mlp_output)
+        else:
+            std = torch.exp(self.log_std_param).expand_as(mlp_output)
+        self._distribution = Normal(mlp_output, std)
+        self._latent_sample = None
+        self._action_sample = None
+
+    def sample(self) -> torch.Tensor:
+        if self._distribution is None:
+            raise RuntimeError("update() must be called before sample()")
+        # rsample supplies the pathwise derivative needed by the entropy
+        # estimator during PPO updates.  Rollout collection already runs under
+        # inference_mode and detaches stored actions.
+        self._latent_sample = self._distribution.rsample()
+        self._action_sample = self._transform(self._latent_sample)
+        return self._action_sample
+
+    def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        return self._transform(mlp_output)
+
+    def as_deterministic_output_module(self) -> nn.Module:
+        return _AsymmetricArctanDeterministicOutput(self.lower_bound, self.upper_bound)
+
+    @property
+    def input_dim(self) -> int:
+        return self.output_dim
+
+    @property
+    def mean(self) -> torch.Tensor:
+        if self._distribution is None:
+            raise RuntimeError("update() must be called before reading mean")
+        # This is the transformed Gaussian centre/median and is also the exact
+        # deterministic policy output.  The nonlinear distribution's arithmetic
+        # expectation has no closed form and is not consumed by RSL-RL PPO.
+        return self._transform(self._distribution.mean)
+
+    @property
+    def std(self) -> torch.Tensor:
+        if self._distribution is None:
+            raise RuntimeError("update() must be called before reading std")
+        # RSL-RL uses this property only for its exploration-width log.  Return
+        # the learned latent standard deviation, whose local action scale is
+        # identical at the zero anchor because T'(0) == 1.
+        return self._distribution.stddev
+
+    @property
+    def entropy(self) -> torch.Tensor:
+        if self._distribution is None or self._latent_sample is None:
+            raise RuntimeError("sample() must be called before reading entropy")
+        latent_log_prob = self._distribution.log_prob(self._latent_sample).sum(dim=-1)
+        log_jacobian = self._log_abs_det_jacobian(self._latent_sample).sum(dim=-1)
+        return -(latent_log_prob - log_jacobian)
+
+    @property
+    def params(self) -> tuple[torch.Tensor, ...]:
+        if self._distribution is None:
+            raise RuntimeError("update() must be called before reading params")
+        # Storing latent parameters is both sufficient and preferable: the
+        # bounds are immutable buffers and fixed-bijection KL is latent KL.
+        return (self._distribution.mean, self._distribution.stddev)
+
+    def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
+        if self._distribution is None:
+            raise RuntimeError("update() must be called before log_prob()")
+        latent = self._inverse(outputs)
+        latent_log_prob = self._distribution.log_prob(latent).sum(dim=-1)
+        log_jacobian = self._log_abs_det_jacobian(latent).sum(dim=-1)
+        result = latent_log_prob - log_jacobian
+        if not bool(torch.isfinite(result).all().item()):
+            raise FloatingPointError("Bounded Gaussian log_prob became non-finite")
+        return result
+
+    def kl_divergence(
+        self,
+        old_params: tuple[torch.Tensor, ...],
+        new_params: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        old_mean, old_std = old_params
+        new_mean, new_std = new_params
+        old_dist = Normal(old_mean, old_std)
+        new_dist = Normal(new_mean, new_std)
+        return torch.distributions.kl_divergence(old_dist, new_dist).sum(dim=-1)
 
 
 def _joint_position_action_tensors(

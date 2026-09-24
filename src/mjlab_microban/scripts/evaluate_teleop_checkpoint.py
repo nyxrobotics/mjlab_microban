@@ -56,7 +56,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 
 TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
-_CHECKPOINT_RE = re.compile(r"^model_(\d+)\.pt$")
+_CHECKPOINT_RE = re.compile(r"^model_(?:(\d+)|(pristine))\.pt$")
 
 # These are the physical command limits applied by microban's central input
 # scaler and the final teleop-training curriculum.  Stationary yaw is wider
@@ -330,7 +330,8 @@ def resolve_checkpoint(
             raise FileNotFoundError(f"Checkpoint not found: {resolved}")
         if _CHECKPOINT_RE.fullmatch(resolved.name) is None:
             raise ValueError(
-                f"Checkpoint name must match model_<iteration>.pt: {resolved}"
+                "Checkpoint name must match model_<iteration>.pt or "
+                f"model_pristine.pt: {resolved}"
             )
         age_s = now_s - resolved.stat().st_mtime
         if age_s < minimum_age_s:
@@ -349,6 +350,7 @@ def resolve_checkpoint(
             match = _CHECKPOINT_RE.fullmatch(path.name)
             if (
                 match is not None
+                and match.group(1) is not None
                 and path.is_file()
                 and now_s - path.stat().st_mtime >= minimum_age_s
             ):
@@ -1055,7 +1057,13 @@ def build_report(
     ]
 
     match = _CHECKPOINT_RE.fullmatch(checkpoint.name)
-    checkpoint_iteration = int(match.group(1)) if match is not None else None
+    checkpoint_iteration = (
+        int(match.group(1))
+        if match is not None and match.group(1) is not None
+        else -1
+        if match is not None
+        else None
+    )
     hard_pass = not hard_failures and not incomplete
     acceptance_pass = (
         hard_pass
@@ -1072,6 +1080,7 @@ def build_report(
         acceptance_pass
         and canonical_coverage
         and not checkpoint_contract.diagnostic_legacy
+        and not checkpoint_contract.pristine_pre_update
     ):
         status = "pass"
     limitations = [
@@ -1105,10 +1114,15 @@ def build_report(
         limitations.append(
             "This is an explicitly requested legacy-v1 diagnostic using raw "
             "previous-action feedback and the v1 scalar Gaussian actor. It can "
-            "never pass the v4 deployment gate or be exported as v4."
+            "never pass the v5 deployment gate or be exported as v5."
+        )
+    if checkpoint_contract.pristine_pre_update:
+        limitations.append(
+            "This is the pinned velocity bootstrap before any teleop PPO update. "
+            "It is a safety baseline and can never pass the deployment gate."
         )
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "status": status,
         "task": TASK,
         "checkpoint": str(checkpoint),
@@ -1121,7 +1135,11 @@ def build_report(
                 checkpoint_contract.previous_action_semantics
             ),
             "diagnostic_legacy": checkpoint_contract.diagnostic_legacy,
-            "v4_deployment_compatible": not checkpoint_contract.diagnostic_legacy,
+            "pristine_pre_update": checkpoint_contract.pristine_pre_update,
+            "v5_deployment_compatible": (
+                not checkpoint_contract.diagnostic_legacy
+                and not checkpoint_contract.pristine_pre_update
+            ),
         },
         "device": device,
         "seed": seed,

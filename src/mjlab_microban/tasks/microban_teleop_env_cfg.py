@@ -47,14 +47,15 @@ from mjlab_microban.tasks.mdp import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    guarded_teleop_actor_raw_bounds,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RETARGET_INTERVAL_S,
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    AsymmetricBoundedGaussianDistribution,
     HmdNeckTargetMotion,
-    PerJointGaussianDistribution,
     ResetFixedFootTargetCommandCfg,
     ResetFixedHandTargetCommandCfg,
     ResumeSafeStepBasedStagedCurriculum,
@@ -147,6 +148,35 @@ def microban_teleop_initial_action_std() -> tuple[float, ...]:
             raise ValueError(f"{name} home pose is outside its action clip")
         values.append(min(0.15, headroom / 3.0))
     return tuple(values)
+
+
+def microban_teleop_action_delta_bounds() -> tuple[
+    tuple[float, ...], tuple[float, ...]
+]:
+    """Return actor-output bounds in the exact 18-joint raw-delta order.
+
+    ``JointPositionAction`` uses scale 1.0 and the task's configured default
+    joint position as its offset, then applies the XML-derived absolute target
+    clips.  The actor uses the shared five-percent guarded interval derived from
+    those values; the environment/runtime hard clip remains at the wider soft
+    limits.  Deployment metadata calls the same helper over resolved tensors.
+    """
+
+    defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
+    defaults["left_shoulder_pitch"] = math.radians(10.0)
+    defaults["right_shoulder_pitch"] = math.radians(10.0)
+    clips = _microban_soft_joint_position_clip()
+    ordered_defaults = tuple(
+        float(defaults[name]) for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES
+    )
+    ordered_lower = tuple(clips[name][0] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+    ordered_upper = tuple(clips[name][1] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+    return guarded_teleop_actor_raw_bounds(
+        ordered_defaults,
+        ordered_lower,
+        ordered_upper,
+        (1.0,) * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+    )
 
 
 def _materialize_rotation_command_cfg(
@@ -555,6 +585,7 @@ class MicrobanTeleopRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     bootstrap_velocity_checkpoint: str | None = None
     bootstrap_velocity_checkpoint_sha256: str | None = None
+    save_pristine_checkpoint: bool = False
 
 
 MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
@@ -563,8 +594,10 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         activation="elu",
         obs_normalization=True,
         distribution_cfg={
-            "class_name": PerJointGaussianDistribution,
+            "class_name": AsymmetricBoundedGaussianDistribution,
             "init_std": microban_teleop_initial_action_std(),
+            "lower_bound": microban_teleop_action_delta_bounds()[0],
+            "upper_bound": microban_teleop_action_delta_bounds()[1],
             "std_type": "log",
         },
     ),

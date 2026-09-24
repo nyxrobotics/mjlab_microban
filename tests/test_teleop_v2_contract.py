@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Focused tests for the Microban teleop-v4 training/deployment contract."""
+"""Focused tests for the Microban teleop-v5 training/deployment contract."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from unittest.mock import patch
 import torch
 from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
+from rsl_rl.models import MLPModel
+from tensordict import TensorDict
 
 from mjlab_microban.tasks.mdp import no_stepping_penalty
 from mjlab_microban.tasks.microban_policy_export import (
@@ -29,6 +31,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MicrobanTeleopOnPolicyRunner,
     TeleopCheckpointContract,
     _command_target_bounds,
+    validate_bounded_actor_checkpoint_buffers,
     validate_teleop_checkpoint_contract,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
@@ -41,10 +44,12 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
+    microban_teleop_action_delta_bounds,
     microban_teleop_initial_action_std,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    AsymmetricBoundedGaussianDistribution,
     PerJointGaussianDistribution,
     ResetFixedFootTargetCommand,
     effective_action_after_target_clip,
@@ -220,6 +225,173 @@ class PerJointGaussianTest(unittest.TestCase):
             PerJointGaussianDistribution(2, [0.1, 0.0])
 
 
+class AsymmetricBoundedGaussianTest(unittest.TestCase):
+    LOWER = (-0.3, -0.4, -0.8)
+    UPPER = (0.5, 0.6, 0.2)
+    STD = (0.1, 0.2, 0.05)
+
+    def _distribution(self) -> AsymmetricBoundedGaussianDistribution:
+        return AsymmetricBoundedGaussianDistribution(
+            3,
+            self.STD,
+            self.LOWER,
+            self.UPPER,
+            std_type="log",
+        )
+
+    def test_zero_anchor_and_finite_extremes_are_strictly_inside_bounds(self) -> None:
+        distribution = self._distribution()
+        latent = torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0e30, -1.0e30, 1.0e30]],
+            dtype=torch.float32,
+        )
+        action = distribution.deterministic_output(latent)
+        torch.testing.assert_close(action[0], torch.zeros(3))
+        lower = torch.tensor(self.LOWER)
+        upper = torch.tensor(self.UPPER)
+        self.assertTrue(torch.all(action > lower).item())
+        self.assertTrue(torch.all(action < upper).item())
+        self.assertTrue(
+            torch.isfinite(distribution._log_abs_det_jacobian(latent)).all()
+        )
+
+    def test_sample_storage_inverse_log_prob_is_consistent(self) -> None:
+        torch.manual_seed(1234)
+        mean = torch.tensor([[0.02, -0.03, 0.04], [-0.1, 0.2, -0.05]])
+        distribution = self._distribution()
+        distribution.update(mean)
+        action = distribution.sample().detach()
+        rollout_log_prob = distribution.log_prob(action).detach()
+
+        # A PPO minibatch reconstructs the distribution later and evaluates the
+        # stored bounded action through the inverse transform.
+        distribution.update(mean.clone())
+        replay_log_prob = distribution.log_prob(action)
+        torch.testing.assert_close(replay_log_prob, rollout_log_prob)
+        torch.testing.assert_close(
+            torch.exp(replay_log_prob - rollout_log_prob), torch.ones(2)
+        )
+
+        latent = distribution._inverse(action)
+        latent_dist = torch.distributions.Normal(
+            mean, torch.tensor(self.STD).expand_as(mean)
+        )
+        expected = latent_dist.log_prob(latent).sum(dim=-1)
+        expected -= distribution._log_abs_det_jacobian(latent).sum(dim=-1)
+        torch.testing.assert_close(replay_log_prob, expected)
+
+    def test_round_trip_handles_tiny_asymmetric_shoulder_headroom(self) -> None:
+        lower, upper = microban_teleop_action_delta_bounds()
+        shoulder = MICROBAN_TELEOP_ACTION_JOINT_NAMES.index("right_shoulder_roll")
+        self.assertLess(min(-lower[shoulder], upper[shoulder]), math.radians(1.01))
+        distribution = AsymmetricBoundedGaussianDistribution(
+            1,
+            [0.002],
+            [lower[shoulder]],
+            [upper[shoulder]],
+        )
+        negative_scale = -lower[shoulder]
+        positive_scale = upper[shoulder]
+        latent = torch.tensor(
+            [[-0.75 * negative_scale], [0.0], [0.75 * positive_scale]]
+        )
+        action = distribution.deterministic_output(latent)
+        round_trip = distribution._inverse(action)
+        torch.testing.assert_close(round_trip, latent, rtol=2e-6, atol=1e-8)
+
+    def test_exact_or_outside_bounds_fail_instead_of_clamping_inverse(self) -> None:
+        distribution = self._distribution()
+        distribution.update(torch.zeros((1, 3)))
+        for invalid in (
+            torch.tensor([[self.UPPER[0], 0.0, 0.0]]),
+            torch.tensor([[self.LOWER[0], 0.0, 0.0]]),
+            torch.tensor([[float("nan"), 0.0, 0.0]]),
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "strictly inside"),
+            ):
+                distribution.log_prob(invalid)
+
+    def test_fixed_bijection_kl_equals_latent_gaussian_kl(self) -> None:
+        distribution = self._distribution()
+        old_mean = torch.tensor([[0.1, -0.2, 0.0], [0.0, 0.1, -0.1]])
+        old_std = torch.tensor(self.STD).expand_as(old_mean)
+        new_mean = old_mean + torch.tensor([0.03, -0.01, 0.02])
+        new_std = old_std * torch.tensor([1.1, 0.9, 1.2])
+        actual = distribution.kl_divergence((old_mean, old_std), (new_mean, new_std))
+        expected = torch.distributions.kl_divergence(
+            torch.distributions.Normal(old_mean, old_std),
+            torch.distributions.Normal(new_mean, new_std),
+        ).sum(dim=-1)
+        torch.testing.assert_close(actual, expected)
+
+    def test_entropy_and_export_module_are_finite_and_action_shaped(self) -> None:
+        torch.manual_seed(7)
+        mean = torch.tensor([[0.0, 0.0, 0.0], [0.15, -0.25, 0.1]], requires_grad=True)
+        distribution = self._distribution()
+        distribution.update(mean)
+        distribution.sample()
+        entropy = distribution.entropy
+        self.assertEqual(entropy.shape, (2,))
+        self.assertTrue(torch.isfinite(entropy).all().item())
+        entropy.sum().backward()
+        self.assertIsNotNone(mean.grad)
+        self.assertTrue(torch.isfinite(mean.grad).all().item())
+
+        deterministic = distribution.deterministic_output(mean.detach())
+        export_output = distribution.as_deterministic_output_module()(mean.detach())
+        torch.testing.assert_close(export_output, deterministic)
+
+    def test_rsl_actor_replay_of_stored_action_has_unit_ppo_ratio(self) -> None:
+        torch.manual_seed(19)
+        obs = TensorDict({"policy": torch.randn(8, 5)}, batch_size=[8])
+        actor = MLPModel(
+            obs=obs,
+            obs_groups={"actor": ["policy"]},
+            obs_set="actor",
+            output_dim=3,
+            hidden_dims=(16,),
+            distribution_cfg={
+                "class_name": AsymmetricBoundedGaussianDistribution,
+                "init_std": self.STD,
+                "lower_bound": self.LOWER,
+                "upper_bound": self.UPPER,
+                "std_type": "log",
+            },
+        )
+        stored_action = actor(obs, stochastic_output=True).detach()
+        old_log_prob = actor.get_output_log_prob(stored_action).detach()
+        old_params = tuple(
+            value.detach().clone() for value in actor.output_distribution_params
+        )
+
+        # This is the PPO update path: a fresh stochastic forward updates the
+        # distribution, then log_prob is evaluated for the stored rollout action.
+        actor(obs, stochastic_output=True)
+        replay_log_prob = actor.get_output_log_prob(stored_action)
+        new_params = actor.output_distribution_params
+        ratio = torch.exp(replay_log_prob - old_log_prob)
+        torch.testing.assert_close(ratio, torch.ones_like(ratio))
+        torch.testing.assert_close(
+            actor.get_kl_divergence(old_params, new_params), torch.zeros(8)
+        )
+
+    def test_rejects_invalid_widths_bounds_and_std(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lower_bound must contain 3"):
+            AsymmetricBoundedGaussianDistribution(
+                3, self.STD, self.LOWER[:2], self.UPPER
+            )
+        with self.assertRaisesRegex(ValueError, "strictly negative"):
+            AsymmetricBoundedGaussianDistribution(
+                3, self.STD, (-0.3, 0.0, -0.8), self.UPPER
+            )
+        with self.assertRaisesRegex(ValueError, "strictly positive"):
+            AsymmetricBoundedGaussianDistribution(
+                3, self.STD, self.LOWER, (0.5, 0.0, 0.2)
+            )
+
+
 class TeleopConfigurationTest(unittest.TestCase):
     def test_export_separates_single_and_simultaneous_foot_support(self) -> None:
         foot_cfg = SimpleNamespace(
@@ -299,11 +471,32 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "fixed")
         self.assertIs(
             MicrobanTeleopRlCfg.actor.distribution_cfg["class_name"],
-            PerJointGaussianDistribution,
+            AsymmetricBoundedGaussianDistribution,
         )
         self.assertEqual(
             tuple(MicrobanTeleopRlCfg.actor.distribution_cfg["init_std"]), std
         )
+        lower, upper = microban_teleop_action_delta_bounds()
+        self.assertEqual(
+            tuple(MicrobanTeleopRlCfg.actor.distribution_cfg["lower_bound"]), lower
+        )
+        self.assertEqual(
+            tuple(MicrobanTeleopRlCfg.actor.distribution_cfg["upper_bound"]), upper
+        )
+        self.assertTrue(all(value < 0.0 for value in lower))
+        self.assertTrue(all(value > 0.0 for value in upper))
+        defaults = cfg.scene.entities["robot"].init_state.joint_pos
+        assert defaults is not None
+        clips = cfg.actions["joint_pos"].clip
+        assert clips is not None
+        for index, name in enumerate(MICROBAN_TELEOP_ACTION_JOINT_NAMES):
+            physical_lower = clips[name][0] - defaults[name]
+            physical_upper = clips[name][1] - defaults[name]
+            self.assertGreater(lower[index], physical_lower)
+            self.assertLess(upper[index], physical_upper)
+        for name in ("right_shoulder_roll", "left_shoulder_roll"):
+            index = MICROBAN_TELEOP_ACTION_JOINT_NAMES.index(name)
+            self.assertAlmostEqual(min(-lower[index], upper[index]), 1.0e-4)
 
     def test_curriculum_finishes_at_runtime_envelope_and_both_feet(self) -> None:
         self.assertEqual(MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.0025)
@@ -562,10 +755,35 @@ class CheckpointContractTest(unittest.TestCase):
         torch.save({"iter": iteration, "infos": infos}, path)
         return path
 
-    def test_v4_marker_is_required_and_iteration_must_match_filename(self) -> None:
+    @staticmethod
+    def _bounded_actor_state() -> dict[str, torch.Tensor]:
+        lower = torch.tensor([-1.25, -1.0e-4], dtype=torch.float32)
+        upper = torch.tensor([0.75, 0.4], dtype=torch.float32)
+        zero = torch.zeros_like(lower)
+        return {
+            "distribution.lower_bound": lower,
+            "distribution.upper_bound": upper,
+            "distribution.inward_lower_bound": torch.nextafter(lower, zero),
+            "distribution.inward_upper_bound": torch.nextafter(upper, zero),
+        }
+
+    @staticmethod
+    def _v5_infos(*, pristine: bool = False) -> dict[str, object]:
+        infos: dict[str, object] = {
+            "env_state": {"common_step_counter": 0 if pristine else 24},
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+        }
+        if pristine:
+            infos["pristine_pre_update"] = True
+        return infos
+
+    def test_v5_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "4")
+        self.assertEqual(parsed.version, "5")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
@@ -585,20 +803,178 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must match"):
             validate_teleop_checkpoint_contract(mismatched)
 
-        # A well-formed v3 checkpoint is still a non-resumable training contract,
+        # A well-formed v4 checkpoint is still a non-resumable training contract,
         # even though tensor shapes and previous-action semantics happen to match.
-        v3 = self._save(16, contract=True)
-        payload = torch.load(v3, map_location="cpu", weights_only=False)
-        payload["infos"]["microban_teleop_training_contract_version"] = "3"
-        torch.save(payload, v3)
-        with self.assertRaisesRegex(ValueError, "v1/v2/v3"):
-            validate_teleop_checkpoint_contract(v3)
+        v4 = self._save(16, contract=True)
+        payload = torch.load(v4, map_location="cpu", weights_only=False)
+        payload["infos"]["microban_teleop_training_contract_version"] = "4"
+        torch.save(payload, v4)
+        with self.assertRaisesRegex(ValueError, "v1/v2/v3/v4"):
+            validate_teleop_checkpoint_contract(v4)
 
-    def test_save_adds_v4_marker_and_legacy_runner_cannot_write(self) -> None:
+    def test_pristine_checkpoint_requires_explicit_pre_update_contract(self) -> None:
+        path = self.root / "model_pristine.pt"
+        infos = {
+            "env_state": {"common_step_counter": 0},
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "pristine_pre_update": True,
+        }
+        torch.save({"iter": -1, "infos": infos}, path)
+        contract = validate_teleop_checkpoint_contract(path)
+        self.assertEqual(contract.iteration, -1)
+        self.assertTrue(contract.pristine_pre_update)
+
+        infos["pristine_pre_update"] = False
+        torch.save({"iter": -1, "infos": infos}, path)
+        with self.assertRaisesRegex(ValueError, "pristine_pre_update=true"):
+            validate_teleop_checkpoint_contract(path)
+
+    def test_bounded_actor_checkpoint_buffers_are_exactly_pinned(self) -> None:
+        path = self.root / "bounds.pt"
+        expected = self._bounded_actor_state()
+
+        def save(candidate: dict[str, torch.Tensor]) -> None:
+            torch.save({"actor_state_dict": candidate}, path)
+
+        save({key: value.clone() for key, value in expected.items()})
+        validate_bounded_actor_checkpoint_buffers(path, expected)
+
+        invalid_cases = (
+            (
+                "missing",
+                {
+                    key: value.clone()
+                    for key, value in expected.items()
+                    if key != "distribution.lower_bound"
+                },
+                TypeError,
+                "missing Tensor",
+            ),
+            (
+                "shape",
+                {
+                    **{key: value.clone() for key, value in expected.items()},
+                    "distribution.lower_bound": expected["distribution.lower_bound"][
+                        :1
+                    ],
+                },
+                ValueError,
+                "shape differs",
+            ),
+            (
+                "dtype",
+                {
+                    **{key: value.clone() for key, value in expected.items()},
+                    "distribution.upper_bound": expected[
+                        "distribution.upper_bound"
+                    ].double(),
+                },
+                ValueError,
+                "dtype differs",
+            ),
+            (
+                "non-finite",
+                {
+                    **{key: value.clone() for key, value in expected.items()},
+                    "distribution.inward_upper_bound": torch.tensor(
+                        [float("nan"), 0.1], dtype=torch.float32
+                    ),
+                },
+                ValueError,
+                "non-finite",
+            ),
+            (
+                "different",
+                {
+                    **{key: value.clone() for key, value in expected.items()},
+                    "distribution.inward_lower_bound": expected[
+                        "distribution.inward_lower_bound"
+                    ]
+                    + torch.tensor([0.0, 1.0e-7]),
+                },
+                ValueError,
+                "differs from the current",
+            ),
+        )
+        for name, candidate, error_type, message in invalid_cases:
+            with self.subTest(name=name):
+                save(candidate)
+                with self.assertRaisesRegex(error_type, message):
+                    validate_bounded_actor_checkpoint_buffers(path, expected)
+
+        nonfinite_expected = {
+            **expected,
+            "distribution.lower_bound": torch.tensor(
+                [float("inf"), -1.0e-4], dtype=torch.float32
+            ),
+        }
+        save({key: value.clone() for key, value in nonfinite_expected.items()})
+        with self.assertRaisesRegex(ValueError, "Current bounded actor.*non-finite"):
+            validate_bounded_actor_checkpoint_buffers(path, nonfinite_expected)
+
+    def test_v5_load_pins_bounds_before_base_load_including_pristine(self) -> None:
+        expected = self._bounded_actor_state()
+        policy = SimpleNamespace(state_dict=lambda: expected)
+
+        for pristine in (False, True):
+            with self.subTest(pristine=pristine):
+                path = self.root / ("model_pristine.pt" if pristine else "model_0.pt")
+                torch.save(
+                    {
+                        "actor_state_dict": {
+                            key: value.clone() for key, value in expected.items()
+                        },
+                        "iter": -1 if pristine else 0,
+                        "infos": self._v5_infos(pristine=pristine),
+                    },
+                    path,
+                )
+                runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+                runner.alg = SimpleNamespace(get_policy=lambda: policy)
+                with patch.object(
+                    MjlabOnPolicyRunner, "load", return_value={}
+                ) as base_load:
+                    runner.load(str(path), load_cfg={"actor": True})
+                base_load.assert_called_once()
+                self.assertEqual(
+                    runner.loaded_checkpoint_contract.pristine_pre_update,
+                    pristine,
+                )
+
+        mismatched_path = self.root / "model_1.pt"
+        mismatched = {key: value.clone() for key, value in expected.items()}
+        mismatched["distribution.upper_bound"][0] += 1.0e-4
+        torch.save(
+            {
+                "actor_state_dict": mismatched,
+                "iter": 1,
+                "infos": {
+                    **self._v5_infos(),
+                    "env_state": {"common_step_counter": 48},
+                },
+            },
+            mismatched_path,
+        )
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        with (
+            patch.object(MjlabOnPolicyRunner, "load") as base_load,
+            self.assertRaisesRegex(ValueError, "guarded action-bound contract"),
+        ):
+            runner.load(str(mismatched_path), load_cfg={"actor": True})
+        base_load.assert_not_called()
+
+    def test_save_adds_v5_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
         fresh.velocity_actor_bootstrap_info = {
-            "mapping_version": "xc330_velocity_63_to_teleop_83_v2_preserve_normalizer_count",
+            "mapping_version": (
+                "xc330_velocity_63_to_teleop_83_v3_bounded_actor_"
+                "preserve_normalizer_count"
+            ),
             "source_checkpoint_sha256": "a" * 64,
         }
         with patch.object(MjlabOnPolicyRunner, "save") as base_save:
@@ -610,7 +986,7 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "4")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "5")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,

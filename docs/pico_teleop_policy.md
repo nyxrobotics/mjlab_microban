@@ -45,14 +45,17 @@ simulation-only signals during asymmetric actor-critic training.
 
 The output is exactly 18 actions in model-natural order: right arm (3), right leg
 (6), left arm (3), left leg (6). `head`, `neck_roll` and `neck_pitch` are observed
-but never output by this policy; the HMD controller owns them. Processed joint
-position targets are clipped to the robot configuration's 90% soft limits.
+but never output by this policy; the HMD controller owns them. The actor applies
+a per-joint asymmetric bounded transform before producing its 18 raw deltas.
+Processed joint-position targets therefore remain strictly inside the robot
+configuration's 90% soft limits; the environment and physical runtime retain
+their target clip as an independent defense.
 
-This is training/deployment contract **v4**. In v1, the observation fed back the
+This is training/deployment contract **v5**. In v1, the observation fed back the
 unbounded network output even when the actuator target had already saturated.
 That created a hidden recurrence and a flat action nullspace: the policy could
 keep producing larger shoulder/hip values while the robot received the same
-clipped target. V2 introduced, and v4 retains, this computation:
+clipped target. V2 introduced, and v5 retains, this computation:
 
 ```text
 absolute_target = default_joint_pos + raw_action * action_scale
@@ -61,11 +64,12 @@ effective_action = (clipped_target - default_joint_pos) / action_scale
 ```
 
 `effective_action` is the next observation in simulation and on the robot. ONNX
-metadata must contain training-contract version `4`, observation-schema version
+metadata must contain training-contract version `5`, observation-schema version
 `2`, and the exact semantic string
 `effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates`.
 The observation-schema version remains `2` because its 83 fields did not change.
-The runtime rejects missing, v1/v2/v3, or otherwise different training metadata.
+The runtime rejects missing, v1/v2/v3/v4, or otherwise different training
+metadata.
 
 Foot offsets are trained as stance/keypoint targets and fade out continuously as
 the walking command grows. Hand targets remain active while walking; each hand's
@@ -137,18 +141,19 @@ appeared to work.
 
 ## Training
 
-### V4 requires a clean run
+### V5 requires a clean run
 
-Do **not** resume a v1, v2 or v3 checkpoint. Their tensors have compatible
-widths, but v4 changes the target-limit objective and velocity-bootstrap
-normalizer contract. Every v4
+Do **not** resume a v1, v2, v3 or v4 checkpoint. Their tensors have compatible
+widths, but v5 changes stochastic and deterministic actor output to the bounded
+transform described below. It also retains v4's corrected target-limit objective
+and velocity-bootstrap normalizer contract. Every v5
 checkpoint stores the training-contract version and exact action
 semantic in `infos`; training resume, normal evaluation, automatic export and
 explicit export validate those markers before loading weights. They also require
 the checkpoint's internal iteration to equal its canonical `model_N.pt` suffix.
-An unversioned/v1 or versioned-v2/v3 checkpoint is intentionally unusable for
-v4 resume or export. The v1 diagnostics escape hatch below does not accept v2
-or v3.
+An unversioned/v1 or versioned-v2/v3/v4 checkpoint is intentionally unusable for
+v5 resume or export. The v1 diagnostics escape hatch below does not accept v2,
+v3 or v4.
 
 For historical comparison only, the evaluator has an explicit escape hatch:
 
@@ -199,7 +204,7 @@ arguments that would override the calculated resume fields. MjLab writes the
 continuation into a new timestamp directory; use that new directory name for a
 later continuation.
 
-V4 teaches capabilities in strict order. It begins with only locomotion over
+V5 teaches capabilities in strict order. It begins with only locomotion over
 `vx [-0.2, 0.3] m/s`, `vy [-0.1, 0.1] m/s`, moving yaw
 `[-0.4, 0.4] rad/s` and pure yaw `[-0.8, 0.8] rad/s`. At 1,000 iterations this
 widens to `[-0.4, 0.5]`, `[-0.2, 0.2]`, `[-0.8, 0.8]` and `[-1.5, 1.5]`
@@ -219,12 +224,41 @@ The live bridge projects every target at or below the inclusive `2.5 mm` floor
 band to that exact zero, so the canonical evaluator exercises `2.6 mm` as the
 first practical active value.
 
-Exploration uses an exact joint-ordered log-standard-deviation vector. Each
+The MLP output is the mean of a latent diagonal Gaussian. Each latent coordinate
+is mapped to its exact asymmetric, guarded raw-delta interval with a
+zero-anchored arctangent bijection:
+
+```text
+S = raw_upper                  when z >= 0
+S = -raw_lower                when z < 0
+action = 2*S/pi * atan(pi*z/(2*S))
+```
+
+Latent zero therefore remains raw action zero/default pose, and the derivative
+at zero is one from both sides. Every finite deterministic or sampled action is
+strictly inside its target limits. If a huge float32 latent value would round to
+the exact asymptote, it is moved one representable value inward. PPO evaluates a
+stored bounded action with the analytic inverse and Jacobian; KL is the
+equivalent latent-Gaussian KL, and ONNX contains the same deterministic
+transform. Exact-bound and non-finite actions are rejected by the probability
+calculation instead of being silently clamped.
+
+The actor interval normally moves each absolute soft limit inward by 5% of its
+span. If that would put the configured default on or outside the interval (the
+one-degree shoulder-roll side is the important case), that side is expanded
+only by `epsilon = min(1e-4 rad, half of each physical headroom)` around the
+default. Raw zero is therefore strictly interior without moving the default pose
+or giving up the physical guard. Export metadata records the exact 18 actor
+bounds, the wider hard-clip bounds, guard ratio and epsilon. The wider hard clip
+is deliberately retained as a second line of defense.
+
+Exploration uses an exact joint-ordered latent log-standard-deviation vector. Each
 initial standard deviation is one third of the nearest soft-limit headroom,
 capped at `0.15 rad`; shoulder roll is only `0.00581776 rad` (`0.333 deg`)
 because its home pose has one degree of headroom. Entropy bonus is zero. A
-normalized per-joint L1 target-clip-excess sum (weight `-2`) and actual joint-
-limit cost (weight `-10`) make saturation expensive. A second weight-`-1`
+normalized per-joint L1 target-clip-excess sum (weight `-2`) remains a defensive
+contract check, while the actual joint-limit cost (weight `-10`) makes dynamic
+overshoot expensive. A second weight-`-1`
 asymmetric per-joint L1 sum keeps a 5% target margin wherever possible, but
 expands that margin to include the configured default so raw action zero is
 always free. Summing rather than averaging prevents one unsafe joint from being
@@ -240,7 +274,7 @@ stepping cost.
 
 PPO uses a fixed `1e-4` learning rate and three learning epochs. There is no
 adaptive-KL reduction: a run whose recorded learning rate differs from `1e-4`
-is not this v4 recipe.
+is not this v5 recipe.
 
 Checkpoints and automatic ONNX exports are written under:
 
@@ -248,15 +282,15 @@ Checkpoints and automatic ONNX exports are written under:
 logs/rsl_rl/mjlab_microban_teleop/<timestamp>/
 ```
 
-On a **v4-only** resume, the teleop runner starts at the next (not repeated) PPO
+On a **v5-only** resume, the teleop runner starts at the next (not repeated) PPO
 iteration, restores the saved environment step counter, and materializes every
 curriculum stage due at that step before collecting another rollout. There is no
-legacy counter reconstruction or v1/v2/v3-to-v4 fine-tuning path; start a clean
+legacy counter reconstruction or v1/v2/v3/v4-to-v5 fine-tuning path; start a clean
 run.
 
 ### Optional pinned XC330 velocity actor bootstrap
 
-The preferred first v4 canary may initialize the shared actor inputs from the
+The preferred first v5 canary may initialize the shared actor inputs from the
 known XC330 velocity checkpoint. This is explicit opt-in, not resume. The loader
 requires the checkpoint path and exact SHA-256, verifies the 63-value source and
 83-value target layouts, then maps base angular velocity, gravity, 18 joint
@@ -268,7 +302,7 @@ statistics cannot be overwritten in the first few hundred teleop updates. The
 new columns remain identity-normalized and learn through their initially-zero
 first-layer weights. Downstream actor MLP layers are copied.
 
-This is a safety-critical v4 correction. In the rejected v3 canary
+This is a safety-critical v4 correction retained by v5. In the rejected v3 canary
 `2026-09-24_21-13-38`, the source count `1,474,560,000` was capped to
 `1,000,000`; it had already become `50,250,304` by `model_500`, while the mean
 shared-input standard deviation changed from `0.8574` to `0.3829`. Over the same
@@ -282,9 +316,9 @@ small at their hinges. That run must not be resumed.
 
 The action distribution, critic, optimizer and PPO iteration are deliberately
 not copied. Bootstrap plus `resume` is rejected, and an older teleop checkpoint
-is not a bootstrap source. Every resulting v4 checkpoint records the source path,
+is not a bootstrap source. Every resulting v5 checkpoint records the source path,
 SHA-256, mapping version, normalizer counts and non-copied components in
-`infos.velocity_actor_bootstrap`; that provenance is retained across a later v4
+`infos.velocity_actor_bootstrap`; that provenance is retained across a later v5
 resume. The currently audited source is checked into this repository so a fresh
 clone can run the exact canary without relying on an ignored local training
 directory:
@@ -294,22 +328,40 @@ checkpoints/xc330_velocity/model_14999.pt
 sha256 b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141
 ```
 
-Run the initial 501-update locomotion safety canary with the checked script. It
-verifies the local bytes before invoking the normal training wrapper, saves
-`model_500.pt` (checkpoint suffixes are zero-based), and uses a 50-iteration
-checkpoint interval for the v4 safety gates:
+First run the checked production-width preflight. It trains exactly two updates
+with 4,096 environments, saves the mapped velocity actor as
+`model_pristine.pt` before the first rollout, saves `model_0.pt` and
+`model_1.pt`, then evaluates all three deterministically for 300 neutral steps.
+It fails unless every checkpoint has zero falls/non-finite values/self-contact,
+target-clip fraction at most `0.001`, and actual soft-limit violation at most
+`1e-6 rad`:
+
+```bash
+scripts/run_microban_teleop_v5_preflight.sh
+```
+
+A 64-environment smoke is only an API check and is not a substitute for this
+gate: the first 4,096-environment PPO batch previously moved the unbounded actor
+in a different and unsafe direction. `model_pristine.pt` is diagnostics-only;
+resume, save-as-current and ONNX export reject it.
+
+After that passes, run the initial 501-update locomotion safety canary with the
+checked script. It verifies the local bootstrap bytes before invoking the normal
+training wrapper, also saves its own pristine baseline, saves `model_500.pt`
+(checkpoint suffixes are zero-based), and uses a 50-iteration checkpoint
+interval for the v5 safety gates:
 
 ```bash
 MICROBAN_TELEOP_NUM_ENVS=4096 \
 MICROBAN_TELEOP_TARGET_ITERS=501 \
-scripts/train_microban_teleop_v4_canary.sh
+scripts/train_microban_teleop_v5_canary.sh
 ```
 
 After the uninterrupted 501-update canary finishes, evaluate neutral
 deterministically at `model_0`, `model_50`, `model_100`, `model_250` and
-`model_500` before resuming beyond 501 updates. Target clipping must trend down
-and must be below the deployment threshold `0.001` at `model_500`; a rise, fall,
-non-finite value or actual joint-limit violation rejects the run. The script
+`model_500` before resuming beyond 501 updates. The bounded actor should keep
+target clipping exactly zero; any value above the deployment threshold `0.001`,
+fall, non-finite value or actual joint-limit violation rejects the run. The script
 keeps every 50th checkpoint so these gates do not depend on TensorBoard
 interpolation. Override
 `MICROBAN_TELEOP_SAVE_INTERVAL` only when deliberately running a shorter smoke.
@@ -319,11 +371,11 @@ envelope with the normal wrapper:
 ```bash
 MICROBAN_TELEOP_TARGET_ITERS=3000 \
 MICROBAN_TELEOP_SAVE_INTERVAL=50 \
-scripts/train_microban_teleop.sh resume <v4-canary-run>
+scripts/train_microban_teleop.sh resume <v5-canary-run>
 ```
 
 Resume writes a new timestamp directory. Record that continuation name from the
-console output and use it, not `<v4-canary-run>`, for evaluation and any later
+console output and use it, not `<v5-canary-run>`, for evaluation and any later
 resume.
 
 If the same audited bytes live elsewhere, set
@@ -445,12 +497,15 @@ uv run python -m mjlab_microban.scripts.export_teleop_onnx \
 ```
 
 The exporter rejects anything other than one fixed-width 18-action output. Its
-metadata contains `action_joint_names`, action-aligned defaults/gains/soft limits,
-`observation_joint_names`, all 21 observation-position defaults, 50 Hz control
-rate, the versioned training/observation schemas, effective-previous-action and
-target semantics, and a legacy `joint_names` alias. This avoids the generic MJLab exporter bug for
-subset-action policies, where 21 joint names could be paired with only 18
-actions.
+metadata contains `action_joint_names`, action-aligned defaults/gains/soft
+limits, the derived raw-action lower/upper bounds as full-precision JSON strings
+(the generic three-decimal list serializer is unsafe for the `1e-4 rad`
+shoulder allowance), bounded-distribution
+semantics, `observation_joint_names`, all 21 observation-position defaults,
+50 Hz control rate, the versioned training/observation schemas,
+effective-previous-action and target semantics, and a legacy `joint_names`
+alias. This avoids the generic MJLab exporter bug for subset-action policies,
+where 21 joint names could be paired with only 18 actions.
 
 ## Live PICO mapping
 

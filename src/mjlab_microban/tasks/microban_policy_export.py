@@ -87,11 +87,13 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "4"
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "5"
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
 )
+MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO = 0.05
+MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD = 1.0e-4
 
 # A fixed, deterministic input corpus makes the checkpoint -> PyTorch -> ONNX
 # comparison reproducible on every export host.  The tolerances allow ordinary
@@ -103,13 +105,90 @@ TELEOP_ONNX_PARITY_SAMPLE_COUNT = 16
 TELEOP_ONNX_PARITY_ATOL = 1e-5
 TELEOP_ONNX_PARITY_RTOL = 1e-4
 
-_CHECKPOINT_NAME_RE = re.compile(r"model_(\d+)\.pt")
+_CHECKPOINT_NAME_RE = re.compile(r"model_(?:(\d+)|(pristine))\.pt")
+_BOUNDED_ACTOR_BUFFER_KEYS = (
+    "distribution.lower_bound",
+    "distribution.upper_bound",
+    "distribution.inward_lower_bound",
+    "distribution.inward_upper_bound",
+)
 
 if MICROBAN_TELEOP_OBSERVATION_WIDTH != 83:
     raise RuntimeError(
         "Microban teleop observation schema must total 83 values, got "
         f"{MICROBAN_TELEOP_OBSERVATION_WIDTH}"
     )
+
+
+def guarded_teleop_actor_raw_bounds(
+    default_joint_pos: list[float] | tuple[float, ...],
+    soft_joint_pos_lower: list[float] | tuple[float, ...],
+    soft_joint_pos_upper: list[float] | tuple[float, ...],
+    action_scale: list[float] | tuple[float, ...],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Derive zero-interior actor bounds inside the physical soft limits.
+
+    The usual five-percent target guard can place a shoulder default exactly on
+    its preferred interval boundary because that pose has only one degree of
+    soft-limit headroom.  A bijection requires zero to be strictly interior, so
+    the guarded interval expands by at most ``1e-4 rad`` around the default on
+    such a side.  This preserves essentially the complete physical guard while
+    keeping the environment/runtime hard clip independent and wider.
+    """
+
+    width = MICROBAN_TELEOP_ACTION_WIDTH
+    vectors = {
+        "default_joint_pos": tuple(default_joint_pos),
+        "soft_joint_pos_lower": tuple(soft_joint_pos_lower),
+        "soft_joint_pos_upper": tuple(soft_joint_pos_upper),
+        "action_scale": tuple(action_scale),
+    }
+    for name, values in vectors.items():
+        if len(values) != width:
+            raise ValueError(f"{name} must contain exactly {width} values")
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError(f"{name} must contain only finite values")
+
+    raw_lower: list[float] = []
+    raw_upper: list[float] = []
+    for default, lower, upper, scale in zip(
+        vectors["default_joint_pos"],
+        vectors["soft_joint_pos_lower"],
+        vectors["soft_joint_pos_upper"],
+        vectors["action_scale"],
+        strict=True,
+    ):
+        default = float(default)
+        lower = float(lower)
+        upper = float(upper)
+        scale = float(scale)
+        if not lower < default < upper:
+            raise ValueError("Every default joint position must be inside soft limits")
+        if scale <= 0.0:
+            raise ValueError("Every teleop action scale must be positive")
+        span = upper - lower
+        epsilon = min(
+            MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD,
+            0.5 * (default - lower),
+            0.5 * (upper - default),
+        )
+        target_lower = min(
+            default - epsilon,
+            lower + MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO * span,
+        )
+        target_upper = max(
+            default + epsilon,
+            upper - MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO * span,
+        )
+        bounded_lower = (target_lower - default) / scale
+        bounded_upper = (target_upper - default) / scale
+        if not bounded_lower < 0.0 < bounded_upper:
+            raise ValueError("Every guarded actor interval must strictly contain zero")
+        if not (lower < target_lower < default < target_upper < upper):
+            raise ValueError("Every guarded actor target must stay inside soft limits")
+        raw_lower.append(bounded_lower)
+        raw_upper.append(bounded_upper)
+    return tuple(raw_lower), tuple(raw_upper)
 
 
 @dataclass(frozen=True)
@@ -126,12 +205,15 @@ class TeleopExportProvenance:
     def metadata(self, *, parity_verified: bool = True) -> dict[str, str]:
         """Return unambiguous string metadata for the deployment artifact."""
 
+        iteration_semantics = (
+            "pristine_velocity_bootstrap_before_first_ppo_update"
+            if self.checkpoint_iteration == -1
+            else "zero_based_completed_update_index_from_model_filename"
+        )
         metadata = {
             "checkpoint_filename": self.checkpoint_path.name,
             "checkpoint_iteration": str(self.checkpoint_iteration),
-            "checkpoint_iteration_semantics": (
-                "zero_based_completed_update_index_from_model_filename"
-            ),
+            "checkpoint_iteration_semantics": iteration_semantics,
             "checkpoint_completed_updates": str(self.checkpoint_iteration + 1),
             "checkpoint_sha256": self.checkpoint_sha256,
             "exporter_source_commit": self.exporter_source_commit,
@@ -158,6 +240,7 @@ class TeleopCheckpointContract:
     iteration: int
     common_step_counter: int
     diagnostic_legacy: bool = False
+    pristine_pre_update: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,9 +303,9 @@ def collect_teleop_export_provenance(
 ) -> TeleopExportProvenance:
     """Capture checkpoint bytes, iteration, and exporter source identity.
 
-    Checkpoints must retain RSL-RL's ``model_<N>.pt`` name.  Treating an
-    arbitrary filename as an iteration would make later audit/reproduction
-    ambiguous.
+    Checkpoints must retain RSL-RL's ``model_<N>.pt`` name or the explicit
+    ``model_pristine.pt`` pre-update name. Treating an arbitrary filename as an
+    iteration would make later audit/reproduction ambiguous.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
@@ -231,10 +314,11 @@ def collect_teleop_export_provenance(
     match = _CHECKPOINT_NAME_RE.fullmatch(checkpoint.name)
     if match is None:
         raise ValueError(
-            "Checkpoint filename must be model_<iteration>.pt for provenance, "
+            "Checkpoint filename must be model_<iteration>.pt or "
+            "model_pristine.pt for provenance, "
             f"got {checkpoint.name!r}"
         )
-    iteration = int(match.group(1))
+    iteration = int(match.group(1)) if match.group(1) is not None else -1
     source_path = Path(__file__).resolve()
     source_commit, source_dirty = _git_source_state(source_path)
     return TeleopExportProvenance(
@@ -255,22 +339,23 @@ def validate_teleop_checkpoint_contract(
 ) -> TeleopCheckpointContract:
     """Reject checkpoints trained with a different observation/action contract.
 
-    Older checkpoints can have the same tensor widths as v4, so PyTorch can load
-    them without an error and an exporter could otherwise attach current v4
+    Older checkpoints can have the same tensor widths as v5, so PyTorch can load
+    them without an error and an exporter could otherwise attach current v5
     metadata to incompatible training semantics. Validation happens before any
     actor state is loaded. The only legacy escape hatch is explicitly marked
-    diagnostic use for an unversioned v1 checkpoint; v2/v3 must never resume into
-    v4, and the runner forbids optimizer/iteration resume in diagnostic mode.
+    diagnostic use for an unversioned v1 checkpoint; v2/v3/v4 must never resume
+    into v5, and the runner forbids optimizer/iteration resume in diagnostic mode.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
     match = _CHECKPOINT_NAME_RE.fullmatch(checkpoint.name)
     if match is None:
         raise ValueError(
-            "Checkpoint filename must be model_<iteration>.pt for contract "
+            "Checkpoint filename must be model_<iteration>.pt or "
+            "model_pristine.pt for contract "
             f"validation, got {checkpoint.name!r}"
         )
-    expected_iteration = int(match.group(1))
+    expected_iteration = int(match.group(1)) if match.group(1) is not None else -1
     loaded = torch.load(checkpoint, map_location=map_location, weights_only=False)
     if not isinstance(loaded, dict):
         raise TypeError("Teleop checkpoint must contain a dictionary")
@@ -281,8 +366,8 @@ def validate_teleop_checkpoint_contract(
         or iteration != expected_iteration
     ):
         raise ValueError(
-            "Checkpoint internal iteration must match its model_<iteration>.pt "
-            f"filename ({iteration!r} != {expected_iteration})"
+            "Checkpoint internal iteration must match its canonical filename "
+            f"({iteration!r} != {expected_iteration})"
         )
 
     infos = loaded.get("infos")
@@ -300,6 +385,17 @@ def validate_teleop_checkpoint_contract(
         raise ValueError(
             "Teleop checkpoint common_step_counter must be a non-negative integer"
         )
+    pristine_pre_update = infos.get("pristine_pre_update")
+    if expected_iteration == -1:
+        if pristine_pre_update is not True or common_step_counter != 0:
+            raise ValueError(
+                "model_pristine.pt requires pristine_pre_update=true and "
+                "common_step_counter=0"
+            )
+    elif pristine_pre_update not in (None, False):
+        raise ValueError(
+            "Only model_pristine.pt may carry the pristine_pre_update marker"
+        )
 
     version = infos.get("microban_teleop_training_contract_version")
     semantics = infos.get("previous_action_semantics")
@@ -310,20 +406,75 @@ def validate_teleop_checkpoint_contract(
             iteration=iteration,
             common_step_counter=common_step_counter,
             diagnostic_legacy=True,
+            pristine_pre_update=False,
         )
     if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
         raise ValueError(
-            "Checkpoint is not Microban teleop training contract v4; v1/v2/v3 "
+            "Checkpoint is not Microban teleop training contract v5; v1/v2/v3/v4 "
             "checkpoints require a clean retrain and cannot be resumed/exported"
         )
     if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
-        raise ValueError("Checkpoint previous-action semantics do not match v4")
+        raise ValueError("Checkpoint previous-action semantics do not match v5")
     return TeleopCheckpointContract(
         version=version,
         previous_action_semantics=semantics,
         iteration=iteration,
         common_step_counter=common_step_counter,
+        pristine_pre_update=expected_iteration == -1,
     )
+
+
+def validate_bounded_actor_checkpoint_buffers(
+    checkpoint_path: str | Path,
+    expected_actor_state: Mapping[str, object],
+    *,
+    map_location: str | torch.device | None = "cpu",
+) -> None:
+    """Reject a v5 checkpoint whose persisted transform bounds can drift.
+
+    RSL-RL includes registered distribution buffers in ``actor_state_dict`` and
+    ``load_state_dict`` would otherwise overwrite the bounds derived from the
+    current robot/default/guard contract.  Compare all four physical/inward
+    buffers exactly before any actor weights are installed.
+    """
+
+    loaded = torch.load(
+        Path(checkpoint_path).resolve(),
+        map_location=map_location,
+        weights_only=False,
+    )
+    if not isinstance(loaded, dict):
+        raise TypeError("Teleop checkpoint must contain a dictionary")
+    checkpoint_actor_state = loaded.get("actor_state_dict")
+    if not isinstance(checkpoint_actor_state, Mapping):
+        raise TypeError("Teleop checkpoint has no actor_state_dict mapping")
+
+    for key in _BOUNDED_ACTOR_BUFFER_KEYS:
+        candidate = checkpoint_actor_state.get(key)
+        expected = expected_actor_state.get(key)
+        if not isinstance(candidate, torch.Tensor):
+            raise TypeError(f"Checkpoint actor is missing Tensor {key!r}")
+        if not isinstance(expected, torch.Tensor):
+            raise TypeError(f"Current bounded actor is missing Tensor {key!r}")
+        if candidate.shape != expected.shape:
+            raise ValueError(
+                f"Checkpoint actor buffer {key!r} shape differs from current "
+                f"contract: {tuple(candidate.shape)} != {tuple(expected.shape)}"
+            )
+        if candidate.dtype != expected.dtype:
+            raise ValueError(
+                f"Checkpoint actor buffer {key!r} dtype differs from current "
+                f"contract: {candidate.dtype} != {expected.dtype}"
+            )
+        if not bool(torch.isfinite(expected).all().item()):
+            raise ValueError(f"Current bounded actor buffer {key!r} is non-finite")
+        if not bool(torch.isfinite(candidate).all().item()):
+            raise ValueError(f"Checkpoint actor buffer {key!r} is non-finite")
+        if not torch.equal(candidate.detach().cpu(), expected.detach().cpu()):
+            raise ValueError(
+                f"Checkpoint actor buffer {key!r} differs from the current "
+                "guarded action-bound contract"
+            )
 
 
 def _representative_observation_bounds() -> tuple[np.ndarray, np.ndarray]:
@@ -695,6 +846,60 @@ def get_microban_teleop_metadata(
     soft_lower = [float(bounds[0]) for bounds in soft_limits]
     soft_upper = [float(bounds[1]) for bounds in soft_limits]
 
+    scale = torch.as_tensor(
+        action.scale,
+        dtype=robot.data.default_joint_pos.dtype,
+        device=robot.data.default_joint_pos.device,
+    )
+    offset = torch.as_tensor(
+        action.offset,
+        dtype=robot.data.default_joint_pos.dtype,
+        device=robot.data.default_joint_pos.device,
+    )
+    if scale.ndim == 0:
+        scale = scale.expand(MICROBAN_TELEOP_ACTION_WIDTH)
+    else:
+        scale = scale[0]
+    if offset.ndim == 0:
+        offset = offset.expand(MICROBAN_TELEOP_ACTION_WIDTH)
+    else:
+        offset = offset[0]
+    if tuple(scale.shape) != (MICROBAN_TELEOP_ACTION_WIDTH,) or not bool(
+        torch.all(torch.isfinite(scale) & (scale > 0.0)).item()
+    ):
+        raise ValueError("Microban teleop action scale must be finite and positive")
+    if tuple(offset.shape) != (MICROBAN_TELEOP_ACTION_WIDTH,) or not bool(
+        torch.isfinite(offset).all().item()
+    ):
+        raise ValueError("Microban teleop action offset must be finite")
+    if not torch.allclose(
+        offset,
+        robot.data.default_joint_pos[0, action_joint_ids],
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise ValueError("Microban teleop action offset must equal its default pose")
+    soft_limits_tensor = torch.as_tensor(
+        soft_limits,
+        dtype=offset.dtype,
+        device=offset.device,
+    )
+    raw_soft_lower = ((soft_limits_tensor[:, 0] - offset) / scale).tolist()
+    raw_soft_upper = ((soft_limits_tensor[:, 1] - offset) / scale).tolist()
+    if not all(
+        math.isfinite(lower) and math.isfinite(upper) and lower < 0.0 < upper
+        for lower, upper in zip(raw_soft_lower, raw_soft_upper, strict=True)
+    ):
+        raise ValueError(
+            "Microban teleop defaults must lie strictly inside every raw action bound"
+        )
+    actor_raw_lower, actor_raw_upper = guarded_teleop_actor_raw_bounds(
+        [float(value) for value in offset.tolist()],
+        soft_lower,
+        soft_upper,
+        [float(value) for value in scale.tolist()],
+    )
+
     actor_terms = list(env.observation_manager.active_terms["actor"])
     input_schema = dict(MICROBAN_TELEOP_OBSERVATION_SCHEMA)
     (
@@ -725,6 +930,25 @@ def get_microban_teleop_metadata(
         "default_joint_pos": default_joint_pos,
         "soft_joint_pos_lower": soft_lower,
         "soft_joint_pos_upper": soft_upper,
+        # MJLab formats list metadata to only three decimals, which would turn
+        # the shoulder's 1e-4-rad interior allowance into signed zero.  JSON
+        # strings preserve the exact v5 safety bounds through ONNX metadata.
+        "raw_action_soft_lower_json": json.dumps(
+            [float(value) for value in raw_soft_lower], separators=(",", ":")
+        ),
+        "raw_action_soft_upper_json": json.dumps(
+            [float(value) for value in raw_soft_upper], separators=(",", ":")
+        ),
+        "actor_raw_action_lower_json": json.dumps(
+            list(actor_raw_lower), separators=(",", ":")
+        ),
+        "actor_raw_action_upper_json": json.dumps(
+            list(actor_raw_upper), separators=(",", ":")
+        ),
+        "actor_target_guard_margin_ratio": (MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO),
+        "actor_default_interior_epsilon_rad": (
+            MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD
+        ),
         "command_names": list(env.command_manager.active_terms),
         "observation_names": actor_terms,
         "observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
@@ -741,6 +965,10 @@ def get_microban_teleop_metadata(
         "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
         "action_target_semantics": "default_joint_pos_plus_raw_action_times_scale",
         "action_clip_semantics": "absolute_joint_position_radians",
+        "action_distribution_semantics": (
+            "diagonal_normal_latent_with_per_joint_asymmetric_zero_anchored_"
+            "arctan_bijection_v1"
+        ),
         "foot_target_semantics": (
             "left_xyz_then_right_xyz_trunk_frame_offset_from_episode_reset_"
             "reference_metres_periodic_command_resampling_does_not_move_reference"
@@ -829,7 +1057,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         log_dir: str | None = None,
         device: str = "cpu",
     ) -> None:
-        """Construct a fresh v4 runner and optionally bootstrap its actor only.
+        """Construct a fresh v5 runner and optionally bootstrap its actor only.
 
         Bootstrap options are removed before RSL-RL sees the config.  Requiring
         both an explicit path and SHA-256 prevents a similarly named or replaced
@@ -839,6 +1067,9 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         runner_cfg = deepcopy(train_cfg)
         bootstrap_path = runner_cfg.pop("bootstrap_velocity_checkpoint", None)
         bootstrap_sha256 = runner_cfg.pop("bootstrap_velocity_checkpoint_sha256", None)
+        save_pristine_checkpoint = bool(
+            runner_cfg.pop("save_pristine_checkpoint", False)
+        )
         if (bootstrap_path is None) != (bootstrap_sha256 is None):
             raise ValueError(
                 "Velocity actor bootstrap requires both checkpoint path and SHA-256"
@@ -848,6 +1079,13 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                 "Velocity actor bootstrap is only valid for a fresh run and cannot "
                 "be combined with teleop checkpoint resume"
             )
+        if save_pristine_checkpoint and bootstrap_path is None:
+            raise ValueError(
+                "A pristine teleop checkpoint is only meaningful with an explicit "
+                "velocity actor bootstrap"
+            )
+        if save_pristine_checkpoint and log_dir is None:
+            raise ValueError("A pristine teleop checkpoint requires a runner log_dir")
 
         super().__init__(env, runner_cfg, log_dir=log_dir, device=device)
         self.loaded_checkpoint_contract = None
@@ -902,6 +1140,38 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             f"(sha256={self.bootstrap_velocity_provenance.checkpoint_sha256}, "
             "critic/distribution/optimizer not copied)"
         )
+        if save_pristine_checkpoint and self.gpu_global_rank == 0:
+            assert log_dir is not None
+            self._save_pristine_checkpoint(Path(log_dir) / "model_pristine.pt")
+
+    def _save_pristine_checkpoint(self, path: Path) -> None:
+        """Atomically save the mapped actor before the first PPO rollout/update."""
+
+        if self.velocity_actor_bootstrap_info is None:
+            raise RuntimeError("Pristine checkpoint requires velocity bootstrap info")
+        if self.env.unwrapped.common_step_counter != 0:
+            raise ValueError("Pristine checkpoint requires common_step_counter == 0")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise FileExistsError(f"Refusing to replace pristine checkpoint: {path}")
+        payload = self.alg.save()
+        payload["iter"] = -1
+        payload["infos"] = {
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "velocity_actor_bootstrap": deepcopy(self.velocity_actor_bootstrap_info),
+            "env_state": {"common_step_counter": 0},
+            "pristine_pre_update": True,
+        }
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            torch.save(payload, temporary)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(f"[INFO] Saved pristine pre-update checkpoint: {path}")
 
     def _require_nonlegacy_deployment_contract(self) -> None:
         """Prevent diagnostic v1 weights from ever being saved or exported.
@@ -909,7 +1179,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         ``allow_legacy_teleop_contract`` exists solely so the deterministic
         evaluator can characterize the final v1 run.  Once those weights are
         resident in a runner, every path that could create a checkpoint or ONNX
-        must fail before writing anything; otherwise current v4 metadata could
+        must fail before writing anything; otherwise current v5 metadata could
         be attached to an observation-incompatible actor.
         """
 
@@ -917,7 +1187,12 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if contract is not None and contract.diagnostic_legacy:
             raise ValueError(
                 "Legacy teleop checkpoints are diagnostics-only and cannot be "
-                "saved, exported, or tagged with v4 metadata"
+                "saved, exported, or tagged with v5 metadata"
+            )
+        if contract is not None and contract.pristine_pre_update:
+            raise ValueError(
+                "Pristine pre-update checkpoints are safety diagnostics-only and "
+                "cannot be saved or exported"
             )
 
     def load(
@@ -928,7 +1203,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         map_location: str | None = None,
         allow_legacy_teleop_contract: bool = False,
     ) -> dict:
-        """Validate v4 semantics, then load at the next PPO iteration.
+        """Validate v5 semantics, then load at the next PPO iteration.
 
         RSL-RL stores the zero-based iteration that has just completed.  Its
         default loader resumes *at* that index, repeating one PPO update.  This
@@ -942,7 +1217,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if getattr(self, "bootstrap_velocity_provenance", None) is not None:
             raise ValueError(
                 "A velocity-bootstrapped fresh runner cannot also load a teleop "
-                "checkpoint; construct a non-bootstrap runner to resume v4"
+                "checkpoint; construct a non-bootstrap runner to resume v5"
             )
         loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
         contract = validate_teleop_checkpoint_contract(
@@ -964,6 +1239,26 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                     "Legacy teleop checkpoints permit only an explicit actor-only "
                     "diagnostic load and cannot resume training"
                 )
+        if contract.pristine_pre_update:
+            actor_only = (
+                load_cfg is not None
+                and load_cfg.get("actor") is True
+                and not any(
+                    bool(load_cfg.get(name, False))
+                    for name in ("critic", "optimizer", "iteration", "rnd")
+                )
+            )
+            if not actor_only:
+                raise ValueError(
+                    "Pristine pre-update checkpoints permit only an explicit "
+                    "actor-only diagnostic load and cannot resume training"
+                )
+        if not contract.diagnostic_legacy:
+            validate_bounded_actor_checkpoint_buffers(
+                path,
+                self.alg.get_policy().state_dict(),
+                map_location=map_location or "cpu",
+            )
         self.loaded_checkpoint_contract = contract
         infos = super().load(
             path,
@@ -1050,7 +1345,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         filename: str = "policy.onnx",
         verbose: bool = False,
     ) -> None:
-        """Export only fresh/resumed v4 weights, never legacy diagnostic weights."""
+        """Export only fresh/resumed v5 weights, never legacy diagnostic weights."""
 
         self._require_nonlegacy_deployment_contract()
         super().export_policy_to_onnx(path, filename, verbose)

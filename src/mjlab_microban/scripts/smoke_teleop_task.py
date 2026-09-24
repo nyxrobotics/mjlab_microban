@@ -32,6 +32,8 @@ from mjlab_microban.tasks.mdp import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
+    MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD,
+    MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
     get_microban_teleop_metadata,
@@ -348,6 +350,39 @@ def main() -> None:
         ):
             if len(metadata[key]) != 18:
                 raise AssertionError(f"Metadata field {key!r} is not action-aligned")
+        if metadata["actor_target_guard_margin_ratio"] != (
+            MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO
+        ):
+            raise AssertionError("Metadata actor target guard ratio drifted")
+        if metadata["actor_default_interior_epsilon_rad"] != (
+            MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD
+        ):
+            raise AssertionError("Metadata actor default epsilon drifted")
+        if metadata["action_distribution_semantics"] != (
+            "diagonal_normal_latent_with_per_joint_asymmetric_zero_anchored_"
+            "arctan_bijection_v1"
+        ):
+            raise AssertionError("Metadata bounded action semantics drifted")
+        exact_bounds = {
+            name: json.loads(metadata[f"{name}_json"])
+            for name in (
+                "actor_raw_action_lower",
+                "actor_raw_action_upper",
+                "raw_action_soft_lower",
+                "raw_action_soft_upper",
+            )
+        }
+        if any(len(values) != 18 for values in exact_bounds.values()):
+            raise AssertionError("Exact JSON action bounds are not action-aligned")
+        for actor_lower, actor_upper, soft_lower, soft_upper in zip(
+            exact_bounds["actor_raw_action_lower"],
+            exact_bounds["actor_raw_action_upper"],
+            exact_bounds["raw_action_soft_lower"],
+            exact_bounds["raw_action_soft_upper"],
+            strict=True,
+        ):
+            if not soft_lower < actor_lower < 0.0 < actor_upper < soft_upper:
+                raise AssertionError("Actor bounds are not guarded inside soft bounds")
         if len(metadata["observation_default_joint_pos"]) != 21:
             raise AssertionError(
                 "Metadata observation_default_joint_pos is not observation-aligned"

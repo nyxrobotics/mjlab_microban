@@ -28,7 +28,7 @@ import torch
 VELOCITY_ACTOR_OBSERVATION_WIDTH = 63
 TELEOP_ACTOR_OBSERVATION_WIDTH = 83
 VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION = (
-    "xc330_velocity_63_to_teleop_83_v2_preserve_normalizer_count"
+    "xc330_velocity_63_to_teleop_83_v3_bounded_actor_preserve_normalizer_count"
 )
 
 # velocity: base_ang_vel(3), gravity(3), joint_pos(18), joint_vel(18),
