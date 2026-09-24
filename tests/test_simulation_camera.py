@@ -18,6 +18,7 @@ import mujoco
 import numpy as np
 
 from mjlab_microban.scripts.simulation_camera import (
+    CAMERA_SCHEMA,
     EXPECTED_BASELINE_M,
     EYE_ASPECT,
     EYE_HEIGHT_PX,
@@ -29,6 +30,7 @@ from mjlab_microban.scripts.simulation_camera import (
     VERTICAL_FOV_DEG,
     _FrameStore,
     _LoopbackHttpServer,
+    camera_geometry_sha256,
     _point_scene_camera_at_site,
     camera_geometry_dict,
     validate_simulation_camera_model,
@@ -48,6 +50,7 @@ ROBOT_XML = (
 class CameraGeometryTests(unittest.TestCase):
     def test_advertised_intrinsics_are_exact_for_render_dimensions(self) -> None:
         geometry = camera_geometry_dict()
+        self.assertEqual(geometry["schema"], CAMERA_SCHEMA)
         self.assertEqual(geometry["eye_width_px"], EYE_WIDTH_PX)
         self.assertEqual(geometry["eye_height_px"], EYE_HEIGHT_PX)
         self.assertEqual(geometry["sbs_width_px"], 2 * EYE_WIDTH_PX)
@@ -139,6 +142,74 @@ class LoopbackMjpegServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["frame_sequence"], 1)
         self.assertEqual(payload["geometry"]["eye_width_px"], EYE_WIDTH_PX)
+        self.assertEqual(payload["geometry_sha256"], camera_geometry_sha256())
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=2.0
+        )
+        connection.request("GET", "/calibration.json")
+        response = connection.getresponse()
+        calibration = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calibration["geometry"]["schema"], CAMERA_SCHEMA)
+        self.assertEqual(
+            calibration["geometry_sha256"], camera_geometry_sha256()
+        )
+        self.assertEqual(calibration["latest_frame_path"], "/frame.jpg")
+        self.assertEqual(calibration["max_frame_age_ms"], 250)
+
+    def test_latest_frame_endpoint_is_one_slot_and_freshness_annotated(self) -> None:
+        first = b"\xff\xd8first\xff\xd9"
+        second = b"\xff\xd8second\xff\xd9"
+        self.store.publish(first)
+        self.store.publish(second)
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=2.0
+        )
+        connection.request("GET", "/frame.jpg?after=0&wait_ms=0")
+        response = connection.getresponse()
+        payload = response.read()
+        headers = dict(response.getheaders())
+        connection.close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload, second)
+        self.assertEqual(headers["X-Microban-Camera-Schema"], CAMERA_SCHEMA)
+        self.assertEqual(headers["X-Microban-Frame-Sequence"], "2")
+        self.assertGreaterEqual(int(headers["X-Microban-Frame-Age-Ns"]), 0)
+        self.assertEqual(
+            headers["X-Microban-Geometry-SHA256"], camera_geometry_sha256()
+        )
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=2.0
+        )
+        connection.request("GET", "/frame.jpg?after=2&wait_ms=0")
+        response = connection.getresponse()
+        self.assertEqual(response.read(), b"")
+        connection.close()
+        self.assertEqual(response.status, 204)
+
+    def test_latest_frame_endpoint_rejects_ambiguous_or_unbounded_query(self) -> None:
+        for path in (
+            "/frame.jpg?after=1&after=2",
+            "/frame.jpg?after=-1",
+            "/frame.jpg?wait_ms=1001",
+            "/frame.jpg?unknown=1",
+            "/frame.jpg?after=not-a-number",
+        ):
+            with self.subTest(path=path):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.port, timeout=2.0
+                )
+                connection.request("GET", path)
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(response.status, 400)
 
     def test_stream_is_sbs_mjpeg_compatible(self) -> None:
         jpeg = b"\xff\xd8test\xff\xd9"

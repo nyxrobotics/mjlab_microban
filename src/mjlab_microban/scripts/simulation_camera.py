@@ -17,6 +17,7 @@ different camera transform and works with the model actually used by the task.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
@@ -26,6 +27,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import mujoco
 import numpy as np
@@ -50,6 +52,9 @@ VERTICAL_FOV_DEG = math.degrees(2.0 * math.atan(VERTICAL_TAN))
 TAN_BOUNDS = (HORIZONTAL_TAN, HORIZONTAL_TAN, VERTICAL_TAN, VERTICAL_TAN)
 EXPECTED_BASELINE_M = math.sqrt(0.059016**2 + 0.000051**2)
 MJPEG_BOUNDARY = "microban-sim-frame"
+CAMERA_SCHEMA = "microban_sim_stereo_camera_v1"
+LATEST_FRAME_PATH = "/frame.jpg"
+MAX_LATEST_WAIT_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -72,7 +77,23 @@ class SimulationCameraGeometry:
 
 
 def camera_geometry_dict() -> dict[str, Any]:
-    return asdict(SimulationCameraGeometry())
+    return {
+        "schema": CAMERA_SCHEMA,
+        **asdict(SimulationCameraGeometry()),
+    }
+
+
+def camera_geometry_sha256() -> str:
+    """Fingerprint the exact geometry attached to every latest-frame reply."""
+
+    payload = json.dumps(
+        camera_geometry_dict(),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _site_id(model: mujoco.MjModel, name: str) -> int:
@@ -200,9 +221,12 @@ class _MjpegHandler(BaseHTTPRequestHandler):
         return self.server.frame_store  # type: ignore[attr-defined, no-any-return]
 
     def do_GET(self) -> None:
-        if self.path == "/stream":
+        request = urlsplit(self.path)
+        if request.path == "/stream" and not request.query:
             self._stream()
-        elif self.path == "/healthz":
+        elif request.path == LATEST_FRAME_PATH:
+            self._latest_frame(request.query)
+        elif request.path == "/healthz" and not request.query:
             age_s = (
                 None
                 if self.frame_store.captured_at_s == 0.0
@@ -215,12 +239,85 @@ class _MjpegHandler(BaseHTTPRequestHandler):
                     "frame_sequence": self.frame_store.sequence,
                     "frame_age_s": age_s,
                     "geometry": camera_geometry_dict(),
+                    "geometry_sha256": camera_geometry_sha256(),
                 }
             )
-        elif self.path == "/calibration.json":
-            self._json(camera_geometry_dict())
+        elif request.path == "/calibration.json" and not request.query:
+            self._json(
+                {
+                    "geometry": camera_geometry_dict(),
+                    "geometry_sha256": camera_geometry_sha256(),
+                    "latest_frame_path": LATEST_FRAME_PATH,
+                    "max_frame_age_ms": 250,
+                }
+            )
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _latest_frame(self, query: str) -> None:
+        """Return one latest-only JPEG with conservative freshness metadata.
+
+        A client supplies the last sequence it displayed.  The frame store has
+        one slot, so a slow client skips intermediate frames instead of draining
+        an old socket backlog.  ``X-Microban-Frame-Age-Ns`` is measured on the
+        PC immediately before the response; the headset must add its own whole
+        request/decode elapsed time before applying the 250 ms display gate.
+        """
+
+        try:
+            values = parse_qs(
+                query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=2,
+            )
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid latest-frame query")
+            return
+        if set(values) - {"after", "wait_ms"} or any(
+            len(items) != 1 for items in values.values()
+        ):
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid latest-frame query")
+            return
+        try:
+            after_text = values.get("after", ["0"])[0]
+            wait_text = values.get("wait_ms", ["0"])[0]
+            if not after_text.isascii() or not after_text.isdecimal():
+                raise ValueError
+            if not wait_text.isascii() or not wait_text.isdecimal():
+                raise ValueError
+            after = int(after_text)
+            wait_ms = int(wait_text)
+            if after < 0 or after > (1 << 63) - 1:
+                raise ValueError
+            if wait_ms < 0 or wait_ms > MAX_LATEST_WAIT_MS:
+                raise ValueError
+        except (ValueError, OverflowError):
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid latest-frame bounds")
+            return
+
+        frame = self.frame_store.wait_after(after, timeout_s=wait_ms / 1000.0)
+        if frame is None:
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        sequence, jpeg, captured_at_s = frame
+        age_ns = max(0, math.ceil((time.monotonic() - captured_at_s) * 1.0e9))
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpeg)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Microban-Camera-Schema", CAMERA_SCHEMA)
+        self.send_header("X-Microban-Frame-Sequence", str(sequence))
+        self.send_header("X-Microban-Frame-Age-Ns", str(age_ns))
+        self.send_header(
+            "X-Microban-Geometry-SHA256", camera_geometry_sha256()
+        )
+        self.end_headers()
+        self.wfile.write(jpeg)
 
     def _json(self, value: Any) -> None:
         payload = json.dumps(value, sort_keys=True).encode("utf-8")
