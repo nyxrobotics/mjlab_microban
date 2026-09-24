@@ -66,6 +66,19 @@ Start the training with:
 uv run train Mjlab-Velocity-Microban --env.scene.num-envs 4096
 ```
 
+For the PICO 4 Ultra hybrid teleoperation policy, use the checked wrapper so
+the smoke gate, seeds, environment count, checkpoint cadence and local logger
+are reproducible:
+
+```bash
+scripts/train_microban_teleop.sh smoke
+scripts/train_microban_teleop.sh train
+```
+
+The complete observation/action contract, staged curriculum, resume and safe
+18-action ONNX export procedure are in
+[`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
+
 Once training is complete, play back a checkpoint with:
 
 ```
