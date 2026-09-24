@@ -28,7 +28,20 @@ import torch
 VELOCITY_ACTOR_OBSERVATION_WIDTH = 63
 TELEOP_ACTOR_OBSERVATION_WIDTH = 83
 VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION = (
-    "xc330_velocity_63_to_teleop_83_v3_bounded_actor_preserve_normalizer_count"
+    "xc330_velocity_63_to_teleop_83_v4_guarded_shoulder_roll_head"
+)
+# The common ±10-degree shoulder-roll home pose starts only one degree inside
+# its soft limit.  Copying the velocity actor's state-dependent shoulder rows
+# verbatim makes the first PPO update seed-sensitive: one observed
+# production-width seed held the target at the neutral edge long enough for
+# gravity to pull the measured joint beyond the soft limit.  Initialize only
+# these two rows to a deterministic inward target.
+# The rest of the velocity actor remains byte-for-byte mapped, and the rows are
+# ordinary trainable parameters after initialization.
+TELEOP_SHOULDER_ROLL_ACTION_INDICES: tuple[int, int] = (1, 10)
+TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES: tuple[float, float] = (-0.25, 0.25)
+TELEOP_SHOULDER_ROLL_INITIALIZATION = (
+    "zero_final_weights_constant_inward_latent_bias_v1"
 )
 
 # velocity: base_ang_vel(3), gravity(3), joint_pos(18), joint_vel(18),
@@ -76,6 +89,7 @@ class VelocityActorBootstrapProvenance:
     checkpoint_sha256: str
     source_normalizer_count: float
     installed_normalizer_count: float
+    shoulder_roll_initial_latent_biases: tuple[float, float]
 
 
 def _sha256_file(path: Path) -> str:
@@ -132,7 +146,11 @@ def bootstrap_teleop_actor_state(
     New HMD/keypoint input columns are exactly zero in the first layer.  Their
     normalizer mean is zero and variance/std are one, which is the neutral
     identity initialization (zero variance would cause division by zero).  The
-    target action-distribution parameters remain untouched.
+    target action-distribution parameters remain untouched.  The two final
+    shoulder-roll rows are deliberately initialized to constant inward latent
+    means because the common shoulder-roll home pose has only one degree of
+    soft-limit headroom and the copied state-dependent rows did not reliably
+    preserve the inward holding target through the first PPO update.
     """
 
     target_first = target_actor_state.get("mlp.0.weight")
@@ -181,6 +199,18 @@ def bootstrap_teleop_actor_state(
             .detach()
             .clone()
         )
+
+    final_weight = result["mlp.6.weight"]
+    final_bias = result["mlp.6.bias"]
+    if final_weight.ndim != 2 or final_weight.shape[0] != 18:
+        raise ValueError("Target actor final weight must contain 18 action rows")
+    if final_bias.shape != (18,):
+        raise ValueError("Target actor final bias must contain 18 actions")
+    shoulder_indices = list(TELEOP_SHOULDER_ROLL_ACTION_INDICES)
+    final_weight[shoulder_indices] = 0.0
+    final_bias[shoulder_indices] = final_bias.new_tensor(
+        TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+    )
 
     for key in _NORMALIZER_KEYS:
         target_value = _require_tensor(
@@ -260,4 +290,7 @@ def load_velocity_actor_bootstrap(
         checkpoint_sha256=actual_sha256,
         source_normalizer_count=float(source_count.item()),
         installed_normalizer_count=float(source_count.item()),
+        shoulder_roll_initial_latent_biases=(
+            TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+        ),
     )

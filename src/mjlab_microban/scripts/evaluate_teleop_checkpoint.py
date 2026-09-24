@@ -672,6 +672,20 @@ def _evaluate_scenario(
     actual_limit_value_count = 0
     actual_limit_violation_count = 0
     max_actual_limit_violation = 0.0
+    max_actual_limit_violation_detail: dict[str, Any] | None = None
+    minimum_actual_soft_margin = math.inf
+    minimum_actual_soft_margin_detail: dict[str, Any] | None = None
+    target_ids_value = action_term.target_ids
+    if isinstance(target_ids_value, slice):
+        action_target_ids = tuple(range(len(robot.joint_names))[target_ids_value])
+    elif isinstance(target_ids_value, torch.Tensor):
+        action_target_ids = tuple(int(value) for value in target_ids_value.tolist())
+    else:
+        action_target_ids = tuple(int(value) for value in target_ids_value)
+    action_index_by_robot_joint = {
+        robot_joint_index: action_index
+        for action_index, robot_joint_index in enumerate(action_target_ids)
+    }
     clip_count_by_joint = torch.zeros(
         len(action_term.target_names), dtype=torch.long, device=env.device
     )
@@ -679,6 +693,15 @@ def _evaluate_scenario(
     max_violation_by_joint = torch.zeros(
         len(robot.joint_names), dtype=torch.float64, device=env.device
     )
+    min_margin_by_joint = torch.full(
+        (len(robot.joint_names),),
+        math.inf,
+        dtype=torch.float64,
+        device=env.device,
+    )
+    min_margin_detail_by_joint: list[dict[str, Any] | None] = [
+        None for _ in robot.joint_names
+    ]
     self_collision_steps = 0
     self_collision_contacts = 0
     self_collision_max_contacts = 0
@@ -764,14 +787,124 @@ def _evaluate_scenario(
         lower_violation = torch.clamp(all_soft_limits[..., 0] - joint_pos, min=0.0)
         upper_violation = torch.clamp(joint_pos - all_soft_limits[..., 1], min=0.0)
         violation = torch.maximum(lower_violation, upper_violation)
+        soft_margin = torch.minimum(
+            joint_pos - all_soft_limits[..., 0],
+            all_soft_limits[..., 1] - joint_pos,
+        )
         actual_limit_value_count += joint_pos.numel()
         actual_limit_violation_count += int((violation > 1.0e-6).sum().item())
-        max_actual_limit_violation = max(
-            max_actual_limit_violation, float(violation.max().item())
-        )
+        step_max_violation, step_max_joint = torch.max(violation[0], dim=0)
+        step_max_value = float(step_max_violation.item())
+        if step_max_value > max_actual_limit_violation:
+            max_actual_limit_violation = step_max_value
+            robot_joint_index = int(step_max_joint.item())
+            action_index = action_index_by_robot_joint.get(robot_joint_index)
+            position = float(joint_pos[0, robot_joint_index].item())
+            lower = float(all_soft_limits[0, robot_joint_index, 0].item())
+            upper = float(all_soft_limits[0, robot_joint_index, 1].item())
+            max_actual_limit_violation_detail = {
+                "step": step,
+                "joint": robot.joint_names[robot_joint_index],
+                "side": "lower" if position < lower else "upper",
+                "position_rad": position,
+                "velocity_rad_s": float(
+                    robot.data.joint_vel[0, robot_joint_index].item()
+                ),
+                "soft_lower_rad": lower,
+                "soft_upper_rad": upper,
+                "joint_position_target_rad": float(
+                    robot.data.joint_pos_target[0, robot_joint_index].item()
+                ),
+                "policy_action_index": action_index,
+                "policy_action_raw": (
+                    float(actions[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+                "unclipped_target_rad": (
+                    float(unclipped_target[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+                "clipped_target_rad": (
+                    float(clipped_target[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+            }
         max_violation_by_joint = torch.maximum(
             max_violation_by_joint, violation[0].to(dtype=torch.float64)
         )
+        improved_margin_indices = torch.nonzero(
+            soft_margin[0] < min_margin_by_joint, as_tuple=False
+        ).flatten()
+        for improved_joint_tensor in improved_margin_indices:
+            robot_joint_index = int(improved_joint_tensor.item())
+            action_index = action_index_by_robot_joint.get(robot_joint_index)
+            position = float(joint_pos[0, robot_joint_index].item())
+            lower = float(all_soft_limits[0, robot_joint_index, 0].item())
+            upper = float(all_soft_limits[0, robot_joint_index, 1].item())
+            min_margin_detail_by_joint[robot_joint_index] = {
+                "step": step,
+                "margin_rad": float(soft_margin[0, robot_joint_index].item()),
+                "side": ("lower" if position - lower <= upper - position else "upper"),
+                "position_rad": position,
+                "velocity_rad_s": float(
+                    robot.data.joint_vel[0, robot_joint_index].item()
+                ),
+                "soft_lower_rad": lower,
+                "soft_upper_rad": upper,
+                "joint_position_target_rad": float(
+                    robot.data.joint_pos_target[0, robot_joint_index].item()
+                ),
+                "policy_action_raw": (
+                    float(actions[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+            }
+        min_margin_by_joint = torch.minimum(
+            min_margin_by_joint, soft_margin[0].to(dtype=torch.float64)
+        )
+        step_min_margin, step_min_joint = torch.min(soft_margin[0], dim=0)
+        step_min_margin_value = float(step_min_margin.item())
+        if step_min_margin_value < minimum_actual_soft_margin:
+            minimum_actual_soft_margin = step_min_margin_value
+            robot_joint_index = int(step_min_joint.item())
+            action_index = action_index_by_robot_joint.get(robot_joint_index)
+            position = float(joint_pos[0, robot_joint_index].item())
+            lower = float(all_soft_limits[0, robot_joint_index, 0].item())
+            upper = float(all_soft_limits[0, robot_joint_index, 1].item())
+            minimum_actual_soft_margin_detail = {
+                "step": step,
+                "joint": robot.joint_names[robot_joint_index],
+                "side": ("lower" if position - lower <= upper - position else "upper"),
+                "position_rad": position,
+                "velocity_rad_s": float(
+                    robot.data.joint_vel[0, robot_joint_index].item()
+                ),
+                "soft_lower_rad": lower,
+                "soft_upper_rad": upper,
+                "joint_position_target_rad": float(
+                    robot.data.joint_pos_target[0, robot_joint_index].item()
+                ),
+                "policy_action_index": action_index,
+                "policy_action_raw": (
+                    float(actions[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+                "unclipped_target_rad": (
+                    float(unclipped_target[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+                "clipped_target_rad": (
+                    float(clipped_target[0, action_index].item())
+                    if action_index is not None
+                    else None
+                ),
+            }
 
         current_root_height = robot.data.root_link_pos_w[:, 2]
         root_height.add(current_root_height)
@@ -840,6 +973,12 @@ def _evaluate_scenario(
     actual_limit_per_joint = dict(
         zip(robot.joint_names, max_violation_by_joint.cpu().tolist(), strict=True)
     )
+    actual_margin_per_joint = dict(
+        zip(robot.joint_names, min_margin_by_joint.cpu().tolist(), strict=True)
+    )
+    actual_margin_detail_per_joint = dict(
+        zip(robot.joint_names, min_margin_detail_by_joint, strict=True)
+    )
 
     report = {
         "name": scenario.name,
@@ -876,6 +1015,13 @@ def _evaluate_scenario(
             ),
             "max_actual_violation_rad": max_actual_limit_violation,
             "max_actual_violation_rad_by_joint": actual_limit_per_joint,
+            "max_actual_violation_detail": max_actual_limit_violation_detail,
+            "minimum_actual_soft_margin_rad": minimum_actual_soft_margin,
+            "minimum_actual_soft_margin_rad_by_joint": actual_margin_per_joint,
+            "minimum_actual_soft_margin_detail_by_joint": (
+                actual_margin_detail_per_joint
+            ),
+            "minimum_actual_soft_margin_detail": (minimum_actual_soft_margin_detail),
         },
         "foot_slip": foot_slip.report(units="m_s_while_in_contact"),
         "self_collision": {
@@ -1114,7 +1260,7 @@ def build_report(
         limitations.append(
             "This is an explicitly requested legacy-v1 diagnostic using raw "
             "previous-action feedback and the v1 scalar Gaussian actor. It can "
-            "never pass the v5 deployment gate or be exported as v5."
+            "never pass the v7 deployment gate or be exported as v7."
         )
     if checkpoint_contract.pristine_pre_update:
         limitations.append(
@@ -1122,7 +1268,7 @@ def build_report(
             "It is a safety baseline and can never pass the deployment gate."
         )
     return {
-        "schema_version": 5,
+        "schema_version": 7,
         "status": status,
         "task": TASK,
         "checkpoint": str(checkpoint),
@@ -1136,7 +1282,7 @@ def build_report(
             ),
             "diagnostic_legacy": checkpoint_contract.diagnostic_legacy,
             "pristine_pre_update": checkpoint_contract.pristine_pre_update,
-            "v5_deployment_compatible": (
+            "v7_deployment_compatible": (
                 not checkpoint_contract.diagnostic_legacy
                 and not checkpoint_contract.pristine_pre_update
             ),
@@ -1308,6 +1454,12 @@ def main() -> None:
             "init_std": 1.0,
             "std_type": "scalar",
         }
+        # The v7 adapter requires and transforms latent actions.  A legacy-v1
+        # checkpoint used RSL-RL's ordinary environment-action PPO path, so its
+        # diagnostic reconstruction must restore that algorithm as well as the
+        # original Gaussian.  This branch is already permanently barred from
+        # saving/exporting by MicrobanTeleopOnPolicyRunner.
+        agent_cfg.algorithm.class_name = "PPO"
     raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device)
     wrapped_env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
 

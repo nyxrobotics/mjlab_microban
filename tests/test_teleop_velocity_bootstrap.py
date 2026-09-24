@@ -14,6 +14,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -22,6 +23,8 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
 from mjlab_microban.tasks.microban_teleop_bootstrap import (
     TELEOP_ACTOR_OBSERVATION_WIDTH,
+    TELEOP_SHOULDER_ROLL_ACTION_INDICES,
+    TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES,
     VELOCITY_ACTOR_OBSERVATION_WIDTH,
     VELOCITY_TO_TELEOP_OBSERVATION_INDEX,
     bootstrap_teleop_actor_state,
@@ -95,18 +98,25 @@ def _actor_mean(
 
 
 class VelocityBootstrapMappingTest(unittest.TestCase):
-    def test_neutral_output_parity_and_new_columns_are_zero(self) -> None:
+    def test_unguarded_neutral_output_parity_and_new_columns_are_zero(self) -> None:
         source, target = _synthetic_states()
         mapped = bootstrap_teleop_actor_state(target, source)
 
         neutral_velocity = torch.zeros((1, VELOCITY_ACTOR_OBSERVATION_WIDTH))
         neutral_velocity[:, 5] = -1.0
         neutral_teleop = expand_velocity_observation_to_teleop(neutral_velocity)
+        source_mean = _actor_mean(source, neutral_velocity)
+        mapped_mean = _actor_mean(mapped, neutral_teleop)
+        unguarded = sorted(set(range(18)) - set(TELEOP_SHOULDER_ROLL_ACTION_INDICES))
         torch.testing.assert_close(
-            _actor_mean(source, neutral_velocity),
-            _actor_mean(mapped, neutral_teleop),
+            source_mean[:, unguarded],
+            mapped_mean[:, unguarded],
             rtol=1e-6,
             atol=1e-6,
+        )
+        torch.testing.assert_close(
+            mapped_mean[:, list(TELEOP_SHOULDER_ROLL_ACTION_INDICES)],
+            mapped_mean.new_tensor([TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES]),
         )
 
         mapped_columns = {
@@ -130,7 +140,9 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
                 torch.ones_like(mapped[key][:, new_columns]),
             )
 
-    def test_only_actor_mlp_and_normalizer_are_copied(self) -> None:
+    def test_only_actor_mlp_and_normalizer_are_copied_with_guarded_shoulder_head(
+        self,
+    ) -> None:
         source, target = _synthetic_states()
         target_distribution = target["distribution.log_std_param"].clone()
         mapped = bootstrap_teleop_actor_state(target, source)
@@ -149,10 +161,24 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
             "mlp.2.bias",
             "mlp.4.weight",
             "mlp.4.bias",
-            "mlp.6.weight",
-            "mlp.6.bias",
         ):
             torch.testing.assert_close(mapped[key], source[key])
+        shoulder_indices = list(TELEOP_SHOULDER_ROLL_ACTION_INDICES)
+        unguarded = sorted(set(range(18)) - set(shoulder_indices))
+        torch.testing.assert_close(
+            mapped["mlp.6.weight"][unguarded], source["mlp.6.weight"][unguarded]
+        )
+        torch.testing.assert_close(
+            mapped["mlp.6.bias"][unguarded], source["mlp.6.bias"][unguarded]
+        )
+        torch.testing.assert_close(
+            mapped["mlp.6.weight"][shoulder_indices],
+            torch.zeros_like(mapped["mlp.6.weight"][shoulder_indices]),
+        )
+        torch.testing.assert_close(
+            mapped["mlp.6.bias"][shoulder_indices],
+            mapped["mlp.6.bias"].new_tensor(TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES),
+        )
 
     def test_loader_requires_exact_sha_before_installing_actor(self) -> None:
         source, target = _synthetic_states()
@@ -197,29 +223,35 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
                 provenance.installed_normalizer_count,
                 provenance.source_normalizer_count,
             )
+            self.assertEqual(
+                provenance.shoulder_roll_initial_latent_biases,
+                TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES,
+            )
             self.assertIsNotNone(actor.loaded)
             self.assertNotIn("must_not_copy", actor.loaded or {})
 
 
 class VelocityBootstrapRunnerGuardTest(unittest.TestCase):
     def test_both_path_and_digest_are_required(self) -> None:
+        env = SimpleNamespace(clip_actions=None, num_actions=18)
         with (
             patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
             self.assertRaisesRegex(ValueError, "requires both"),
         ):
             MicrobanTeleopOnPolicyRunner(
-                None,
+                env,
                 {"bootstrap_velocity_checkpoint": "/tmp/model.pt"},
             )
         base_init.assert_not_called()
 
     def test_bootstrap_cannot_be_combined_with_resume(self) -> None:
+        env = SimpleNamespace(clip_actions=None, num_actions=18)
         with (
             patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
             self.assertRaisesRegex(ValueError, "fresh run"),
         ):
             MicrobanTeleopOnPolicyRunner(
-                None,
+                env,
                 {
                     "resume": True,
                     "bootstrap_velocity_checkpoint": "/tmp/model.pt",

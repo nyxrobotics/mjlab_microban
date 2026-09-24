@@ -33,7 +33,14 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD,
+    MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+    MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
     MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO,
+    MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
     get_microban_teleop_metadata,
@@ -359,10 +366,29 @@ def main() -> None:
         ):
             raise AssertionError("Metadata actor default epsilon drifted")
         if metadata["action_distribution_semantics"] != (
-            "diagonal_normal_latent_with_per_joint_asymmetric_zero_anchored_"
-            "arctan_bijection_v1"
+            "diagonal_normal_ppo_latent_stored_exactly_then_per_joint_"
+            "asymmetric_zero_anchored_arctan_environment_transform_with_"
+            "operational_envelope_v1"
         ):
             raise AssertionError("Metadata bounded action semantics drifted")
+        expected_latent_metadata = {
+            "actor_latent_operational_scale_multiplier": (
+                MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER
+            ),
+            "actor_latent_operational_abs_max": MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+            "actor_latent_mean_fraction": MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+            "actor_latent_std_min_abs_max": MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+            "actor_latent_std_min_envelope_divisor": (
+                MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR
+            ),
+            "actor_latent_std_abs_max": MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+            "actor_latent_std_envelope_divisor": (
+                MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR
+            ),
+        }
+        for key, expected in expected_latent_metadata.items():
+            if metadata[key] != expected or not math.isfinite(metadata[key]):
+                raise AssertionError(f"Metadata field {key!r} drifted")
         exact_bounds = {
             name: json.loads(metadata[f"{name}_json"])
             for name in (

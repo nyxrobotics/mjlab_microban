@@ -6,13 +6,14 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Focused tests for the Microban teleop-v5 training/deployment contract."""
+"""Focused tests for the Microban teleop-v7 training/deployment contract."""
 
 from __future__ import annotations
 
 import math
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,19 +21,37 @@ from unittest.mock import patch
 import torch
 from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
+from rsl_rl.algorithms import PPO
 from rsl_rl.models import MLPModel
+from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
 from mjlab_microban.tasks.mdp import no_stepping_penalty
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+    MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
+    MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     MicrobanTeleopOnPolicyRunner,
     TeleopCheckpointContract,
     _command_target_bounds,
     validate_bounded_actor_checkpoint_buffers,
+    validate_finite_actor_state,
+    validate_finite_checkpoint_actor_state,
     validate_teleop_checkpoint_contract,
+    validate_velocity_actor_bootstrap_info,
+)
+from mjlab_microban.tasks.microban_teleop_bootstrap import (
+    TELEOP_SHOULDER_ROLL_ACTION_INDICES,
+    TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES,
+    TELEOP_SHOULDER_ROLL_INITIALIZATION,
+    VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
@@ -41,6 +60,8 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
     MICROBAN_TELEOP_HAND_TRACKING_STD_M,
     MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
+    MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
     MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
@@ -50,10 +71,12 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     AsymmetricBoundedGaussianDistribution,
+    LatentActionPPO,
     PerJointGaussianDistribution,
     ResetFixedFootTargetCommand,
     effective_action_after_target_clip,
     linear_velocity_tracking_error_l1,
+    normalized_joint_soft_limit_guard_l1_sum,
     normalized_target_clip_excess_l1_sum,
     normalized_target_near_limit_l1_sum,
     raw_action_l2,
@@ -107,6 +130,61 @@ class EffectiveActionTest(unittest.TestCase):
             normalized_target_clip_excess_l1_sum(env), expected_penalty
         )
         torch.testing.assert_close(raw_action_l2(env), raw.square().mean(dim=-1))
+
+    def test_joint_soft_limit_guard_uses_current_and_projected_position(self) -> None:
+        action = object.__new__(JointPositionAction)
+        action._target_ids = torch.tensor([0, 2])
+        action._offset = torch.tensor([[0.5, 0.5]])
+        action._entity = SimpleNamespace(
+            data=SimpleNamespace(
+                joint_pos=torch.tensor([[0.11, 99.0, 0.50], [0.50, 99.0, 0.89]]),
+                joint_vel=torch.tensor([[-0.20, 0.0, 0.00], [0.00, 0.0, 0.20]]),
+                soft_joint_pos_limits=torch.tensor(
+                    [[[0.0, 1.0], [-100.0, 100.0], [0.0, 1.0]]]
+                ).expand(2, -1, -1),
+            )
+        )
+        env = SimpleNamespace(
+            action_manager=SimpleNamespace(get_term=lambda name: action)
+        )
+
+        penalty = normalized_joint_soft_limit_guard_l1_sum(
+            env, margin_ratio=0.1, lookahead_s=0.1
+        )
+
+        # First row projects from 0.11 to 0.09, 0.01 inside the lower guard;
+        # second row projects from 0.89 to 0.91, 0.01 past the upper guard.
+        torch.testing.assert_close(penalty, torch.tensor([0.02, 0.02]))
+
+    def test_joint_soft_limit_guard_does_not_move_near_limit_default(self) -> None:
+        action = object.__new__(JointPositionAction)
+        action._target_ids = torch.tensor([0])
+        action._offset = torch.tensor([[0.05]])
+        action._entity = SimpleNamespace(
+            data=SimpleNamespace(
+                joint_pos=torch.tensor([[0.05], [0.04]]),
+                joint_vel=torch.zeros(2, 1),
+                soft_joint_pos_limits=torch.tensor([[[0.0, 1.0]]]).expand(2, -1, -1),
+            )
+        )
+        env = SimpleNamespace(
+            action_manager=SimpleNamespace(get_term=lambda name: action)
+        )
+
+        penalty = normalized_joint_soft_limit_guard_l1_sum(
+            env, margin_ratio=0.1, lookahead_s=0.1
+        )
+
+        torch.testing.assert_close(penalty, torch.tensor([0.0, 0.02]))
+
+    def test_joint_soft_limit_guard_rejects_invalid_parameters(self) -> None:
+        env = SimpleNamespace(action_manager=SimpleNamespace())
+        for margin in (0.0, 0.5, float("nan")):
+            with self.assertRaisesRegex(ValueError, "margin_ratio"):
+                normalized_joint_soft_limit_guard_l1_sum(env, margin_ratio=margin)
+        for lookahead in (-0.1, float("inf")):
+            with self.assertRaisesRegex(ValueError, "lookahead_s"):
+                normalized_joint_soft_limit_guard_l1_sum(env, lookahead_s=lookahead)
 
     def test_penalty_is_zero_at_and_inside_target_limits(self) -> None:
         raw = torch.tensor([[0.5, -0.5]])
@@ -228,7 +306,7 @@ class PerJointGaussianTest(unittest.TestCase):
 class AsymmetricBoundedGaussianTest(unittest.TestCase):
     LOWER = (-0.3, -0.4, -0.8)
     UPPER = (0.5, 0.6, 0.2)
-    STD = (0.1, 0.2, 0.05)
+    STD = (0.1, 0.1, 0.05)
 
     def _distribution(self) -> AsymmetricBoundedGaussianDistribution:
         return AsymmetricBoundedGaussianDistribution(
@@ -239,79 +317,112 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
             std_type="log",
         )
 
-    def test_zero_anchor_and_finite_extremes_are_strictly_inside_bounds(self) -> None:
+    def test_zero_anchor_and_guarded_mean_are_strictly_inside_bounds(self) -> None:
         distribution = self._distribution()
-        latent = torch.tensor(
+        mlp_output = torch.tensor(
             [[0.0, 0.0, 0.0], [1.0e30, -1.0e30, 1.0e30]],
             dtype=torch.float32,
         )
-        action = distribution.deterministic_output(latent)
+        action = distribution.deterministic_output(mlp_output)
         torch.testing.assert_close(action[0], torch.zeros(3))
         lower = torch.tensor(self.LOWER)
         upper = torch.tensor(self.UPPER)
         self.assertTrue(torch.all(action > lower).item())
         self.assertTrue(torch.all(action < upper).item())
-        self.assertTrue(
-            torch.isfinite(distribution._log_abs_det_jacobian(latent)).all()
-        )
+        self.assertTrue(torch.isfinite(action).all().item())
 
-    def test_sample_storage_inverse_log_prob_is_consistent(self) -> None:
+        with self.assertRaisesRegex(FloatingPointError, "MLP output"):
+            distribution.update(torch.tensor([[float("inf"), 0.0, 0.0]]))
+
+    def test_sample_storage_uses_exact_latent_log_prob(self) -> None:
         torch.manual_seed(1234)
         mean = torch.tensor([[0.02, -0.03, 0.04], [-0.1, 0.2, -0.05]])
         distribution = self._distribution()
         distribution.update(mean)
-        action = distribution.sample().detach()
-        rollout_log_prob = distribution.log_prob(action).detach()
+        latent = distribution.sample().detach()
+        rollout_log_prob = distribution.log_prob(latent).detach()
+        environment_action = distribution.to_environment_action(latent)
 
         # A PPO minibatch reconstructs the distribution later and evaluates the
-        # stored bounded action through the inverse transform.
+        # exact stored latent.  Only the tensor returned to the environment is
+        # transformed, and it is a distinct bounded tensor.
         distribution.update(mean.clone())
-        replay_log_prob = distribution.log_prob(action)
+        replay_log_prob = distribution.log_prob(latent)
         torch.testing.assert_close(replay_log_prob, rollout_log_prob)
         torch.testing.assert_close(
             torch.exp(replay_log_prob - rollout_log_prob), torch.ones(2)
         )
-
-        latent = distribution._inverse(action)
-        latent_dist = torch.distributions.Normal(
-            mean, torch.tensor(self.STD).expand_as(mean)
-        )
+        latent_dist = torch.distributions.Normal(distribution.mean, distribution.std)
         expected = latent_dist.log_prob(latent).sum(dim=-1)
-        expected -= distribution._log_abs_det_jacobian(latent).sum(dim=-1)
         torch.testing.assert_close(replay_log_prob, expected)
+        self.assertFalse(torch.equal(environment_action, latent))
+        self.assertTrue(torch.all(environment_action > torch.tensor(self.LOWER)))
+        self.assertTrue(torch.all(environment_action < torch.tensor(self.UPPER)))
 
-    def test_round_trip_handles_tiny_asymmetric_shoulder_headroom(self) -> None:
+    def test_operational_envelope_round_trip_budget_covers_all_joints(self) -> None:
         lower, upper = microban_teleop_action_delta_bounds()
+        initial_std = microban_teleop_initial_action_std()
         shoulder = MICROBAN_TELEOP_ACTION_JOINT_NAMES.index("right_shoulder_roll")
-        self.assertLess(min(-lower[shoulder], upper[shoulder]), math.radians(1.01))
-        distribution = AsymmetricBoundedGaussianDistribution(
-            1,
-            [0.002],
-            [lower[shoulder]],
-            [upper[shoulder]],
-        )
-        negative_scale = -lower[shoulder]
-        positive_scale = upper[shoulder]
-        latent = torch.tensor(
-            [[-0.75 * negative_scale], [0.0], [0.75 * positive_scale]]
-        )
-        action = distribution.deterministic_output(latent)
-        round_trip = distribution._inverse(action)
-        torch.testing.assert_close(round_trip, latent, rtol=2e-6, atol=1e-8)
+        self.assertLess(min(-lower[shoulder], upper[shoulder]), 1.01e-4)
 
-    def test_exact_or_outside_bounds_fail_instead_of_clamping_inverse(self) -> None:
+        for index, name in enumerate(MICROBAN_TELEOP_ACTION_JOINT_NAMES):
+            with self.subTest(joint=name):
+                distribution = AsymmetricBoundedGaussianDistribution(
+                    1,
+                    [initial_std[index]],
+                    [lower[index]],
+                    [upper[index]],
+                )
+                max_std = float(distribution.max_std.item())
+                reachable_lower = max(
+                    float(distribution.operational_lower_bound.item()),
+                    float(distribution.mean_lower_bound.item()) - 10.0 * max_std,
+                )
+                reachable_upper = min(
+                    float(distribution.operational_upper_bound.item()),
+                    float(distribution.mean_upper_bound.item()) + 10.0 * max_std,
+                )
+                latent = torch.linspace(
+                    reachable_lower,
+                    reachable_upper,
+                    100_001,
+                    dtype=torch.float32,
+                ).unsqueeze(-1)
+                action = distribution.to_environment_action(latent)
+                round_trip = distribution._inverse(action)
+                max_error = torch.max(torch.abs(round_trip - latent))
+                self.assertLessEqual(
+                    float(max_error), 0.025 * float(distribution.min_std.item())
+                )
+                self.assertFalse(
+                    bool(
+                        (
+                            (action == distribution.inward_lower_bound)
+                            | (action == distribution.inward_upper_bound)
+                        ).any()
+                    )
+                )
+
+    def test_outside_latent_and_non_bijective_action_endpoints_fail(self) -> None:
         distribution = self._distribution()
         distribution.update(torch.zeros((1, 3)))
-        for invalid in (
-            torch.tensor([[self.UPPER[0], 0.0, 0.0]]),
-            torch.tensor([[self.LOWER[0], 0.0, 0.0]]),
+        for invalid_latent in (
+            distribution.operational_upper_bound.unsqueeze(0) + 1.0,
+            distribution.operational_lower_bound.unsqueeze(0) - 1.0,
             torch.tensor([[float("nan"), 0.0, 0.0]]),
         ):
             with (
-                self.subTest(invalid=invalid),
-                self.assertRaisesRegex(ValueError, "strictly inside"),
+                self.subTest(invalid=invalid_latent),
+                self.assertRaisesRegex(FloatingPointError, "operational envelope"),
             ):
-                distribution.log_prob(invalid)
+                distribution.log_prob(invalid_latent)
+
+        for endpoint in (
+            distribution.inward_lower_bound.unsqueeze(0),
+            distribution.inward_upper_bound.unsqueeze(0),
+        ):
+            with self.assertRaisesRegex(ValueError, "operational action envelope"):
+                distribution._inverse(endpoint)
 
     def test_fixed_bijection_kl_equals_latent_gaussian_kl(self) -> None:
         distribution = self._distribution()
@@ -335,13 +446,41 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
         entropy = distribution.entropy
         self.assertEqual(entropy.shape, (2,))
         self.assertTrue(torch.isfinite(entropy).all().item())
-        entropy.sum().backward()
+        entropy.sum().backward(retain_graph=True)
+        self.assertIsNotNone(distribution.log_std_param.grad)
+        self.assertTrue(torch.isfinite(distribution.log_std_param.grad).all().item())
+
+        deterministic = distribution.deterministic_output(mean)
+        deterministic.sum().backward()
         self.assertIsNotNone(mean.grad)
         self.assertTrue(torch.isfinite(mean.grad).all().item())
-
-        deterministic = distribution.deterministic_output(mean.detach())
         export_output = distribution.as_deterministic_output_module()(mean.detach())
-        torch.testing.assert_close(export_output, deterministic)
+        torch.testing.assert_close(export_output, deterministic.detach())
+        with self.assertRaisesRegex(FloatingPointError, "Exportable.*non-finite"):
+            distribution.as_deterministic_output_module()(
+                torch.tensor([[float("inf"), 0.0, 0.0]])
+            )
+
+    def test_nonfinite_std_parameter_is_rejected_before_clamp(self) -> None:
+        for std_type, parameter_name in (
+            ("scalar", "std_param"),
+            ("log", "log_std_param"),
+        ):
+            with self.subTest(std_type=std_type):
+                distribution = AsymmetricBoundedGaussianDistribution(
+                    3,
+                    self.STD,
+                    self.LOWER,
+                    self.UPPER,
+                    std_type=std_type,
+                )
+                parameter = getattr(distribution, parameter_name)
+                with torch.no_grad():
+                    parameter[0] = float("inf")
+                with self.assertRaisesRegex(
+                    FloatingPointError, "parameter.*before clamp"
+                ):
+                    distribution.update(torch.zeros((1, 3)))
 
     def test_rsl_actor_replay_of_stored_action_has_unit_ppo_ratio(self) -> None:
         torch.manual_seed(19)
@@ -360,8 +499,11 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
                 "std_type": "log",
             },
         )
-        stored_action = actor(obs, stochastic_output=True).detach()
-        old_log_prob = actor.get_output_log_prob(stored_action).detach()
+        stored_latent = actor(obs, stochastic_output=True).detach()
+        old_log_prob = actor.get_output_log_prob(stored_latent).detach()
+        distribution = actor.distribution
+        assert isinstance(distribution, AsymmetricBoundedGaussianDistribution)
+        environment_action = distribution.to_environment_action(stored_latent)
         old_params = tuple(
             value.detach().clone() for value in actor.output_distribution_params
         )
@@ -369,13 +511,127 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
         # This is the PPO update path: a fresh stochastic forward updates the
         # distribution, then log_prob is evaluated for the stored rollout action.
         actor(obs, stochastic_output=True)
-        replay_log_prob = actor.get_output_log_prob(stored_action)
+        replay_log_prob = actor.get_output_log_prob(stored_latent)
         new_params = actor.output_distribution_params
         ratio = torch.exp(replay_log_prob - old_log_prob)
         torch.testing.assert_close(ratio, torch.ones_like(ratio))
         torch.testing.assert_close(
             actor.get_kl_divergence(old_params, new_params), torch.zeros(8)
         )
+        self.assertFalse(torch.equal(environment_action, stored_latent))
+        torch.testing.assert_close(
+            environment_action, distribution.to_environment_action(stored_latent)
+        )
+
+    def test_real_mlp_and_latent_ppo_store_latent_but_step_bounded_action(
+        self,
+    ) -> None:
+        """Exercise the real RSL-RL constructor and rollout transition path."""
+
+        torch.manual_seed(29)
+        num_envs = 4
+        obs = TensorDict({"policy": torch.randn(num_envs, 83)}, batch_size=[num_envs])
+        obs_groups = {"actor": ["policy"], "critic": ["policy"]}
+        lower, upper = microban_teleop_action_delta_bounds()
+        actor = MLPModel(
+            obs=obs,
+            obs_groups=obs_groups,
+            obs_set="actor",
+            output_dim=18,
+            hidden_dims=(16,),
+            distribution_cfg={
+                "class_name": AsymmetricBoundedGaussianDistribution,
+                "init_std": microban_teleop_initial_action_std(),
+                "lower_bound": lower,
+                "upper_bound": upper,
+                "std_type": "log",
+            },
+        )
+        critic = MLPModel(
+            obs=obs,
+            obs_groups=obs_groups,
+            obs_set="critic",
+            output_dim=1,
+            hidden_dims=(16,),
+        )
+        storage = RolloutStorage("rl", num_envs, 2, obs, [18], "cpu")
+        algorithm = LatentActionPPO(
+            actor,
+            critic,
+            storage,
+            device="cpu",
+            rnd_cfg=None,
+            symmetry_cfg=None,
+        )
+
+        environment_action = algorithm.act(obs)
+        stored_latent = algorithm.transition.actions
+        assert stored_latent is not None
+        old_log_prob = algorithm.transition.actions_log_prob
+        assert old_log_prob is not None
+        self.assertEqual(environment_action.shape, (num_envs, 18))
+        self.assertEqual(stored_latent.shape, (num_envs, 18))
+        self.assertFalse(torch.equal(environment_action, stored_latent))
+        distribution = actor.distribution
+        assert isinstance(distribution, AsymmetricBoundedGaussianDistribution)
+        torch.testing.assert_close(
+            environment_action, distribution.to_environment_action(stored_latent)
+        )
+
+        # The first PPO replay before an optimizer step must have ratio exactly
+        # one in the same latent sample space stored by RolloutStorage.
+        actor(obs, stochastic_output=True)
+        replay_log_prob = actor.get_output_log_prob(stored_latent)
+        ratio = torch.exp(replay_log_prob - old_log_prob)
+        torch.testing.assert_close(ratio, torch.ones_like(ratio))
+
+    def test_latent_ppo_returns_bounded_copy_without_overwriting_transition(
+        self,
+    ) -> None:
+        distribution = self._distribution()
+        latent = torch.tensor([[0.2, -0.1, 0.05]])
+        algorithm = object.__new__(LatentActionPPO)
+        algorithm.actor = SimpleNamespace(distribution=distribution)
+        algorithm.transition = SimpleNamespace(actions=latent.clone())
+        obs = TensorDict({"policy": torch.zeros(1, 1)}, batch_size=[1])
+
+        with patch.object(PPO, "act", return_value=algorithm.transition.actions):
+            environment_action = algorithm.act(obs)
+
+        torch.testing.assert_close(algorithm.transition.actions, latent)
+        torch.testing.assert_close(
+            environment_action, distribution.to_environment_action(latent)
+        )
+        self.assertNotEqual(
+            environment_action.untyped_storage().data_ptr(),
+            algorithm.transition.actions.untyped_storage().data_ptr(),
+        )
+
+    def test_latent_ppo_construct_fails_closed_on_wrapper_and_extensions(self) -> None:
+        obs = TensorDict({"policy": torch.zeros(1, 1)}, batch_size=[1])
+        valid_env = SimpleNamespace(clip_actions=None, num_actions=18)
+        with patch.object(PPO, "construct_algorithm", return_value="sentinel"):
+            self.assertEqual(
+                LatentActionPPO.construct_algorithm(
+                    obs, valid_env, {"algorithm": {}}, "cpu"
+                ),
+                "sentinel",
+            )
+
+        invalid_cases = (
+            (SimpleNamespace(clip_actions=1.0, num_actions=18), {}, "clip_actions"),
+            (SimpleNamespace(clip_actions=None, num_actions=17), {}, "18-wide"),
+            (valid_env, {"rnd_cfg": {}}, "RND"),
+            (valid_env, {"symmetry_cfg": {}}, "symmetry"),
+        )
+        for env, algorithm_cfg, message in invalid_cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                LatentActionPPO.construct_algorithm(
+                    obs, env, {"algorithm": algorithm_cfg}, "cpu"
+                )
 
     def test_rejects_invalid_widths_bounds_and_std(self) -> None:
         with self.assertRaisesRegex(ValueError, "lower_bound must contain 3"):
@@ -442,6 +698,19 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(cfg.rewards["target_clip_excess"].weight, -2.0)
         self.assertEqual(cfg.rewards["target_near_limit"].weight, -1.0)
+        self.assertEqual(cfg.rewards["joint_soft_limit_guard"].weight, -5.0)
+        self.assertIs(
+            cfg.rewards["joint_soft_limit_guard"].func,
+            normalized_joint_soft_limit_guard_l1_sum,
+        )
+        self.assertEqual(
+            cfg.rewards["joint_soft_limit_guard"].params,
+            {
+                "action_name": "joint_pos",
+                "margin_ratio": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
+                "lookahead_s": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
+            },
+        )
         self.assertEqual(cfg.rewards["raw_action_l2"].weight, -0.01)
         self.assertEqual(cfg.rewards["action_rate_l2"].weight, -0.02)
         self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -2.0)
@@ -469,6 +738,10 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-4)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "fixed")
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.class_name,
+            "mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO",
+        )
         self.assertIs(
             MicrobanTeleopRlCfg.actor.distribution_cfg["class_name"],
             AsymmetricBoundedGaussianDistribution,
@@ -482,6 +755,34 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(
             tuple(MicrobanTeleopRlCfg.actor.distribution_cfg["upper_bound"]), upper
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["latent_scale_multiplier"],
+            MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["latent_abs_max"],
+            MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["latent_mean_fraction"],
+            MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["std_min_abs_max"],
+            MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["std_min_envelope_divisor"],
+            MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["std_abs_max"],
+            MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.actor.distribution_cfg["std_envelope_divisor"],
+            MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
         )
         self.assertTrue(all(value < 0.0 for value in lower))
         self.assertTrue(all(value > 0.0 for value in upper))
@@ -752,23 +1053,35 @@ class CheckpointContractTest(unittest.TestCase):
                 }
             )
         path = self.root / f"model_{filename_iteration}.pt"
-        torch.save({"iter": iteration, "infos": infos}, path)
+        torch.save(
+            {
+                "actor_state_dict": {"mlp.weight": torch.zeros(1)},
+                "iter": iteration,
+                "infos": infos,
+            },
+            path,
+        )
         return path
 
     @staticmethod
     def _bounded_actor_state() -> dict[str, torch.Tensor]:
         lower = torch.tensor([-1.25, -1.0e-4], dtype=torch.float32)
         upper = torch.tensor([0.75, 0.4], dtype=torch.float32)
-        zero = torch.zeros_like(lower)
+        distribution = AsymmetricBoundedGaussianDistribution(
+            2,
+            [0.05, 0.005],
+            lower.tolist(),
+            upper.tolist(),
+            std_type="log",
+        )
         return {
-            "distribution.lower_bound": lower,
-            "distribution.upper_bound": upper,
-            "distribution.inward_lower_bound": torch.nextafter(lower, zero),
-            "distribution.inward_upper_bound": torch.nextafter(upper, zero),
+            f"distribution.{key}": value.detach().clone()
+            for key, value in distribution.state_dict().items()
+            if key != "log_std_param"
         }
 
     @staticmethod
-    def _v5_infos(*, pristine: bool = False) -> dict[str, object]:
+    def _v7_infos(*, pristine: bool = False) -> dict[str, object]:
         infos: dict[str, object] = {
             "env_state": {"common_step_counter": 0 if pristine else 24},
             "microban_teleop_training_contract_version": (
@@ -780,10 +1093,31 @@ class CheckpointContractTest(unittest.TestCase):
             infos["pristine_pre_update"] = True
         return infos
 
-    def test_v5_marker_is_required_and_iteration_must_match_filename(self) -> None:
+    @staticmethod
+    def _valid_bootstrap_info() -> dict[str, object]:
+        return {
+            "mapping_version": VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+            "source_checkpoint_path": "/pinned/model_14999.pt",
+            "source_checkpoint_sha256": "a" * 64,
+            "source_normalizer_count": 1_474_560_000.0,
+            "installed_normalizer_count": 1_474_560_000.0,
+            "copied_state": (
+                "actor_normalizer_and_mlp_except_guarded_shoulder_roll_head"
+            ),
+            "shoulder_roll_initialization": TELEOP_SHOULDER_ROLL_INITIALIZATION,
+            "shoulder_roll_action_indices": list(TELEOP_SHOULDER_ROLL_ACTION_INDICES),
+            "shoulder_roll_initial_latent_biases": list(
+                TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+            ),
+            "distribution_copied": False,
+            "critic_copied": False,
+            "optimizer_copied": False,
+        }
+
+    def test_v7_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "5")
+        self.assertEqual(parsed.version, "7")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
@@ -803,14 +1137,50 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must match"):
             validate_teleop_checkpoint_contract(mismatched)
 
-        # A well-formed v4 checkpoint is still a non-resumable training contract,
-        # even though tensor shapes and previous-action semantics happen to match.
-        v4 = self._save(16, contract=True)
-        payload = torch.load(v4, map_location="cpu", weights_only=False)
-        payload["infos"]["microban_teleop_training_contract_version"] = "4"
-        torch.save(payload, v4)
-        with self.assertRaisesRegex(ValueError, "v1/v2/v3/v4"):
-            validate_teleop_checkpoint_contract(v4)
+        # Every superseded version remains non-resumable even when tensor widths
+        # and previous-action semantics happen to match the current contract.
+        for index, version in enumerate(("2", "3", "4", "5", "6"), start=16):
+            with self.subTest(version=version):
+                old = self._save(index, contract=True)
+                payload = torch.load(old, map_location="cpu", weights_only=False)
+                payload["infos"]["microban_teleop_training_contract_version"] = version
+                torch.save(payload, old)
+                with self.assertRaisesRegex(ValueError, "v1/v2/v3/v4/v5/v6"):
+                    validate_teleop_checkpoint_contract(old)
+
+    def test_guarded_shoulder_bootstrap_provenance_is_fail_closed(self) -> None:
+        valid = self._valid_bootstrap_info()
+        validate_velocity_actor_bootstrap_info(valid)
+
+        invalid_cases = {
+            "mapping_version": "superseded_v3",
+            "shoulder_roll_action_indices": [10, 1],
+            "shoulder_roll_initial_latent_biases": [-0.15, 0.15],
+            "shoulder_roll_initialization": "untracked_initialization",
+            "copied_state": "actor_normalizer_and_mlp_only",
+            "distribution_copied": True,
+        }
+        for key, value in invalid_cases.items():
+            with self.subTest(key=key):
+                candidate = deepcopy(valid)
+                candidate[key] = value
+                with self.assertRaisesRegex(ValueError, "guarded shoulder contract"):
+                    validate_velocity_actor_bootstrap_info(candidate)
+
+        mismatched_count = deepcopy(valid)
+        mismatched_count["installed_normalizer_count"] = 1.0
+        with self.assertRaisesRegex(ValueError, "preserve"):
+            validate_velocity_actor_bootstrap_info(mismatched_count)
+
+        path = self._save(30, contract=True)
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        payload["infos"]["velocity_actor_bootstrap"] = {
+            **valid,
+            "mapping_version": "superseded_v3",
+        }
+        torch.save(payload, path)
+        with self.assertRaisesRegex(ValueError, "guarded shoulder contract"):
+            validate_teleop_checkpoint_contract(path)
 
     def test_pristine_checkpoint_requires_explicit_pre_update_contract(self) -> None:
         path = self.root / "model_pristine.pt"
@@ -883,7 +1253,7 @@ class CheckpointContractTest(unittest.TestCase):
                         [float("nan"), 0.1], dtype=torch.float32
                     ),
                 },
-                ValueError,
+                FloatingPointError,
                 "non-finite",
             ),
             (
@@ -912,10 +1282,38 @@ class CheckpointContractTest(unittest.TestCase):
             ),
         }
         save({key: value.clone() for key, value in nonfinite_expected.items()})
-        with self.assertRaisesRegex(ValueError, "Current bounded actor.*non-finite"):
+        with self.assertRaisesRegex(
+            FloatingPointError, "Checkpoint actor_state_dict.*non-finite"
+        ):
             validate_bounded_actor_checkpoint_buffers(path, nonfinite_expected)
 
-    def test_v5_load_pins_bounds_before_base_load_including_pristine(self) -> None:
+    def test_every_floating_actor_state_is_finite_before_load_or_export(self) -> None:
+        valid_state = {
+            "mlp.0.weight": torch.zeros(2, 2),
+            "obs_normalizer.count": torch.tensor(3, dtype=torch.long),
+        }
+        validate_finite_actor_state(valid_state, context="test actor")
+
+        for bad_value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=bad_value):
+                invalid_state = {
+                    **valid_state,
+                    "mlp.0.weight": torch.tensor([[bad_value, 0.0]]),
+                }
+                with self.assertRaisesRegex(
+                    FloatingPointError, "mlp.0.weight.*non-finite"
+                ):
+                    validate_finite_actor_state(invalid_state, context="test actor")
+
+        checkpoint = self.root / "actor_finite.pt"
+        torch.save({"actor_state_dict": valid_state}, checkpoint)
+        validate_finite_checkpoint_actor_state(checkpoint)
+        valid_state["mlp.0.weight"][0, 0] = float("nan")
+        torch.save({"actor_state_dict": valid_state}, checkpoint)
+        with self.assertRaisesRegex(FloatingPointError, "non-finite"):
+            validate_finite_checkpoint_actor_state(checkpoint)
+
+    def test_v7_load_pins_bounds_before_base_load_including_pristine(self) -> None:
         expected = self._bounded_actor_state()
         policy = SimpleNamespace(state_dict=lambda: expected)
 
@@ -928,7 +1326,7 @@ class CheckpointContractTest(unittest.TestCase):
                             key: value.clone() for key, value in expected.items()
                         },
                         "iter": -1 if pristine else 0,
-                        "infos": self._v5_infos(pristine=pristine),
+                        "infos": self._v7_infos(pristine=pristine),
                     },
                     path,
                 )
@@ -952,7 +1350,7 @@ class CheckpointContractTest(unittest.TestCase):
                 "actor_state_dict": mismatched,
                 "iter": 1,
                 "infos": {
-                    **self._v5_infos(),
+                    **self._v7_infos(),
                     "env_state": {"common_step_counter": 48},
                 },
             },
@@ -967,16 +1365,15 @@ class CheckpointContractTest(unittest.TestCase):
             runner.load(str(mismatched_path), load_cfg={"actor": True})
         base_load.assert_not_called()
 
-    def test_save_adds_v5_marker_and_legacy_runner_cannot_write(self) -> None:
+    def test_save_adds_v7_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
-        fresh.velocity_actor_bootstrap_info = {
-            "mapping_version": (
-                "xc330_velocity_63_to_teleop_83_v3_bounded_actor_"
-                "preserve_normalizer_count"
-            ),
-            "source_checkpoint_sha256": "a" * 64,
-        }
+        fresh.alg = SimpleNamespace(
+            get_policy=lambda: SimpleNamespace(
+                state_dict=lambda: {"mlp.weight": torch.zeros(1)}
+            )
+        )
+        fresh.velocity_actor_bootstrap_info = self._valid_bootstrap_info()
         with patch.object(MjlabOnPolicyRunner, "save") as base_save:
             fresh.save(
                 str(self.root / "model_0.pt"),
@@ -986,7 +1383,7 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "5")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "7")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
@@ -1016,6 +1413,11 @@ class CheckpointContractTest(unittest.TestCase):
     def test_legacy_load_is_actor_only_and_never_optimizer_resume(self) -> None:
         checkpoint = self._save(14999, contract=False)
         runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(
+            get_policy=lambda: SimpleNamespace(
+                state_dict=lambda: {"mlp.weight": torch.zeros(1)}
+            )
+        )
         with (
             patch.object(MjlabOnPolicyRunner, "load") as base_load,
             self.assertRaisesRegex(ValueError, "cannot be resumed/exported"),

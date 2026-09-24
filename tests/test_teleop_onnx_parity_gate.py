@@ -19,6 +19,8 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper
+from rsl_rl.models import MLPModel
+from tensordict import TensorDict
 
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
@@ -30,6 +32,13 @@ from mjlab_microban.tasks.microban_policy_export import (
     publish_gated_teleop_onnx,
     unique_teleop_onnx_temporary_path,
     validate_pytorch_onnx_parity,
+)
+from mjlab_microban.tasks.microban_teleop_env_cfg import (
+    microban_teleop_action_delta_bounds,
+    microban_teleop_initial_action_std,
+)
+from mjlab_microban.tasks.microban_teleop_mdp import (
+    AsymmetricBoundedGaussianDistribution,
 )
 
 
@@ -189,6 +198,48 @@ class ParityGateTest(unittest.TestCase):
         result = validate_pytorch_onnx_parity(policy, self.temporary_onnx)
 
         self.assertLessEqual(result.max_absolute_error, 1e-5)
+
+    def test_v7_real_actor_onnx_matches_bounded_deterministic_policy(self) -> None:
+        torch.manual_seed(37)
+        obs = TensorDict(
+            {"policy": torch.zeros(1, MICROBAN_TELEOP_OBSERVATION_WIDTH)},
+            batch_size=[1],
+        )
+        lower, upper = microban_teleop_action_delta_bounds()
+        actor = MLPModel(
+            obs=obs,
+            obs_groups={"actor": ["policy"]},
+            obs_set="actor",
+            output_dim=MICROBAN_TELEOP_ACTION_WIDTH,
+            hidden_dims=(16,),
+            distribution_cfg={
+                "class_name": AsymmetricBoundedGaussianDistribution,
+                "init_std": microban_teleop_initial_action_std(),
+                "lower_bound": lower,
+                "upper_bound": upper,
+                "std_type": "log",
+            },
+        )
+        policy = actor.as_onnx(verbose=False).eval()
+        torch.onnx.export(
+            policy,
+            (torch.zeros(1, MICROBAN_TELEOP_OBSERVATION_WIDTH),),
+            self.temporary_onnx,
+            export_params=True,
+            opset_version=18,
+            input_names=["obs"],
+            output_names=["actions"],
+            dynamic_axes={},
+            dynamo=False,
+        )
+
+        result = validate_pytorch_onnx_parity(policy, self.temporary_onnx)
+        self.assertLessEqual(result.max_absolute_error, 1e-5)
+        with torch.inference_mode():
+            output = policy(torch.as_tensor(deterministic_teleop_parity_inputs()[0]))
+        self.assertTrue(torch.isfinite(output).all().item())
+        self.assertTrue(torch.all(output > torch.tensor(lower)).item())
+        self.assertTrue(torch.all(output < torch.tensor(upper)).item())
 
     def test_success_publishes_metadata_bearing_artifact(self) -> None:
         _write_zero_policy(self.temporary_onnx)

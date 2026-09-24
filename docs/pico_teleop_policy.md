@@ -51,11 +51,11 @@ Processed joint-position targets therefore remain strictly inside the robot
 configuration's 90% soft limits; the environment and physical runtime retain
 their target clip as an independent defense.
 
-This is training/deployment contract **v5**. In v1, the observation fed back the
+This is training/deployment contract **v7**. In v1, the observation fed back the
 unbounded network output even when the actuator target had already saturated.
 That created a hidden recurrence and a flat action nullspace: the policy could
 keep producing larger shoulder/hip values while the robot received the same
-clipped target. V2 introduced, and v5 retains, this computation:
+clipped target. V2 introduced, and v7 retains, this computation:
 
 ```text
 absolute_target = default_joint_pos + raw_action * action_scale
@@ -64,11 +64,11 @@ effective_action = (clipped_target - default_joint_pos) / action_scale
 ```
 
 `effective_action` is the next observation in simulation and on the robot. ONNX
-metadata must contain training-contract version `5`, observation-schema version
+metadata must contain training-contract version `7`, observation-schema version
 `2`, and the exact semantic string
 `effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates`.
 The observation-schema version remains `2` because its 83 fields did not change.
-The runtime rejects missing, v1/v2/v3/v4, or otherwise different training
+The runtime rejects missing, v1/v2/v3/v4/v5/v6, or otherwise different training
 metadata.
 
 Foot offsets are trained as stance/keypoint targets and fade out continuously as
@@ -141,19 +141,21 @@ appeared to work.
 
 ## Training
 
-### V5 requires a clean run
+### V7 requires a clean run
 
-Do **not** resume a v1, v2, v3 or v4 checkpoint. Their tensors have compatible
-widths, but v5 changes stochastic and deterministic actor output to the bounded
-transform described below. It also retains v4's corrected target-limit objective
-and velocity-bootstrap normalizer contract. Every v5
-checkpoint stores the training-contract version and exact action
+Do **not** resume a v1, v2, v3, v4, v5 or v6 checkpoint. Their tensors have
+compatible widths, but v7 changes PPO storage and likelihood evaluation from a
+float32 physical action reconstructed through an ill-conditioned inverse to the
+exact sampled Gaussian latent. It retains v6's neutral-preserving predicted-state
+joint guard, v5's bounded environment transform, v4's corrected target-limit
+objective, and the velocity-bootstrap normalizer contract. Every v7 checkpoint
+stores the training-contract version and exact action
 semantic in `infos`; training resume, normal evaluation, automatic export and
 explicit export validate those markers before loading weights. They also require
 the checkpoint's internal iteration to equal its canonical `model_N.pt` suffix.
-An unversioned/v1 or versioned-v2/v3/v4 checkpoint is intentionally unusable for
-v5 resume or export. The v1 diagnostics escape hatch below does not accept v2,
-v3 or v4.
+An unversioned/v1 or versioned-v2/v3/v4/v5/v6 checkpoint is intentionally
+unusable for v7 resume or export. The v1 diagnostics escape hatch below does not
+accept v2 through v6.
 
 For historical comparison only, the evaluator has an explicit escape hatch:
 
@@ -164,7 +166,8 @@ uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
   --output artifacts/model_14999_v1_diagnostic.json
 ```
 
-That mode reconstructs the v1 raw-action observation and scalar-Gaussian actor.
+That mode reconstructs the v1 raw-action observation, scalar-Gaussian actor and
+ordinary RSL-RL `PPO` algorithm rather than the v7 latent-action adapter.
 Its report records `legacy_unversioned_v1`, can never produce `status: pass` or
 a deployable artifact, exits nonzero, and the loaded runner refuses save and
 every ONNX export entry point.
@@ -204,7 +207,7 @@ arguments that would override the calculated resume fields. MjLab writes the
 continuation into a new timestamp directory; use that new directory name for a
 later continuation.
 
-V5 teaches capabilities in strict order. It begins with only locomotion over
+V7 teaches capabilities in strict order. It begins with only locomotion over
 `vx [-0.2, 0.3] m/s`, `vy [-0.1, 0.1] m/s`, moving yaw
 `[-0.4, 0.4] rad/s` and pure yaw `[-0.8, 0.8] rad/s`. At 1,000 iterations this
 widens to `[-0.4, 0.5]`, `[-0.2, 0.2]`, `[-0.8, 0.8]` and `[-1.5, 1.5]`
@@ -224,9 +227,9 @@ The live bridge projects every target at or below the inclusive `2.5 mm` floor
 band to that exact zero, so the canonical evaluator exercises `2.6 mm` as the
 first practical active value.
 
-The MLP output is the mean of a latent diagonal Gaussian. Each latent coordinate
-is mapped to its exact asymmetric, guarded raw-delta interval with a
-zero-anchored arctangent bijection:
+The MLP output is smoothly limited to the mean envelope of a latent diagonal
+Gaussian. Each sampled latent coordinate is mapped to its exact asymmetric,
+guarded raw-delta interval with a zero-anchored arctangent bijection:
 
 ```text
 S = raw_upper                  when z >= 0
@@ -235,13 +238,31 @@ action = 2*S/pi * atan(pi*z/(2*S))
 ```
 
 Latent zero therefore remains raw action zero/default pose, and the derivative
-at zero is one from both sides. Every finite deterministic or sampled action is
-strictly inside its target limits. If a huge float32 latent value would round to
-the exact asymptote, it is moved one representable value inward. PPO evaluates a
-stored bounded action with the analytic inverse and Jacobian; KL is the
-equivalent latent-Gaussian KL, and ONNX contains the same deterministic
-transform. Exact-bound and non-finite actions are rejected by the probability
-calculation instead of being silently clamped.
+at zero is one from both sides. During rollout, v7 stores and scores the exact
+sampled latent in PPO's transition; only a separate tensor returned to the
+environment is transformed into the bounded physical raw action. The first
+minibatch replay therefore has probability ratio exactly one without performing
+a float32 inverse. `distribution.mean` is also in that same latent sample space.
+The deterministic policy and ONNX export apply the mean limiter and physical
+transform exactly once.
+
+The operational latent interval is derived per side as
+`min(1024 * physical_side_width, 32)`. The Gaussian mean is limited to three
+eighths of it. Standard deviation is constrained between
+`min(0.01, nearest_side/64)` and `min(0.15, nearest_side/16)`, leaving ten
+standard deviations between the furthest allowed mean and the nearest outer
+envelope. An escaped/non-finite latent, a non-finite MLP output, a non-finite
+pre-clamp standard-deviation parameter, action clipping in the RSL-RL wrapper,
+RND or symmetry augmentation all fail closed. Resume and export also scan every
+floating actor-state tensor for non-finite values. Every finite environment
+action remains strictly inside its target limits; an exact numerical endpoint
+is rejected rather than silently used.
+
+Contract v6 attempted to store the bounded float32 environment action and
+recover its latent with the analytic inverse. The very narrow `1e-4 rad`
+shoulder side made that round trip poorly conditioned; its production-width
+canary reached non-finite PPO likelihoods at iteration 84. That run and every
+v6 checkpoint are rejected. V7 removes the inverse from training entirely.
 
 The actor interval normally moves each absolute soft limit inward by 5% of its
 span. If that would put the configured default on or outside the interval (the
@@ -257,8 +278,8 @@ initial standard deviation is one third of the nearest soft-limit headroom,
 capped at `0.15 rad`; shoulder roll is only `0.00581776 rad` (`0.333 deg`)
 because its home pose has one degree of headroom. Entropy bonus is zero. A
 normalized per-joint L1 target-clip-excess sum (weight `-2`) remains a defensive
-contract check, while the actual joint-limit cost (weight `-10`) makes dynamic
-overshoot expensive. A second weight-`-1`
+contract check, while the actual joint-limit cost (weight `-10`) penalizes a
+crossing after it occurs. A second weight-`-1`
 asymmetric per-joint L1 sum keeps a 5% target margin wherever possible, but
 expands that margin to include the configured default so raw action zero is
 always free. Summing rather than averaging prevents one unsafe joint from being
@@ -267,6 +288,31 @@ outside the hinge instead of quadratically small. The smaller numeric weights
 compensate for removing the joint mean while still making the per-joint
 large-error reward slope 3.6 times stronger than v3. The
 raw-action anchor is `-0.01` and action-rate weight is `-0.02`.
+
+V7 retains v6's weight-`-5` measured-state guard on the 18
+policy-controlled joints. It checks both current position and the more dangerous
+side of `q + 0.12*qdot`; `0.12 s` is the maximum configured six-sample actuator
+delay at 50 Hz. The ordinary boundary is 5% inside each soft range, but it is
+clamped at the configured default pose. A stationary neutral pose is therefore
+exactly penalty-free and is not moved. Gravity sag or predicted motion from that
+neutral toward the close shoulder-roll limit is penalized immediately, allowing
+the policy to learn an inward holding target while the measured joint stays at
+neutral. This term is a training signal, not a formal deployment-time safety
+filter; every deterministic checkpoint evaluation still requires zero measured
+soft-limit violation.
+
+This corrects the rejected contract-v5 canary
+`2026-09-24_22-08-21_v5_bounded_canary`. Its targets remained legal and target
+clip fraction stayed zero, but the left shoulder-roll target saturated near
+`+9.994 deg` while the XC330 model sagged under gravity past the `+9 deg` soft
+limit. Neutral deterministic measured violation was `0.0254458 rad` at
+`model_250` and `0.0278908 rad` at `model_500`; `model_0` and `model_100` were
+zero. This was sustained tracking error, not a transient target overshoot, and
+the evaluator tolerance was not relaxed. The diagnostic v5 reward experiment
+`2026-09-24_23-00-04_v5_neutral_preserving_dynamic_margin_canary` produced zero
+target clip, fall, self-collision and measured violation at
+`model_0/50/100/250/500`, but its v5-marked checkpoints remain non-deployable.
+
 Planar per-axis absolute-error-sum (L1) and yaw-rate absolute-error (L1) costs
 have weights `-2.0` and `-0.5`. Teleop alone uses foot-distance minimum `0.07 m` at weight `-100`;
 active foot targets are exempt from the otherwise conflicting stationary no-
@@ -274,7 +320,7 @@ stepping cost.
 
 PPO uses a fixed `1e-4` learning rate and three learning epochs. There is no
 adaptive-KL reduction: a run whose recorded learning rate differs from `1e-4`
-is not this v5 recipe.
+is not this v7 recipe.
 
 Checkpoints and automatic ONNX exports are written under:
 
@@ -282,15 +328,15 @@ Checkpoints and automatic ONNX exports are written under:
 logs/rsl_rl/mjlab_microban_teleop/<timestamp>/
 ```
 
-On a **v5-only** resume, the teleop runner starts at the next (not repeated) PPO
+On a **v7-only** resume, the teleop runner starts at the next (not repeated) PPO
 iteration, restores the saved environment step counter, and materializes every
 curriculum stage due at that step before collecting another rollout. There is no
-legacy counter reconstruction or v1/v2/v3/v4-to-v5 fine-tuning path; start a clean
+legacy counter reconstruction or older-contract fine-tuning path; start a clean
 run.
 
 ### Optional pinned XC330 velocity actor bootstrap
 
-The preferred first v5 canary may initialize the shared actor inputs from the
+The preferred first v7 canary may initialize the shared actor inputs from the
 known XC330 velocity checkpoint. This is explicit opt-in, not resume. The loader
 requires the checkpoint path and exact SHA-256, verifies the 63-value source and
 83-value target layouts, then maps base angular velocity, gravity, 18 joint
@@ -300,9 +346,30 @@ initialized to mean zero and variance/std one. The source normalizer's complete
 sample count is preserved exactly so the copied 63-column velocity feature
 statistics cannot be overwritten in the first few hundred teleop updates. The
 new columns remain identity-normalized and learn through their initially-zero
-first-layer weights. Downstream actor MLP layers are copied.
+first-layer weights. Downstream actor MLP layers are copied except for the two
+shoulder-roll rows of the final head (action indices 1 and 10). Those rows start
+with zero weights and inward latent biases `-0.25` (right) and `+0.25` (left),
+then remain ordinarily trainable. This maps deterministically to approximately
+24.2 degrees of inward shoulder-roll target at bootstrap without changing the
+common `-10/+10 deg` shoulder-roll home pose or either physical soft limit. The
+smallest diagnosed passing magnitude was `0.15`; `0.25` is pinned as a
+`0.10 rad` latent reserve, while remaining below the separately verified
+`0.35` case. The production-width preflight below verifies the resulting pose
+and dynamics rather than treating that diagnostic sweep as sufficient.
 
-This is a safety-critical v4 correction retained by v5. In the rejected v3 canary
+The guarded-head mapping is
+`xc330_velocity_63_to_teleop_83_v4_guarded_shoulder_roll_head`. It fixes a
+production-width seed-dependent failure observed with the superseded v3
+mapping: pristine actors were bit-identical and safe, but seed 43's first PPO
+update held both shoulder targets near the neutral edge for over 100 evaluation
+steps. Gravity then pulled the left shoulder `0.00799 rad` beyond its measured
+soft limit even though its target was finite and unclipped. Cross-seed
+evaluation isolated the actor update rather than reset state or simulation seed
+as the cause. Checkpoint provenance records the exact guarded rows and biases;
+current v7 loading/export rejects a checkpoint that carries the old mapping or
+different guarded-head values.
+
+The preserved-normalizer change is another safety correction retained by v7. In the rejected v3 canary
 `2026-09-24_21-13-38`, the source count `1,474,560,000` was capped to
 `1,000,000`; it had already become `50,250,304` by `model_500`, while the mean
 shared-input standard deviation changed from `0.8574` to `0.3829`. Over the same
@@ -316,9 +383,9 @@ small at their hinges. That run must not be resumed.
 
 The action distribution, critic, optimizer and PPO iteration are deliberately
 not copied. Bootstrap plus `resume` is rejected, and an older teleop checkpoint
-is not a bootstrap source. Every resulting v5 checkpoint records the source path,
+is not a bootstrap source. Every resulting v7 checkpoint records the source path,
 SHA-256, mapping version, normalizer counts and non-copied components in
-`infos.velocity_actor_bootstrap`; that provenance is retained across a later v5
+`infos.velocity_actor_bootstrap`; that provenance is retained across a later v7
 resume. The currently audited source is checked into this repository so a fresh
 clone can run the exact canary without relying on an ignored local training
 directory:
@@ -328,16 +395,15 @@ checkpoints/xc330_velocity/model_14999.pt
 sha256 b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141
 ```
 
-First run the checked production-width preflight. It trains exactly two updates
-with 4,096 environments, saves the mapped velocity actor as
-`model_pristine.pt` before the first rollout, saves `model_0.pt` and
-`model_1.pt`, then evaluates all three deterministically for 300 neutral steps.
+First run the checked production-width preflight. For each seed 42, 43 and 44,
+it trains exactly one update with 4,096 environments, saves the mapped velocity
+actor as `model_pristine.pt` before the first rollout, saves `model_0.pt`, then
+evaluates both deterministically for 300 neutral steps using the matching seed.
 It fails unless every checkpoint has zero falls/non-finite values/self-contact,
-target-clip fraction at most `0.001`, and actual soft-limit violation at most
-`1e-6 rad`:
+exactly zero target clipping and exactly zero measured soft-limit violation:
 
 ```bash
-scripts/run_microban_teleop_v5_preflight.sh
+scripts/run_microban_teleop_v7_preflight.sh
 ```
 
 A 64-environment smoke is only an API check and is not a substitute for this
@@ -345,37 +411,45 @@ gate: the first 4,096-environment PPO batch previously moved the unbounded actor
 in a different and unsafe direction. `model_pristine.pt` is diagnostics-only;
 resume, save-as-current and ONNX export reject it.
 
-After that passes, run the initial 501-update locomotion safety canary with the
-checked script. It verifies the local bootstrap bytes before invoking the normal
-training wrapper, also saves its own pristine baseline, saves `model_500.pt`
-(checkpoint suffixes are zero-based), and uses a 50-iteration checkpoint
-interval for the v5 safety gates:
+After that passes, run three independent 251-update production-width locomotion
+safety canaries. They verify the local bootstrap bytes before invoking the
+normal training wrapper, save their own pristine baselines, materialize
+`model_0`, `model_50`, `model_100` and `model_250` (checkpoint suffixes are
+zero-based), and differ only in seed:
 
 ```bash
-MICROBAN_TELEOP_NUM_ENVS=4096 \
-MICROBAN_TELEOP_TARGET_ITERS=501 \
-scripts/train_microban_teleop_v5_canary.sh
+for seed in 42 43 44; do
+  MICROBAN_TELEOP_NUM_ENVS=4096 \
+  MICROBAN_TELEOP_TARGET_ITERS=251 \
+  MICROBAN_TELEOP_SAVE_INTERVAL=50 \
+  MICROBAN_TELEOP_SEED="${seed}" \
+  scripts/train_microban_teleop_v7_canary.sh \
+    --agent.run-name "v7_latent_canary_seed${seed}"
+done
 ```
 
-After the uninterrupted 501-update canary finishes, evaluate neutral
-deterministically at `model_0`, `model_50`, `model_100`, `model_250` and
-`model_500` before resuming beyond 501 updates. The bounded actor should keep
-target clipping exactly zero; any value above the deployment threshold `0.001`,
-fall, non-finite value or actual joint-limit violation rejects the run. The script
-keeps every 50th checkpoint so these gates do not depend on TensorBoard
-interpolation. Override
-`MICROBAN_TELEOP_SAVE_INTERVAL` only when deliberately running a shorter smoke.
-After `model_500` passes, resume from that source run to the complete locomotion
-envelope with the normal wrapper:
+Evaluate all four checkpoints from every seed deterministically under the neutral
+scenario before doing any longer run. Any non-finite value, target clip, measured
+soft-limit violation, fall or self-collision rejects the entire three-seed gate;
+fix the cause and restart all seeds from clean initialization. The checkpoints
+make this gate independent of TensorBoard interpolation. Only after all twelve
+evaluations pass may one selected v7 source run be extended toward the complete
+locomotion envelope with the normal wrapper:
+
+```bash
+scripts/evaluate_microban_teleop_v7_canary.sh <seed42-run> 42
+scripts/evaluate_microban_teleop_v7_canary.sh <seed43-run> 43
+scripts/evaluate_microban_teleop_v7_canary.sh <seed44-run> 44
+```
 
 ```bash
 MICROBAN_TELEOP_TARGET_ITERS=3000 \
 MICROBAN_TELEOP_SAVE_INTERVAL=50 \
-scripts/train_microban_teleop.sh resume <v5-canary-run>
+scripts/train_microban_teleop.sh resume <v7-canary-run>
 ```
 
 Resume writes a new timestamp directory. Record that continuation name from the
-console output and use it, not `<v5-canary-run>`, for evaluation and any later
+console output and use it, not `<v7-canary-run>`, for evaluation and any later
 resume.
 
 If the same audited bytes live elsewhere, set

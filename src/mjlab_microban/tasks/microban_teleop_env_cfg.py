@@ -47,6 +47,13 @@ from mjlab_microban.tasks.mdp import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+    MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
+    MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
     guarded_teleop_actor_raw_bounds,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
@@ -61,6 +68,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResumeSafeStepBasedStagedCurriculum,
     effective_action_after_target_clip,
     linear_velocity_tracking_error_l1,
+    normalized_joint_soft_limit_guard_l1_sum,
     normalized_target_clip_excess_l1_sum,
     normalized_target_near_limit_l1_sum,
     raw_action_l2,
@@ -107,6 +115,8 @@ MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
 MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
+MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S = 0.12
 MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE = {
     "lin_vel_x": (-0.2, 0.3),
     "lin_vel_y": (-0.1, 0.1),
@@ -365,6 +375,15 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "margin_ratio": 0.05,
         },
     )
+    cfg.rewards["joint_soft_limit_guard"] = RewardTermCfg(
+        func=normalized_joint_soft_limit_guard_l1_sum,
+        weight=-5.0,
+        params={
+            "action_name": "joint_pos",
+            "margin_ratio": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
+            "lookahead_s": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
+        },
+    )
     cfg.rewards["raw_action_l2"] = RewardTermCfg(
         func=raw_action_l2,
         weight=-0.01,
@@ -599,6 +618,15 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
             "lower_bound": microban_teleop_action_delta_bounds()[0],
             "upper_bound": microban_teleop_action_delta_bounds()[1],
             "std_type": "log",
+            "latent_scale_multiplier": (MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER),
+            "latent_abs_max": MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+            "latent_mean_fraction": MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+            "std_min_abs_max": MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+            "std_min_envelope_divisor": (
+                MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR
+            ),
+            "std_abs_max": MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+            "std_envelope_divisor": (MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR),
         },
     ),
     critic=RslRlModelCfg(
@@ -607,6 +635,7 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         obs_normalization=True,
     ),
     algorithm=RslRlPpoAlgorithmCfg(
+        class_name=("mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO"),
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,

@@ -29,7 +29,9 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from rsl_rl.algorithms import PPO
 from rsl_rl.modules.distribution import Distribution, GaussianDistribution
+from tensordict import TensorDict
 from torch import nn
 from torch.distributions import Normal
 
@@ -39,7 +41,17 @@ from mjlab_microban.tasks.mdp import (
     HandTargetCommand,
     HandTargetCommandCfg,
 )
-from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTION_WIDTH,
+    MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+    MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
+    MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+    MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+)
 
 # Runtime command limits from microban/src/moves/hmd_head.py.  The event further
 # intersects these with Entity.data.soft_joint_pos_limits, so the effective
@@ -109,12 +121,20 @@ class PerJointGaussianDistribution(GaussianDistribution):
 
 
 class _AsymmetricArctanDeterministicOutput(nn.Module):
-    """Exportable zero-anchored map from latent actions to safe deltas."""
+    """Exportable zero-anchored map from MLP outputs to safe deltas."""
 
-    def __init__(self, lower_bound: torch.Tensor, upper_bound: torch.Tensor) -> None:
+    def __init__(
+        self,
+        lower_bound: torch.Tensor,
+        upper_bound: torch.Tensor,
+        mean_lower_bound: torch.Tensor,
+        mean_upper_bound: torch.Tensor,
+    ) -> None:
         super().__init__()
         self.register_buffer("lower_bound", lower_bound.detach().clone())
         self.register_buffer("upper_bound", upper_bound.detach().clone())
+        self.register_buffer("mean_lower_bound", mean_lower_bound.detach().clone())
+        self.register_buffer("mean_upper_bound", mean_upper_bound.detach().clone())
         zero = torch.zeros((), dtype=lower_bound.dtype, device=lower_bound.device)
         self.register_buffer(
             "inward_lower_bound", torch.nextafter(lower_bound, zero).detach().clone()
@@ -123,17 +143,39 @@ class _AsymmetricArctanDeterministicOutput(nn.Module):
             "inward_upper_bound", torch.nextafter(upper_bound, zero).detach().clone()
         )
 
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+    def forward(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        if not torch.onnx.is_in_onnx_export() and not bool(
+            torch.isfinite(mlp_output).all().item()
+        ):
+            raise FloatingPointError(
+                "Exportable bounded actor MLP output became non-finite"
+            )
+        mean_scale = torch.where(
+            mlp_output >= 0.0, self.mean_upper_bound, -self.mean_lower_bound
+        )
+        latent = (2.0 * mean_scale / math.pi) * torch.atan(
+            math.pi * mlp_output / (2.0 * mean_scale)
+        )
         scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
         action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
-        return torch.maximum(
+        bounded = torch.maximum(
             torch.minimum(action, self.inward_upper_bound),
             self.inward_lower_bound,
         )
+        # atan(inf) is finite.  Preserve non-finite network failures through
+        # ONNX rather than hiding them behind a saturated-looking action.
+        output = bounded + 0.0 * mlp_output
+        if not torch.onnx.is_in_onnx_export() and not bool(
+            torch.isfinite(output).all().item()
+        ):
+            raise FloatingPointError(
+                "Exportable bounded actor output became non-finite"
+            )
+        return output
 
 
 class AsymmetricBoundedGaussianDistribution(Distribution):
-    """Diagonal Gaussian pushed through a zero-anchored bounded bijection.
+    """Numerically guarded diagonal Gaussian with bounded physical actions.
 
     The MLP emits an unconstrained latent action ``z``.  For a joint with raw
     action bounds ``lower < 0 < upper``, the action sent to the environment is::
@@ -143,18 +185,20 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
 
     This asymmetric arctangent is strictly monotonic, maps real numbers onto the
     open action interval, satisfies ``T(0) == 0`` and has unit derivative at
-    zero on both sides.  A copied velocity actor therefore keeps its default
-    pose and its local action scale while no stochastic or deterministic output
-    can request a target beyond a teleoperation soft limit.
+    zero on both sides.  Float32 storage cannot reliably invert it arbitrarily
+    close to its asymptote, however.  Contract v7 therefore derives a finite
+    operational latent envelope from each side's action width, smoothly bounds
+    the MLP-provided Gaussian mean inside that envelope, and clamps the
+    learned standard deviation to leave a wide stochastic margin.  Sampling
+    outside the outer envelope fails training instead of silently clipping a
+    non-invertible action.
 
-    PPO operates on the actual bounded actions.  ``log_prob`` applies the exact
-    inverse-Jacobian correction, and KL is evaluated in latent Gaussian space;
-    KL is invariant under the same fixed bijection.  Entropy has no elementary
-    closed form for asymmetric arctan-normal distributions, so ``entropy`` is
-    the unbiased reparameterized ``-log p(T(z))`` estimate from the sample made
-    by the current ``update``/``sample`` call.  The task currently has zero
-    entropy weight, but the estimator remains finite, correctly shaped and
-    differentiable if that setting changes.
+    PPO stores and scores the exact sampled latent, never a float32 physical
+    action reconstructed through the ill-conditioned inverse.  The custom PPO
+    adapter maps that latent through :meth:`to_environment_action` only for the
+    environment step.  Deterministic evaluation and ONNX export apply the same
+    map.  Previous-action observations remain the bounded, target-clipped raw
+    delta received by the environment.
     """
 
     def __init__(
@@ -164,6 +208,17 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         lower_bound: Sequence[float],
         upper_bound: Sequence[float],
         std_type: str = "log",
+        latent_scale_multiplier: float = (
+            MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER
+        ),
+        latent_abs_max: float = MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
+        latent_mean_fraction: float = MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+        std_min_abs_max: float = MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+        std_min_envelope_divisor: float = (
+            MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR
+        ),
+        std_abs_max: float = MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+        std_envelope_divisor: float = (MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR),
     ) -> None:
         super().__init__(output_dim)
         if isinstance(init_std, (str, bytes)):
@@ -188,6 +243,47 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
             raise ValueError("every lower_bound must be strictly negative")
         if not bool(torch.all(upper_values > 0.0).item()):
             raise ValueError("every upper_bound must be strictly positive")
+        scalar_contract = {
+            "latent_scale_multiplier": latent_scale_multiplier,
+            "latent_abs_max": latent_abs_max,
+            "std_min_abs_max": std_min_abs_max,
+            "std_min_envelope_divisor": std_min_envelope_divisor,
+            "std_abs_max": std_abs_max,
+            "std_envelope_divisor": std_envelope_divisor,
+        }
+        for name, value in scalar_contract.items():
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+        if (
+            not math.isfinite(latent_mean_fraction)
+            or not 0.0 < latent_mean_fraction < 1.0
+        ):
+            raise ValueError("latent_mean_fraction must be finite and in (0, 1)")
+
+        absolute_cap = torch.full_like(lower_values, latent_abs_max)
+        operational_lower = -torch.minimum(
+            -lower_values * latent_scale_multiplier, absolute_cap
+        )
+        operational_upper = torch.minimum(
+            upper_values * latent_scale_multiplier, absolute_cap
+        )
+        mean_lower = operational_lower * latent_mean_fraction
+        mean_upper = operational_upper * latent_mean_fraction
+        closest_operational_side = torch.minimum(-operational_lower, operational_upper)
+        min_std = torch.minimum(
+            torch.full_like(std_values, std_min_abs_max),
+            closest_operational_side / std_min_envelope_divisor,
+        )
+        max_std = torch.minimum(
+            torch.full_like(std_values, std_abs_max),
+            closest_operational_side / std_envelope_divisor,
+        )
+        if not bool(torch.all(min_std < max_std).item()):
+            raise ValueError("derived max_std must be greater than std_min")
+        if not bool(
+            torch.all((std_values >= min_std) & (std_values <= max_std)).item()
+        ):
+            raise ValueError("every init_std must be inside the operational std bounds")
 
         self.std_type = std_type
         if std_type == "scalar":
@@ -204,9 +300,34 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         zero = torch.zeros((), dtype=lower_values.dtype)
         self.register_buffer("inward_lower_bound", torch.nextafter(lower_values, zero))
         self.register_buffer("inward_upper_bound", torch.nextafter(upper_values, zero))
+        self.register_buffer("operational_lower_bound", operational_lower)
+        self.register_buffer("operational_upper_bound", operational_upper)
+        self.register_buffer("mean_lower_bound", mean_lower)
+        self.register_buffer("mean_upper_bound", mean_upper)
+        self.register_buffer("min_std", min_std)
+        self.register_buffer("max_std", max_std)
+        operational_scale = torch.where(
+            operational_lower >= 0.0, upper_values, -lower_values
+        )
+        operational_action_lower = (
+            2.0
+            * operational_scale
+            / math.pi
+            * torch.atan(math.pi * operational_lower / (2.0 * operational_scale))
+        )
+        operational_scale = torch.where(
+            operational_upper >= 0.0, upper_values, -lower_values
+        )
+        operational_action_upper = (
+            2.0
+            * operational_scale
+            / math.pi
+            * torch.atan(math.pi * operational_upper / (2.0 * operational_scale))
+        )
+        self.register_buffer("operational_action_lower", operational_action_lower)
+        self.register_buffer("operational_action_upper", operational_action_upper)
         self._distribution: Normal | None = None
         self._latent_sample: torch.Tensor | None = None
-        self._action_sample: torch.Tensor | None = None
         Normal.set_default_validate_args(False)
 
     def _transform(self, latent: torch.Tensor) -> torch.Tensor:
@@ -223,6 +344,16 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
             self.inward_lower_bound,
         )
 
+    def _limit_mean(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        """Smoothly keep the Gaussian centre inside its operational envelope."""
+
+        scale = torch.where(
+            mlp_output >= 0.0, self.mean_upper_bound, -self.mean_lower_bound
+        )
+        return (2.0 * scale / math.pi) * torch.atan(
+            math.pi * mlp_output / (2.0 * scale)
+        )
+
     def _inverse(self, action: torch.Tensor) -> torch.Tensor:
         if action.shape[-1] != self.output_dim:
             raise ValueError(
@@ -233,14 +364,19 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
             torch.isfinite(action)
             & (action > self.lower_bound)
             & (action < self.upper_bound)
+            & (action >= self.operational_action_lower)
+            & (action <= self.operational_action_upper)
         )
         if not bool(valid.all().item()):
             raise ValueError(
-                "Bounded action log_prob requires finite values strictly inside "
-                "every joint's soft action bounds"
+                "Bounded action log_prob requires finite values inside every "
+                "joint's operational action envelope"
             )
         scale = torch.where(action >= 0.0, self.upper_bound, -self.lower_bound)
-        return (2.0 * scale / math.pi) * torch.tan(math.pi * action / (2.0 * scale))
+        latent = (2.0 * scale / math.pi) * torch.tan(math.pi * action / (2.0 * scale))
+        if not bool(torch.isfinite(latent).all().item()):
+            raise FloatingPointError("Operational action inverse became non-finite")
+        return latent
 
     def _log_abs_det_jacobian(self, latent: torch.Tensor) -> torch.Tensor:
         scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
@@ -260,13 +396,29 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         return -log_one_plus_square
 
     def update(self, mlp_output: torch.Tensor) -> None:
+        if not bool(torch.isfinite(mlp_output).all().item()):
+            raise FloatingPointError("Bounded Gaussian MLP output became non-finite")
+        mean = self._limit_mean(mlp_output)
         if self.std_type == "scalar":
-            std = self.std_param.expand_as(mlp_output)
+            if not bool(torch.isfinite(self.std_param).all().item()):
+                raise FloatingPointError(
+                    "Bounded Gaussian std parameter became non-finite before clamp"
+                )
+            std_values = torch.clamp(self.std_param, self.min_std, self.max_std)
         else:
-            std = torch.exp(self.log_std_param).expand_as(mlp_output)
-        self._distribution = Normal(mlp_output, std)
+            if not bool(torch.isfinite(self.log_std_param).all().item()):
+                raise FloatingPointError(
+                    "Bounded Gaussian log_std parameter became non-finite before clamp"
+                )
+            log_min_std = torch.log(self.min_std)
+            log_max_std = torch.log(self.max_std)
+            std_values = torch.exp(
+                torch.clamp(self.log_std_param, log_min_std, log_max_std)
+            )
+        if not bool(torch.isfinite(std_values).all().item()):
+            raise FloatingPointError("Bounded Gaussian std became non-finite")
+        self._distribution = Normal(mean, std_values.expand_as(mean))
         self._latent_sample = None
-        self._action_sample = None
 
     def sample(self) -> torch.Tensor:
         if self._distribution is None:
@@ -275,14 +427,65 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         # estimator during PPO updates.  Rollout collection already runs under
         # inference_mode and detaches stored actions.
         self._latent_sample = self._distribution.rsample()
-        self._action_sample = self._transform(self._latent_sample)
-        return self._action_sample
+        valid = (
+            torch.isfinite(self._latent_sample)
+            & (self._latent_sample >= self.operational_lower_bound)
+            & (self._latent_sample <= self.operational_upper_bound)
+        )
+        if not bool(valid.all().item()):
+            raise FloatingPointError(
+                "Bounded Gaussian sample escaped its operational latent envelope"
+            )
+        return self._latent_sample
+
+    def to_environment_action(self, latent: torch.Tensor) -> torch.Tensor:
+        """Map a stored/scored PPO latent to the bounded environment action."""
+
+        if latent.shape[-1] != self.output_dim:
+            raise ValueError(
+                f"PPO latent must end in width {self.output_dim}, "
+                f"got {latent.shape[-1]}"
+            )
+        valid = (
+            torch.isfinite(latent)
+            & (latent >= self.operational_lower_bound)
+            & (latent <= self.operational_upper_bound)
+        )
+        if not bool(valid.all().item()):
+            raise FloatingPointError(
+                "PPO latent escaped its operational envelope before env transform"
+            )
+        action = self._transform(latent)
+        if not bool(torch.isfinite(action).all().item()):
+            raise FloatingPointError("Bounded environment action became non-finite")
+        endpoint = (action == self.inward_lower_bound) | (
+            action == self.inward_upper_bound
+        )
+        if bool(endpoint.any().item()):
+            raise FloatingPointError(
+                "Operational latent produced a non-bijective action endpoint"
+            )
+        return action
 
     def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
-        return self._transform(mlp_output)
+        if not bool(torch.isfinite(mlp_output).all().item()):
+            raise FloatingPointError(
+                "Deterministic bounded Gaussian MLP output became non-finite"
+            )
+        output = self._transform(self._limit_mean(mlp_output))
+        if not bool(torch.isfinite(output).all().item()):
+            raise FloatingPointError(
+                "Deterministic bounded Gaussian output became non-finite"
+            )
+        return output
 
     def as_deterministic_output_module(self) -> nn.Module:
-        return _AsymmetricArctanDeterministicOutput(self.lower_bound, self.upper_bound)
+        return _AsymmetricArctanDeterministicOutput(
+            self.lower_bound,
+            self.upper_bound,
+            self.mean_lower_bound,
+            self.mean_upper_bound,
+        )
 
     @property
     def input_dim(self) -> int:
@@ -292,10 +495,9 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
     def mean(self) -> torch.Tensor:
         if self._distribution is None:
             raise RuntimeError("update() must be called before reading mean")
-        # This is the transformed Gaussian centre/median and is also the exact
-        # deterministic policy output.  The nonlinear distribution's arithmetic
-        # expectation has no closed form and is not consumed by RSL-RL PPO.
-        return self._transform(self._distribution.mean)
+        # PPO stores and scores latent actions.  Deterministic policy/export
+        # output is intentionally exposed only through deterministic_output().
+        return self._distribution.mean
 
     @property
     def std(self) -> torch.Tensor:
@@ -310,9 +512,7 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
     def entropy(self) -> torch.Tensor:
         if self._distribution is None or self._latent_sample is None:
             raise RuntimeError("sample() must be called before reading entropy")
-        latent_log_prob = self._distribution.log_prob(self._latent_sample).sum(dim=-1)
-        log_jacobian = self._log_abs_det_jacobian(self._latent_sample).sum(dim=-1)
-        return -(latent_log_prob - log_jacobian)
+        return self._distribution.entropy().sum(dim=-1)
 
     @property
     def params(self) -> tuple[torch.Tensor, ...]:
@@ -325,12 +525,29 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
     def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
         if self._distribution is None:
             raise RuntimeError("update() must be called before log_prob()")
-        latent = self._inverse(outputs)
-        latent_log_prob = self._distribution.log_prob(latent).sum(dim=-1)
-        log_jacobian = self._log_abs_det_jacobian(latent).sum(dim=-1)
-        result = latent_log_prob - log_jacobian
+        if outputs.shape[-1] != self.output_dim:
+            raise ValueError(
+                f"PPO latent must end in width {self.output_dim}, "
+                f"got {outputs.shape[-1]}"
+            )
+        valid = (
+            torch.isfinite(outputs)
+            & (outputs >= self.operational_lower_bound)
+            & (outputs <= self.operational_upper_bound)
+        )
+        if not bool(valid.all().item()):
+            raise FloatingPointError(
+                "PPO log_prob latent is outside its operational envelope"
+            )
+        result = self._distribution.log_prob(outputs).sum(dim=-1)
         if not bool(torch.isfinite(result).all().item()):
-            raise FloatingPointError("Bounded Gaussian log_prob became non-finite")
+            raise FloatingPointError(
+                "Latent Gaussian log_prob became non-finite: "
+                f"latent_abs_max={float(outputs.abs().max().item()):.9g}, "
+                f"mean_abs_max={float(self._distribution.mean.abs().max().item()):.9g}, "
+                f"std_min={float(self._distribution.stddev.min().item()):.9g}, "
+                f"std_max={float(self._distribution.stddev.max().item()):.9g}"
+            )
         return result
 
     def kl_divergence(
@@ -343,6 +560,54 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         old_dist = Normal(old_mean, old_std)
         new_dist = Normal(new_mean, new_std)
         return torch.distributions.kl_divergence(old_dist, new_dist).sum(dim=-1)
+
+
+class LatentActionPPO(PPO):
+    """Store/score exact Gaussian latents while stepping bounded actions."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if not isinstance(
+            self.actor.distribution, AsymmetricBoundedGaussianDistribution
+        ):
+            raise TypeError(
+                "LatentActionPPO requires AsymmetricBoundedGaussianDistribution"
+            )
+        if self.symmetry is not None:
+            raise ValueError(
+                "LatentActionPPO does not support action-space symmetry augmentation"
+            )
+        if self.rnd is not None:
+            raise ValueError("LatentActionPPO does not support RND")
+        if self.actor.distribution.output_dim != MICROBAN_TELEOP_ACTION_WIDTH:
+            raise ValueError(
+                "LatentActionPPO requires the exact 18-wide Microban action contract"
+            )
+
+    @staticmethod
+    def construct_algorithm(
+        obs: TensorDict, env: Any, cfg: dict[str, Any], device: str
+    ) -> PPO:
+        if getattr(env, "clip_actions", object()) is not None:
+            raise ValueError("LatentActionPPO requires wrapper clip_actions=None")
+        if getattr(env, "num_actions", None) != MICROBAN_TELEOP_ACTION_WIDTH:
+            raise ValueError(
+                "LatentActionPPO requires the exact 18-wide Microban action contract"
+            )
+        algorithm_cfg = cfg.get("algorithm", {})
+        if not isinstance(algorithm_cfg, dict):
+            raise TypeError("LatentActionPPO algorithm config must be a dictionary")
+        if algorithm_cfg.get("rnd_cfg") is not None:
+            raise ValueError("LatentActionPPO does not support RND")
+        if algorithm_cfg.get("symmetry_cfg") is not None:
+            raise ValueError("LatentActionPPO does not support symmetry augmentation")
+        return PPO.construct_algorithm(obs, env, cfg, device)
+
+    def act(self, obs: TensorDict) -> torch.Tensor:
+        latent = super().act(obs)
+        distribution = self.actor.distribution
+        assert isinstance(distribution, AsymmetricBoundedGaussianDistribution)
+        return distribution.to_environment_action(latent)
 
 
 def _joint_position_action_tensors(
@@ -461,6 +726,76 @@ def normalized_target_near_limit_l1_sum(
     preferred_target = torch.clamp(target, min=preferred_lower, max=preferred_upper)
     normalized_excess = (target - preferred_target) / (0.5 * span)
     return torch.abs(normalized_excess).sum(dim=-1)
+
+
+def normalized_joint_soft_limit_guard_l1_sum(
+    env: ManagerBasedRlEnv,
+    action_name: str = "joint_pos",
+    margin_ratio: float = 0.05,
+    lookahead_s: float = 0.12,
+) -> torch.Tensor:
+    """Penalize controlled joints near a soft limit now or after a short coast.
+
+    Bounding position *targets* is not sufficient to bound the measured joint
+    state: actuator delay, gravity and momentum can carry a joint past its soft
+    limit while its target remains legal.  This guard evaluates both the current
+    position and a constant-velocity projection over the maximum configured
+    actuator delay (six 50 Hz policy samples).  The more dangerous value on each
+    side is compared with an inward ``margin_ratio`` and normalized by half of
+    that joint's soft range before summing.
+
+    As with :func:`normalized_target_near_limit_l1_sum`, an inward margin is
+    clamped at the configured default pose.  The guard therefore never asks the
+    measured joint to move away from neutral.  Unlike the target guard, however,
+    it penalizes gravity sag or projected motion past that neutral boundary.
+    Microban's shoulder-roll defaults are only one degree inside their soft
+    limits, so the policy can learn the inward *target* needed to hold the
+    measured shoulder at neutral without changing that neutral pose.  This is a
+    training signal, not a deployment-time safety filter; deterministic
+    evaluation must still reject every actual violation.
+    """
+
+    if not math.isfinite(margin_ratio) or not 0.0 < margin_ratio < 0.5:
+        raise ValueError("margin_ratio must be finite and in (0, 0.5)")
+    if not math.isfinite(lookahead_s) or lookahead_s < 0.0:
+        raise ValueError("lookahead_s must be finite and non-negative")
+
+    action = env.action_manager.get_term(action_name)
+    if not isinstance(action, JointPositionAction):
+        raise TypeError(f"{action_name!r} must be a JointPositionAction")
+    entity = action._entity
+    limits = entity.data.soft_joint_pos_limits[:, action.target_ids]
+    joint_pos = entity.data.joint_pos[:, action.target_ids]
+    joint_vel = entity.data.joint_vel[:, action.target_ids]
+    if not bool(
+        torch.isfinite(limits).all()
+        and torch.isfinite(joint_pos).all()
+        and torch.isfinite(joint_vel).all()
+    ):
+        raise ValueError("joint soft-limit guard inputs must be finite")
+
+    lower = limits[..., 0]
+    upper = limits[..., 1]
+    if not bool(torch.all(lower < upper).item()):
+        raise ValueError("joint soft-limit guard requires lower < upper")
+    projected_pos = joint_pos + lookahead_s * joint_vel
+    dangerous_lower = torch.minimum(joint_pos, projected_pos)
+    dangerous_upper = torch.maximum(joint_pos, projected_pos)
+    span = upper - lower
+    default_target = torch.as_tensor(
+        action.offset, dtype=joint_pos.dtype, device=joint_pos.device
+    )
+    default_target = torch.broadcast_to(default_target, joint_pos.shape)
+    if not bool(
+        torch.isfinite(default_target).all()
+        and torch.all((default_target >= lower) & (default_target <= upper)).item()
+    ):
+        raise ValueError("joint soft-limit guard default target must be in bounds")
+    preferred_lower = torch.minimum(default_target, lower + margin_ratio * span)
+    preferred_upper = torch.maximum(default_target, upper - margin_ratio * span)
+    lower_excess = torch.clamp(preferred_lower - dangerous_lower, min=0.0)
+    upper_excess = torch.clamp(dangerous_upper - preferred_upper, min=0.0)
+    return ((lower_excess + upper_excess) / (0.5 * span)).sum(dim=-1)
 
 
 def raw_action_l2(

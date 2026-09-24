@@ -87,13 +87,29 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "5"
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "7"
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
 )
 MICROBAN_TELEOP_ACTOR_LIMIT_MARGIN_RATIO = 0.05
 MICROBAN_TELEOP_ACTOR_DEFAULT_EPSILON_RAD = 1.0e-4
+# Float32 action storage cannot reliably invert the arctangent transform once
+# its latent input is millions of times wider than the selected asymmetric
+# action side.  Contract v7 therefore keeps the stochastic latent inside this
+# independently derivable operational envelope.  The mean uses three eighths
+# of that envelope and the maximum standard deviation is one sixteenth, leaving
+# ten sigmas to the closest side.  An envelope escape is therefore a fail-fast
+# numerical fault rather than an ordinary clipped sample.  The minimum standard
+# deviation keeps inverse quantization below 2.5% of one sigma throughout that
+# reachable region.
+MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER = 1024.0
+MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX = 32.0
+MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION = 3.0 / 8.0
+MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX = 0.01
+MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR = 64.0
+MICROBAN_TELEOP_ACTOR_STD_ABS_MAX = 0.15
+MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR = 16.0
 
 # A fixed, deterministic input corpus makes the checkpoint -> PyTorch -> ONNX
 # comparison reproducible on every export host.  The tolerances allow ordinary
@@ -106,11 +122,20 @@ TELEOP_ONNX_PARITY_ATOL = 1e-5
 TELEOP_ONNX_PARITY_RTOL = 1e-4
 
 _CHECKPOINT_NAME_RE = re.compile(r"model_(?:(\d+)|(pristine))\.pt")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _BOUNDED_ACTOR_BUFFER_KEYS = (
     "distribution.lower_bound",
     "distribution.upper_bound",
     "distribution.inward_lower_bound",
     "distribution.inward_upper_bound",
+    "distribution.operational_lower_bound",
+    "distribution.operational_upper_bound",
+    "distribution.operational_action_lower",
+    "distribution.operational_action_upper",
+    "distribution.mean_lower_bound",
+    "distribution.mean_upper_bound",
+    "distribution.min_std",
+    "distribution.max_std",
 )
 
 if MICROBAN_TELEOP_OBSERVATION_WIDTH != 83:
@@ -331,6 +356,74 @@ def collect_teleop_export_provenance(
     )
 
 
+def validate_velocity_actor_bootstrap_info(info: object) -> None:
+    """Validate optional v7 velocity-bootstrap provenance fail closed.
+
+    The shoulder-roll head initialization is part of the safety contract, not
+    merely an informational training note.  In particular, this rejects v7
+    checkpoints produced by the superseded v3 mapping before any actor tensor
+    can be loaded or exported under current metadata.
+    """
+
+    if info is None:
+        return
+    if not isinstance(info, dict):
+        raise TypeError("Checkpoint velocity_actor_bootstrap must be a dictionary")
+
+    from mjlab_microban.tasks.microban_teleop_bootstrap import (
+        TELEOP_SHOULDER_ROLL_ACTION_INDICES,
+        TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES,
+        TELEOP_SHOULDER_ROLL_INITIALIZATION,
+        VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+    )
+
+    exact = {
+        "mapping_version": VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+        "copied_state": ("actor_normalizer_and_mlp_except_guarded_shoulder_roll_head"),
+        "shoulder_roll_initialization": TELEOP_SHOULDER_ROLL_INITIALIZATION,
+        "shoulder_roll_action_indices": list(TELEOP_SHOULDER_ROLL_ACTION_INDICES),
+        "shoulder_roll_initial_latent_biases": list(
+            TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+        ),
+        "distribution_copied": False,
+        "critic_copied": False,
+        "optimizer_copied": False,
+    }
+    for key, expected in exact.items():
+        if info.get(key) != expected:
+            raise ValueError(
+                "Checkpoint velocity bootstrap provenance does not match the "
+                f"v7 guarded shoulder contract for {key!r}"
+            )
+
+    source_path = info.get("source_checkpoint_path")
+    source_sha256 = info.get("source_checkpoint_sha256")
+    if not isinstance(source_path, str) or not source_path:
+        raise TypeError("Velocity bootstrap source path must be a non-empty string")
+    if (
+        not isinstance(source_sha256, str)
+        or _SHA256_RE.fullmatch(source_sha256) is None
+    ):
+        raise ValueError("Velocity bootstrap source SHA-256 must be lowercase hex")
+    source_count = info.get("source_normalizer_count")
+    installed_count = info.get("installed_normalizer_count")
+    for name, value in (
+        ("source_normalizer_count", source_count),
+        ("installed_normalizer_count", installed_count),
+    ):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError(
+                f"Velocity bootstrap {name} must be finite and non-negative"
+            )
+    if float(source_count) != float(installed_count):
+        raise ValueError("Velocity bootstrap must preserve the source normalizer count")
+
+
 def validate_teleop_checkpoint_contract(
     checkpoint_path: str | Path,
     *,
@@ -339,12 +432,13 @@ def validate_teleop_checkpoint_contract(
 ) -> TeleopCheckpointContract:
     """Reject checkpoints trained with a different observation/action contract.
 
-    Older checkpoints can have the same tensor widths as v5, so PyTorch can load
-    them without an error and an exporter could otherwise attach current v5
+    Older checkpoints can have the same tensor widths as v7, so PyTorch can load
+    them without an error and an exporter could otherwise attach current v7
     metadata to incompatible training semantics. Validation happens before any
     actor state is loaded. The only legacy escape hatch is explicitly marked
-    diagnostic use for an unversioned v1 checkpoint; v2/v3/v4 must never resume
-    into v5, and the runner forbids optimizer/iteration resume in diagnostic mode.
+    diagnostic use for an unversioned v1 checkpoint; v2/v3/v4/v5/v6 must never
+    resume into v7, and the runner forbids optimizer/iteration resume in
+    diagnostic mode.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
@@ -410,11 +504,13 @@ def validate_teleop_checkpoint_contract(
         )
     if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
         raise ValueError(
-            "Checkpoint is not Microban teleop training contract v5; v1/v2/v3/v4 "
+            "Checkpoint is not Microban teleop training contract v7; "
+            "v1/v2/v3/v4/v5/v6 "
             "checkpoints require a clean retrain and cannot be resumed/exported"
         )
     if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
-        raise ValueError("Checkpoint previous-action semantics do not match v5")
+        raise ValueError("Checkpoint previous-action semantics do not match v7")
+    validate_velocity_actor_bootstrap_info(infos.get("velocity_actor_bootstrap"))
     return TeleopCheckpointContract(
         version=version,
         previous_action_semantics=semantics,
@@ -430,7 +526,7 @@ def validate_bounded_actor_checkpoint_buffers(
     *,
     map_location: str | torch.device | None = "cpu",
 ) -> None:
-    """Reject a v5 checkpoint whose persisted transform bounds can drift.
+    """Reject a v7 checkpoint whose persisted transform bounds can drift.
 
     RSL-RL includes registered distribution buffers in ``actor_state_dict`` and
     ``load_state_dict`` would otherwise overwrite the bounds derived from the
@@ -448,6 +544,13 @@ def validate_bounded_actor_checkpoint_buffers(
     checkpoint_actor_state = loaded.get("actor_state_dict")
     if not isinstance(checkpoint_actor_state, Mapping):
         raise TypeError("Teleop checkpoint has no actor_state_dict mapping")
+
+    validate_finite_actor_state(
+        checkpoint_actor_state, context="Checkpoint actor_state_dict"
+    )
+    validate_finite_actor_state(
+        expected_actor_state, context="Current actor state_dict"
+    )
 
     for key in _BOUNDED_ACTOR_BUFFER_KEYS:
         candidate = checkpoint_actor_state.get(key)
@@ -475,6 +578,46 @@ def validate_bounded_actor_checkpoint_buffers(
                 f"Checkpoint actor buffer {key!r} differs from the current "
                 "guarded action-bound contract"
             )
+
+
+def validate_finite_actor_state(
+    actor_state: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    """Fail closed if any floating/complex actor state tensor is non-finite."""
+
+    if not isinstance(actor_state, Mapping):
+        raise TypeError(f"{context} must be a mapping")
+    for key, value in actor_state.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{context} keys must be strings")
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"{context} entry {key!r} must be a Tensor")
+        if (value.is_floating_point() or value.is_complex()) and not bool(
+            torch.isfinite(value).all().item()
+        ):
+            raise FloatingPointError(f"{context} entry {key!r} is non-finite")
+
+
+def validate_finite_checkpoint_actor_state(
+    checkpoint_path: str | Path,
+    *,
+    map_location: str | torch.device | None = "cpu",
+) -> None:
+    """Validate every floating actor tensor before any checkpoint load."""
+
+    loaded = torch.load(
+        Path(checkpoint_path).resolve(),
+        map_location=map_location,
+        weights_only=False,
+    )
+    if not isinstance(loaded, dict):
+        raise TypeError("Teleop checkpoint must contain a dictionary")
+    actor_state = loaded.get("actor_state_dict")
+    if not isinstance(actor_state, Mapping):
+        raise TypeError("Teleop checkpoint has no actor_state_dict mapping")
+    validate_finite_actor_state(actor_state, context="Checkpoint actor_state_dict")
 
 
 def _representative_observation_bounds() -> tuple[np.ndarray, np.ndarray]:
@@ -932,7 +1075,7 @@ def get_microban_teleop_metadata(
         "soft_joint_pos_upper": soft_upper,
         # MJLab formats list metadata to only three decimals, which would turn
         # the shoulder's 1e-4-rad interior allowance into signed zero.  JSON
-        # strings preserve the exact v5 safety bounds through ONNX metadata.
+        # strings preserve the exact v7 safety bounds through ONNX metadata.
         "raw_action_soft_lower_json": json.dumps(
             [float(value) for value in raw_soft_lower], separators=(",", ":")
         ),
@@ -966,8 +1109,22 @@ def get_microban_teleop_metadata(
         "action_target_semantics": "default_joint_pos_plus_raw_action_times_scale",
         "action_clip_semantics": "absolute_joint_position_radians",
         "action_distribution_semantics": (
-            "diagonal_normal_latent_with_per_joint_asymmetric_zero_anchored_"
-            "arctan_bijection_v1"
+            "diagonal_normal_ppo_latent_stored_exactly_then_per_joint_"
+            "asymmetric_zero_anchored_arctan_environment_transform_with_"
+            "operational_envelope_v1"
+        ),
+        "actor_latent_operational_scale_multiplier": (
+            MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER
+        ),
+        "actor_latent_operational_abs_max": (MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX),
+        "actor_latent_mean_fraction": MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
+        "actor_latent_std_min_abs_max": MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
+        "actor_latent_std_min_envelope_divisor": (
+            MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR
+        ),
+        "actor_latent_std_abs_max": MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
+        "actor_latent_std_envelope_divisor": (
+            MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR
         ),
         "foot_target_semantics": (
             "left_xyz_then_right_xyz_trunk_frame_offset_from_episode_reset_"
@@ -1057,12 +1214,21 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         log_dir: str | None = None,
         device: str = "cpu",
     ) -> None:
-        """Construct a fresh v5 runner and optionally bootstrap its actor only.
+        """Construct a fresh v7 runner and optionally bootstrap its actor only.
 
         Bootstrap options are removed before RSL-RL sees the config.  Requiring
         both an explicit path and SHA-256 prevents a similarly named or replaced
         velocity checkpoint from silently becoming the initialization source.
         """
+
+        if not hasattr(env, "clip_actions") or env.clip_actions is not None:
+            raise ValueError(
+                "Microban teleop contract v7 requires wrapper clip_actions=None"
+            )
+        if getattr(env, "num_actions", None) != MICROBAN_TELEOP_ACTION_WIDTH:
+            raise ValueError(
+                "Microban teleop contract v7 requires exactly 18 environment actions"
+            )
 
         runner_cfg = deepcopy(train_cfg)
         bootstrap_path = runner_cfg.pop("bootstrap_velocity_checkpoint", None)
@@ -1091,6 +1257,9 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         self.loaded_checkpoint_contract = None
         self.bootstrap_velocity_provenance = None
         self.velocity_actor_bootstrap_info = None
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Fresh actor state_dict"
+        )
         if bootstrap_path is None:
             return
 
@@ -1106,6 +1275,8 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             )
 
         from mjlab_microban.tasks.microban_teleop_bootstrap import (
+            TELEOP_SHOULDER_ROLL_ACTION_INDICES,
+            TELEOP_SHOULDER_ROLL_INITIALIZATION,
             VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
             load_velocity_actor_bootstrap,
         )
@@ -1114,6 +1285,9 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             self.alg.get_policy(),
             bootstrap_path,
             bootstrap_sha256,
+        )
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Bootstrapped actor state_dict"
         )
         self.velocity_actor_bootstrap_info = {
             "mapping_version": VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
@@ -1129,11 +1303,19 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             "installed_normalizer_count": (
                 self.bootstrap_velocity_provenance.installed_normalizer_count
             ),
-            "copied_state": "actor_normalizer_and_mlp_only",
+            "copied_state": (
+                "actor_normalizer_and_mlp_except_guarded_shoulder_roll_head"
+            ),
+            "shoulder_roll_initialization": TELEOP_SHOULDER_ROLL_INITIALIZATION,
+            "shoulder_roll_action_indices": list(TELEOP_SHOULDER_ROLL_ACTION_INDICES),
+            "shoulder_roll_initial_latent_biases": list(
+                self.bootstrap_velocity_provenance.shoulder_roll_initial_latent_biases
+            ),
             "distribution_copied": False,
             "critic_copied": False,
             "optimizer_copied": False,
         }
+        validate_velocity_actor_bootstrap_info(self.velocity_actor_bootstrap_info)
         print(
             "Initialized teleop actor shared inputs from pinned velocity checkpoint "
             f"{self.bootstrap_velocity_provenance.checkpoint_path} "
@@ -1149,11 +1331,15 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
 
         if self.velocity_actor_bootstrap_info is None:
             raise RuntimeError("Pristine checkpoint requires velocity bootstrap info")
+        validate_velocity_actor_bootstrap_info(self.velocity_actor_bootstrap_info)
         if self.env.unwrapped.common_step_counter != 0:
             raise ValueError("Pristine checkpoint requires common_step_counter == 0")
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             raise FileExistsError(f"Refusing to replace pristine checkpoint: {path}")
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Pristine actor state_dict"
+        )
         payload = self.alg.save()
         payload["iter"] = -1
         payload["infos"] = {
@@ -1179,7 +1365,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         ``allow_legacy_teleop_contract`` exists solely so the deterministic
         evaluator can characterize the final v1 run.  Once those weights are
         resident in a runner, every path that could create a checkpoint or ONNX
-        must fail before writing anything; otherwise current v5 metadata could
+        must fail before writing anything; otherwise current v7 metadata could
         be attached to an observation-incompatible actor.
         """
 
@@ -1187,7 +1373,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if contract is not None and contract.diagnostic_legacy:
             raise ValueError(
                 "Legacy teleop checkpoints are diagnostics-only and cannot be "
-                "saved, exported, or tagged with v5 metadata"
+                "saved, exported, or tagged with v7 metadata"
             )
         if contract is not None and contract.pristine_pre_update:
             raise ValueError(
@@ -1203,7 +1389,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         map_location: str | None = None,
         allow_legacy_teleop_contract: bool = False,
     ) -> dict:
-        """Validate v5 semantics, then load at the next PPO iteration.
+        """Validate v7 semantics, then load at the next PPO iteration.
 
         RSL-RL stores the zero-based iteration that has just completed.  Its
         default loader resumes *at* that index, repeating one PPO update.  This
@@ -1217,7 +1403,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if getattr(self, "bootstrap_velocity_provenance", None) is not None:
             raise ValueError(
                 "A velocity-bootstrapped fresh runner cannot also load a teleop "
-                "checkpoint; construct a non-bootstrap runner to resume v5"
+                "checkpoint; construct a non-bootstrap runner to resume v7"
             )
         loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
         contract = validate_teleop_checkpoint_contract(
@@ -1253,6 +1439,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                     "Pristine pre-update checkpoints permit only an explicit "
                     "actor-only diagnostic load and cannot resume training"
                 )
+        validate_finite_checkpoint_actor_state(path, map_location=map_location or "cpu")
         if not contract.diagnostic_legacy:
             validate_bounded_actor_checkpoint_buffers(
                 path,
@@ -1266,11 +1453,10 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             strict=strict,
             map_location=map_location,
         )
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Loaded actor state_dict"
+        )
         saved_bootstrap_info = infos.get("velocity_actor_bootstrap")
-        if saved_bootstrap_info is not None and not isinstance(
-            saved_bootstrap_info, dict
-        ):
-            raise TypeError("Checkpoint velocity_actor_bootstrap must be a dictionary")
         self.velocity_actor_bootstrap_info = deepcopy(saved_bootstrap_info)
         if not loads_iteration:
             return infos
@@ -1294,6 +1480,9 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
 
     def save(self, path: str, infos=None) -> None:
         self._require_nonlegacy_deployment_contract()
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Actor state_dict before save"
+        )
         contract_infos = {
             **(infos or {}),
             "microban_teleop_training_contract_version": (
@@ -1304,6 +1493,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         contract_infos.pop("velocity_actor_bootstrap", None)
         bootstrap_info = getattr(self, "velocity_actor_bootstrap_info", None)
         if bootstrap_info is not None:
+            validate_velocity_actor_bootstrap_info(bootstrap_info)
             contract_infos["velocity_actor_bootstrap"] = deepcopy(bootstrap_info)
         super().save(path, contract_infos)
         policy_dir, _filename, onnx_path = self._get_export_paths(path)
@@ -1345,7 +1535,10 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         filename: str = "policy.onnx",
         verbose: bool = False,
     ) -> None:
-        """Export only fresh/resumed v5 weights, never legacy diagnostic weights."""
+        """Export only fresh/resumed v7 weights, never legacy diagnostic weights."""
 
         self._require_nonlegacy_deployment_contract()
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Actor state_dict before export"
+        )
         super().export_policy_to_onnx(path, filename, verbose)
