@@ -232,11 +232,11 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
 
 
 class VelocityBootstrapRunnerGuardTest(unittest.TestCase):
-    def test_both_path_and_digest_are_required(self) -> None:
+    def test_contract_v8_rejects_velocity_bootstrap_options(self) -> None:
         env = SimpleNamespace(clip_actions=None, num_actions=18)
         with (
             patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
-            self.assertRaisesRegex(ValueError, "requires both"),
+            self.assertRaisesRegex(ValueError, "requires a clean actor"),
         ):
             MicrobanTeleopOnPolicyRunner(
                 env,
@@ -244,11 +244,21 @@ class VelocityBootstrapRunnerGuardTest(unittest.TestCase):
             )
         base_init.assert_not_called()
 
-    def test_bootstrap_cannot_be_combined_with_resume(self) -> None:
+        with (
+            patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
+            self.assertRaisesRegex(ValueError, "requires a clean actor"),
+        ):
+            MicrobanTeleopOnPolicyRunner(
+                env,
+                {"bootstrap_velocity_checkpoint_sha256": "0" * 64},
+            )
+        base_init.assert_not_called()
+
+    def test_contract_v8_rejects_bootstrap_even_with_resume(self) -> None:
         env = SimpleNamespace(clip_actions=None, num_actions=18)
         with (
             patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
-            self.assertRaisesRegex(ValueError, "fresh run"),
+            self.assertRaisesRegex(ValueError, "requires a clean actor"),
         ):
             MicrobanTeleopOnPolicyRunner(
                 env,
@@ -257,6 +267,18 @@ class VelocityBootstrapRunnerGuardTest(unittest.TestCase):
                     "bootstrap_velocity_checkpoint": "/tmp/model.pt",
                     "bootstrap_velocity_checkpoint_sha256": "0" * 64,
                 },
+            )
+        base_init.assert_not_called()
+
+    def test_contract_v8_rejects_pristine_checkpoint_option(self) -> None:
+        env = SimpleNamespace(clip_actions=None, num_actions=18)
+        with (
+            patch.object(MjlabOnPolicyRunner, "__init__") as base_init,
+            self.assertRaisesRegex(ValueError, "requires a clean actor"),
+        ):
+            MicrobanTeleopOnPolicyRunner(
+                env,
+                {"save_pristine_checkpoint": True},
             )
         base_init.assert_not_called()
 

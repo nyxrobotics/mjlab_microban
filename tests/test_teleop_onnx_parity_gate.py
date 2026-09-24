@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,9 +23,14 @@ from onnx import TensorProto, helper
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
+from mjlab_microban.scripts import evaluate_teleop_checkpoint as teleop_evaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
+    MICROBAN_TELEOP_ACTOR_INITIALIZATION,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
+    MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+    MICROBAN_TELEOP_RECIPE_REVISION,
+    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     TELEOP_ONNX_PARITY_SAMPLE_COUNT,
     TELEOP_ONNX_PARITY_SEED,
     collect_teleop_export_provenance,
@@ -39,6 +45,12 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     AsymmetricBoundedGaussianDistribution,
+)
+from mjlab_microban.tasks.microban_teleop_provenance import (
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
+    canonical_json_sha256,
 )
 
 
@@ -63,6 +75,231 @@ def _write_zero_policy(path: Path) -> None:
         [weight],
     )
     onnx.save(helper.make_model(graph), path)
+
+
+def _write_generic_checkpoint(path: Path, *, iteration: int = 42) -> None:
+    files = {"src/mjlab_microban/test_recipe.py": "a" * 64}
+    manifest = {
+        "schema_version": MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+        "canonical_stage": False,
+        "training_contract_version": MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+        "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+        "actor_initialization": MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+        "resolved_config": {"critical": {}, "environment": {}, "runner": {}},
+        "source": {
+            "algorithm": "sha256(canonical_json_path_to_sha256_v1)",
+            "tree_sha256": canonical_json_sha256(files),
+            "files": files,
+        },
+        "invocation": {
+            "mode": "generic",
+            "stage_start_boundary": None,
+            "stage_target_boundary": None,
+            "parent_checkpoint_sha256": None,
+            "parent_gate_sha256": None,
+        },
+    }
+    torch.save(
+        {
+            "iter": iteration,
+            "infos": {
+                "env_state": {"common_step_counter": (iteration + 1) * 24},
+                "microban_teleop_training_contract_version": (
+                    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+                ),
+                "previous_action_semantics": (
+                    MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS
+                ),
+                "microban_teleop_actor_initialization": (
+                    MICROBAN_TELEOP_ACTOR_INITIALIZATION
+                ),
+                "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+                MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: manifest,
+                MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
+                    canonical_json_sha256(manifest)
+                ),
+            },
+        },
+        path,
+    )
+
+
+def _write_final_canonical_checkpoint(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    files = {"src/mjlab_microban/final_recipe.py": "b" * 64}
+    manifest = {
+        "schema_version": MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+        "canonical_stage": True,
+        "training_contract_version": MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+        "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+        "actor_initialization": MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+        "resolved_config": {
+            "critical": {
+                "num_envs": 4096,
+                "environment_seed": 42,
+                "runner_seed": 42,
+                "num_steps_per_env": 24,
+                "save_interval": 500,
+                "max_iterations_for_process": 2000,
+                "resume": True,
+                "logger": "tensorboard",
+                "upload_model": False,
+                "wrapper_clip_actions": None,
+                "bootstrap_velocity_checkpoint": None,
+                "bootstrap_velocity_checkpoint_sha256": None,
+                "save_pristine_checkpoint": False,
+            },
+            "environment": {},
+            "runner": {},
+        },
+        "source": {
+            "algorithm": "sha256(canonical_json_path_to_sha256_v1)",
+            "tree_sha256": canonical_json_sha256(files),
+            "files": files,
+        },
+        "invocation": {
+            "mode": "canonical_v8_stage",
+            "stage_start_boundary": 18_000,
+            "stage_target_boundary": 20_000,
+            "parent_checkpoint_sha256": "c" * 64,
+            "parent_gate_sha256": "d" * 64,
+        },
+    }
+    torch.save(
+        {
+            "iter": 19_999,
+            "infos": {
+                "env_state": {"common_step_counter": 20_000 * 24},
+                "microban_teleop_training_contract_version": (
+                    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+                ),
+                "previous_action_semantics": (
+                    MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS
+                ),
+                "microban_teleop_actor_initialization": (
+                    MICROBAN_TELEOP_ACTOR_INITIALIZATION
+                ),
+                "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+                MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: manifest,
+                MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
+                    canonical_json_sha256(manifest)
+                ),
+            },
+        },
+        path,
+    )
+
+
+def _write_final_acceptance_receipt(
+    root: Path,
+    checkpoint: Path,
+    *,
+    training_provenance_sha256: str,
+) -> tuple[Path, list[Path]]:
+    checkpoint = checkpoint.resolve()
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    scenario_reports = [
+        {"name": scenario.name} for scenario in teleop_evaluator.default_scenarios()
+    ]
+    report_paths: list[Path] = []
+    moving_paths: list[Path] = []
+    for moving_hmd, destination in ((False, report_paths), (True, moving_paths)):
+        for seed in (42, 43, 44):
+            report = {
+                "schema_version": 8,
+                "seed": seed,
+                "checkpoint": str(checkpoint),
+                "checkpoint_iteration": 19_999,
+                "checkpoint_sha256": checkpoint_sha256,
+                "evaluator_revision": teleop_evaluator.TELEOP_EVALUATOR_REVISION,
+                "acceptance_revision": teleop_evaluator.TELEOP_ACCEPTANCE_REVISION,
+                "steps_per_scenario": 1000,
+                "settle_steps": 50,
+                "status": "diagnostic" if moving_hmd else "pass",
+                "training_contract": {
+                    "version": MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+                    "training_provenance_sha256": training_provenance_sha256,
+                    "canonical_training_stage": True,
+                    "deployment_compatible": True,
+                },
+                "summary": {
+                    "hard_safety_checks_passed": True,
+                    "acceptance_checks_passed": True,
+                    "canonical_coverage": not moving_hmd,
+                },
+                "scenarios": scenario_reports,
+                "nominal_environment": {"hmd_neck_motion": moving_hmd},
+                "hmd_neck_motion": {
+                    "enabled": moving_hmd,
+                    "params": ({"neutral_probability": 0.0} if moving_hmd else None),
+                    "evidence": (
+                        {
+                            "passed": True,
+                            "active_event_membership": {
+                                "all_scenarios": True,
+                                "inactive_scenarios": [],
+                                "malformed_scenarios": [],
+                            },
+                            "minimum_required_target_peak_to_peak_rad": 0.10,
+                            "minimum_required_actual_peak_to_peak_rad": 0.05,
+                            "minimum_observed_target_peak_to_peak_rad_by_axis": {
+                                "head": 0.11,
+                                "neck_roll": 0.11,
+                                "neck_pitch": 0.11,
+                            },
+                            "minimum_observed_actual_peak_to_peak_rad_by_axis": {
+                                "head": 0.06,
+                                "neck_roll": 0.06,
+                                "neck_pitch": 0.06,
+                            },
+                        }
+                        if moving_hmd
+                        else None
+                    ),
+                },
+            }
+            suffix = "moving" if moving_hmd else "nominal"
+            report_path = root / f"seed{seed}_{suffix}.json"
+            report_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            destination.append(report_path.resolve())
+
+    evaluator_source_sha256 = hashlib.sha256(
+        Path(teleop_evaluator.__file__).read_bytes()
+    ).hexdigest()
+    receipt = {
+        "schema_version": 3,
+        "status": "pass",
+        "training_contract_version": MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+        "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+        "training_provenance_sha256": training_provenance_sha256,
+        "evaluator_revision": teleop_evaluator.TELEOP_EVALUATOR_REVISION,
+        "acceptance_revision": teleop_evaluator.TELEOP_ACCEPTANCE_REVISION,
+        "evaluator_source_sha256": evaluator_source_sha256,
+        "run_name": checkpoint.parent.name,
+        "completed_iterations": 20_000,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
+        "evaluation_seeds": [42, 43, 44],
+        "scenarios": "canonical",
+        "reports": [str(path) for path in report_paths],
+        "report_sha256": {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in report_paths
+        },
+        "moving_hmd_reports": [str(path) for path in moving_paths],
+        "moving_hmd_report_sha256": {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in moving_paths
+        },
+    }
+    receipt_path = root / "final_gate.json"
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return receipt_path, [*report_paths, *moving_paths]
 
 
 class _ZeroPolicy(torch.nn.Module):
@@ -123,7 +360,7 @@ class ParityGateTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.checkpoint = self.root / "model_42.pt"
-        self.checkpoint.write_bytes(b"stable checkpoint bytes")
+        _write_generic_checkpoint(self.checkpoint)
         self.temporary_onnx = self.root / ".policy.onnx.tmp"
         self.output_onnx = self.root / "policy.onnx"
 
@@ -139,6 +376,19 @@ class ParityGateTest(unittest.TestCase):
             hashlib.sha256(self.checkpoint.read_bytes()).hexdigest(),
         )
         self.assertEqual(len(provenance.exporter_source_sha256), 64)
+        self.assertFalse(provenance.training.canonical_stage)
+        self.assertEqual(provenance.training.mode, "generic")
+        self.assertIsNone(provenance.acceptance)
+
+    def test_generic_checkpoint_cannot_satisfy_canonical_deployment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "canonical training stage"):
+            collect_teleop_export_provenance(
+                self.checkpoint, require_canonical_stage=True
+            )
+        with self.assertRaisesRegex(ValueError, "canonical training stage"):
+            collect_teleop_export_provenance(
+                self.checkpoint, require_final_acceptance=True
+            )
 
     def test_rejects_checkpoint_without_iteration_filename(self) -> None:
         checkpoint = self.root / "latest.pt"
@@ -151,8 +401,8 @@ class ParityGateTest(unittest.TestCase):
         second = self.root / "second" / "model_42.pt"
         first.parent.mkdir()
         second.parent.mkdir()
-        first.write_bytes(b"first checkpoint")
-        second.write_bytes(b"second checkpoint")
+        _write_generic_checkpoint(first)
+        _write_generic_checkpoint(second)
         selected = self.root / "selected" / "model_42.pt"
         selected.parent.mkdir()
         selected.symlink_to(first)
@@ -270,6 +520,91 @@ class ParityGateTest(unittest.TestCase):
             "onnx.reference.ReferenceEvaluator",
         )
         self.assertEqual(metadata["policy_type"], "microban_pico_hybrid_teleop")
+        self.assertEqual(metadata["canonical_training_stage"], "false")
+        self.assertEqual(metadata["training_provenance_mode"], "generic")
+        self.assertEqual(
+            metadata["training_provenance_sha256"], provenance.training.sha256
+        )
+        self.assertEqual(
+            metadata["training_source_tree_sha256"],
+            provenance.training.source_tree_sha256,
+        )
+        self.assertEqual(metadata["training_stage_start_boundary"], "none")
+        self.assertEqual(metadata["deployment_accepted"], "false")
+        self.assertEqual(metadata["acceptance_receipt_sha256"], "none")
+
+    def test_final_receipt_is_verified_and_bound_into_onnx(self) -> None:
+        run = self.root / "canonical_run"
+        checkpoint = run / "model_19999.pt"
+        _write_final_canonical_checkpoint(checkpoint)
+        unaccepted = collect_teleop_export_provenance(
+            checkpoint, require_final_canonical_stage=True
+        )
+        receipt, _reports = _write_final_acceptance_receipt(
+            self.root,
+            checkpoint,
+            training_provenance_sha256=unaccepted.training.sha256,
+        )
+
+        provenance = collect_teleop_export_provenance(
+            checkpoint,
+            acceptance_receipt=receipt,
+            require_final_acceptance=True,
+        )
+        self.assertIsNotNone(provenance.acceptance)
+        _write_zero_policy(self.temporary_onnx)
+        publish_gated_teleop_onnx(
+            self.temporary_onnx,
+            self.output_onnx,
+            pytorch_policy=_ZeroPolicy(),
+            policy_metadata={},
+            provenance=provenance,
+        )
+        metadata = {
+            item.key: item.value for item in onnx.load(self.output_onnx).metadata_props
+        }
+        self.assertEqual(metadata["canonical_training_stage"], "true")
+        self.assertEqual(metadata["training_provenance_mode"], "canonical_v8_stage")
+        self.assertEqual(metadata["training_stage_start_boundary"], "18000")
+        self.assertEqual(metadata["training_stage_target_boundary"], "20000")
+        self.assertEqual(metadata["deployment_accepted"], "true")
+        self.assertEqual(metadata["acceptance_receipt_schema_version"], "3")
+        self.assertEqual(metadata["acceptance_status"], "pass")
+        self.assertEqual(metadata["acceptance_boundary"], "20000")
+        self.assertEqual(
+            metadata["acceptance_checkpoint_sha256"], metadata["checkpoint_sha256"]
+        )
+        self.assertEqual(
+            metadata["acceptance_training_provenance_sha256"],
+            metadata["training_provenance_sha256"],
+        )
+        self.assertEqual(
+            metadata["acceptance_recipe_revision"],
+            metadata["training_recipe_revision"],
+        )
+        assert provenance.acceptance is not None
+        self.assertEqual(
+            metadata["acceptance_receipt_sha256"], provenance.acceptance.sha256
+        )
+
+    def test_final_receipt_fails_closed_on_hashed_report_mutation(self) -> None:
+        run = self.root / "canonical_run"
+        checkpoint = run / "model_19999.pt"
+        _write_final_canonical_checkpoint(checkpoint)
+        unaccepted = collect_teleop_export_provenance(checkpoint)
+        receipt, reports = _write_final_acceptance_receipt(
+            self.root,
+            checkpoint,
+            training_provenance_sha256=unaccepted.training.sha256,
+        )
+        reports[0].write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "report SHA-256 mismatch"):
+            collect_teleop_export_provenance(
+                checkpoint,
+                acceptance_receipt=receipt,
+                require_final_acceptance=True,
+            )
 
     def test_parity_failure_preserves_last_known_good_output(self) -> None:
         _write_zero_policy(self.temporary_onnx)

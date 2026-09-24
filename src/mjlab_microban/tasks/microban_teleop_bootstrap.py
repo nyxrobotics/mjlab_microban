@@ -116,6 +116,39 @@ def _require_tensor(
     return value
 
 
+def initialize_teleop_shoulder_roll_mlp_head(
+    mlp: torch.nn.Module,
+) -> None:
+    """Install the guarded shoulder-roll rows on a freshly-created actor MLP.
+
+    The shoulder-roll neutral targets are only one degree inside the physical
+    soft limits.  A generic random final layer can therefore map either narrow
+    asymmetric action coordinate to the neutral-side endpoint before PPO has
+    received any safety signal.  It also makes the mean of these two dimensions
+    observation-dependent while their exploration standard deviation is only
+    about 0.006 rad, which can dominate the first adaptive-KL update.
+
+    Zeroing only the two final rows and applying the already validated inward
+    latent biases keeps every other clean-actor parameter untouched.  The rows
+    remain ordinary trainable parameters after initialization.
+    """
+
+    linear_layers = [
+        module for module in mlp.modules() if isinstance(module, torch.nn.Linear)
+    ]
+    if not linear_layers:
+        raise ValueError("Fresh actor MLP must contain a linear output layer")
+    final_layer = linear_layers[-1]
+    if final_layer.out_features != 18 or final_layer.bias is None:
+        raise ValueError("Fresh actor final layer must contain 18 biased action rows")
+    shoulder_indices = list(TELEOP_SHOULDER_ROLL_ACTION_INDICES)
+    with torch.no_grad():
+        final_layer.weight[shoulder_indices] = 0.0
+        final_layer.bias[shoulder_indices] = final_layer.bias.new_tensor(
+            TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+        )
+
+
 def expand_velocity_observation_to_teleop(
     velocity_observation: torch.Tensor,
 ) -> torch.Tensor:

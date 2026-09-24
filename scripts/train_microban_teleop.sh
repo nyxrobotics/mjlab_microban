@@ -14,9 +14,12 @@ Usage:
 
 Environment overrides:
   MICROBAN_TELEOP_NUM_ENVS      Parallel environments (default: 4096)
-  MICROBAN_TELEOP_TARGET_ITERS  Target total completed PPO iterations (default: 15000)
+  MICROBAN_TELEOP_TARGET_ITERS  Target total completed PPO iterations (default: 20000)
   MICROBAN_TELEOP_SAVE_INTERVAL Checkpoint interval in iterations (default: 500)
   MICROBAN_TELEOP_SEED          Environment/agent seed (default: 42)
+
+The PPO rollout length is fixed at 24 steps per environment. The wrapper rejects
+--agent.num-steps-per-env in both space-separated and --option=value forms.
 
 RUN_NAME is the timestamp directory below
 logs/rsl_rl/mjlab_microban_teleop/, for example 2026-09-24_12-34-56.
@@ -74,7 +77,7 @@ if [[ -n "${MICROBAN_TELEOP_MAX_ITERS+x}" ]]; then
     fi
     echo "[WARN] MICROBAN_TELEOP_MAX_ITERS is deprecated; use MICROBAN_TELEOP_TARGET_ITERS." >&2
 fi
-readonly TARGET_ITERS="${MICROBAN_TELEOP_TARGET_ITERS:-${MICROBAN_TELEOP_MAX_ITERS:-15000}}"
+readonly TARGET_ITERS="${MICROBAN_TELEOP_TARGET_ITERS:-${MICROBAN_TELEOP_MAX_ITERS:-20000}}"
 readonly SAVE_INTERVAL="${MICROBAN_TELEOP_SAVE_INTERVAL:-500}"
 readonly SEED="${MICROBAN_TELEOP_SEED:-42}"
 
@@ -103,6 +106,10 @@ fi
 # target depend on Tyro's duplicate-option behavior.
 for option in "$@"; do
     case "${option}" in
+        --agent.num-steps-per-env|--agent.num-steps-per-env=*)
+            echo "Contract v8 fixes --agent.num-steps-per-env at 24." >&2
+            exit 2
+            ;;
         --agent.max-iterations|--agent.max-iterations=*|\
         --agent.save-interval|--agent.save-interval=*|\
         --agent.resume|--agent.resume=*|\
@@ -111,20 +118,14 @@ for option in "$@"; do
             echo "${option} is controlled by this wrapper; use its mode/environment overrides instead." >&2
             exit 2
             ;;
+        --agent.bootstrap-velocity-checkpoint|--agent.bootstrap-velocity-checkpoint=*|\
+        --agent.bootstrap-velocity-checkpoint-sha256|--agent.bootstrap-velocity-checkpoint-sha256=*|\
+        --agent.save-pristine-checkpoint|--agent.save-pristine-checkpoint=*)
+            echo "Contract v8 requires a clean actor; ${option} is forbidden." >&2
+            exit 2
+            ;;
     esac
 done
-
-if [[ "${mode}" == "resume" ]]; then
-    for option in "$@"; do
-        case "${option}" in
-            --agent.bootstrap-velocity-checkpoint|--agent.bootstrap-velocity-checkpoint=*|\
-            --agent.bootstrap-velocity-checkpoint-sha256|--agent.bootstrap-velocity-checkpoint-sha256=*)
-                echo "Velocity actor bootstrap is fresh-run-only and cannot be used with resume." >&2
-                exit 2
-                ;;
-        esac
-    done
-fi
 
 iterations_to_run="${TARGET_ITERS}"
 resume_args=()

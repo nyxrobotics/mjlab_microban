@@ -21,27 +21,41 @@ from tensordict import TensorDict
 
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
     CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M,
+    HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+    HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     EvaluationScenario,
+    HmdMotionStats,
+    _configure_nominal_evaluation,
     _contact_aligned_foot_site_ids,
+    _copy_forced_moving_hmd_neck_event,
+    _hmd_neck_motion_report,
     _patch_initial_command_observation,
     _percentile,
     _publish_json_report,
     build_report,
     checkpoint_sha256,
+    command_axis_sign_diagnostic,
     default_scenarios,
+    evaluate_scenario_acceptance,
     evaluation_exit_code,
     resolve_checkpoint,
     select_scenarios,
+    summarize_hmd_motion_evidence,
     validate_scenarios,
 )
 from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
     TeleopCheckpointContract,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
+    MICROBAN_HMD_RETARGET_INTERVAL_S,
+    MICROBAN_HMD_RUNTIME_LIMITS_RAD,
+    MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    HmdNeckTargetMotion,
 )
 
 
@@ -51,7 +65,7 @@ class ScenarioContractTest(unittest.TestCase):
         validate_scenarios(scenarios)
         by_name = {scenario.name: scenario for scenario in scenarios}
 
-        self.assertEqual(len(scenarios), 15)
+        self.assertEqual(len(scenarios), 33)
         self.assertEqual(MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.0025)
         self.assertEqual(CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M, 0.0026)
         self.assertEqual(
@@ -86,7 +100,28 @@ class ScenarioContractTest(unittest.TestCase):
         )
         self.assertEqual(by_name["max_forward"].twist, (0.7, 0.0, 0.0))
         self.assertEqual(by_name["max_backward"].twist, (-0.5, 0.0, 0.0))
+        self.assertEqual(by_name["mid_lateral_left"].twist, (0.0, 0.2, 0.0))
+        self.assertEqual(by_name["mid_lateral_right"].twist, (0.0, -0.2, 0.0))
+        self.assertEqual(by_name["max_moving_yaw_left"].twist, (0.0, 0.0, 1.5))
+        self.assertEqual(by_name["max_moving_yaw_right"].twist, (0.0, 0.0, -1.5))
         self.assertEqual(by_name["max_stationary_yaw_left"].twist, (0.0, 0.0, 3.0))
+        self.assertEqual(
+            by_name["mixed_twist_forward_left"].twist,
+            (0.7, 0.3, 1.5),
+        )
+        self.assertEqual(
+            by_name["mixed_twist_forward_left"].foot_target,
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        )
+        self.assertEqual(
+            by_name["mixed_twist_forward_left"].hand_active,
+            (False, False),
+        )
+        self.assertEqual(
+            by_name["max_hands_left"].foot_target,
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        )
+        self.assertEqual(by_name["max_hands_left"].hand_active, (True, True))
         both_feet = by_name["bounded_both_feet"].foot_target
         self.assertTrue(
             all(any(abs(value) > 0.0 for value in foot) for foot in both_feet)
@@ -160,6 +195,183 @@ class ScenarioContractTest(unittest.TestCase):
         self.assertEqual([item.name for item in selected], ["max_backward", "neutral"])
         with self.assertRaisesRegex(ValueError, "Unknown scenarios"):
             select_scenarios(default_scenarios(), "not-a-scenario")
+
+
+class MovingHmdConfigurationTest(unittest.TestCase):
+    @staticmethod
+    def _evaluation_cfg() -> SimpleNamespace:
+        return SimpleNamespace(
+            scene=SimpleNamespace(num_envs=64),
+            auto_reset=True,
+            episode_length_s=0.0,
+            decimation=4,
+            sim=SimpleNamespace(mujoco=SimpleNamespace(timestep=0.005)),
+            events={
+                "reset_base": SimpleNamespace(
+                    mode="reset",
+                    params={"pose_range": {"x": (-1.0, 1.0)}, "velocity_range": {}},
+                ),
+                "reset_robot_joints": SimpleNamespace(mode="reset", params={}),
+                "push_robot": SimpleNamespace(mode="interval", params={}),
+            },
+            observations={"actor": SimpleNamespace(enable_corruption=True)},
+            curriculum={"training_stage": object()},
+        )
+
+    @staticmethod
+    def _training_cfg() -> SimpleNamespace:
+        return SimpleNamespace(
+            events={
+                "hmd_neck_target_motion": SimpleNamespace(
+                    mode="step",
+                    func=HmdNeckTargetMotion,
+                    params={
+                        "asset_cfg": SimpleNamespace(
+                            joint_names=MICROBAN_HMD_JOINT_NAMES
+                        ),
+                        "position_ranges_rad": MICROBAN_HMD_RUNTIME_LIMITS_RAD,
+                        "slew_rates_rad_s": MICROBAN_HMD_SLEW_RATES_RAD_S,
+                        "retarget_interval_s": MICROBAN_HMD_RETARGET_INTERVAL_S,
+                        "neutral_probability": 1.0,
+                    },
+                )
+            }
+        )
+
+    def test_forced_motion_copies_only_hmd_event_and_disables_other_randomness(
+        self,
+    ) -> None:
+        training_cfg = self._training_cfg()
+        copied = _copy_forced_moving_hmd_neck_event(training_cfg)
+        self.assertEqual(copied.params["neutral_probability"], 0.0)
+        self.assertEqual(
+            training_cfg.events["hmd_neck_target_motion"].params["neutral_probability"],
+            1.0,
+        )
+
+        cfg = self._evaluation_cfg()
+        _configure_nominal_evaluation(
+            cfg,
+            steps=1000,
+            moving_hmd_neck_event=copied,
+        )
+        self.assertEqual(
+            set(cfg.events),
+            {"reset_base", "reset_robot_joints", "hmd_neck_target_motion"},
+        )
+        self.assertFalse(cfg.observations["actor"].enable_corruption)
+        self.assertEqual(cfg.curriculum, {})
+        self.assertFalse(cfg.auto_reset)
+        self.assertEqual(cfg.scene.num_envs, 1)
+        self.assertAlmostEqual(cfg.episode_length_s, 20.0)
+
+        report = _hmd_neck_motion_report(cfg)
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["params"]["neutral_probability"], 0.0)
+        self.assertEqual(
+            report["params"]["joint_names"], list(MICROBAN_HMD_JOINT_NAMES)
+        )
+
+    def test_nominal_configuration_has_no_hmd_event(self) -> None:
+        cfg = self._evaluation_cfg()
+        _configure_nominal_evaluation(cfg, steps=300)
+        self.assertEqual(
+            set(cfg.events),
+            {"reset_base", "reset_robot_joints"},
+        )
+        self.assertEqual(
+            _hmd_neck_motion_report(cfg),
+            {"enabled": False, "params": None},
+        )
+
+
+class MovingHmdEvidenceTest(unittest.TestCase):
+    @staticmethod
+    def _scenario_motion(
+        *, target_peak_to_peak: float, actual_peak_to_peak: float
+    ) -> dict[str, object]:
+        return {
+            "active_event_member": True,
+            "sample_count": 1001,
+            "joint_names": list(MICROBAN_HMD_JOINT_NAMES),
+            "per_axis": {
+                name: {
+                    "target_peak_to_peak_rad": target_peak_to_peak,
+                    "actual_peak_to_peak_rad": actual_peak_to_peak,
+                }
+                for name in MICROBAN_HMD_JOINT_NAMES
+            },
+        }
+
+    def test_streaming_stats_report_per_axis_target_and_actual_excursion(self) -> None:
+        stats = HmdMotionStats.start(
+            joint_names=MICROBAN_HMD_JOINT_NAMES,
+            target=torch.tensor([0.0, -0.1, 0.2]),
+            actual=torch.tensor([0.0, -0.05, 0.1]),
+        )
+        stats.add(
+            target=torch.tensor([0.2, 0.1, -0.1]),
+            actual=torch.tensor([0.1, 0.02, -0.05]),
+        )
+        report = stats.report(step_dt=0.02)
+        self.assertTrue(report["active_event_member"])
+        self.assertEqual(report["sample_count"], 2)
+        self.assertAlmostEqual(
+            report["per_axis"]["head"]["target_peak_to_peak_rad"], 0.2
+        )
+        self.assertAlmostEqual(
+            report["per_axis"]["neck_pitch"]["actual_peak_to_peak_rad"],
+            0.15,
+            places=5,
+        )
+        self.assertAlmostEqual(
+            report["per_axis"]["head"]["maximum_target_slew_rad_s"],
+            10.0,
+            places=5,
+        )
+
+    def test_motion_evidence_requires_active_membership_and_both_excursions(
+        self,
+    ) -> None:
+        passing = [
+            {
+                "name": "neutral",
+                "hmd_neck_motion": self._scenario_motion(
+                    target_peak_to_peak=HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+                    actual_peak_to_peak=HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+                ),
+            }
+        ]
+        evidence = summarize_hmd_motion_evidence(passing, required=True)
+        self.assertTrue(evidence["passed"])
+        self.assertTrue(evidence["active_event_membership"]["all_scenarios"])
+
+        inactive = [
+            {
+                "name": "neutral",
+                "hmd_neck_motion": {
+                    "active_event_member": False,
+                    "joint_names": [],
+                    "per_axis": {},
+                },
+            }
+        ]
+        self.assertFalse(
+            summarize_hmd_motion_evidence(inactive, required=True)["passed"]
+        )
+
+        insufficient = [
+            {
+                "name": "neutral",
+                "hmd_neck_motion": self._scenario_motion(
+                    target_peak_to_peak=HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+                    actual_peak_to_peak=HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD - 1.0e-6,
+                ),
+            }
+        ]
+        evidence = summarize_hmd_motion_evidence(insufficient, required=True)
+        self.assertFalse(evidence["passed"])
+        self.assertFalse(evidence["actual_excursion_passed"])
 
 
 class CheckpointResolutionTest(unittest.TestCase):
@@ -246,37 +458,73 @@ class ReportPublicationTest(unittest.TestCase):
             "scenario_reports": scenarios,
             "control_hz": 50.0,
         }
-        v7_report = build_report(
+        current_report = build_report(
             **common,
             checkpoint_contract=TeleopCheckpointContract(
-                version="7",
+                version="8",
                 previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
                 iteration=14999,
                 common_step_counter=360000,
             ),
         )
-        self.assertEqual(v7_report["status"], "pass")
-        self.assertEqual(v7_report["schema_version"], 7)
+        self.assertEqual(current_report["status"], "pass")
+        self.assertEqual(current_report["schema_version"], 8)
+        self.assertFalse(current_report["hmd_neck_motion"]["enabled"])
+        self.assertIsNone(current_report["hmd_neck_motion"]["params"])
+        self.assertTrue(current_report["hmd_neck_motion"]["evidence"]["passed"])
+        self.assertFalse(current_report["nominal_environment"]["hmd_neck_motion"])
+
+        moving_scenarios = []
+        for scenario_report in scenarios:
+            moving_scenarios.append(
+                {
+                    **scenario_report,
+                    "hmd_neck_motion": MovingHmdEvidenceTest._scenario_motion(
+                        target_peak_to_peak=HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+                        actual_peak_to_peak=HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+                    ),
+                }
+            )
+        moving_hmd_report = build_report(
+            **{**common, "scenario_reports": moving_scenarios},
+            checkpoint_contract=TeleopCheckpointContract(
+                version="8",
+                previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+                iteration=14999,
+                common_step_counter=360000,
+            ),
+            hmd_neck_motion={
+                "enabled": True,
+                "params": {"neutral_probability": 0.0},
+            },
+        )
+        self.assertEqual(moving_hmd_report["status"], "diagnostic")
+        self.assertEqual(evaluation_exit_code(moving_hmd_report), 3)
+        self.assertFalse(moving_hmd_report["summary"]["canonical_coverage"])
+        self.assertTrue(moving_hmd_report["summary"]["acceptance_checks_passed"])
+        self.assertTrue(moving_hmd_report["hmd_neck_motion"]["enabled"])
+        self.assertTrue(moving_hmd_report["hmd_neck_motion"]["evidence"]["passed"])
+        self.assertTrue(moving_hmd_report["nominal_environment"]["hmd_neck_motion"])
 
         failing_scenarios = [dict(item) for item in scenarios]
         failing_scenarios[0] = {
             **failing_scenarios[0],
             "acceptance": {"passed": False},
         }
-        failed_v7_report = build_report(
+        failed_current_report = build_report(
             **{**common, "scenario_reports": failing_scenarios},
             checkpoint_contract=TeleopCheckpointContract(
-                version="7",
+                version="8",
                 previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
                 iteration=14999,
                 common_step_counter=360000,
             ),
         )
-        self.assertTrue(failed_v7_report["summary"]["canonical_coverage"])
-        self.assertFalse(failed_v7_report["summary"]["acceptance_checks_passed"])
-        self.assertEqual(failed_v7_report["status"], "fail")
-        self.assertEqual(evaluation_exit_code(failed_v7_report), 2)
-        self.assertEqual(evaluation_exit_code(v7_report), 0)
+        self.assertTrue(failed_current_report["summary"]["canonical_coverage"])
+        self.assertFalse(failed_current_report["summary"]["acceptance_checks_passed"])
+        self.assertEqual(failed_current_report["status"], "fail")
+        self.assertEqual(evaluation_exit_code(failed_current_report), 2)
+        self.assertEqual(evaluation_exit_code(current_report), 0)
 
         legacy_report = build_report(
             **common,
@@ -291,13 +539,13 @@ class ReportPublicationTest(unittest.TestCase):
         self.assertEqual(legacy_report["status"], "diagnostic")
         self.assertEqual(evaluation_exit_code(legacy_report), 3)
         self.assertTrue(legacy_report["training_contract"]["diagnostic_legacy"])
-        self.assertFalse(legacy_report["training_contract"]["v7_deployment_compatible"])
+        self.assertFalse(legacy_report["training_contract"]["deployment_compatible"])
         self.assertFalse(legacy_report["summary"]["deployment_certified"])
 
         pristine_report = build_report(
             **{**common, "checkpoint": Path("model_pristine.pt")},
             checkpoint_contract=TeleopCheckpointContract(
-                version="7",
+                version="8",
                 previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
                 iteration=-1,
                 common_step_counter=0,
@@ -306,9 +554,7 @@ class ReportPublicationTest(unittest.TestCase):
         )
         self.assertEqual(pristine_report["status"], "diagnostic")
         self.assertTrue(pristine_report["training_contract"]["pristine_pre_update"])
-        self.assertFalse(
-            pristine_report["training_contract"]["v7_deployment_compatible"]
-        )
+        self.assertFalse(pristine_report["training_contract"]["deployment_compatible"])
         self.assertFalse(pristine_report["summary"]["deployment_certified"])
         self.assertEqual(evaluation_exit_code({"status": "unknown"}), 2)
         self.assertEqual(evaluation_exit_code({}), 2)
@@ -387,6 +633,82 @@ class MetricHelperTest(unittest.TestCase):
     def test_percentile_interpolates_and_handles_empty_input(self) -> None:
         self.assertIsNone(_percentile([], 0.95))
         self.assertAlmostEqual(_percentile([0.0, 10.0], 0.95), 9.5)
+
+    def test_command_axis_sign_diagnostic_uses_signed_measured_means(self) -> None:
+        zero = (0.0, 0.0, 0.0)
+        scenario = EvaluationScenario(
+            "mixed_velocity",
+            (0.7, -0.3, 3.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        )
+        measured = {
+            "linear_x": {"mean": 0.1},
+            "linear_y": {"mean": -0.01},
+            "yaw": {"mean": 0.2},
+        }
+
+        diagnostic = command_axis_sign_diagnostic(scenario, measured)
+        self.assertTrue(diagnostic["applied"])
+        self.assertTrue(diagnostic["passed"])
+        self.assertEqual(diagnostic["axes"]["linear_y"]["expected_sign"], -1)
+        self.assertEqual(diagnostic["axes"]["linear_y"]["actual_sign"], -1)
+
+        measured["linear_y"]["mean"] = 0.01
+        diagnostic = command_axis_sign_diagnostic(scenario, measured)
+        self.assertFalse(diagnostic["passed"])
+        self.assertFalse(diagnostic["axes"]["linear_y"]["passed"])
+
+        measured["linear_y"]["mean"] = None
+        diagnostic = command_axis_sign_diagnostic(scenario, measured)
+        self.assertFalse(diagnostic["passed"])
+        self.assertIsNone(diagnostic["axes"]["linear_y"]["actual_sign"])
+
+        neutral = EvaluationScenario(
+            "neutral",
+            zero,
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        )
+        missing = {name: {"mean": None} for name in ("linear_x", "linear_y", "yaw")}
+        diagnostic = command_axis_sign_diagnostic(neutral, missing)
+        self.assertFalse(diagnostic["applied"])
+        self.assertTrue(diagnostic["passed"])
+
+    def test_command_axis_sign_is_an_acceptance_gate(self) -> None:
+        zero = (0.0, 0.0, 0.0)
+        scenario = EvaluationScenario(
+            "wrong_way",
+            (0.7, 0.0, 0.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        )
+        measured = {
+            "linear_x": {"mean": -0.01},
+            "linear_y": {"mean": 0.0},
+            "yaw": {"mean": 0.0},
+        }
+        report = {
+            "finite": True,
+            "fell_over": False,
+            "reached_time_limit": True,
+            "self_collision": {"contact_count_total": 0},
+            "action": {"target_clip_fraction": 0.0},
+            "joint_soft_limits": {"max_actual_violation_rad": 0.0},
+            "velocity_tracking_error": {
+                "linear_xy": {"mean": 0.01},
+                "yaw": {"mean": 0.01},
+            },
+            "target_error": {"active_hand": {}, "foot": {}},
+            "command_axis_sign": command_axis_sign_diagnostic(scenario, measured),
+        }
+
+        acceptance = evaluate_scenario_acceptance(scenario, report)
+        self.assertFalse(acceptance["passed"])
+        self.assertEqual(acceptance["failed_checks"], ["command_axis_sign"])
 
 
 if __name__ == "__main__":

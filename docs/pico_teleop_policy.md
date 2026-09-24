@@ -51,11 +51,11 @@ Processed joint-position targets therefore remain strictly inside the robot
 configuration's 90% soft limits; the environment and physical runtime retain
 their target clip as an independent defense.
 
-This is training/deployment contract **v7**. In v1, the observation fed back the
+This is training/deployment contract **v8**. In v1, the observation fed back the
 unbounded network output even when the actuator target had already saturated.
 That created a hidden recurrence and a flat action nullspace: the policy could
 keep producing larger shoulder/hip values while the robot received the same
-clipped target. V2 introduced, and v7 retains, this computation:
+clipped target. V2 introduced, and v8 retains, this computation:
 
 ```text
 absolute_target = default_joint_pos + raw_action * action_scale
@@ -64,11 +64,11 @@ effective_action = (clipped_target - default_joint_pos) / action_scale
 ```
 
 `effective_action` is the next observation in simulation and on the robot. ONNX
-metadata must contain training-contract version `7`, observation-schema version
+metadata must contain training-contract version `8`, observation-schema version
 `2`, and the exact semantic string
 `effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates`.
 The observation-schema version remains `2` because its 83 fields did not change.
-The runtime rejects missing, v1/v2/v3/v4/v5/v6, or otherwise different training
+The runtime rejects missing, v1/v2/v3/v4/v5/v6/v7, or otherwise different training
 metadata.
 
 Foot offsets are trained as stance/keypoint targets and fade out continuously as
@@ -93,9 +93,13 @@ local to the PICO task and does not modify the velocity or get-up environments.
 ## HMD-owned neck motion during training
 
 The body policy cannot safely learn to compensate for the camera neck if all
-three observed neck joints remain fixed at zero in simulation. Training therefore
+three observed neck joints remain fixed for the complete run. Training therefore
 adds the stateful `hmd_neck_target_motion` step event. It owns only `head`,
-`neck_roll` and `neck_pitch`; the policy action remains exactly 18-wide.
+`neck_roll` and `neck_pitch`; the policy action remains exactly 18-wide. The
+event is intentionally neutral during the initial locomotion acquisition, then
+switches to live neck motion at the 8,000-update boundary. This avoids making a
+large moving-head disturbance part of the already difficult first signed-axis
+problem.
 
 The requested ranges come from the robot-side `HmdHeadTrackingMove` limits. The
 event intersects them with MjLab's 90% articulation soft limits, giving these
@@ -107,12 +111,33 @@ effective training ranges:
 | `neck_roll` | -23 to +23 deg | -22.5 to +22.5 deg | 2.5 rad/s |
 | `neck_pitch` | -85 to +23 deg | -84.25 to +19.25 deg | 2.5 rad/s |
 
-Every environment independently samples a new waypoint every 0.35-1.50 seconds.
-The target advances toward it on every 50 Hz policy step, with the same slew
-limit used by the physical HMD controller; 20% of waypoints are neutral dwells.
-Sampling uses device-side `torch.rand`, so `--env.seed` reproduces the command
-sequence. MuJoCo Warp itself is not guaranteed bit-exact, so reproducibility here
-means the generated neck commands, not an identical physics trajectory.
+Before 8,000 updates the neutral probability is `1.0`, so the stateful event
+holds the three targets at zero. At 8,000 it changes both the running event and
+its auditable config to neutral probability `0.2`. Each environment then samples
+a new waypoint every 0.35-1.50 seconds and advances toward it on every 50 Hz
+policy step with the physical controller's slew limit; 20% of waypoints remain
+neutral dwells. Sampling uses device-side `torch.rand`, so `--env.seed`
+reproduces the command sequence. MuJoCo Warp itself is not guaranteed bit-exact,
+so reproducibility here means the generated neck commands, not an identical
+physics trajectory.
+
+The nominal deterministic evaluator disables the training event in play mode.
+Passing `--moving-hmd-neck` adds back a deep copy of only the training
+`HmdNeckTargetMotion` step event, forces its neutral probability to `0.0`, and
+keeps the nominal reset events. Actor observation corruption, every other
+domain-randomization event and curriculum remain disabled. This intentionally
+strong diagnostic makes every new waypoint non-neutral. It records the exact
+ranges, slew rates, retarget interval and neutral probability under
+`hmd_neck_motion.params`; even a complete passing suite stays
+`status: diagnostic`/exit `3` and cannot replace the nominal canonical pass.
+
+At every boundary from 12,000 updates onward, the stage evaluator runs both the
+nominal and moving-neck version of the same scenario set under each fixed seed.
+The gate receipt is not written unless all six reports pass hard safety and
+acceptance, identify the same checkpoint SHA-256/seed/scenarios, and expose the
+expected HMD mode. At 20,000 updates this means three nominal canonical passes
+plus three complete moving-neck diagnostic passes. A separate 256-environment,
+1,000-step zero-action audit observed no actual HMD-joint soft-limit excess.
 
 The event is omitted entirely from the `play=True` configuration. A viewer or
 live player must explicitly own the neck, just as the HMD controller does on the
@@ -139,9 +164,234 @@ rebuilds dataclasses: a dynamically attached command `build` callback or rotatio
 fields would otherwise disappear even if direct Python environment construction
 appeared to work.
 
-## Training
+## Training (contract v8; authoritative)
 
-### V7 requires a clean run
+Contract v8 must start from a clean actor. Do not resume or bootstrap from an
+older teleop or velocity checkpoint. The old tensors may load structurally, but
+that does not make their behavior safe or useful.
+
+The production v7 run `2026-09-25_02-13-39` was rejected at `model_2999.pt`:
+translation stayed essentially stationary at full forward/backward/lateral
+commands, while full stationary yaw fell. The follow-up neutral-anchor run
+`2026-09-25_03-10-15_v7_neutral_anchor_diagnostic` made neutral safe (foot RMS
+`0.010028 m`, P95 `0.014251 m`, no clip/limit violation) but did not restore
+locomotion: full translation still measured only millimetres per second and both
+yaw extrema remained slow or unstable. This is a capability failure, not a gate
+threshold issue, so the v7 scripts now exit immediately instead of producing a
+new checkpoint.
+
+A fresh velocity-policy experiment was also tested rather than assumed useful.
+Mapping its `model_999.pt` actor into the v8 bounded action head passed hard
+safety in all seven 300-step diagnostics, both before and after one 64-environment
+PPO update, but erased directional response and remained almost stationary. The
+diagnostic run is
+`2026-09-25_03-40-18_v8_model999_mapped_64env_1update_diagnostic`; reports are
+`artifacts/2026-09-25_03-40-18_v8_model999_mapped_pristine_low_signed_7x300.json`
+and
+`artifacts/2026-09-25_03-40-18_v8_model999_mapped_model0_low_signed_7x300.json`.
+It is therefore not a bootstrap source. These mapped checkpoints are historical
+diagnostics only: current v8 validation rejects every checkpoint carrying
+`infos.velocity_actor_bootstrap`, and both the generic and staged training
+wrappers reject all bootstrap/pristine options. V8 requires a clean actor start.
+
+### What v8 changes
+
+The velocity command sampler is now an exclusive categorical distribution over
+`standing`, forward, backward, left, right, yaw-left, yaw-right and (later)
+mixed motion. Early training gives each signed direction its own examples rather
+than relying on three independently sampled axes, which previously made mixed
+commands dominate and left no pure backward/lateral cases. The initial isolated
+probabilities are 10% standing and 15% for each of the six directions. At the
+mixed stage they become 10% for standing and each pure direction, and 30% mixed.
+
+The first signed ranges deliberately exclude the zero deadband:
+
+| Direction | Initial range | Intermediate range | Final range |
+|---|---:|---:|---:|
+| forward | `+0.25..+0.40 m/s` | `+0.10..+0.50` | `+0.10..+0.70` |
+| backward | `-0.35..-0.20 m/s` | `-0.40..-0.10` | `-0.50..-0.10` |
+| lateral left/right | `+/-0.15..0.25 m/s` | `+/-0.08..0.20` | `+/-0.08..0.30` |
+| yaw left/right | `+/-0.80..1.20 rad/s` | `+/-0.40..1.50` | `+/-0.40..3.00` |
+
+The tracking kernels start at `0.35/0.80` (linear/yaw) and later widen to
+`0.50/1.25`. Non-shoulder-roll exploration starts at latent
+standard deviation `1.0`; the close shoulder-roll sides retain their guarded
+one-third-headroom width. The two shoulder-roll output rows start with zero
+weights and deterministic inward latent biases `-0.25/+0.25`; all rows remain
+trainable. The exact checkpoint/ONNX marker is
+`microban_teleop_actor_initialization =
+clean_random_except_inward_shoulder_roll_v1_nonshoulder_std_1_v1`, so older v8
+runs without this initialization cannot resume or export. Learned log-standard
+deviations are projected into their numerical interval after every optimizer
+step, and load rejects an out-of-range saved parameter. PPO uses three epochs,
+entropy coefficient `0.005`, adaptive learning rate starting at `1e-4`, and the
+exact latent-action replay contract. The bounded physical transform,
+effective-action feedback, predicted joint-state guard and independent actuator
+target clip remain in force.
+
+The exact semantic recipe marker is `microban_teleop_recipe_revision =
+v8g_clean_shoulder_std1_intermediate_commands_tracking_l1x2_v1`.
+The non-vanishing linear/yaw L1 tracking weights are `-4.0/-1.0`; this doubles
+only the tracking incentive after the v8f diagnostic remained safely static.
+Pose, joint-limit, collision, and bounded-action safety terms are unchanged.
+Resume/evaluation rejects checkpoints from earlier v8 diagnostics.
+
+An exact-zero stationary foot anchor has weight `1.0` from the first update, but
+its velocity fade is only `0.0..0.01`. It is therefore exactly absent on every
+signed locomotion sample (the initial smallest lateral command is `0.15 m/s`
+and the smallest yaw command is `0.8 rad/s`) and cannot make standing still profitable
+for a moving command. The 8,000 stage enables the separate stationary no-step
+guard; it does not first introduce the foot anchor.
+
+The rollout length is a fixed part of this contract: every PPO update contains
+exactly 24 control steps per environment. Both wrappers reject
+`--agent.num-steps-per-env` in space-separated and `--option=value` forms. A
+normal `model_N.pt` checkpoint is accepted only when
+`infos.env_state.common_step_counter == (N + 1) * 24`; a mismatched counter is
+rejected before resume, evaluation or export. The separate pristine filename
+keeps its existing pre-update `iter=-1`, counter-zero diagnostic semantics.
+
+### Preflight and fail-closed staged workflow
+
+From any working directory, run the checked preflight once:
+
+```bash
+/home/kanade/Git-projects/mjlab_microban/scripts/run_microban_teleop_v8_preflight.sh
+```
+
+It runs the signed sampler, evaluator and policy-contract tests, then the CUDA
+environment smoke. A pass establishes API/config consistency only; it is not a
+locomotion result.
+
+Start the first production-width stage:
+
+```bash
+cd /home/kanade/Git-projects/mjlab_microban
+scripts/train_microban_teleop_v8_stage.sh start \
+  --agent.run-name v8_signed_axis_seed42
+```
+
+The driver stops at exactly 1,500 completed PPO updates. Checkpoint suffixes are
+zero-based, so this boundary is `model_1499.pt`. Gate the run:
+
+```bash
+scripts/evaluate_microban_teleop_v8_stage.sh <run-directory-name>
+```
+
+The evaluator runs each stage's fixed scenario set for 1,000 control steps after
+a 50-step settling window under seeds 42, 43 and 44. It requires contract v8,
+finite state, time-limit completion, no fall/self-collision, target clip at most
+0.1%, actual soft-limit violation at most `1e-6 rad`, correct command sign and
+the applicable velocity/keypoint error limits. Low `+/-0.1 m/s` commands also
+require at least `0.05 m/s` signed response and at most `0.075 m/s` MAE. A subset
+that passes is intentionally reported as `status: diagnostic`/exit `3`; the gate
+script converts three verified diagnostics into a SHA-bound `status: pass`
+receipt under `artifacts/teleop_v8_gates/`. The 20,000 boundary instead requires
+three complete canonical evaluator passes. Starting at 12,000, every seed also
+runs the same scenarios with `--moving-hmd-neck`; those three reports must pass
+hard safety and acceptance while remaining explicitly non-canonical diagnostics.
+Each scenario records whether `hmd_neck_target_motion` was an active event plus
+the target and measured neck minimum, maximum, peak-to-peak excursion, maximum
+target slew and tracking error for `head`, `neck_roll` and `neck_pitch`. The gate
+requires every axis in every scenario to show at least `0.10 rad` target motion
+and `0.05 rad` actual motion; merely retaining a configured event is not enough.
+Their paths are recorded separately as `moving_hmd_reports` in the gate receipt.
+
+Every checkpoint written by the runner carries a deterministic training
+provenance manifest and its canonical-JSON SHA-256. The manifest contains the
+resolved environment and PPO configs (including values after CLI parsing), the
+critical process settings, the canonical stage/parent lineage, and SHA-256s for
+the complete local training source set. The stage gate additionally requires
+the canonical-driver marker, the fixed 4,096 environments/seeds/rollout/save
+settings, and an exact match to the current source tree. Thus a checkpoint made
+through the generic debug wrapper cannot become a canonical checkpoint merely
+because it has the same human-readable v8 recipe string.
+
+Gate receipts use schema 3. In addition to the checkpoint and training
+provenance digests, each receipt pins the recipe, evaluator and acceptance
+revisions, the exact evaluator source SHA-256, and the SHA-256 of every nominal
+and moving-HMD JSON report. Resume recalculates all of those digests; modifying
+or replacing a report after the gate was issued invalidates the receipt.
+
+Only a valid receipt for the exact checkpoint SHA-256 unlocks the next stage:
+
+```bash
+scripts/train_microban_teleop_v8_stage.sh resume <run-directory-name>
+```
+
+MjLab writes every resume into a new timestamp directory. Use the new directory
+printed by training for the next evaluation and resume; do not reuse the source
+name. Repeat evaluate/resume at every boundary:
+
+If training stops between two boundaries, pass that interrupted run directory to
+the same `resume` command. The driver reads the latest checkpoint, validates its
+canonical provenance digest, original stage start/target, current source tree and
+pinned parent checkpoint/gate SHA-256, then runs only the remaining updates to
+the original upper boundary. It never unlocks a later curriculum stage and does
+not require a gate for the unfinished checkpoint. A checkpoint made by the
+generic training wrapper, one from another stage, or one whose parent receipt is
+missing or changed is rejected.
+
+| Completed updates | Capability just trained and gated | Next capability unlocked after pass |
+|---:|---|---|
+| 1,500 | representative low-speed isolated signed-axis response | intermediate isolated ranges |
+| 3,000 | representative low/mid isolated response, including lateral `+/-0.2 m/s` | final translation and moving yaw |
+| 4,500 | full translation and moving yaw `+/-1.5 rad/s` | pure yaw to `+/-3 rad/s` |
+| 6,000 | full pure-yaw isolated axes | 30% mixed-twist replay |
+| 8,000 | full mixed locomotion with the stationary foot anchor | moving-HMD and stationary no-step guard |
+| 12,000 | moving-HMD/no-step locomotion robustness | broad hand targets |
+| 14,000 | broad hand tracking | tighter hand tracking |
+| 16,000 | tight hand tracking | broad stationary foot targets |
+| 18,000 | broad single/both-foot tracking | tighter/fuller both-foot targets |
+| 20,000 | complete policy | canonical ONNX/runtime verification |
+
+The 3,000-and-later gates include zero-target lateral `+/-0.2 m/s`. The 4,500
+gate has separate zero-target moving-yaw extrema; the 8,000 gate has
+zero-target mixed-twist cases; and the hand gates have zero-foot hand corners.
+This keeps each capability independently testable instead of accidentally
+requiring a later keypoint objective. The 18,000 gate adds the floor-band and
+single-foot corners within the broad target range already trained before that
+boundary. The `0.016 m` bounded-both-feet case remains in the final 20,000 gate,
+after the simultaneous-foot range has trained up to `0.020 m`. The final
+canonical suite covers all 33 scenarios, including the combined hand/foot cases.
+
+If an interrupted evaluation left reports behind, inspect them first. An
+intentional rerun may replace that stage's reports and receipt with:
+
+```bash
+MICROBAN_TELEOP_GATE_FORCE=1 \
+scripts/evaluate_microban_teleop_v8_stage.sh <run-directory-name>
+```
+
+Forced evaluation first moves any existing pass receipt to a timestamped
+`.invalidated.*` path, before launching the first evaluator. If any forced run
+then fails or is interrupted, the canonical receipt path remains absent and the
+old pass cannot unlock training. A new receipt is published atomically only
+after every required report passes and is hashed.
+
+The lower-level `scripts/train_microban_teleop.sh` still supports debugging and
+defaults to 4,096 environments, seed 42, a checkpoint every 500 updates and
+20,000 total updates. It does not enforce stage receipts; do not use its direct
+`train`/`resume` modes for the canonical production run. Environment overrides
+remain available for explicitly non-canonical diagnostics.
+
+The final gate command creates three nominal full-suite reports, three
+moving-neck full-suite reports and one receipt. Do not export or copy the policy
+to the robot if any stage fails. Fix the recipe and restart a clean run;
+continuing past a failed boundary would train the next objective on an unproven
+base capability.
+
+## Rejected v7 archive (do not execute)
+
+The following section records the superseded v7 design and failure-analysis
+workflow for auditability. It is not a current setup guide and none of its
+commands should be run. The v7-named wrappers fail closed; generic wrapper
+examples in the archive now resolve to the v8 code and cannot reproduce v7.
+
+<details>
+<summary>Show the rejected v7 record</summary>
+
+### V7 required a clean run
 
 Do **not** resume a v1, v2, v3, v4, v5 or v6 checkpoint. Their tensors have
 compatible widths, but v7 changes PPO storage and likelihood evaluation from a
@@ -273,10 +523,10 @@ or giving up the physical guard. Export metadata records the exact 18 actor
 bounds, the wider hard-clip bounds, guard ratio and epsilon. The wider hard clip
 is deliberately retained as a second line of defense.
 
-Exploration uses an exact joint-ordered latent log-standard-deviation vector. Each
-initial standard deviation is one third of the nearest soft-limit headroom,
-capped at `0.15 rad`; shoulder roll is only `0.00581776 rad` (`0.333 deg`)
-because its home pose has one degree of headroom. Entropy bonus is zero. A
+Exploration uses an exact joint-ordered latent log-standard-deviation vector.
+Each initial standard deviation is one third of the nearest soft-limit headroom,
+capped at `0.15`; shoulder roll is only `0.00581776` because its home pose has
+one degree of headroom. Entropy bonus is zero. A
 normalized per-joint L1 target-clip-excess sum (weight `-2`) remains a defensive
 contract check, while the actual joint-limit cost (weight `-10`) penalizes a
 crossing after it occurs. A second weight-`-1`
@@ -553,20 +803,67 @@ Close the MuJoCo window to finish. This shares the GPU, so running it alongside
 a 4,096-environment training job reduces training throughput even though the
 single preview environment uses comparatively little memory.
 
-## Deterministic export
+</details>
 
-Export the latest run:
+## Current v8 final acceptance
+
+The final stage evaluator already invokes the canonical headless suite under all
+three fixed seeds. For a standalone rerun of one seed:
 
 ```bash
-uv run python -m mjlab_microban.scripts.export_teleop_onnx \
+uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
+  --seed 42 --steps 1000 --settle-steps 50 \
+  --output artifacts/model_19999_v8_evaluation_seed42.json
+```
+
+Run the independent moving-neck version with the same checkpoint, seed and
+scenario coverage. A healthy result intentionally exits `3` because it is a
+diagnostic, so use the stage wrapper for the authoritative combined gate:
+
+```bash
+uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
+  --seed 42 --steps 1000 --settle-steps 50 --moving-hmd-neck \
+  --output artifacts/model_19999_v8_evaluation_seed42_moving_hmd.json
+```
+
+Canonical coverage is the evaluator's exact ordered 33-scenario list. It
+includes neutral, low/mid signed axes (including lateral `+/-0.2 m/s`), final
+translation, moving-yaw and stationary-yaw extrema, zero-target mixed twists,
+floor-band foot targets,
+hand-only corners, combined keypoint corners and both-feet targets. The complete
+list must run for at least 1,000 steps with the default 50-step settle period;
+otherwise a healthy subset remains `diagnostic` rather than `pass`.
+
+The shared acceptance limits are: at least 99% time-limit completion; no
+NaN/Inf, fall or self-collision; actual joint-limit violation at most
+`1e-6 rad`; target clip fraction at most 0.1%; hand RMS/P95 at most 3/5 cm;
+stationary-foot RMS/P95 at most 1.5/2.5 cm; ordinary linear/yaw MAE at most
+`0.10 m/s` and `0.20 rad/s`; and the stricter low-linear response gate described
+above. A simulation pass still records `deployment_certified: false` until the
+physical IMU-axis, restraint, emergency-stop, current-limit and camera-path
+checks are completed.
+
+## Deterministic export
+
+Training-time and diagnostic export of the latest run is allowed, but is
+explicitly non-deployable (`deployment_accepted=false`):
+
+```bash
+uv run --locked python -m mjlab_microban.scripts.export_teleop_onnx \
   --device cpu --output artifacts/microban_teleop.onnx
 ```
 
-Or specify a checkpoint explicitly:
+After the final 20,000-update gate passes, create the robot-deployment artifact
+by binding the exact schema-3 pass receipt:
 
 ```bash
-uv run python -m mjlab_microban.scripts.export_teleop_onnx \
-  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<timestamp>/model_<iteration>.pt \
+uv run --locked python -m mjlab_microban.scripts.export_teleop_onnx \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<timestamp>/model_19999.pt \
+  --acceptance-receipt \
+    artifacts/teleop_v8_gates/<timestamp>_boundary_20000_gate.json \
+  --require-final-acceptance \
   --output artifacts/microban_teleop.onnx
 ```
 
@@ -580,6 +877,19 @@ semantics, `observation_joint_names`, all 21 observation-position defaults,
 effective-previous-action and target semantics, and a legacy `joint_names`
 alias. This avoids the generic MJLab exporter bug for subset-action policies,
 where 21 joint names could be paired with only 18 actions.
+
+The deployment ONNX also carries checkpoint-derived training provenance rather
+than reconstructing it from the current source tree: complete-manifest and
+training-source SHA-256s, exact recipe/actor initialization, canonical/generic
+mode, and stage/parent lineage. Generic automatic exports say
+`canonical_training_stage=false` and have no stage lineage. A final accepted
+export must instead prove canonical stage `18000->20000`; the exporter re-hashes
+and validates all three nominal and three moving-HMD reports, the evaluator
+source/revisions, checkpoint and training provenance, then embeds the exact
+receipt SHA-256 with `deployment_accepted=true`. The runtime must reject a model
+with missing fields, `deployment_accepted=false`, a non-final stage, or a
+receipt/recipe/init/revision mismatch. The complete key list and inspection
+command are in `docs/teleop_onnx_export_gate.md`.
 
 ## Live PICO mapping
 

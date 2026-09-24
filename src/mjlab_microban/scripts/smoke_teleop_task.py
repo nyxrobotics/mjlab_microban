@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from copy import deepcopy
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv
@@ -47,6 +48,25 @@ from mjlab_microban.tasks.microban_policy_export import (
     validate_microban_teleop_observation_contract,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
+    MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
+    MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
+    MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
+    MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_INTERMEDIATE_ANGULAR_TRACKING_STD_RAD_S,
+    MICROBAN_TELEOP_INTERMEDIATE_LINEAR_TRACKING_STD_M_S,
+    MICROBAN_TELEOP_INTERMEDIATE_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+    MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+    MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
     make_microban_teleop_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
@@ -72,8 +92,10 @@ def _assert_rotation_command_cfg(
     *,
     expected_rel_rotation_envs: float,
     expected_rotation_range: tuple[float, float],
+    expected_signed_axis_probabilities: dict[str, float] | None = None,
+    expected_signed_axis_ranges: dict[str, tuple[float, float]] | None = None,
 ) -> None:
-    """Check the rotation-only command contract survives config construction."""
+    """Check rotation and optional v8 signed-axis config survive construction."""
 
     if not isinstance(command_cfg, UniformVelocityCommandWithRotationCfg):
         raise TypeError(
@@ -101,6 +123,92 @@ def _assert_rotation_command_cfg(
             "Unexpected rotation-only angular velocity range: "
             f"{command_cfg.rotation_env_ang_vel_range}"
         )
+    if command_cfg.signed_axis_probabilities != expected_signed_axis_probabilities:
+        raise AssertionError(
+            "Unexpected signed-axis probabilities: "
+            f"{command_cfg.signed_axis_probabilities}"
+        )
+    if command_cfg.signed_axis_ranges != expected_signed_axis_ranges:
+        raise AssertionError(
+            f"Unexpected signed-axis ranges: {command_cfg.signed_axis_ranges}"
+        )
+
+
+def _assert_velocity_envelope(
+    command_cfg: UniformVelocityCommandWithRotationCfg,
+    expected: dict[str, tuple[float, float]],
+) -> None:
+    actual = {
+        "lin_vel_x": command_cfg.ranges.lin_vel_x,
+        "lin_vel_y": command_cfg.ranges.lin_vel_y,
+        "ang_vel_z": command_cfg.ranges.ang_vel_z,
+        "rotation_ang_vel_z": command_cfg.rotation_env_ang_vel_range,
+    }
+    if actual != expected:
+        raise AssertionError(f"Velocity envelope drifted: {actual} != {expected}")
+
+
+def _assert_runtime_signed_axis_sampling(
+    twist: UniformVelocityCommandWithRotation,
+    env_ids: torch.Tensor,
+) -> None:
+    """Exercise every v8 categorical mode through the real command term."""
+
+    cfg = twist.cfg
+    original_probabilities = deepcopy(cfg.signed_axis_probabilities)
+    original_ranges = deepcopy(cfg.signed_axis_ranges)
+    if original_probabilities is None or original_ranges is None:
+        raise AssertionError("Training command did not enable signed-axis sampling")
+
+    mode_names = tuple(original_probabilities)
+    zero = torch.zeros(len(env_ids), device=env_ids.device)
+    try:
+        for mode in mode_names:
+            cfg.signed_axis_probabilities = {
+                name: float(name == mode) for name in mode_names
+            }
+            twist._resample_command(env_ids)
+            command = twist.vel_command_b[env_ids]
+            if not torch.equal(twist.vel_command_w[env_ids], command):
+                raise AssertionError(
+                    f"{mode} did not mirror body command to world storage"
+                )
+
+            nonzero_axes = torch.abs(command) > 0.0
+            if mode == "standing":
+                if torch.any(nonzero_axes) or not torch.all(
+                    twist.is_standing_env[env_ids]
+                ):
+                    raise AssertionError("Standing mode emitted a non-zero command")
+                continue
+
+            if mode == "mixed":
+                if not torch.all(nonzero_axes):
+                    raise AssertionError("Mixed mode did not command all three axes")
+                continue
+
+            axis = 0 if mode in ("forward", "backward") else 1
+            if mode in ("yaw_left", "yaw_right"):
+                axis = 2
+            if not torch.all(nonzero_axes[:, axis]):
+                raise AssertionError(f"{mode} emitted a zero primary-axis command")
+            other_axes = [candidate for candidate in range(3) if candidate != axis]
+            if not torch.equal(command[:, other_axes], zero[:, None].expand(-1, 2)):
+                raise AssertionError(f"{mode} leaked onto another command axis")
+            lower, upper = original_ranges[mode]
+            values = command[:, axis]
+            if torch.any(values < lower) or torch.any(values > upper):
+                raise AssertionError(f"{mode} escaped its signed range")
+            if mode == "forward" and not torch.all(twist.is_forward_env[env_ids]):
+                raise AssertionError("Forward mode flag was not materialized")
+            if mode in ("yaw_left", "yaw_right") and not torch.all(
+                twist.is_rotation_env[env_ids]
+            ):
+                raise AssertionError(f"{mode} rotation flag was not materialized")
+    finally:
+        cfg.signed_axis_probabilities = original_probabilities
+        cfg.signed_axis_ranges = original_ranges
+        twist._resample_command(env_ids)
 
 
 def main() -> None:
@@ -122,14 +230,30 @@ def main() -> None:
     cfg = make_microban_teleop_env_cfg(play=False)
     _assert_rotation_command_cfg(
         cfg.commands["twist"],
-        expected_rel_rotation_envs=0.1,
-        expected_rotation_range=(-0.8, 0.8),
+        expected_rel_rotation_envs=0.0,
+        expected_rotation_range=(
+            MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
+        ),
+        expected_signed_axis_probabilities=(
+            MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+        ),
+        expected_signed_axis_ranges=MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     )
+    _assert_velocity_envelope(
+        cfg.commands["twist"], MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE
+    )
+    hmd_event_cfg = cfg.events["hmd_neck_target_motion"]
+    if hmd_event_cfg.params["neutral_probability"] != (
+        MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+    ):
+        raise AssertionError("Initial HMD neutral probability drifted")
+    initial_foot_reward = cfg.rewards["foot_target_tracking"]
+    if initial_foot_reward.weight != MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT:
+        raise AssertionError("Neutral foot tracking must be enabled from update zero")
+    if initial_foot_reward.params["velocity_fade_range"] != (0.0, 0.01):
+        raise AssertionError("Initial neutral-foot velocity fade range drifted")
     cfg.scene.num_envs = args.num_envs
     cfg.seed = args.seed
-    # Prevent the deliberately occasional neutral dwell from making the bounded
-    # smoke check probabilistic; normal training keeps the configured 20% dwell.
-    cfg.events["hmd_neck_target_motion"].params["neutral_probability"] = 0.0
     env = ManagerBasedRlEnv(cfg=cfg, device=args.device)
 
     try:
@@ -140,9 +264,17 @@ def main() -> None:
             )
         _assert_rotation_command_cfg(
             env.command_manager.get_term_cfg("twist"),
-            expected_rel_rotation_envs=0.1,
-            expected_rotation_range=(-0.8, 0.8),
+            expected_rel_rotation_envs=0.0,
+            expected_rotation_range=(
+                MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
+            ),
+            expected_signed_axis_probabilities=(
+                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+            ),
+            expected_signed_axis_ranges=MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
         )
+        env_ids = torch.arange(args.num_envs, device=args.device)
+        _assert_runtime_signed_axis_sampling(twist, env_ids)
 
         action = env.action_manager.get_term("joint_pos")
         if tuple(action.target_names) != MICROBAN_TELEOP_ACTION_JOINT_NAMES:
@@ -171,6 +303,12 @@ def main() -> None:
             raise TypeError("HMD target event did not build its stateful term")
         if tuple(motion.joint_names) != ("head", "neck_roll", "neck_pitch"):
             raise AssertionError(f"Unexpected HMD joint order: {motion.joint_names}")
+        if motion.neutral_probability != (
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+        ) or event_cfg.params["neutral_probability"] != (
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+        ):
+            raise AssertionError("Live/config HMD probability differs at update zero")
 
         actions = torch.zeros(
             (args.num_envs, env.action_manager.total_action_dim),
@@ -210,11 +348,24 @@ def main() -> None:
         ):
             raise AssertionError("Hand zero reference was not captured after reset FK")
 
+        # Update zero deliberately holds the HMD command at neutral while the
+        # actor acquires locomotion.  Check this behavior before temporarily
+        # forcing random waypoints for the deterministic-seed contract below.
         initial_target = motion.current_target.clone()
+        observations, rewards, terminated, truncated, _ = env.step(actions)
+        if not torch.equal(motion.goal_target, initial_target) or not torch.equal(
+            motion.current_target, initial_target
+        ):
+            raise AssertionError("Initial HMD-neutral stage emitted a moving waypoint")
+
+        motion.neutral_probability = 0.0
+        event_cfg.params["neutral_probability"] = 0.0
+        env.reset(seed=args.seed)
+        random_initial_target = motion.current_target.clone()
         observations, rewards, terminated, truncated, _ = env.step(actions)
         first_goal = motion.goal_target.clone()
         first_target = motion.current_target.clone()
-        if torch.allclose(first_target, initial_target):
+        if torch.allclose(first_target, random_initial_target):
             raise AssertionError("HMD target did not move on the first training step")
 
         env.reset(seed=args.seed)
@@ -222,11 +373,19 @@ def main() -> None:
         if not torch.allclose(motion.goal_target, first_goal, atol=0.0, rtol=0.0):
             raise AssertionError("HMD waypoint sampling is not seed-reproducible")
 
+        # Restore the actual v8 stage-zero contract before testing curriculum
+        # boundaries; the 8,000 boundary must be what first enables moving HMD.
+        motion.neutral_probability = MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+        event_cfg.params["neutral_probability"] = (
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+        )
+        env.reset(seed=args.seed)
+        observations, rewards, terminated, truncated, _ = env.step(actions)
+
         # Periodic command sampling must not move the episode's reference.  Do
         # this after the seeded HMD comparison because command resampling also
         # consumes the process torch RNG.  Sentinels catch the shared command
         # implementation's former behavior even when the robot has barely moved.
-        env_ids = torch.arange(args.num_envs, device=args.device)
         saved_foot_reference = foot_target._default_foot_pos_b.clone()
         saved_hand_reference = hand_target._default_hand_pos_b.clone()
         foot_sentinel = saved_foot_reference + 0.123
@@ -434,38 +593,181 @@ def main() -> None:
                     f"runtime constant {expected_shoulder_pitch}"
                 )
 
-        # Simulate manager reconstruction followed by a checkpoint's restored
-        # step count.  One compute must materialize every due stage before a
-        # resumed rollout, rather than waiting for three future episode resets.
+        # Walk every v8 boundary at the exact global step.  This checks both that
+        # no stage is applied one step early and that resuming on a boundary
+        # materializes the complete command/reward state in one compute.
         curriculum_cfg = env.curriculum_manager.get_term_cfg("staged_curriculum")
         curriculum = curriculum_cfg.func
         if not isinstance(curriculum, ResumeSafeStepBasedStagedCurriculum):
             raise TypeError(f"Unexpected curriculum type: {type(curriculum).__name__}")
-        env.common_step_counter = 3000 * 24
-        env.curriculum_manager.compute()
-        if curriculum.current_stage != 2:
-            raise AssertionError(
-                "Resume curriculum materialized stage "
-                f"{curriculum.current_stage}, expected 2"
-            )
-        if env.reward_manager.get_term_cfg("hand_target_tracking").weight != 0.0:
-            raise AssertionError("Hand tracking was enabled before locomotion canary")
-        if env.reward_manager.get_term_cfg("foot_target_tracking").weight != 0.0:
-            raise AssertionError("Foot tracking was enabled before locomotion canary")
-        if env.command_manager.get_term_cfg("hand_target").rel_active != 0.0:
-            raise AssertionError("Hand targets were enabled before their stage")
-        if (
-            env.command_manager.get_term_cfg("foot_target").rel_single_support_envs
-            != 0.0
-        ):
-            raise AssertionError("Foot targets were enabled before their stage")
-        if env.command_manager.get_term_cfg("twist").ranges.lin_vel_x != (-0.5, 0.7):
-            raise AssertionError("Final velocity envelope was not materialized")
-        if env.command_manager.get_term_cfg("twist").ranges.ang_vel_z != (-1.5, 1.5):
-            raise AssertionError("Final yaw envelope was not materialized")
-        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.0:
-            raise AssertionError("Both-foot targets were enabled before their stage")
+        stage_boundaries = (1500, 3000, 4500, 6000, 8000, 12000, 14000, 16000, 18000)
+        for expected_stage, boundary in enumerate(stage_boundaries):
+            env.common_step_counter = boundary * 24 - 1
+            env.curriculum_manager.compute()
+            if curriculum.current_stage != expected_stage:
+                raise AssertionError(
+                    f"Curriculum stage {expected_stage + 1} applied before "
+                    f"its v8 boundary {boundary}"
+                )
+            if boundary == 8000:
+                if motion.neutral_probability != (
+                    MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+                ) or event_cfg.params["neutral_probability"] != (
+                    MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+                ):
+                    raise AssertionError("Moving HMD was enabled before update 8000")
+                if env.reward_manager.get_term_cfg("no_stepping").weight != 0.0:
+                    raise AssertionError("No-step guard was enabled before update 8000")
+
+            env.common_step_counter = boundary * 24
+            env.curriculum_manager.compute()
+            if curriculum.current_stage != expected_stage + 1:
+                raise AssertionError(
+                    f"V8 boundary {boundary} materialized stage "
+                    f"{curriculum.current_stage}, expected {expected_stage + 1}"
+                )
+
+            twist_cfg = env.command_manager.get_term_cfg("twist")
+            linear_reward = env.reward_manager.get_term_cfg("track_linear_velocity")
+            angular_reward = env.reward_manager.get_term_cfg("track_angular_velocity")
+            if boundary == 1500:
+                _assert_velocity_envelope(
+                    twist_cfg, MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE
+                )
+                if (
+                    twist_cfg.signed_axis_ranges
+                    != MICROBAN_TELEOP_INTERMEDIATE_SIGNED_AXIS_RANGES
+                    or twist_cfg.signed_axis_probabilities
+                    != MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                    or linear_reward.params["std"]
+                    != MICROBAN_TELEOP_INTERMEDIATE_LINEAR_TRACKING_STD_M_S
+                    or angular_reward.params["std"]
+                    != MICROBAN_TELEOP_INTERMEDIATE_ANGULAR_TRACKING_STD_RAD_S
+                ):
+                    raise AssertionError("Intermediate isolated-axis stage drifted")
+            elif boundary == 3000:
+                _assert_velocity_envelope(
+                    twist_cfg,
+                    MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
+                )
+                if (
+                    twist_cfg.signed_axis_ranges
+                    != MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES
+                    or twist_cfg.signed_axis_probabilities
+                    != MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                    or linear_reward.params["std"]
+                    != MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S
+                    or angular_reward.params["std"]
+                    != MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+                ):
+                    raise AssertionError(
+                        "Final translation isolated-axis stage drifted"
+                    )
+            elif boundary == 4500:
+                _assert_velocity_envelope(
+                    twist_cfg, MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
+                )
+                if (
+                    twist_cfg.signed_axis_ranges
+                    != MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES
+                    or twist_cfg.signed_axis_probabilities
+                    != MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                ):
+                    raise AssertionError("Final pure-yaw isolated-axis stage drifted")
+            elif boundary == 6000 and (
+                twist_cfg.signed_axis_probabilities
+                != MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES
+            ):
+                raise AssertionError("Mixed-command replay was not enabled")
+
+            hand_reward = env.reward_manager.get_term_cfg("hand_target_tracking")
+            foot_reward = env.reward_manager.get_term_cfg("foot_target_tracking")
+            hand_cfg = env.command_manager.get_term_cfg("hand_target")
+            foot_cfg = env.command_manager.get_term_cfg("foot_target")
+            if boundary <= 6000:
+                if hand_reward.weight != 0.0 or foot_reward.weight != (
+                    MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT
+                ):
+                    raise AssertionError(
+                        "Initial neutral-foot reward drifted during locomotion acquisition"
+                    )
+                if foot_reward.params["velocity_fade_range"] != (0.0, 0.01):
+                    raise AssertionError("Initial neutral-foot fade range drifted")
+                if (
+                    hand_cfg.rel_active != 0.0
+                    or foot_cfg.rel_single_support_envs != 0.0
+                    or foot_cfg.rel_both_feet_envs != 0.0
+                ):
+                    raise AssertionError(
+                        "Non-neutral limb targets were enabled during locomotion acquisition"
+                    )
+            elif boundary == 8000:
+                if (
+                    foot_reward.weight != MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT
+                    or hand_reward.weight != 0.0
+                    or hand_cfg.rel_active != 0.0
+                    or foot_cfg.rel_single_support_envs != 0.0
+                    or foot_cfg.rel_both_feet_envs != 0.0
+                ):
+                    raise AssertionError(
+                        "Neutral-foot anchor did not remain target-inactive"
+                    )
+                if motion.neutral_probability != (
+                    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY
+                ) or event_cfg.params["neutral_probability"] != (
+                    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY
+                ):
+                    raise AssertionError(
+                        "Update 8000 did not update both live/config HMD probability"
+                    )
+                if env.reward_manager.get_term_cfg("no_stepping").weight != -1.0:
+                    raise AssertionError(
+                        "Update 8000 did not enable the stationary no-step guard"
+                    )
+            elif boundary == 12000:
+                if hand_reward.weight != 1.0 or hand_cfg.rel_active != 0.7:
+                    raise AssertionError("Broad hand tracking stage drifted")
+            elif boundary == 14000:
+                if hand_reward.weight != 2.0 or (
+                    hand_reward.params["std"]
+                    != MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M
+                ):
+                    raise AssertionError("Tight hand tracking stage drifted")
+            elif boundary == 16000:
+                if (
+                    foot_reward.weight != 2.0
+                    or foot_reward.params["std"] != 0.05
+                    or foot_reward.params["velocity_fade_range"] != (0.0, 0.15)
+                    or foot_cfg.rel_single_support_envs != 0.3
+                    or foot_cfg.rel_both_feet_envs != 0.05
+                ):
+                    raise AssertionError("Broad stationary-foot stage drifted")
+
+        twist_cfg = env.command_manager.get_term_cfg("twist")
+        _assert_velocity_envelope(twist_cfg, MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE)
+        if twist_cfg.signed_axis_ranges != MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES:
+            raise AssertionError("Final signed-axis ranges were not retained")
+
+        hand_reward = env.reward_manager.get_term_cfg("hand_target_tracking")
+        foot_reward = env.reward_manager.get_term_cfg("foot_target_tracking")
         foot_cfg = env.command_manager.get_term_cfg("foot_target")
+        hand_cfg = env.command_manager.get_term_cfg("hand_target")
+        if hand_reward.weight != 2.0 or (
+            hand_reward.params["std"] != MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M
+        ):
+            raise AssertionError("Final hand tracking stage was not materialized")
+        if hand_cfg.rel_active != 0.7:
+            raise AssertionError("Final hand activation was not materialized")
+        if foot_reward.weight != 3.0 or (
+            foot_reward.params["std"] != MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
+        ):
+            raise AssertionError("Final foot tracking stage was not materialized")
+        if foot_reward.params["velocity_fade_range"] != (0.0, 0.15):
+            raise AssertionError("Final stationary-foot fade range drifted")
+        if foot_cfg.rel_single_support_envs != 0.3:
+            raise AssertionError("Final single-foot activation was not materialized")
+        if foot_cfg.rel_both_feet_envs != 0.1:
+            raise AssertionError("Final both-foot activation was not materialized")
         if foot_cfg.lift_height_range != (
             MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
             0.05,
@@ -473,53 +775,17 @@ def main() -> None:
             raise AssertionError("Single-foot floor-band support drifted")
         if foot_cfg.both_feet_lift_height_range != (
             MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
-            0.012,
-        ):
-            raise AssertionError("Initial both-foot floor-band support drifted")
-        env.curriculum_manager.compute()
-        if curriculum.current_stage != 2:
-            raise AssertionError("Curriculum stages were applied more than once")
-
-        env.common_step_counter = 10000 * 24
-        env.curriculum_manager.compute()
-        if curriculum.current_stage != 6:
-            raise AssertionError(
-                "Resume curriculum materialized stage "
-                f"{curriculum.current_stage}, expected 6"
-            )
-        twist_cfg = env.command_manager.get_term_cfg("twist")
-        if twist_cfg.ranges.lin_vel_x != (-0.5, 0.7):
-            raise AssertionError("Final asymmetric velocity stage was not materialized")
-        if twist_cfg.ranges.lin_vel_y != (-0.3, 0.3):
-            raise AssertionError("Final lateral velocity stage was not materialized")
-        if twist_cfg.ranges.ang_vel_z != (-1.5, 1.5):
-            raise AssertionError("Final moving-yaw stage was not materialized")
-        if twist_cfg.rotation_env_ang_vel_range != (-3.0, 3.0):
-            raise AssertionError("Final pure-yaw stage was not materialized")
-        if env.command_manager.get_term_cfg(
-            "foot_target"
-        ).both_feet_lift_height_range != (
-            MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
             0.02,
         ):
             raise AssertionError("Final both-foot floor-band support drifted")
-        hand_reward = env.reward_manager.get_term_cfg("hand_target_tracking")
-        if hand_reward.weight != 2.0 or hand_reward.params["std"] != 0.05:
-            raise AssertionError("Final hand tracking stage was not materialized")
-        foot_reward = env.reward_manager.get_term_cfg("foot_target_tracking")
-        if foot_reward.weight != 3.0 or foot_reward.params["std"] != 0.03:
-            raise AssertionError("Final foot tracking stage was not materialized")
-        if env.command_manager.get_term_cfg("hand_target").rel_active != 0.7:
-            raise AssertionError("Final hand activation was not materialized")
         if (
-            env.command_manager.get_term_cfg("foot_target").rel_single_support_envs
-            != 0.3
+            env.reward_manager.get_term_cfg("no_stepping").weight != -1.0
+            or MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT <= 0.0
         ):
-            raise AssertionError("Final foot activation was not materialized")
-        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.1:
-            raise AssertionError("Final both-foot activation was not materialized")
+            raise AssertionError("Exact-stationary neutral-foot anchor drifted")
+
         env.curriculum_manager.compute()
-        if curriculum.current_stage != 6:
+        if curriculum.current_stage != len(stage_boundaries):
             raise AssertionError("Final curriculum stages were applied more than once")
 
         report = {
@@ -539,6 +805,8 @@ def main() -> None:
             "hmd_slew_rates_rad_s": motion.slew_rates_rad_s[0].tolist(),
             "twist_command_type": type(twist).__name__,
             "rotation_env_ang_vel_range": list(twist.cfg.rotation_env_ang_vel_range),
+            "signed_axis_modes": list(twist.cfg.signed_axis_probabilities),
+            "v8_curriculum_boundaries": list(stage_boundaries),
             "keypoint_reference": "episode_reset_fixed",
             "resume_curriculum_stage": curriculum.current_stage,
             "terminated": int(terminated.sum().item()),

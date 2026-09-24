@@ -28,6 +28,7 @@ import os
 import re
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,14 +43,20 @@ from mjlab.utils.torch import configure_torch_backends
 
 from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
 from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
+    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     TeleopCheckpointContract,
     validate_microban_teleop_observation_contract,
     validate_teleop_checkpoint_contract,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
+    MICROBAN_HMD_RETARGET_INTERVAL_S,
+    MICROBAN_HMD_RUNTIME_LIMITS_RAD,
+    MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    HmdNeckTargetMotion,
     ResetFixedFootTargetCommand,
     ResetFixedHandTargetCommand,
 )
@@ -57,6 +64,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
 _CHECKPOINT_RE = re.compile(r"^model_(?:(\d+)|(pristine))\.pt$")
+TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v8_1"
+TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v8_1"
 
 # These are the physical command limits applied by microban's central input
 # scaler and the final teleop-training curriculum.  Stationary yaw is wider
@@ -86,11 +95,21 @@ ACCEPTANCE_THRESHOLDS = {
     "foot_rms_m_max": 0.015,
     "foot_p95_m_max": 0.025,
     "linear_velocity_mae_m_s_max": 0.10,
+    "low_linear_velocity_mae_m_s_max": 0.075,
+    "low_linear_signed_response_m_s_min": 0.05,
     "yaw_velocity_mae_rad_s_max": 0.20,
     "self_collision_contacts_max": 0,
     "action_target_clip_fraction_max": 0.001,
     "actual_soft_limit_violation_rad_max": 1.0e-6,
 }
+
+# A moving-HMD stage report must demonstrate that the event was actually
+# dispatched and that both its target and the physical neck moved on every
+# axis.  These floors are deliberately small relative to the narrowest runtime
+# range (46 degrees for neck roll), but large enough that numerical noise or a
+# stale target cannot satisfy the gate.
+HMD_TARGET_PEAK_TO_PEAK_MIN_RAD = 0.10
+HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD = 0.05
 
 
 @dataclass(frozen=True)
@@ -118,6 +137,66 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
 
     return (
         EvaluationScenario("neutral", zero, (zero, zero), (zero, zero), (False, False)),
+        EvaluationScenario(
+            "low_forward", (0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "mid_forward", (0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "low_backward", (-0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "mid_backward", (-0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "low_lateral_left",
+            (0.0, 0.1, 0.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "mid_lateral_left",
+            (0.0, 0.2, 0.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "low_lateral_right",
+            (0.0, -0.1, 0.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "mid_lateral_right",
+            (0.0, -0.2, 0.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "low_yaw_left", (0.0, 0.0, 0.5), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "mid_yaw_left", (0.0, 0.0, 1.0), (zero, zero), (zero, zero), (False, False)
+        ),
+        EvaluationScenario(
+            "low_yaw_right",
+            (0.0, 0.0, -0.5),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "mid_yaw_right",
+            (0.0, 0.0, -1.0),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
         # Exact zero is the only inactive foot representation.  These two
         # stationary cases exercise the first practical active value just above
         # the inclusive 2.5 mm support-foot floor band.
@@ -177,6 +256,20 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
             (False, False),
         ),
         EvaluationScenario(
+            "max_moving_yaw_left",
+            (0.0, 0.0, MOVING_YAW_MAX_RAD_S),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "max_moving_yaw_right",
+            (0.0, 0.0, -MOVING_YAW_MAX_RAD_S),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
             "max_stationary_yaw_left",
             (0.0, 0.0, STATIONARY_YAW_MAX_RAD_S),
             (zero, zero),
@@ -189,6 +282,46 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
             (zero, zero),
             (zero, zero),
             (False, False),
+        ),
+        # Keep locomotion-only mixed commands separate from keypoint scenarios.
+        # The v8 staged gate reaches mixed replay before hand/foot tracking is
+        # enabled, so coupling these commands would reject a valid locomotion
+        # stage for an objective that has not entered the curriculum yet.
+        EvaluationScenario(
+            "mixed_twist_forward_left",
+            (FORWARD_MAX_M_S, LATERAL_MAX_M_S, MOVING_YAW_MAX_RAD_S),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        EvaluationScenario(
+            "mixed_twist_backward_right",
+            (-BACKWARD_MAX_M_S, -LATERAL_MAX_M_S, -MOVING_YAW_MAX_RAD_S),
+            (zero, zero),
+            (zero, zero),
+            (False, False),
+        ),
+        # Likewise, hand-only corners let the broad/tight hand stages be gated
+        # before non-zero foot targets are introduced at iteration 16,000.
+        EvaluationScenario(
+            "max_hands_left",
+            zero,
+            (zero, zero),
+            (
+                (hand_max[0], -hand_max[1], hand_max[2]),
+                (-hand_max[0], hand_max[1], -hand_max[2]),
+            ),
+            (True, True),
+        ),
+        EvaluationScenario(
+            "max_hands_right",
+            zero,
+            (zero, zero),
+            (
+                (-hand_max[0], hand_max[1], -hand_max[2]),
+                (hand_max[0], -hand_max[1], hand_max[2]),
+            ),
+            (True, True),
         ),
         EvaluationScenario(
             "max_keypoints_left",
@@ -476,6 +609,89 @@ class ScalarStats:
         }
 
 
+@dataclass
+class HmdMotionStats:
+    """Streaming target/actual motion evidence for the three HMD joints."""
+
+    joint_names: tuple[str, ...]
+    target_minimum: torch.Tensor
+    target_maximum: torch.Tensor
+    actual_minimum: torch.Tensor
+    actual_maximum: torch.Tensor
+    previous_target: torch.Tensor
+    maximum_target_step: torch.Tensor
+    tracking_error: tuple[ScalarStats, ...]
+    sample_count: int = 1
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        joint_names: tuple[str, ...],
+        target: torch.Tensor,
+        actual: torch.Tensor,
+    ) -> HmdMotionStats:
+        target = target.detach().clone()
+        actual = actual.detach().clone()
+        return cls(
+            joint_names=joint_names,
+            target_minimum=target.clone(),
+            target_maximum=target.clone(),
+            actual_minimum=actual.clone(),
+            actual_maximum=actual.clone(),
+            previous_target=target.clone(),
+            maximum_target_step=torch.zeros_like(target),
+            tracking_error=tuple(ScalarStats() for _ in joint_names),
+        )
+
+    def add(self, *, target: torch.Tensor, actual: torch.Tensor) -> None:
+        target = target.detach()
+        actual = actual.detach()
+        self.target_minimum = torch.minimum(self.target_minimum, target)
+        self.target_maximum = torch.maximum(self.target_maximum, target)
+        self.actual_minimum = torch.minimum(self.actual_minimum, actual)
+        self.actual_maximum = torch.maximum(self.actual_maximum, actual)
+        self.maximum_target_step = torch.maximum(
+            self.maximum_target_step, torch.abs(target - self.previous_target)
+        )
+        self.previous_target = target.clone()
+        for index, stats in enumerate(self.tracking_error):
+            stats.add(torch.abs(target[index] - actual[index]).reshape(1))
+        self.sample_count += 1
+
+    def report(self, *, step_dt: float) -> dict[str, Any]:
+        target_minimum = self.target_minimum.cpu().tolist()
+        target_maximum = self.target_maximum.cpu().tolist()
+        actual_minimum = self.actual_minimum.cpu().tolist()
+        actual_maximum = self.actual_maximum.cpu().tolist()
+        maximum_target_step = self.maximum_target_step.cpu().tolist()
+        per_axis: dict[str, Any] = {}
+        for index, name in enumerate(self.joint_names):
+            per_axis[name] = {
+                "target_min_rad": target_minimum[index],
+                "target_max_rad": target_maximum[index],
+                "target_peak_to_peak_rad": (
+                    target_maximum[index] - target_minimum[index]
+                ),
+                "actual_min_rad": actual_minimum[index],
+                "actual_max_rad": actual_maximum[index],
+                "actual_peak_to_peak_rad": (
+                    actual_maximum[index] - actual_minimum[index]
+                ),
+                "maximum_target_step_rad": maximum_target_step[index],
+                "maximum_target_slew_rad_s": maximum_target_step[index] / step_dt,
+                "absolute_tracking_error": self.tracking_error[index].report(
+                    units="rad"
+                ),
+            }
+        return {
+            "active_event_member": True,
+            "sample_count": self.sample_count,
+            "joint_names": list(self.joint_names),
+            "per_axis": per_axis,
+        }
+
+
 def _percentile(values: list[float], quantile: float) -> float | None:
     if not values:
         return None
@@ -489,8 +705,74 @@ def _percentile(values: list[float], quantile: float) -> float | None:
     return ordered[lower_index] * (1.0 - weight) + ordered[upper_index] * weight
 
 
-def _configure_nominal_evaluation(cfg: Any, *, steps: int) -> None:
-    """Remove stochastic training events while preserving nominal reset events."""
+def command_axis_sign_diagnostic(
+    scenario: EvaluationScenario,
+    measured_base_velocity: dict[str, dict[str, float | int | str | None]],
+) -> dict[str, Any]:
+    """Check that every commanded velocity axis responds in its requested direction.
+
+    A strictly correct sign is required for each nonzero command component. A
+    tiny response in the right direction can satisfy this diagnostic, but it
+    cannot hide a non-responsive policy because the independent velocity-MAE
+    gates still apply.
+    """
+
+    axis_specs = (
+        ("linear_x", scenario.twist[0], "m_s"),
+        ("linear_y", scenario.twist[1], "m_s"),
+        ("yaw", scenario.twist[2], "rad_s"),
+    )
+    axes: dict[str, dict[str, Any]] = {}
+    for name, command, units in axis_specs:
+        actual_mean = measured_base_velocity[name]["mean"]
+        actual_finite = isinstance(actual_mean, (float, int)) and math.isfinite(
+            actual_mean
+        )
+        applied = command != 0.0
+        passed = not applied or (actual_finite and command * float(actual_mean) > 0.0)
+        axes[name] = {
+            "applied": applied,
+            "command": command,
+            "actual_mean": actual_mean,
+            "units": units,
+            "expected_sign": 1 if command > 0.0 else -1 if command < 0.0 else 0,
+            "actual_sign": (
+                1
+                if actual_finite and float(actual_mean) > 0.0
+                else -1
+                if actual_finite and float(actual_mean) < 0.0
+                else 0
+                if actual_finite
+                else None
+            ),
+            "passed": passed,
+        }
+
+    applied = any(axis["applied"] for axis in axes.values())
+    return {
+        "applied": applied,
+        "passed": all(axis["passed"] for axis in axes.values()),
+        "axes": axes,
+    }
+
+
+def _copy_forced_moving_hmd_neck_event(training_cfg: Any) -> Any:
+    """Copy only the training HMD step event and force every waypoint non-neutral."""
+
+    source = training_cfg.events.get("hmd_neck_target_motion")
+    if source is None:
+        raise ValueError("Teleop training config is missing hmd_neck_target_motion")
+    if source.mode != "step" or source.func is not HmdNeckTargetMotion:
+        raise TypeError("Training HMD event must be the HmdNeckTargetMotion step term")
+    copied = deepcopy(source)
+    copied.params["neutral_probability"] = 0.0
+    return copied
+
+
+def _configure_nominal_evaluation(
+    cfg: Any, *, steps: int, moving_hmd_neck_event: Any | None = None
+) -> None:
+    """Keep nominal reset events and optionally one forced moving-HMD step event."""
 
     cfg.scene.num_envs = 1
     cfg.auto_reset = False
@@ -498,9 +780,21 @@ def _configure_nominal_evaluation(cfg: Any, *, steps: int) -> None:
     # therefore reaches ``time_out`` exactly on its final requested step.
     cfg.episode_length_s = steps * cfg.decimation * cfg.sim.mujoco.timestep
 
-    cfg.events = {
+    reset_events = {
         name: term for name, term in cfg.events.items() if term.mode == "reset"
     }
+    if moving_hmd_neck_event is not None:
+        if (
+            moving_hmd_neck_event.mode != "step"
+            or moving_hmd_neck_event.func is not HmdNeckTargetMotion
+            or moving_hmd_neck_event.params.get("neutral_probability") != 0.0
+        ):
+            raise ValueError(
+                "Moving-HMD evaluation requires a non-neutral "
+                "HmdNeckTargetMotion step event"
+            )
+        reset_events["hmd_neck_target_motion"] = moving_hmd_neck_event
+    cfg.events = reset_events
     reset_base = cfg.events.get("reset_base")
     if reset_base is None:
         raise ValueError("Teleop task is missing its reset_base event")
@@ -514,10 +808,56 @@ def _configure_nominal_evaluation(cfg: Any, *, steps: int) -> None:
     }
     reset_base.params["velocity_range"] = {}
 
-    # Play mode already disables actor corruption and the random HMD motion.
+    # Play mode already disables these, but assign them explicitly so copying
+    # the one training event can never bring training corruption/curriculum with it.
     cfg.observations["actor"].enable_corruption = False
-    if "hmd_neck_target_motion" in cfg.events:
-        raise AssertionError("Headless evaluation must not randomize the HMD neck")
+    cfg.curriculum = {}
+    if moving_hmd_neck_event is None and "hmd_neck_target_motion" in cfg.events:
+        raise AssertionError("Nominal evaluation must hold the HMD neck fixed")
+
+
+def _hmd_neck_motion_report(cfg: Any) -> dict[str, Any]:
+    """Return JSON-safe evidence for the optional retained HMD event."""
+
+    event = cfg.events.get("hmd_neck_target_motion")
+    if event is None:
+        return {"enabled": False, "params": None}
+    if event.mode != "step" or event.func is not HmdNeckTargetMotion:
+        raise TypeError("Evaluation HMD event is not HmdNeckTargetMotion")
+    params = event.params
+    asset_cfg = params.get("asset_cfg")
+    joint_names = tuple(getattr(asset_cfg, "joint_names", ()) or ())
+    if joint_names != MICROBAN_HMD_JOINT_NAMES:
+        raise ValueError(
+            f"Evaluation HMD joint order must be {MICROBAN_HMD_JOINT_NAMES}"
+        )
+    position_ranges = params.get("position_ranges_rad")
+    slew_rates = params.get("slew_rates_rad_s")
+    interval = params.get("retarget_interval_s")
+    if position_ranges != MICROBAN_HMD_RUNTIME_LIMITS_RAD:
+        raise ValueError("Evaluation HMD position ranges drifted from training")
+    if slew_rates != MICROBAN_HMD_SLEW_RATES_RAD_S:
+        raise ValueError("Evaluation HMD slew rates drifted from training")
+    if tuple(interval or ()) != MICROBAN_HMD_RETARGET_INTERVAL_S:
+        raise ValueError("Evaluation HMD retarget interval drifted from training")
+    neutral_probability = params.get("neutral_probability")
+    if neutral_probability != 0.0:
+        raise ValueError("Moving-HMD evaluation requires neutral_probability=0.0")
+    return {
+        "enabled": True,
+        "params": {
+            "joint_names": list(joint_names),
+            "position_ranges_rad": {
+                name: [float(bounds[0]), float(bounds[1])]
+                for name, bounds in position_ranges.items()
+            },
+            "slew_rates_rad_s": {
+                name: float(value) for name, value in slew_rates.items()
+            },
+            "retarget_interval_s": [float(interval[0]), float(interval[1])],
+            "neutral_probability": 0.0,
+        },
+    }
 
 
 def _set_scenario(env: ManagerBasedRlEnv, scenario: EvaluationScenario) -> None:
@@ -662,8 +1002,34 @@ def _evaluate_scenario(
     hand_error = ScalarStats()
     linear_velocity_error = ScalarStats()
     yaw_velocity_error = ScalarStats()
+    measured_linear_x = ScalarStats()
+    measured_linear_y = ScalarStats()
+    measured_yaw = ScalarStats()
     reward_stats = ScalarStats()
     root_height = ScalarStats()
+
+    active_event_names = {
+        name
+        for names in env.event_manager.active_terms.values()
+        for name in names
+    }
+    hmd_event_name = "hmd_neck_target_motion"
+    hmd_motion_stats: HmdMotionStats | None = None
+    hmd_motion: HmdNeckTargetMotion | None = None
+    if hmd_event_name in active_event_names:
+        runtime_hmd_cfg = env.event_manager.get_term_cfg(hmd_event_name)
+        if not isinstance(runtime_hmd_cfg.func, HmdNeckTargetMotion):
+            raise TypeError("Active HMD event is not HmdNeckTargetMotion")
+        hmd_motion = runtime_hmd_cfg.func
+        if tuple(hmd_motion.joint_names) != MICROBAN_HMD_JOINT_NAMES:
+            raise ValueError("Active HMD event has an unexpected joint order")
+        initial_target = hmd_motion.current_target[0]
+        initial_actual = robot.data.joint_pos[0, hmd_motion.joint_ids]
+        hmd_motion_stats = HmdMotionStats.start(
+            joint_names=tuple(hmd_motion.joint_names),
+            target=initial_target,
+            actual=initial_actual,
+        )
 
     action_value_count = 0
     wrapper_action_clip_count = 0
@@ -782,6 +1148,12 @@ def _evaluate_scenario(
         if invalid is not None:
             nonfinite = {"step": step, "tensor": invalid, "phase": "after_step"}
             break
+
+        if hmd_motion is not None and hmd_motion_stats is not None:
+            hmd_motion_stats.add(
+                target=hmd_motion.current_target[0],
+                actual=robot.data.joint_pos[0, hmd_motion.joint_ids],
+            )
 
         joint_pos = robot.data.joint_pos
         lower_violation = torch.clamp(all_soft_limits[..., 0] - joint_pos, min=0.0)
@@ -951,6 +1323,9 @@ def _evaluate_scenario(
             commanded = twist.vel_command_b
             actual_linear = robot.data.root_link_lin_vel_b[:, :2]
             actual_yaw = robot.data.root_link_ang_vel_b[:, 2]
+            measured_linear_x.add(actual_linear[:, 0])
+            measured_linear_y.add(actual_linear[:, 1])
+            measured_yaw.add(actual_yaw)
             linear_velocity_error.add(
                 torch.linalg.vector_norm(commanded[:, :2] - actual_linear, dim=-1)
             )
@@ -1038,13 +1413,135 @@ def _evaluate_scenario(
             "linear_xy": linear_velocity_error.report(units="m_s"),
             "yaw": yaw_velocity_error.report(units="rad_s"),
         },
+        "measured_base_velocity": {
+            "linear_x": measured_linear_x.report(units="m_s"),
+            "linear_y": measured_linear_y.report(units="m_s"),
+            "yaw": measured_yaw.report(units="rad_s"),
+        },
+        "hmd_neck_motion": (
+            hmd_motion_stats.report(step_dt=env.step_dt)
+            if hmd_motion_stats is not None
+            else {
+                "active_event_member": False,
+                "sample_count": 0,
+                "joint_names": [],
+                "per_axis": {},
+            }
+        ),
     }
+    report["command_axis_sign"] = command_axis_sign_diagnostic(
+        scenario, report["measured_base_velocity"]
+    )
     report["acceptance"] = evaluate_scenario_acceptance(scenario, report)
     return report
 
 
 def _maximum(values: list[float]) -> float | None:
     return max(values) if values else None
+
+
+def summarize_hmd_motion_evidence(
+    scenario_reports: list[dict[str, Any]], *, required: bool
+) -> dict[str, Any]:
+    """Aggregate fail-closed proof that the active HMD event moved every axis."""
+
+    active_scenarios: list[str] = []
+    inactive_scenarios: list[str] = []
+    target_peak_to_peak_by_axis: dict[str, list[float]] = {
+        name: [] for name in MICROBAN_HMD_JOINT_NAMES
+    }
+    actual_peak_to_peak_by_axis: dict[str, list[float]] = {
+        name: [] for name in MICROBAN_HMD_JOINT_NAMES
+    }
+    malformed_scenarios: list[str] = []
+
+    for scenario in scenario_reports:
+        scenario_name = str(scenario.get("name", "<unnamed>"))
+        motion = scenario.get("hmd_neck_motion")
+        if not isinstance(motion, dict):
+            inactive_scenarios.append(scenario_name)
+            if required:
+                malformed_scenarios.append(scenario_name)
+            continue
+        if motion.get("active_event_member") is not True:
+            inactive_scenarios.append(scenario_name)
+            continue
+        active_scenarios.append(scenario_name)
+        if motion.get("joint_names") != list(MICROBAN_HMD_JOINT_NAMES):
+            malformed_scenarios.append(scenario_name)
+            continue
+        per_axis = motion.get("per_axis")
+        if not isinstance(per_axis, dict):
+            malformed_scenarios.append(scenario_name)
+            continue
+        for name in MICROBAN_HMD_JOINT_NAMES:
+            axis = per_axis.get(name)
+            if not isinstance(axis, dict):
+                malformed_scenarios.append(scenario_name)
+                break
+            target = axis.get("target_peak_to_peak_rad")
+            actual = axis.get("actual_peak_to_peak_rad")
+            if (
+                not isinstance(target, (int, float))
+                or isinstance(target, bool)
+                or not math.isfinite(float(target))
+                or not isinstance(actual, (int, float))
+                or isinstance(actual, bool)
+                or not math.isfinite(float(actual))
+            ):
+                malformed_scenarios.append(scenario_name)
+                break
+            target_peak_to_peak_by_axis[name].append(float(target))
+            actual_peak_to_peak_by_axis[name].append(float(actual))
+
+    minimum_target_by_axis = {
+        name: min(values) if values else None
+        for name, values in target_peak_to_peak_by_axis.items()
+    }
+    minimum_actual_by_axis = {
+        name: min(values) if values else None
+        for name, values in actual_peak_to_peak_by_axis.items()
+    }
+    all_active = (
+        len(active_scenarios) == len(scenario_reports)
+        and not inactive_scenarios
+        and not malformed_scenarios
+    )
+    no_active = not active_scenarios
+    target_passed = all(
+        value is not None and value >= HMD_TARGET_PEAK_TO_PEAK_MIN_RAD
+        for value in minimum_target_by_axis.values()
+    )
+    actual_passed = all(
+        value is not None and value >= HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD
+        for value in minimum_actual_by_axis.values()
+    )
+    passed = (
+        all_active and target_passed and actual_passed
+        if required
+        else no_active and not malformed_scenarios
+    )
+    return {
+        "required": required,
+        "passed": passed,
+        "event_name": "hmd_neck_target_motion",
+        "active_event_membership": {
+            "all_scenarios": all_active,
+            "active_scenarios": active_scenarios,
+            "inactive_scenarios": inactive_scenarios,
+            "malformed_scenarios": sorted(set(malformed_scenarios)),
+        },
+        "minimum_required_target_peak_to_peak_rad": (
+            HMD_TARGET_PEAK_TO_PEAK_MIN_RAD if required else None
+        ),
+        "minimum_required_actual_peak_to_peak_rad": (
+            HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD if required else None
+        ),
+        "minimum_observed_target_peak_to_peak_rad_by_axis": minimum_target_by_axis,
+        "minimum_observed_actual_peak_to_peak_rad_by_axis": minimum_actual_by_axis,
+        "target_excursion_passed": target_passed if required else None,
+        "actual_excursion_passed": actual_passed if required else None,
+    }
 
 
 def evaluate_scenario_acceptance(
@@ -1060,6 +1557,14 @@ def evaluate_scenario_acceptance(
             "value": value,
             "maximum": limit,
             "passed": value is not None and value <= limit,
+        }
+
+    def add_minimum(name: str, value: float | None, limit: float) -> None:
+        checks[name] = {
+            "applied": value is not None,
+            "value": value,
+            "minimum": limit,
+            "passed": value is not None and value >= limit,
         }
 
     checks["finite"] = {
@@ -1095,16 +1600,38 @@ def evaluate_scenario_acceptance(
         report["joint_soft_limits"]["max_actual_violation_rad"],
         ACCEPTANCE_THRESHOLDS["actual_soft_limit_violation_rad_max"],
     )
+    vx, vy, yaw = scenario.twist
+    low_linear_command = yaw == 0.0 and 0.0 < math.hypot(vx, vy) <= 0.1000001
     add_maximum(
         "linear_velocity_mae_m_s",
         report["velocity_tracking_error"]["linear_xy"]["mean"],
-        ACCEPTANCE_THRESHOLDS["linear_velocity_mae_m_s_max"],
+        ACCEPTANCE_THRESHOLDS[
+            "low_linear_velocity_mae_m_s_max"
+            if low_linear_command
+            else "linear_velocity_mae_m_s_max"
+        ],
     )
     add_maximum(
         "yaw_velocity_mae_rad_s",
         report["velocity_tracking_error"]["yaw"]["mean"],
         ACCEPTANCE_THRESHOLDS["yaw_velocity_mae_rad_s_max"],
     )
+    command_axis_sign = report["command_axis_sign"]
+    checks["command_axis_sign"] = {
+        "applied": command_axis_sign["applied"],
+        "value": command_axis_sign["passed"],
+        "required": True,
+        "passed": command_axis_sign["passed"],
+        "axes": command_axis_sign["axes"],
+    }
+    if low_linear_command:
+        commanded_axis = "linear_x" if vx != 0.0 else "linear_y"
+        actual_mean = report["measured_base_velocity"][commanded_axis]["mean"]
+        add_minimum(
+            "low_linear_signed_response_m_s",
+            abs(float(actual_mean)) if actual_mean is not None else None,
+            ACCEPTANCE_THRESHOLDS["low_linear_signed_response_m_s_min"],
+        )
 
     if any(scenario.hand_active):
         add_maximum(
@@ -1118,10 +1645,9 @@ def evaluate_scenario_acceptance(
             ACCEPTANCE_THRESHOLDS["hand_p95_m_max"],
         )
 
-    # The foot reward intentionally fades to zero as locomotion demand grows.
-    # Only stationary/near-stationary scenarios are valid foot-tracking gates.
-    vx, vy, yaw = scenario.twist
-    foot_tracking_active = math.hypot(vx, vy) + abs(yaw) <= 0.15
+    # A fixed-foot gate is meaningful only for an exact stationary command.
+    # Applying it to low-speed walking rewards the stationary local optimum.
+    foot_tracking_active = vx == 0.0 and vy == 0.0 and yaw == 0.0
     if foot_tracking_active:
         add_maximum(
             "foot_rms_m",
@@ -1156,7 +1682,15 @@ def build_report(
     scenario_reports: list[dict[str, Any]],
     control_hz: float,
     checkpoint_contract: TeleopCheckpointContract,
+    hmd_neck_motion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if hmd_neck_motion is None:
+        hmd_neck_motion = {"enabled": False, "params": None}
+    moving_hmd_neck = hmd_neck_motion.get("enabled") is True
+    hmd_motion_evidence = summarize_hmd_motion_evidence(
+        scenario_reports, required=moving_hmd_neck
+    )
+    hmd_neck_motion = {**hmd_neck_motion, "evidence": hmd_motion_evidence}
     falls = [item["name"] for item in scenario_reports if item["fell_over"]]
     nonfinite = [item["name"] for item in scenario_reports if not item["finite"]]
     incomplete = [
@@ -1215,11 +1749,15 @@ def build_report(
         hard_pass
         and not acceptance_failures
         and timeout_fraction >= ACCEPTANCE_THRESHOLDS["timeout_fraction_min"]
+        and hmd_motion_evidence["passed"]
     )
     expected_names = [scenario.name for scenario in default_scenarios()]
     actual_names = [item["name"] for item in scenario_reports]
     canonical_coverage = (
-        actual_names == expected_names and steps >= 1000 and settle_steps == 50
+        not moving_hmd_neck
+        and actual_names == expected_names
+        and steps >= 1000
+        and settle_steps == 50
     )
     status = "fail" if not acceptance_pass else "diagnostic"
     if (
@@ -1243,10 +1781,6 @@ def build_report(
             "transport, servo current, fall restraint or emergency stop behavior."
         ),
         (
-            "Play mode holds the HMD-owned neck at its default pose; moving-neck "
-            "inertial disturbance is trained but is not covered by this evaluator."
-        ),
-        (
             "bounded_both_feet uses the v2 simultaneous-foot live maximum and "
             "requires a stationary twist command."
         ),
@@ -1256,11 +1790,21 @@ def build_report(
             "inclusive 2.5 mm inactive floor band."
         ),
     ]
+    if moving_hmd_neck:
+        limitations.append(
+            "This diagnostic forces every HMD waypoint non-neutral. It can gate "
+            "moving-neck robustness but cannot be the nominal canonical pass."
+        )
+    else:
+        limitations.append(
+            "Nominal evaluation holds the HMD-owned neck at its default pose; "
+            "use --moving-hmd-neck for the independent inertial-disturbance gate."
+        )
     if checkpoint_contract.diagnostic_legacy:
         limitations.append(
             "This is an explicitly requested legacy-v1 diagnostic using raw "
             "previous-action feedback and the v1 scalar Gaussian actor. It can "
-            "never pass the v7 deployment gate or be exported as v7."
+            "never pass the current deployment gate or be exported as current."
         )
     if checkpoint_contract.pristine_pre_update:
         limitations.append(
@@ -1268,7 +1812,9 @@ def build_report(
             "It is a safety baseline and can never pass the deployment gate."
         )
     return {
-        "schema_version": 7,
+        "schema_version": 8,
+        "evaluator_revision": TELEOP_EVALUATOR_REVISION,
+        "acceptance_revision": TELEOP_ACCEPTANCE_REVISION,
         "status": status,
         "task": TASK,
         "checkpoint": str(checkpoint),
@@ -1282,9 +1828,17 @@ def build_report(
             ),
             "diagnostic_legacy": checkpoint_contract.diagnostic_legacy,
             "pristine_pre_update": checkpoint_contract.pristine_pre_update,
-            "v7_deployment_compatible": (
+            "training_provenance_sha256": (
+                checkpoint_contract.training_provenance_sha256
+            ),
+            "canonical_training_stage": (
+                checkpoint_contract.canonical_training_stage
+            ),
+            "deployment_compatible": (
                 not checkpoint_contract.diagnostic_legacy
                 and not checkpoint_contract.pristine_pre_update
+                and checkpoint_contract.version
+                == MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
             ),
         },
         "device": device,
@@ -1295,6 +1849,7 @@ def build_report(
         "saturation_margin_ratio": saturation_margin_ratio,
         "target_safety_margin": TARGET_SAFETY_MARGIN,
         "acceptance_thresholds": ACCEPTANCE_THRESHOLDS,
+        "hmd_neck_motion": hmd_neck_motion,
         "nominal_environment": {
             "viewer": False,
             "robot_network": False,
@@ -1302,12 +1857,14 @@ def build_report(
             "domain_randomization": False,
             "external_pushes": False,
             "auto_reset": False,
+            "hmd_neck_motion": moving_hmd_neck,
         },
         "summary": {
             "scenario_count": len(scenario_reports),
             "canonical_coverage": canonical_coverage,
             "hard_safety_checks_passed": hard_pass,
             "acceptance_checks_passed": acceptance_pass,
+            "hmd_motion_evidence_passed": hmd_motion_evidence["passed"],
             "training_contract_check_passed": (
                 not checkpoint_contract.diagnostic_legacy
             ),
@@ -1399,6 +1956,14 @@ def parse_args() -> argparse.Namespace:
             "and exits nonzero."
         ),
     )
+    parser.add_argument(
+        "--moving-hmd-neck",
+        action="store_true",
+        help=(
+            "Diagnostics only: retain the training HmdNeckTargetMotion event with "
+            "neutral_probability=0.0. Even full coverage cannot be canonical."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1434,7 +1999,16 @@ def main() -> None:
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     env_cfg = load_env_cfg(TASK, play=True)
-    _configure_nominal_evaluation(env_cfg, steps=args.steps)
+    moving_hmd_neck_event = None
+    if args.moving_hmd_neck:
+        training_cfg = load_env_cfg(TASK, play=False)
+        moving_hmd_neck_event = _copy_forced_moving_hmd_neck_event(training_cfg)
+    _configure_nominal_evaluation(
+        env_cfg,
+        steps=args.steps,
+        moving_hmd_neck_event=moving_hmd_neck_event,
+    )
+    hmd_neck_motion = _hmd_neck_motion_report(env_cfg)
     env_cfg.seed = args.seed
     agent_cfg = load_rl_cfg(TASK)
     if checkpoint_contract.diagnostic_legacy:
@@ -1454,7 +2028,7 @@ def main() -> None:
             "init_std": 1.0,
             "std_type": "scalar",
         }
-        # The v7 adapter requires and transforms latent actions.  A legacy-v1
+        # The current adapter requires and transforms latent actions.  A legacy-v1
         # checkpoint used RSL-RL's ordinary environment-action PPO path, so its
         # diagnostic reconstruction must restore that algorithm as well as the
         # original Gaussian.  This branch is already permanently barred from
@@ -1464,6 +2038,29 @@ def main() -> None:
     wrapped_env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
 
     try:
+        active_event_names = {
+            name
+            for names in raw_env.event_manager.active_terms.values()
+            for name in names
+        }
+        if args.moving_hmd_neck:
+            if "hmd_neck_target_motion" not in active_event_names:
+                raise RuntimeError(
+                    "Moving-HMD event is configured but is not an active event term"
+                )
+            runtime_hmd_cfg = raw_env.event_manager.get_term_cfg(
+                "hmd_neck_target_motion"
+            )
+            runtime_hmd_motion = runtime_hmd_cfg.func
+            if (
+                not isinstance(runtime_hmd_motion, HmdNeckTargetMotion)
+                or runtime_hmd_motion.neutral_probability != 0.0
+            ):
+                raise RuntimeError(
+                    "Moving-HMD event did not materialize with neutral_probability=0.0"
+                )
+        elif "hmd_neck_target_motion" in active_event_names:
+            raise RuntimeError("Nominal evaluator unexpectedly enabled HMD motion")
         validate_microban_teleop_observation_contract(raw_env)
         runner_cls = load_runner_cls(TASK)
         runner = runner_cls(wrapped_env, asdict(agent_cfg), device=args.device)
@@ -1518,6 +2115,7 @@ def main() -> None:
             scenario_reports=scenario_reports,
             control_hz=1.0 / raw_env.step_dt,
             checkpoint_contract=checkpoint_contract,
+            hmd_neck_motion=hmd_neck_motion,
         )
     finally:
         wrapped_env.close()

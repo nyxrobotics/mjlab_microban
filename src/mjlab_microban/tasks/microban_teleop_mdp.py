@@ -186,7 +186,7 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
     This asymmetric arctangent is strictly monotonic, maps real numbers onto the
     open action interval, satisfies ``T(0) == 0`` and has unit derivative at
     zero on both sides.  Float32 storage cannot reliably invert it arbitrarily
-    close to its asymptote, however.  Contract v7 therefore derives a finite
+    close to its asymptote, however.  The bounded-action contract therefore derives a finite
     operational latent envelope from each side's action width, smoothly bounds
     the MLP-provided Gaussian mean inside that envelope, and clamps the
     learned standard deviation to leave a wide stochastic margin.  Sampling
@@ -330,6 +330,50 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         self._latent_sample: torch.Tensor | None = None
         Normal.set_default_validate_args(False)
 
+    def init_mlp_weights(self, mlp: nn.Module) -> None:
+        """Deterministically seed the two narrow shoulder-roll output rows.
+
+        RSL-RL invokes this hook immediately after it creates the actor MLP and
+        before constructing PPO's optimizer.  This is the earliest and most
+        reliable place to prevent a random final row from pinning either
+        asymmetric shoulder-roll action at its neutral-side endpoint.
+        """
+
+        from mjlab_microban.tasks.microban_teleop_bootstrap import (
+            initialize_teleop_shoulder_roll_mlp_head,
+        )
+
+        if self.output_dim == MICROBAN_TELEOP_ACTION_WIDTH:
+            initialize_teleop_shoulder_roll_mlp_head(mlp)
+
+    @torch.no_grad()
+    def project_std_parameters_(self) -> None:
+        """Project the learned exploration width into its numerical contract.
+
+        Applying ``torch.clamp`` only while building the distribution creates a
+        dead zone: once the optimizer moves the underlying parameter beyond a
+        bound, the clamp derivative is zero and a later PPO gradient cannot
+        bring it back.  In-place parameter projection keeps the optimizer state
+        and checkpoint schema unchanged while leaving the in-range forward path
+        differentiable, including exactly at either boundary.
+        """
+
+        if self.std_type == "scalar":
+            parameter = self.std_param
+            lower = self.min_std
+            upper = self.max_std
+        else:
+            parameter = self.log_std_param
+            lower = torch.log(self.min_std)
+            upper = torch.log(self.max_std)
+        if not bool(torch.isfinite(parameter).all().item()):
+            parameter_name = "std" if self.std_type == "scalar" else "log_std"
+            raise FloatingPointError(
+                f"Bounded Gaussian {parameter_name} parameter became non-finite "
+                "before clamp"
+            )
+        parameter.copy_(torch.maximum(torch.minimum(parameter, upper), lower))
+
     def _transform(self, latent: torch.Tensor) -> torch.Tensor:
         scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
         action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
@@ -399,22 +443,11 @@ class AsymmetricBoundedGaussianDistribution(Distribution):
         if not bool(torch.isfinite(mlp_output).all().item()):
             raise FloatingPointError("Bounded Gaussian MLP output became non-finite")
         mean = self._limit_mean(mlp_output)
+        self.project_std_parameters_()
         if self.std_type == "scalar":
-            if not bool(torch.isfinite(self.std_param).all().item()):
-                raise FloatingPointError(
-                    "Bounded Gaussian std parameter became non-finite before clamp"
-                )
-            std_values = torch.clamp(self.std_param, self.min_std, self.max_std)
+            std_values = self.std_param
         else:
-            if not bool(torch.isfinite(self.log_std_param).all().item()):
-                raise FloatingPointError(
-                    "Bounded Gaussian log_std parameter became non-finite before clamp"
-                )
-            log_min_std = torch.log(self.min_std)
-            log_max_std = torch.log(self.max_std)
-            std_values = torch.exp(
-                torch.clamp(self.log_std_param, log_min_std, log_max_std)
-            )
+            std_values = torch.exp(self.log_std_param)
         if not bool(torch.isfinite(std_values).all().item()):
             raise FloatingPointError("Bounded Gaussian std became non-finite")
         self._distribution = Normal(mean, std_values.expand_as(mean))
@@ -583,6 +616,25 @@ class LatentActionPPO(PPO):
             raise ValueError(
                 "LatentActionPPO requires the exact 18-wide Microban action contract"
             )
+        self.actor.distribution.project_std_parameters_()
+        self._std_projection_hook_handle = self.optimizer.register_step_post_hook(
+            self._project_std_after_optimizer_step
+        )
+
+    def _project_std_after_optimizer_step(
+        self,
+        _optimizer: torch.optim.Optimizer,
+        _args: tuple[Any, ...],
+        _kwargs: dict[str, Any],
+    ) -> None:
+        """Keep std parameters trainable at the boundary after every update."""
+
+        distribution = self.actor.distribution
+        if not isinstance(distribution, AsymmetricBoundedGaussianDistribution):
+            raise TypeError(
+                "LatentActionPPO lost its AsymmetricBoundedGaussianDistribution"
+            )
+        distribution.project_std_parameters_()
 
     @staticmethod
     def construct_algorithm(

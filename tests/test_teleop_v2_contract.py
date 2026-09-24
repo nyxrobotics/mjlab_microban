@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Focused tests for the Microban teleop-v7 training/deployment contract."""
+"""Focused tests for the Microban teleop training/deployment contract."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from tensordict import TensorDict
 from mjlab_microban.tasks.mdp import no_stepping_penalty
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTOR_INITIALIZATION,
     MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
     MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
@@ -36,7 +37,9 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+    MICROBAN_TELEOP_RECIPE_REVISION,
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     MicrobanTeleopOnPolicyRunner,
     TeleopCheckpointContract,
@@ -54,15 +57,20 @@ from mjlab_microban.tasks.microban_teleop_bootstrap import (
     VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
-    MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
     MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
     MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
     MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
     MICROBAN_TELEOP_HAND_TRACKING_STD_M,
+    MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S,
+    MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+    MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S,
+    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
     MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
     MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
-    MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+    MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+    MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
     microban_teleop_action_delta_bounds,
@@ -71,6 +79,7 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     AsymmetricBoundedGaussianDistribution,
+    HmdNeckTargetMotion,
     LatentActionPPO,
     PerJointGaussianDistribution,
     ResetFixedFootTargetCommand,
@@ -81,6 +90,10 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     normalized_target_near_limit_l1_sum,
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
+)
+from mjlab_microban.tasks.microban_teleop_provenance import (
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+    canonical_json_sha256,
 )
 
 
@@ -547,6 +560,21 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
                 "std_type": "log",
             },
         )
+        final_layer = actor.mlp[-1]
+        assert isinstance(final_layer, torch.nn.Linear)
+        shoulder_indices = list(TELEOP_SHOULDER_ROLL_ACTION_INDICES)
+        unguarded_indices = sorted(set(range(18)) - set(shoulder_indices))
+        torch.testing.assert_close(
+            final_layer.weight[shoulder_indices],
+            torch.zeros_like(final_layer.weight[shoulder_indices]),
+        )
+        torch.testing.assert_close(
+            final_layer.bias[shoulder_indices],
+            final_layer.bias.new_tensor(TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES),
+        )
+        self.assertGreater(
+            float(final_layer.weight[unguarded_indices].abs().sum().item()), 0.0
+        )
         critic = MLPModel(
             obs=obs,
             obs_groups=obs_groups,
@@ -685,7 +713,16 @@ class TeleopConfigurationTest(unittest.TestCase):
                 expected_shoulder_roll,
                 places=7,
             )
-        self.assertTrue(all(0.0 < value <= 0.15 for value in std))
+        self.assertTrue(all(0.0 < value <= 1.0 for value in std))
+        self.assertTrue(
+            all(
+                value == 1.0
+                for name, value in zip(
+                    MICROBAN_TELEOP_ACTION_JOINT_NAMES, std, strict=True
+                )
+                if "shoulder_roll" not in name
+            )
+        )
 
         cfg = make_microban_teleop_env_cfg()
         self.assertIs(
@@ -713,8 +750,8 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(cfg.rewards["raw_action_l2"].weight, -0.01)
         self.assertEqual(cfg.rewards["action_rate_l2"].weight, -0.02)
-        self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -2.0)
-        self.assertEqual(cfg.rewards["yaw_velocity_error_l1"].weight, -0.5)
+        self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -4.0)
+        self.assertEqual(cfg.rewards["yaw_velocity_error_l1"].weight, -1.0)
         self.assertEqual(cfg.rewards["dof_pos_limits"].weight, -10.0)
         self.assertEqual(cfg.rewards["feet_distance"].weight, -100.0)
         self.assertEqual(cfg.rewards["feet_distance"].params["min_dist"], 0.07)
@@ -724,20 +761,20 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(
             cfg.rewards["track_linear_velocity"].params["std"],
-            MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+            MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S,
         )
         self.assertEqual(
             cfg.rewards["track_angular_velocity"].params["std"],
-            MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
+            MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S,
         )
         self.assertEqual(
             cfg.rewards["hand_target_tracking"].params["std"],
             MICROBAN_TELEOP_HAND_TRACKING_STD_M,
         )
-        self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.0)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.005)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-4)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
-        self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "fixed")
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "adaptive")
         self.assertEqual(
             MicrobanTeleopRlCfg.algorithm.class_name,
             "mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO",
@@ -822,15 +859,38 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(
             [stage["step"] for stage in stages],
             [
-                1000 * 24,
-                2500 * 24,
+                1500 * 24,
+                3000 * 24,
                 4500 * 24,
-                6500 * 24,
-                7500 * 24,
-                9500 * 24,
+                6000 * 24,
+                8000 * 24,
+                12000 * 24,
+                14000 * 24,
+                16000 * 24,
+                18000 * 24,
             ],
         )
+        self.assertEqual(
+            cfg.commands["twist"].signed_axis_ranges,
+            MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+        )
         self.assertEqual(cfg.commands["foot_target"].rel_both_feet_envs, 0.0)
+        self.assertEqual(
+            cfg.rewards["foot_target_tracking"].weight,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+        )
+        self.assertEqual(
+            cfg.rewards["foot_target_tracking"].params["velocity_fade_range"],
+            (0.0, 0.01),
+        )
+        self.assertEqual(
+            cfg.events["hmd_neck_target_motion"].params["neutral_probability"],
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+        )
+        self.assertEqual(
+            stages[4]["name"],
+            "enable moving-HMD and stationary no-step guard",
+        )
         self.assertEqual(
             cfg.commands["foot_target"].lift_height_range,
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.05),
@@ -840,18 +900,7 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
         )
 
-        twist = SimpleNamespace(
-            cfg=SimpleNamespace(
-                ranges=SimpleNamespace(
-                    lin_vel_x=(0.0, 0.0),
-                    lin_vel_y=(0.0, 0.0),
-                    ang_vel_z=(0.0, 0.0),
-                ),
-                rotation_env_ang_vel_range=(0.0, 0.0),
-                rel_standing_envs=0.0,
-                rel_rotation_envs=0.0,
-            )
-        )
+        twist = SimpleNamespace(cfg=deepcopy(cfg.commands["twist"]))
         foot = SimpleNamespace(cfg=cfg.commands["foot_target"])
         hand = SimpleNamespace(cfg=cfg.commands["hand_target"])
         reward_cfgs = {
@@ -866,9 +915,23 @@ class TeleopConfigurationTest(unittest.TestCase):
             }[name]
         )
         reward_manager = SimpleNamespace(get_term_cfg=lambda name: reward_cfgs[name])
+        hmd_motion = object.__new__(HmdNeckTargetMotion)
+        hmd_motion.neutral_probability = MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+        hmd_event_cfg = SimpleNamespace(
+            func=hmd_motion,
+            params={
+                "neutral_probability": MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+            },
+        )
+        event_manager = SimpleNamespace(
+            get_term_cfg=lambda name: (
+                hmd_event_cfg if name == "hmd_neck_target_motion" else None
+            )
+        )
         env = SimpleNamespace(
             command_manager=command_manager,
             reward_manager=reward_manager,
+            event_manager=event_manager,
         )
         expected_both_lift_ranges = (
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
@@ -876,12 +939,50 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
         )
-        for stage, expected_both_lift_range in zip(
-            stages, expected_both_lift_ranges, strict=True
+        expected_foot_weights = (
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            2.0,
+            3.0,
+        )
+        expected_hmd_neutral_probabilities = (
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+        )
+        for (
+            stage,
+            expected_both_lift_range,
+            expected_foot_weight,
+            expected_hmd_neutral_probability,
+        ) in zip(
+            stages,
+            expected_both_lift_ranges,
+            expected_foot_weights,
+            expected_hmd_neutral_probabilities,
+            strict=True,
         ):
             stage["apply"](env)
+            self.assertEqual(
+                reward_cfgs["foot_target_tracking"].weight,
+                expected_foot_weight,
+            )
             self.assertEqual(
                 foot.cfg.lift_height_range,
                 (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.05),
@@ -889,6 +990,14 @@ class TeleopConfigurationTest(unittest.TestCase):
             self.assertEqual(
                 foot.cfg.both_feet_lift_height_range,
                 expected_both_lift_range,
+            )
+            self.assertEqual(
+                hmd_motion.neutral_probability,
+                expected_hmd_neutral_probability,
+            )
+            self.assertEqual(
+                hmd_event_cfg.params["neutral_probability"],
+                expected_hmd_neutral_probability,
             )
         self.assertEqual(
             twist.cfg.ranges.lin_vel_x,
@@ -906,7 +1015,11 @@ class TeleopConfigurationTest(unittest.TestCase):
             twist.cfg.rotation_env_ang_vel_range,
             MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"],
         )
-        self.assertEqual(twist.cfg.rel_rotation_envs, 0.25)
+        self.assertEqual(twist.cfg.rel_rotation_envs, 0.0)
+        self.assertEqual(
+            twist.cfg.signed_axis_probabilities,
+            MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
+        )
         self.assertEqual(foot.cfg.rel_both_feet_envs, 0.1)
         self.assertEqual(
             foot.cfg.both_feet_lift_height_range,
@@ -921,6 +1034,11 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(
             reward_cfgs["foot_target_tracking"].params["std"],
             MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
+        )
+        self.assertEqual(MicrobanTeleopRlCfg.max_iterations, 20_000)
+        self.assertEqual(
+            MicrobanTeleopRlCfg.num_steps_per_env,
+            MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
         )
 
     def test_both_foot_targets_force_only_their_rows_stationary(self) -> None:
@@ -1050,6 +1168,12 @@ class CheckpointContractTest(unittest.TestCase):
                     "previous_action_semantics": (
                         MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS
                     ),
+                    "microban_teleop_actor_initialization": (
+                        MICROBAN_TELEOP_ACTOR_INITIALIZATION
+                    ),
+                    "microban_teleop_recipe_revision": (
+                        MICROBAN_TELEOP_RECIPE_REVISION
+                    ),
                 }
             )
         path = self.root / f"model_{filename_iteration}.pt"
@@ -1077,21 +1201,47 @@ class CheckpointContractTest(unittest.TestCase):
         return {
             f"distribution.{key}": value.detach().clone()
             for key, value in distribution.state_dict().items()
-            if key != "log_std_param"
         }
 
     @staticmethod
-    def _v7_infos(*, pristine: bool = False) -> dict[str, object]:
+    def _current_infos(*, pristine: bool = False) -> dict[str, object]:
         infos: dict[str, object] = {
             "env_state": {"common_step_counter": 0 if pristine else 24},
             "microban_teleop_training_contract_version": (
                 MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
             ),
             "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
         }
         if pristine:
             infos["pristine_pre_update"] = True
         return infos
+
+    @staticmethod
+    def _training_provenance() -> tuple[dict[str, object], str]:
+        files = {"src/mjlab_microban/test_recipe.py": "a" * 64}
+        manifest: dict[str, object] = {
+            "schema_version": (
+                MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
+            ),
+            "canonical_stage": False,
+            "training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            "actor_initialization": MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+            "resolved_config": {"critical": {}, "environment": {}, "runner": {}},
+            "source": {
+                "algorithm": "sha256(canonical_json_path_to_sha256_v1)",
+                "tree_sha256": canonical_json_sha256(files),
+                "files": files,
+            },
+            "invocation": {"mode": "generic"},
+        }
+        return manifest, canonical_json_sha256(manifest)
 
     @staticmethod
     def _valid_bootstrap_info() -> dict[str, object]:
@@ -1114,10 +1264,10 @@ class CheckpointContractTest(unittest.TestCase):
             "optimizer_copied": False,
         }
 
-    def test_v7_marker_is_required_and_iteration_must_match_filename(self) -> None:
+    def test_current_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "7")
+        self.assertEqual(parsed.version, "8")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
@@ -1137,15 +1287,31 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must match"):
             validate_teleop_checkpoint_contract(mismatched)
 
+        missing_initialization = self._save(15, contract=True)
+        payload = torch.load(
+            missing_initialization, map_location="cpu", weights_only=False
+        )
+        del payload["infos"]["microban_teleop_actor_initialization"]
+        torch.save(payload, missing_initialization)
+        with self.assertRaisesRegex(ValueError, "actor initialization"):
+            validate_teleop_checkpoint_contract(missing_initialization)
+
+        missing_recipe = self._save(16, contract=True)
+        payload = torch.load(missing_recipe, map_location="cpu", weights_only=False)
+        del payload["infos"]["microban_teleop_recipe_revision"]
+        torch.save(payload, missing_recipe)
+        with self.assertRaisesRegex(ValueError, "recipe revision"):
+            validate_teleop_checkpoint_contract(missing_recipe)
+
         # Every superseded version remains non-resumable even when tensor widths
         # and previous-action semantics happen to match the current contract.
-        for index, version in enumerate(("2", "3", "4", "5", "6"), start=16):
+        for index, version in enumerate(("2", "3", "4", "5", "6", "7"), start=16):
             with self.subTest(version=version):
                 old = self._save(index, contract=True)
                 payload = torch.load(old, map_location="cpu", weights_only=False)
                 payload["infos"]["microban_teleop_training_contract_version"] = version
                 torch.save(payload, old)
-                with self.assertRaisesRegex(ValueError, "v1/v2/v3/v4/v5/v6"):
+                with self.assertRaisesRegex(ValueError, "clean retrain"):
                     validate_teleop_checkpoint_contract(old)
 
     def test_guarded_shoulder_bootstrap_provenance_is_fail_closed(self) -> None:
@@ -1179,7 +1345,7 @@ class CheckpointContractTest(unittest.TestCase):
             "mapping_version": "superseded_v3",
         }
         torch.save(payload, path)
-        with self.assertRaisesRegex(ValueError, "guarded shoulder contract"):
+        with self.assertRaisesRegex(ValueError, "requires a clean actor"):
             validate_teleop_checkpoint_contract(path)
 
     def test_pristine_checkpoint_requires_explicit_pre_update_contract(self) -> None:
@@ -1190,6 +1356,10 @@ class CheckpointContractTest(unittest.TestCase):
                 MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
             ),
             "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
             "pristine_pre_update": True,
         }
         torch.save({"iter": -1, "infos": infos}, path)
@@ -1200,6 +1370,17 @@ class CheckpointContractTest(unittest.TestCase):
         infos["pristine_pre_update"] = False
         torch.save({"iter": -1, "infos": infos}, path)
         with self.assertRaisesRegex(ValueError, "pristine_pre_update=true"):
+            validate_teleop_checkpoint_contract(path)
+
+    def test_current_checkpoint_step_counter_matches_completed_updates(self) -> None:
+        path = self._save(12, contract=True)
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        payload["infos"]["env_state"]["common_step_counter"] = 12 * 24
+        torch.save(payload, path)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"common_step_counter must equal \(iteration \+ 1\) \* 24",
+        ):
             validate_teleop_checkpoint_contract(path)
 
     def test_bounded_actor_checkpoint_buffers_are_exactly_pinned(self) -> None:
@@ -1313,7 +1494,7 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(FloatingPointError, "non-finite"):
             validate_finite_checkpoint_actor_state(checkpoint)
 
-    def test_v7_load_pins_bounds_before_base_load_including_pristine(self) -> None:
+    def test_current_load_pins_bounds_before_base_load_including_pristine(self) -> None:
         expected = self._bounded_actor_state()
         policy = SimpleNamespace(state_dict=lambda: expected)
 
@@ -1326,7 +1507,7 @@ class CheckpointContractTest(unittest.TestCase):
                             key: value.clone() for key, value in expected.items()
                         },
                         "iter": -1 if pristine else 0,
-                        "infos": self._v7_infos(pristine=pristine),
+                        "infos": self._current_infos(pristine=pristine),
                     },
                     path,
                 )
@@ -1350,7 +1531,7 @@ class CheckpointContractTest(unittest.TestCase):
                 "actor_state_dict": mismatched,
                 "iter": 1,
                 "infos": {
-                    **self._v7_infos(),
+                    **self._current_infos(),
                     "env_state": {"common_step_counter": 48},
                 },
             },
@@ -1365,7 +1546,7 @@ class CheckpointContractTest(unittest.TestCase):
             runner.load(str(mismatched_path), load_cfg={"actor": True})
         base_load.assert_not_called()
 
-    def test_save_adds_v7_marker_and_legacy_runner_cannot_write(self) -> None:
+    def test_save_adds_current_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
         fresh.alg = SimpleNamespace(
@@ -1373,7 +1554,11 @@ class CheckpointContractTest(unittest.TestCase):
                 state_dict=lambda: {"mlp.weight": torch.zeros(1)}
             )
         )
-        fresh.velocity_actor_bootstrap_info = self._valid_bootstrap_info()
+        fresh.velocity_actor_bootstrap_info = None
+        (
+            fresh.teleop_training_provenance,
+            fresh.teleop_training_provenance_sha256,
+        ) = self._training_provenance()
         with patch.object(MjlabOnPolicyRunner, "save") as base_save:
             fresh.save(
                 str(self.root / "model_0.pt"),
@@ -1383,15 +1568,30 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "7")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "8")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
         )
         self.assertEqual(
-            saved_infos["velocity_actor_bootstrap"],
-            fresh.velocity_actor_bootstrap_info,
+            saved_infos["microban_teleop_actor_initialization"],
+            MICROBAN_TELEOP_ACTOR_INITIALIZATION,
         )
+        self.assertEqual(
+            saved_infos["microban_teleop_recipe_revision"],
+            MICROBAN_TELEOP_RECIPE_REVISION,
+        )
+        self.assertEqual(
+            saved_infos["microban_teleop_training_provenance_sha256"],
+            fresh.teleop_training_provenance_sha256,
+        )
+        self.assertNotIn("velocity_actor_bootstrap", saved_infos)
+
+        fresh.velocity_actor_bootstrap_info = self._valid_bootstrap_info()
+        with patch.object(MjlabOnPolicyRunner, "save") as base_save:
+            with self.assertRaisesRegex(ValueError, "requires a clean actor"):
+                fresh.save(str(self.root / "model_bootstrapped.pt"))
+            base_save.assert_not_called()
 
         legacy = object.__new__(MicrobanTeleopOnPolicyRunner)
         legacy.loaded_checkpoint_contract = TeleopCheckpointContract(

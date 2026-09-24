@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from xml.etree import ElementTree
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -54,6 +54,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     guarded_teleop_actor_raw_bounds,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
@@ -112,21 +113,34 @@ def _microban_soft_joint_position_clip() -> dict[str, tuple[float, float]]:
 
 MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
+MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S = 0.35
+MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S = 0.80
+MICROBAN_TELEOP_INTERMEDIATE_LINEAR_TRACKING_STD_M_S = 0.35
+MICROBAN_TELEOP_INTERMEDIATE_ANGULAR_TRACKING_STD_RAD_S = 0.80
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
 MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
+MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
+MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S = 0.12
 MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE = {
-    "lin_vel_x": (-0.2, 0.3),
-    "lin_vel_y": (-0.1, 0.1),
-    "ang_vel_z": (-0.4, 0.4),
-    "rotation_ang_vel_z": (-0.8, 0.8),
+    "lin_vel_x": (-0.35, 0.40),
+    "lin_vel_y": (-0.25, 0.25),
+    "ang_vel_z": (-1.20, 1.20),
+    "rotation_ang_vel_z": (-1.20, 1.20),
 }
 MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE = {
     "lin_vel_x": (-0.4, 0.5),
     "lin_vel_y": (-0.2, 0.2),
-    "ang_vel_z": (-0.8, 0.8),
+    "ang_vel_z": (-1.5, 1.5),
+    "rotation_ang_vel_z": (-1.5, 1.5),
+}
+MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE = {
+    "lin_vel_x": (-0.5, 0.7),
+    "lin_vel_y": (-0.3, 0.3),
+    "ang_vel_z": (-1.5, 1.5),
     "rotation_ang_vel_z": (-1.5, 1.5),
 }
 MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE = {
@@ -136,13 +150,66 @@ MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE = {
     "rotation_ang_vel_z": (-3.0, 3.0),
 }
 
+MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES = {
+    "standing": 0.10,
+    "forward": 0.15,
+    "backward": 0.15,
+    "lateral_left": 0.15,
+    "lateral_right": 0.15,
+    "yaw_left": 0.15,
+    "yaw_right": 0.15,
+    "mixed": 0.0,
+}
+MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES = {
+    "standing": 0.10,
+    "forward": 0.10,
+    "backward": 0.10,
+    "lateral_left": 0.10,
+    "lateral_right": 0.10,
+    "yaw_left": 0.10,
+    "yaw_right": 0.10,
+    "mixed": 0.30,
+}
+MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES = {
+    "forward": (0.25, 0.40),
+    "backward": (-0.35, -0.20),
+    "lateral_left": (0.15, 0.25),
+    "lateral_right": (-0.25, -0.15),
+    "yaw_left": (0.80, 1.20),
+    "yaw_right": (-1.20, -0.80),
+}
+MICROBAN_TELEOP_INTERMEDIATE_SIGNED_AXIS_RANGES = {
+    "forward": (0.10, 0.50),
+    "backward": (-0.40, -0.10),
+    "lateral_left": (0.08, 0.20),
+    "lateral_right": (-0.20, -0.08),
+    "yaw_left": (0.40, 1.50),
+    "yaw_right": (-1.50, -0.40),
+}
+MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES = {
+    "forward": (0.10, 0.70),
+    "backward": (-0.50, -0.10),
+    "lateral_left": (0.08, 0.30),
+    "lateral_right": (-0.30, -0.08),
+    "yaw_left": (0.40, 1.50),
+    "yaw_right": (-1.50, -0.40),
+}
+MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES = {
+    **MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES,
+    "yaw_left": (0.40, 3.00),
+    "yaw_right": (-3.00, -0.40),
+}
+
 
 def microban_teleop_initial_action_std() -> tuple[float, ...]:
-    """Return ordered 3-sigma-within-nearest-bound exploration widths.
+    """Return ordered bounded-latent exploration widths.
 
-    Values are capped at 0.15 rad.  Shoulder roll is intentionally much
-    smaller: its 10-degree home is only one degree inside the 90% soft limit,
-    so its exact value is one third of that one-degree headroom.
+    Contract v7 inherited direct-action Gaussian widths, which restricted most
+    joints to narrow latent widths and converged to a stationary local optimum.
+    The v8 actor is physically bounded after sampling, so all joints except the
+    asymmetric shoulder-roll axes start at 1.0 latent standard deviation.  The
+    shoulder-roll widths remain one third of their one-degree physical
+    headroom and also satisfy the tighter operational-envelope cap.
     """
 
     defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
@@ -156,7 +223,7 @@ def microban_teleop_initial_action_std() -> tuple[float, ...]:
         headroom = min(default - lower, upper - default)
         if headroom <= 0.0:
             raise ValueError(f"{name} home pose is outside its action clip")
-        values.append(min(0.15, headroom / 3.0))
+        values.append(headroom / 3.0 if "shoulder_roll" in name else 1.0)
     return tuple(values)
 
 
@@ -202,20 +269,77 @@ def _materialize_rotation_command_cfg(
     survive CLI serialization without changing the deployed velocity task.
     """
 
-    init_fields = tuple(
-        field.name
-        for field in fields(UniformVelocityCommandWithRotationCfg)
-        if field.init
-    )
-    missing = tuple(name for name in init_fields if not hasattr(command, name))
+    values: dict[str, object] = {}
+    missing: list[str] = []
+    for field in fields(UniformVelocityCommandWithRotationCfg):
+        if not field.init:
+            continue
+        if hasattr(command, field.name):
+            values[field.name] = deepcopy(getattr(command, field.name))
+        elif field.default is not MISSING:
+            values[field.name] = deepcopy(field.default)
+        elif field.default_factory is not MISSING:
+            values[field.name] = field.default_factory()
+        else:
+            missing.append(field.name)
     if missing:
         raise TypeError(
             "Velocity command is missing fields required by "
-            f"UniformVelocityCommandWithRotationCfg: {missing}"
+            f"UniformVelocityCommandWithRotationCfg: {tuple(missing)}"
         )
-    return UniformVelocityCommandWithRotationCfg(
-        **{name: deepcopy(getattr(command, name)) for name in init_fields}
+    return UniformVelocityCommandWithRotationCfg(**values)
+
+
+def _set_teleop_locomotion_stage(
+    env: object,
+    *,
+    envelope: dict[str, tuple[float, float]],
+    signed_axis_ranges: dict[str, tuple[float, float]],
+    signed_axis_probabilities: dict[str, float],
+    linear_tracking_std: float,
+    angular_tracking_std: float,
+) -> None:
+    """Apply one auditable command-acquisition stage atomically."""
+
+    command = env.command_manager.get_term_cfg("twist")
+    if not isinstance(command, UniformVelocityCommandWithRotationCfg):
+        raise TypeError("Teleop locomotion stage requires the rotation command cfg")
+    set_command_velocity(
+        env,
+        lin_vel_x=envelope["lin_vel_x"],
+        lin_vel_y=envelope["lin_vel_y"],
+        ang_vel_z=envelope["ang_vel_z"],
+        rotation_env_ang_vel_z=envelope["rotation_ang_vel_z"],
     )
+    command.signed_axis_ranges = deepcopy(signed_axis_ranges)
+    command.signed_axis_probabilities = deepcopy(signed_axis_probabilities)
+    env.reward_manager.get_term_cfg("track_linear_velocity").params["std"] = (
+        linear_tracking_std
+    )
+    env.reward_manager.get_term_cfg("track_angular_velocity").params["std"] = (
+        angular_tracking_std
+    )
+
+
+def _set_hmd_neck_neutral_probability(
+    env: object, *, neutral_probability: float
+) -> None:
+    """Update the live stateful HMD disturbance and its auditable config.
+
+    ``HmdNeckTargetMotion`` copies this value during construction, so mutating
+    only ``EventTermCfg.params`` would silently leave the running event on its
+    old probability.  Resume reconstruction applies this helper again through
+    the step curriculum before collecting the next rollout.
+    """
+
+    if not 0.0 <= neutral_probability <= 1.0:
+        raise ValueError("HMD neutral probability must be in [0, 1]")
+    event_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
+    motion = event_cfg.func
+    if not isinstance(motion, HmdNeckTargetMotion):
+        raise TypeError("HMD neck event did not build its stateful motion term")
+    motion.neutral_probability = neutral_probability
+    event_cfg.params["neutral_probability"] = neutral_probability
 
 
 def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -243,7 +367,21 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rotation_env_ang_vel_range = (
             MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
         )
-        initial_twist.rel_rotation_envs = 0.1
+        # V8 uses one exclusive categorical draw per environment.  Every sign
+        # and axis therefore receives explicit low-speed coverage instead of
+        # being hidden inside independently overlapping legacy flags.
+        initial_twist.signed_axis_probabilities = deepcopy(
+            MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+        )
+        initial_twist.signed_axis_ranges = deepcopy(
+            MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
+        )
+        initial_twist.rel_standing_envs = 0.0
+        initial_twist.rel_forward_envs = 0.0
+        initial_twist.rel_rotation_envs = 0.0
+        initial_twist.rel_heading_envs = 0.0
+        initial_twist.rel_world_envs = 0.0
+        initial_twist.init_velocity_prob = 0.0
 
     # The current control runtime's NEUTRAL_POSE constant uses +10 degrees for
     # both shoulder-pitch joints.  This is a provisional software-contract match,
@@ -283,7 +421,13 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "position_ranges_rad": MICROBAN_HMD_RUNTIME_LIMITS_RAD,
                 "slew_rates_rad_s": MICROBAN_HMD_SLEW_RATES_RAD_S,
                 "retarget_interval_s": MICROBAN_HMD_RETARGET_INTERVAL_S,
-                "neutral_probability": 0.2,
+                # Learn the signed locomotion axes before adding an external
+                # disturbance that sweeps a comparatively heavy head through
+                # its full runtime range.  The 8,000-update stage switches the
+                # live stateful term to the deployment-like distribution.
+                "neutral_probability": (
+                    MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
+                ),
             },
         )
 
@@ -342,16 +486,20 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"command_name": "hand_target"},
     )
 
-    # Foot targets fade out as locomotion demand grows.  Hand targets remain
-    # independent of walking and their two active flags mask inactive hands.
+    # Exact-zero standing receives a small foot anchor from the first update.
+    # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
+    # sample (the smallest commanded translation is 8 cm/s and yaw is 0.4
+    # rad/s), so it cannot reward the stationary local optimum on moving tasks.
+    # Hand targets remain independent of walking and their two active flags
+    # mask inactive hands.
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
-        weight=0.0,
+        weight=MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
         params={
             "command_name": "foot_target",
             "std": 0.05,
             "velocity_command_name": "twist",
-            "velocity_fade_range": (0.0, 0.15),
+            "velocity_fade_range": (0.0, 0.01),
         },
     )
     cfg.rewards["hand_target_tracking"] = RewardTermCfg(
@@ -396,19 +544,19 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Wider kernels keep a useful learning signal at the final command extrema;
     # the old Gaussian rewards were effectively zero before the policy moved.
     cfg.rewards["track_linear_velocity"].params["std"] = (
-        MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S
+        MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S
     )
     cfg.rewards["track_angular_velocity"].params["std"] = (
-        MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+        MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S
     )
     cfg.rewards["linear_velocity_error_l1"] = RewardTermCfg(
         func=linear_velocity_tracking_error_l1,
-        weight=-2.0,
+        weight=-4.0,
         params={"command_name": "twist"},
     )
     cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
         func=yaw_velocity_tracking_error_l1,
-        weight=-0.5,
+        weight=-1.0,
         params={"command_name": "twist"},
     )
 
@@ -442,79 +590,118 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reach_z_range=(-0.08, 0.08),
     )
 
-    # V4 retains the capability order: establish locomotion over the complete
-    # runtime envelope, add hands with a broad then precise kernel, and only then
-    # introduce the more destabilizing single-/two-foot targets.  This avoids the
-    # v2 failure mode where every objective arrived before the actor had learned
-    # to respond to twist commands and a stable stationary policy won instead.
+    # V8 acquires one signed axis at a time before introducing mixed commands.
+    # Checkpoints at 1500/3000/4500/6000/8000 are external capability gates;
+    # the reproducible wrapper stops at each boundary and resumes only after the
+    # fixed signed-axis evaluator passes.  Limb tracking is deliberately delayed
+    # far beyond locomotion so a stationary multi-objective optimum cannot win.
     cfg.curriculum = {
         "staged_curriculum": CurriculumTermCfg(
             func=ResumeSafeStepBasedStagedCurriculum,
             params={
                 "stages": [
                     {
-                        "name": "intermediate locomotion envelope",
-                        "step": 1000 * 24,
-                        "apply": lambda env: (
-                            set_command_velocity(
-                                env,
-                                lin_vel_x=(
-                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
-                                        "lin_vel_x"
-                                    ]
-                                ),
-                                lin_vel_y=(
-                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
-                                        "lin_vel_y"
-                                    ]
-                                ),
-                                ang_vel_z=(
-                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
-                                        "ang_vel_z"
-                                    ]
-                                ),
-                                rotation_env_ang_vel_z=(
-                                    MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE[
-                                        "rotation_ang_vel_z"
-                                    ]
-                                ),
+                        "name": "intermediate isolated signed axes",
+                        "step": 1500 * 24,
+                        "apply": lambda env: _set_teleop_locomotion_stage(
+                            env,
+                            envelope=(MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE),
+                            signed_axis_ranges=(
+                                MICROBAN_TELEOP_INTERMEDIATE_SIGNED_AXIS_RANGES
                             ),
-                            set_stepping_parameters(env, rel_rotation_envs=0.15),
+                            signed_axis_probabilities=(
+                                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                            ),
+                            linear_tracking_std=(
+                                MICROBAN_TELEOP_INTERMEDIATE_LINEAR_TRACKING_STD_M_S
+                            ),
+                            angular_tracking_std=(
+                                MICROBAN_TELEOP_INTERMEDIATE_ANGULAR_TRACKING_STD_RAD_S
+                            ),
                         ),
                     },
                     {
-                        "name": "final runtime locomotion envelope",
-                        "step": 2500 * 24,
-                        "apply": lambda env: (
-                            set_command_velocity(
-                                env,
-                                lin_vel_x=MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE[
-                                    "lin_vel_x"
-                                ],
-                                lin_vel_y=MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE[
-                                    "lin_vel_y"
-                                ],
-                                ang_vel_z=MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE[
-                                    "ang_vel_z"
-                                ],
-                                rotation_env_ang_vel_z=(
-                                    MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE[
-                                        "rotation_ang_vel_z"
-                                    ]
-                                ),
+                        "name": "final translation and moving-yaw isolated axes",
+                        "step": 3000 * 24,
+                        "apply": lambda env: _set_teleop_locomotion_stage(
+                            env,
+                            envelope=(
+                                MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE
                             ),
+                            signed_axis_ranges=(
+                                MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES
+                            ),
+                            signed_axis_probabilities=(
+                                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                            ),
+                            linear_tracking_std=(
+                                MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S
+                            ),
+                            angular_tracking_std=(
+                                MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "final pure-yaw isolated axes",
+                        "step": 4500 * 24,
+                        "apply": lambda env: _set_teleop_locomotion_stage(
+                            env,
+                            envelope=MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
+                            signed_axis_ranges=(
+                                MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES
+                            ),
+                            signed_axis_probabilities=(
+                                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                            ),
+                            linear_tracking_std=(
+                                MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S
+                            ),
+                            angular_tracking_std=(
+                                MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "runtime envelope with mixed command replay",
+                        "step": 6000 * 24,
+                        "apply": lambda env: _set_teleop_locomotion_stage(
+                            env,
+                            envelope=MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
+                            signed_axis_ranges=(
+                                MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES
+                            ),
+                            signed_axis_probabilities=(
+                                MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES
+                            ),
+                            linear_tracking_std=(
+                                MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S
+                            ),
+                            angular_tracking_std=(
+                                MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "enable moving-HMD and stationary no-step guard",
+                        "step": 8000 * 24,
+                        "apply": lambda env: (
                             set_stepping_parameters(
                                 env,
                                 air_time_weight=3.0,
                                 no_stepping_penalty_weight=-1.0,
-                                rel_standing_envs=0.1,
-                                rel_rotation_envs=0.25,
+                            ),
+                            _set_hmd_neck_neutral_probability(
+                                env,
+                                neutral_probability=(
+                                    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY
+                                ),
                             ),
                         ),
                     },
                     {
                         "name": "enable broad hand tracking",
-                        "step": 4500 * 24,
+                        "step": 12000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "hand_target_tracking"
@@ -531,7 +718,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     },
                     {
                         "name": "tighten hand tracking",
-                        "step": 6500 * 24,
+                        "step": 14000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "hand_target_tracking"
@@ -544,8 +731,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                         ),
                     },
                     {
-                        "name": "enable broad foot tracking",
-                        "step": 7500 * 24,
+                        "name": "enable broad stationary foot tracking",
+                        "step": 16000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "foot_target_tracking"
@@ -553,6 +740,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                             env.reward_manager.get_term_cfg(
                                 "foot_target_tracking"
                             ).params.__setitem__("std", 0.05),
+                            env.reward_manager.get_term_cfg(
+                                "foot_target_tracking"
+                            ).params.__setitem__("velocity_fade_range", (0.0, 0.15)),
                             env.command_manager.get_term_cfg("foot_target").__setattr__(
                                 "rel_single_support_envs", 0.3
                             ),
@@ -563,7 +753,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     },
                     {
                         "name": "tighten foot tracking",
-                        "step": 9500 * 24,
+                        "step": 18000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "foot_target_tracking"
@@ -600,7 +790,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 @dataclass
 class MicrobanTeleopRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Runner configuration with an explicit, pinned velocity bootstrap opt-in."""
+    """Runner config retaining retired bootstrap fields for fail-closed parsing."""
 
     bootstrap_velocity_checkpoint: str | None = None
     bootstrap_velocity_checkpoint_sha256: str | None = None
@@ -639,11 +829,21 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.0,
+        entropy_coef=0.005,
+        # Three passes keep the first production-width update inside the policy
+        # trust region.  Five passes at both 1e-3 and 3e-4 drove the adaptive
+        # schedule directly to its 1e-5 floor and yielded a neutral actor that
+        # fell after roughly two seconds.
         num_learning_epochs=3,
         num_mini_batches=4,
+        # Production-width one-update diagnostics at both 1e-3 and 3e-4
+        # overshot the KL target, drove the adaptive scheduler straight to 1e-5
+        # and produced neutral policies that fell after roughly two seconds.
+        # V8 keeps the safer v7 starting rate while retaining adaptive
+        # scheduling plus the new signed-command curriculum, wider bounded
+        # exploration and nonzero entropy that address v7's stationary optimum.
         learning_rate=1.0e-4,
-        schedule="fixed",
+        schedule="adaptive",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
@@ -652,6 +852,6 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
     wandb_project="mjlab_microban_teleop",
     experiment_name="mjlab_microban_teleop",
     save_interval=500,
-    num_steps_per_env=24,
-    max_iterations=15_000,
+    num_steps_per_env=MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
+    max_iterations=20_000,
 )

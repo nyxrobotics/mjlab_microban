@@ -49,6 +49,23 @@ def parse_args() -> argparse.Namespace:
         default=Path("microban_teleop.onnx"),
         help="Output ONNX path",
     )
+    parser.add_argument(
+        "--acceptance-receipt",
+        type=Path,
+        default=None,
+        help=(
+            "Schema-3 final v8 gate receipt. When omitted the ONNX is explicitly "
+            "marked deployment_accepted=false."
+        ),
+    )
+    parser.add_argument(
+        "--require-final-acceptance",
+        action="store_true",
+        help=(
+            "Fail unless --acceptance-receipt proves the canonical 18000->20000 "
+            "checkpoint passed the exact final evaluator suite."
+        ),
+    )
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()
 
@@ -60,7 +77,11 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     # Capture the exact bytes before loading.  Publication re-hashes the source
     # checkpoint so a concurrently written/replaced checkpoint fails closed.
-    provenance = collect_teleop_export_provenance(checkpoint)
+    provenance = collect_teleop_export_provenance(
+        checkpoint,
+        acceptance_receipt=args.acceptance_receipt,
+        require_final_acceptance=args.require_final_acceptance,
+    )
     # Load the exact canonical path that was hashed.  In particular, a retargeted
     # command-line symlink must not select different bytes after provenance capture.
     checkpoint = provenance.checkpoint_path
