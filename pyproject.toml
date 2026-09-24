@@ -9,10 +9,12 @@ description = "Microban RL environment for mjlab"
 readme = "README.md"
 requires-python = ">=3.12, <3.14"
 dependencies = [
+  "aiohttp>=3.11",
   "mjlab==1.3.0",
   "warp-lang==1.12.0",
   "placo>=0.9.20",
   "better-actuator-models",
+  "pillow>=11.0",
 ]
 
 [project.entry-points."mjlab.tasks"]
@@ -28,4 +30,3 @@ exclude = [
 
 [tool.uv.sources]
 better-actuator-models = { git = "ssh://git@github.com/rhoban/bam", branch = "doc" }
-
