@@ -239,9 +239,13 @@ and paired-target checks immediately before UDP serialization.
 
 Policy selection is controller state: left X toggles `walk` / `pico_teleop`
 only while the left trigger is released. It is not selected through an
-environment variable. The robot runtime independently validates the ONNX
-contract and rejects hybrid walking snapshots without paired foot targets; the
-bridge requires complete foot and hand mappings atomically. See
+environment variable. Every native snapshot declares
+`body_target_contract: "microban_pico_offsets_v1"` and
+`body_target_safety_margin: 0.8`. Before accepting a hybrid walking snapshot,
+the robot runtime independently requires those exact values, complete paired
+foot and hand targets, and the same 80%-of-training bounds. A mismatch stops
+and disarms walking, clears both target pairs, and requires a trigger release
+before rearming. See
 `microban_teleop/docs/twist2_microban.md` and
 `microban/docs/pico_teleop_runtime.md` for the reproducible operator and robot
 runbooks.
