@@ -102,9 +102,7 @@ MICROBAN_TELEOP_NUM_STEPS_PER_ENV = 24
 MICROBAN_TELEOP_ACTOR_INITIALIZATION = (
     "clean_random_except_inward_shoulder_roll_v1_nonshoulder_std_1_v1"
 )
-MICROBAN_TELEOP_RECIPE_REVISION = (
-    "v8g_clean_shoulder_std1_intermediate_commands_tracking_l1x2_v1"
-)
+MICROBAN_TELEOP_RECIPE_REVISION = "v8h_clean_shoulder_std1_twist2_locomotion_prior_v1"
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
@@ -2219,7 +2217,16 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         # Manager objects are constructed before the checkpoint is loaded.  Run
         # the resume-safe curriculum once at the restored global step so all due
         # reward weights and command ranges are active before the first rollout.
+        # The constructor already performed a provisional reset using step-zero
+        # config; discard it after applying the restored config.  Checkpoints do
+        # not preserve simulator/RNG state, so this is not throwing away resumed
+        # episode state.  In particular, a 1,000+ resume must not retain the
+        # now-disabled locomotion-prior pose or its low-forward command sample.
+        restored_common_step_counter = env.common_step_counter
         env.curriculum_manager.compute()
+        env.reset()
+        if env.common_step_counter != restored_common_step_counter:
+            raise RuntimeError("Environment reset changed the restored global step")
         return infos
 
     def save(self, path: str, infos=None) -> None:

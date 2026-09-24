@@ -6,8 +6,10 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 cd -- "${PROJECT_ROOT}"
+uv lock --check
 uv run --locked --with pytest python -m pytest -q \
     tests/test_bounded_std_projection.py \
+    tests/test_locomotion_prior.py \
     tests/test_microban_policy_export.py \
     tests/test_signed_axis_velocity_command.py \
     tests/test_teleop_evaluation.py \

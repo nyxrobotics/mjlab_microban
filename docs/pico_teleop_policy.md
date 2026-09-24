@@ -10,11 +10,13 @@ The hybrid RL policy in this task is the live controller. It accepts PICO stick
 commands and compact end-effector targets every control tick, then produces the
 18 arm/leg joint targets that must keep the physical robot balanced.
 
-BeyondMimic/TWIST2-style full-motion tracking is an offline reference-validation
-pipeline for now. Retargeted clips are useful for checking reachability,
-self-collision and target ranges, and later for curriculum/data generation. A
-full reference trajectory is not streamed directly to the servos: it lacks the
-online balance correction and hardware observation contract enforced here.
+BeyondMimic/TWIST2-style full-motion tracking remains an offline reference
+pipeline, not a command streamed to the robot. V8h does use one audited
+retargeted walking clip as a **critic-only training prior** for the first 1,000
+updates. It is faded to zero and disabled before the first 1,500-update gate;
+the deployed actor never observes it. The exact reset, reward, phase and
+provenance contract is in
+[`teleop_v8h_locomotion_prior.md`](teleop_v8h_locomotion_prior.md).
 
 ## Deployment contract
 
@@ -33,7 +35,9 @@ The actor observation is 83 floats in this exact term order:
 
 `base_lin_vel`, global/root position and terrain height scans are forbidden from
 the actor because the real robot does not provide them. The critic may use
-simulation-only signals during asymmetric actor-critic training.
+simulation-only signals during asymmetric actor-critic training. In v8h that
+includes a 39-value `[blend, sin, cos, q_ref, dq_ref, q_lead_5]` locomotion-prior
+command. It is never appended to the 83-value actor observation.
 
 > **Supported-robot acceptance blocker:** the `microban` `PicoHybridMove` now
 > rotates the raw BMI088 gyro with `IMU_MOUNT_QUAT` before constructing
@@ -148,9 +152,13 @@ robot.
 From the repository root:
 
 ```bash
-uv sync
+uv sync --locked
 scripts/train_microban_teleop.sh smoke
 ```
+
+`uv.lock` is tracked and included in checkpoint source provenance. A clean
+machine therefore resolves the same dependency graph, and `--locked` fails
+instead of silently rewriting that graph.
 
 The command must finish with a JSON report containing `"status": "pass"`, an
 actor shape ending in 83, action dimension 18, the three HMD joint names and their
@@ -196,13 +204,17 @@ wrappers reject all bootstrap/pristine options. V8 requires a clean actor start.
 
 ### What v8 changes
 
-The velocity command sampler is now an exclusive categorical distribution over
+After the short v8h prior, the velocity command sampler is an exclusive
+categorical distribution over
 `standing`, forward, backward, left, right, yaw-left, yaw-right and (later)
 mixed motion. Early training gives each signed direction its own examples rather
 than relying on three independently sampled axes, which previously made mixed
-commands dominate and left no pure backward/lateral cases. The initial isolated
-probabilities are 10% standing and 15% for each of the six directions. At the
-mixed stage they become 10% for standing and each pure direction, and 30% mixed.
+commands dominate and left no pure backward/lateral cases. Updates 0--500 use
+20% standing and 80% forward at `0.06..0.11 m/s`. At update 500, while the prior
+fades, sampling becomes 10% standing, 30% forward and 12% for each of the other
+five signed directions. Update 1,000 restores 10% standing and 15% for each of
+the six directions. At the later mixed stage the probabilities become 10% for
+standing and each pure direction, and 30% mixed.
 
 The first signed ranges deliberately exclude the zero deadband:
 
@@ -230,7 +242,7 @@ effective-action feedback, predicted joint-state guard and independent actuator
 target clip remain in force.
 
 The exact semantic recipe marker is `microban_teleop_recipe_revision =
-v8g_clean_shoulder_std1_intermediate_commands_tracking_l1x2_v1`.
+v8h_clean_shoulder_std1_twist2_locomotion_prior_v1`.
 The non-vanishing linear/yaw L1 tracking weights are `-4.0/-1.0`; this doubles
 only the tracking incentive after the v8f diagnostic remained safely static.
 Pose, joint-limit, collision, and bounded-action safety terms are unchanged.
@@ -301,7 +313,8 @@ Every checkpoint written by the runner carries a deterministic training
 provenance manifest and its canonical-JSON SHA-256. The manifest contains the
 resolved environment and PPO configs (including values after CLI parsing), the
 critical process settings, the canonical stage/parent lineage, and SHA-256s for
-the complete local training source set. The stage gate additionally requires
+the complete local training source set, including the vendored locomotion-prior
+NPZ. The stage gate additionally requires
 the canonical-driver marker, the fixed 4,096 environments/seeds/rollout/save
 settings, and an exact match to the current source tree. Thus a checkpoint made
 through the generic debug wrapper cannot become a canonical checkpoint merely
@@ -334,7 +347,7 @@ missing or changed is rejected.
 
 | Completed updates | Capability just trained and gated | Next capability unlocked after pass |
 |---:|---|---|
-| 1,500 | representative low-speed isolated signed-axis response | intermediate isolated ranges |
+| 1,500 | prior faded/disabled plus representative low-speed isolated signed-axis response | intermediate isolated ranges |
 | 3,000 | representative low/mid isolated response, including lateral `+/-0.2 m/s` | final translation and moving yaw |
 | 4,500 | full translation and moving yaw `+/-1.5 rad/s` | pure yaw to `+/-3 rad/s` |
 | 6,000 | full pure-yaw isolated axes | 30% mixed-twist replay |

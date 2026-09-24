@@ -33,9 +33,7 @@ import torch
 
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 1
 MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v8_stage"
-MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY = (
-    "microban_teleop_training_provenance"
-)
+MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY = "microban_teleop_training_provenance"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
     "microban_teleop_training_provenance_sha256"
 )
@@ -215,6 +213,7 @@ def collect_training_source_manifest(project_root: str | Path | None = None) -> 
     candidates.update(
         root / relative
         for relative in (
+            "data/motions/microban_twist2_walk002_locomotion_prior.npz",
             "pyproject.toml",
             "uv.lock",
             "scripts/train_microban_teleop.sh",
@@ -282,17 +281,13 @@ def _validate_canonical_stage_lineage(
         if parents != (None, None):
             raise ValueError("The initial canonical stage cannot have a parent")
         return
-    for name, value in zip(
-        ("parent checkpoint", "parent gate"), parents, strict=True
-    ):
+    for name, value in zip(("parent checkpoint", "parent gate"), parents, strict=True):
         if (
             not isinstance(value, str)
             or len(value) != _SHA256_HEX_LENGTH
             or any(character not in "0123456789abcdef" for character in value)
         ):
-            raise ValueError(
-                f"Canonical stage {name} must be one lowercase SHA-256"
-            )
+            raise ValueError(f"Canonical stage {name} must be one lowercase SHA-256")
 
 
 def collect_training_provenance(

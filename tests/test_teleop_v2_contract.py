@@ -16,7 +16,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from mjlab.envs.mdp.actions import JointPositionAction
@@ -27,6 +27,11 @@ from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
 from mjlab_microban.tasks.mdp import no_stepping_penalty
+from mjlab_microban.tasks.microban_locomotion_prior import (
+    MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
+    LocomotionPriorCommand,
+    LocomotionPriorCommandCfg,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTOR_INITIALIZATION,
@@ -66,11 +71,18 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S,
     MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
     MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
     MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
     MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+    MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT,
+    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT,
+    MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
+    MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
     microban_teleop_action_delta_bounds,
@@ -752,6 +764,24 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(cfg.rewards["action_rate_l2"].weight, -0.02)
         self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -4.0)
         self.assertEqual(cfg.rewards["yaw_velocity_error_l1"].weight, -1.0)
+        self.assertEqual(
+            cfg.rewards["locomotion_prior_action_target"].weight,
+            MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT,
+        )
+        self.assertEqual(
+            cfg.rewards["locomotion_prior_joint_position"].weight,
+            MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT,
+        )
+        self.assertEqual(
+            cfg.rewards["locomotion_prior_action_target"].params["std"],
+            MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
+        )
+        self.assertNotIn("locomotion_prior", cfg.observations["actor"].terms)
+        self.assertIn("locomotion_prior", cfg.observations["critic"].terms)
+        self.assertIsInstance(
+            cfg.commands["locomotion_prior"], LocomotionPriorCommandCfg
+        )
+        self.assertEqual(MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH, 39)
         self.assertEqual(cfg.rewards["dof_pos_limits"].weight, -10.0)
         self.assertEqual(cfg.rewards["feet_distance"].weight, -100.0)
         self.assertEqual(cfg.rewards["feet_distance"].params["min_dist"], 0.07)
@@ -859,6 +889,8 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertEqual(
             [stage["step"] for stage in stages],
             [
+                500 * 24,
+                1000 * 24,
                 1500 * 24,
                 3000 * 24,
                 4500 * 24,
@@ -872,7 +904,11 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(
             cfg.commands["twist"].signed_axis_ranges,
-            MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+            MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
+        )
+        self.assertEqual(
+            cfg.commands["twist"].signed_axis_probabilities,
+            MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
         )
         self.assertEqual(cfg.commands["foot_target"].rel_both_feet_envs, 0.0)
         self.assertEqual(
@@ -888,7 +924,7 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
         )
         self.assertEqual(
-            stages[4]["name"],
+            stages[6]["name"],
             "enable moving-HMD and stationary no-step guard",
         )
         self.assertEqual(
@@ -903,6 +939,13 @@ class TeleopConfigurationTest(unittest.TestCase):
         twist = SimpleNamespace(cfg=deepcopy(cfg.commands["twist"]))
         foot = SimpleNamespace(cfg=cfg.commands["foot_target"])
         hand = SimpleNamespace(cfg=cfg.commands["hand_target"])
+        prior_cfg = cfg.commands["locomotion_prior"]
+        prior = object.__new__(LocomotionPriorCommand)
+        prior.cfg = prior_cfg
+        prior.eligible = torch.ones(1, dtype=torch.bool)
+        prior.finished = torch.ones(1, dtype=torch.bool)
+        prior.phase_rate = torch.ones(1)
+        prior._skip_next_advance = torch.ones(1, dtype=torch.bool)
         reward_cfgs = {
             name: SimpleNamespace(weight=term.weight, params=dict(term.params))
             for name, term in cfg.rewards.items()
@@ -912,8 +955,12 @@ class TeleopConfigurationTest(unittest.TestCase):
                 "twist": twist.cfg,
                 "foot_target": foot.cfg,
                 "hand_target": hand.cfg,
+                "locomotion_prior": prior_cfg,
             }[name]
         )
+        command_manager.get_term = lambda name: {
+            "locomotion_prior": prior,
+        }[name]
         reward_manager = SimpleNamespace(get_term_cfg=lambda name: reward_cfgs[name])
         hmd_motion = object.__new__(HmdNeckTargetMotion)
         hmd_motion.neutral_probability = MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
@@ -942,9 +989,13 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
         )
         expected_foot_weights = (
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
@@ -960,25 +1011,46 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
+            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
         )
-        for (
+        for stage_index, (
             stage,
             expected_both_lift_range,
             expected_foot_weight,
             expected_hmd_neutral_probability,
-        ) in zip(
-            stages,
-            expected_both_lift_ranges,
-            expected_foot_weights,
-            expected_hmd_neutral_probabilities,
-            strict=True,
+        ) in enumerate(
+            zip(
+                stages,
+                expected_both_lift_ranges,
+                expected_foot_weights,
+                expected_hmd_neutral_probabilities,
+                strict=True,
+            )
         ):
             stage["apply"](env)
+            if stage_index == 0:
+                self.assertEqual(
+                    twist.cfg.signed_axis_probabilities,
+                    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
+                )
+                self.assertTrue(prior_cfg.enabled)
+            elif stage_index == 1:
+                self.assertEqual(
+                    twist.cfg.signed_axis_ranges,
+                    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+                )
+                self.assertEqual(
+                    twist.cfg.signed_axis_probabilities,
+                    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
+                )
+                self.assertFalse(prior_cfg.enabled)
+                self.assertFalse(prior.eligible.any())
             self.assertEqual(
                 reward_cfgs["foot_target_tracking"].weight,
                 expected_foot_weight,
@@ -1224,13 +1296,9 @@ class CheckpointContractTest(unittest.TestCase):
     def _training_provenance() -> tuple[dict[str, object], str]:
         files = {"src/mjlab_microban/test_recipe.py": "a" * 64}
         manifest: dict[str, object] = {
-            "schema_version": (
-                MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
-            ),
+            "schema_version": (MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION),
             "canonical_stage": False,
-            "training_contract_version": (
-                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
-            ),
+            "training_contract_version": (MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION),
             "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
             "actor_initialization": MICROBAN_TELEOP_ACTOR_INITIALIZATION,
             "resolved_config": {"critical": {}, "environment": {}, "runner": {}},
@@ -1545,6 +1613,115 @@ class CheckpointContractTest(unittest.TestCase):
         ):
             runner.load(str(mismatched_path), load_cfg={"actor": True})
         base_load.assert_not_called()
+
+    def test_iteration_resume_resets_once_under_restored_stage_config(self) -> None:
+        expected = self._bounded_actor_state()
+        policy = SimpleNamespace(state_dict=lambda: expected)
+        checkpoint = self.root / "model_999.pt"
+        infos = {
+            **self._current_infos(),
+            "env_state": {"common_step_counter": 1000 * 24},
+        }
+        torch.save(
+            {
+                "actor_state_dict": {
+                    key: value.clone() for key, value in expected.items()
+                },
+                "iter": 999,
+                "infos": infos,
+            },
+            checkpoint,
+        )
+
+        cfg = make_microban_teleop_env_cfg(play=False)
+        twist_cfg = deepcopy(cfg.commands["twist"])
+        prior_cfg = deepcopy(cfg.commands["locomotion_prior"])
+        prior = object.__new__(LocomotionPriorCommand)
+        prior.cfg = prior_cfg
+        prior.eligible = torch.ones(2, dtype=torch.bool)
+        prior.finished = torch.ones(2, dtype=torch.bool)
+        prior.phase_rate = torch.ones(2)
+        prior._skip_next_advance = torch.ones(2, dtype=torch.bool)
+        reward_cfgs = {
+            name: SimpleNamespace(weight=term.weight, params=dict(term.params))
+            for name, term in cfg.rewards.items()
+        }
+        command_manager = SimpleNamespace(
+            get_term_cfg=lambda name: {
+                "twist": twist_cfg,
+                "locomotion_prior": prior_cfg,
+            }[name],
+            get_term=lambda name: {"locomotion_prior": prior}[name],
+        )
+        reward_manager = SimpleNamespace(get_term_cfg=lambda name: reward_cfgs[name])
+        env = SimpleNamespace(
+            common_step_counter=0,
+            command_manager=command_manager,
+            reward_manager=reward_manager,
+        )
+        stages = cfg.curriculum["staged_curriculum"].params["stages"]
+
+        def restore_curriculum() -> None:
+            self.assertEqual(env.common_step_counter, 1000 * 24)
+            stages[0]["apply"](env)
+            stages[1]["apply"](env)
+
+        env.curriculum_manager = SimpleNamespace(
+            compute=Mock(side_effect=restore_curriculum)
+        )
+        reset_snapshots: list[tuple[int, dict[str, tuple[float, float]], bool]] = []
+
+        def reset_under_restored_config():
+            reset_snapshots.append(
+                (
+                    env.common_step_counter,
+                    deepcopy(twist_cfg.signed_axis_ranges),
+                    prior_cfg.enabled,
+                )
+            )
+            return {}, {}
+
+        env.reset = Mock(side_effect=reset_under_restored_config)
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.env = SimpleNamespace(unwrapped=env)
+        runner.current_learning_iteration = 0
+
+        def restore_checkpoint(*args, **kwargs):
+            del args, kwargs
+            runner.current_learning_iteration = 999
+            env.common_step_counter = infos["env_state"]["common_step_counter"]
+            return infos
+
+        with patch.object(
+            MjlabOnPolicyRunner, "load", side_effect=restore_checkpoint
+        ) as base_load:
+            runner.load(str(checkpoint))
+
+        base_load.assert_called_once()
+        env.curriculum_manager.compute.assert_called_once_with()
+        env.reset.assert_called_once_with()
+        self.assertEqual(env.common_step_counter, 1000 * 24)
+        self.assertEqual(
+            twist_cfg.signed_axis_ranges,
+            MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+        )
+        self.assertEqual(
+            twist_cfg.signed_axis_probabilities,
+            MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
+        )
+        self.assertFalse(prior_cfg.enabled)
+        self.assertFalse(prior.eligible.any())
+        self.assertEqual(
+            reset_snapshots,
+            [
+                (
+                    1000 * 24,
+                    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+                    False,
+                )
+            ],
+        )
 
     def test_save_adds_current_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)

@@ -27,6 +27,7 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -43,6 +44,16 @@ from mjlab_microban.tasks.mdp import (
     hand_target_tracking_error_exp,
     set_command_velocity,
     set_stepping_parameters,
+)
+from mjlab_microban.tasks.microban_locomotion_prior import (
+    MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S,
+    MICROBAN_LOCOMOTION_PRIOR_PATH,
+    MICROBAN_LOCOMOTION_PRIOR_SHA256,
+    LocomotionPriorCommandCfg,
+    locomotion_prior_action_target_error_exp,
+    locomotion_prior_clip_finished,
+    locomotion_prior_joint_position_error_exp,
+    set_locomotion_prior_enabled,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -199,6 +210,33 @@ MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES = {
     "yaw_left": (0.40, 3.00),
     "yaw_right": (-3.00, -0.40),
 }
+MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES = {
+    "standing": 0.20,
+    "forward": 0.80,
+    "backward": 0.0,
+    "lateral_left": 0.0,
+    "lateral_right": 0.0,
+    "yaw_left": 0.0,
+    "yaw_right": 0.0,
+    "mixed": 0.0,
+}
+MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES = {
+    "standing": 0.10,
+    "forward": 0.30,
+    "backward": 0.12,
+    "lateral_left": 0.12,
+    "lateral_right": 0.12,
+    "yaw_left": 0.12,
+    "yaw_right": 0.12,
+    "mixed": 0.0,
+}
+MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES = {
+    **MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+    "forward": MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S,
+}
+MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT = 2.0
+MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT = 1.0
+MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD = 0.15
 
 
 def microban_teleop_initial_action_std() -> tuple[float, ...]:
@@ -367,14 +405,14 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rotation_env_ang_vel_range = (
             MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
         )
-        # V8 uses one exclusive categorical draw per environment.  Every sign
-        # and axis therefore receives explicit low-speed coverage instead of
-        # being hidden inside independently overlapping legacy flags.
+        # V8h first uses the exact speed range represented by the retargeted
+        # forward clip.  Update 500 introduces every signed axis while the
+        # imitation blend fades; update 1000 restores the original v8g sampler.
         initial_twist.signed_axis_probabilities = deepcopy(
-            MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+            MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES
         )
         initial_twist.signed_axis_ranges = deepcopy(
-            MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
+            MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES
         )
         initial_twist.rel_standing_envs = 0.0
         initial_twist.rel_forward_envs = 0.0
@@ -488,7 +526,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Exact-zero standing receives a small foot anchor from the first update.
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
-    # sample (the smallest commanded translation is 8 cm/s and yaw is 0.4
+    # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
     # Hand targets remain independent of walking and their two active flags
     # mask inactive hands.
@@ -589,8 +627,46 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reach_xy_range=(-0.08, 0.08),
         reach_z_range=(-0.08, 0.08),
     )
+    # This command is privileged: it is appended only to the critic below and
+    # never changes the actor's deployment-stable 83-value observation schema.
+    # Keep the term and all reward/termination shapes in play mode too, but
+    # disable it so every one of its 39 values and both rewards are exact zero.
+    cfg.commands["locomotion_prior"] = LocomotionPriorCommandCfg(
+        resampling_time_range=(1.0e9, 1.0e9),
+        motion_file=str(MICROBAN_LOCOMOTION_PRIOR_PATH),
+        expected_sha256=MICROBAN_LOCOMOTION_PRIOR_SHA256,
+        enabled=not play,
+    )
+    cfg.observations["critic"].terms["locomotion_prior"] = ObservationTermCfg(
+        func=velocity_mdp.generated_commands,
+        params={"command_name": "locomotion_prior"},
+    )
+    cfg.rewards["locomotion_prior_action_target"] = RewardTermCfg(
+        func=locomotion_prior_action_target_error_exp,
+        weight=MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT,
+        params={
+            "command_name": "locomotion_prior",
+            "action_name": "joint_pos",
+            "std": MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
+        },
+    )
+    cfg.rewards["locomotion_prior_joint_position"] = RewardTermCfg(
+        func=locomotion_prior_joint_position_error_exp,
+        weight=MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT,
+        params={
+            "command_name": "locomotion_prior",
+            "std": MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
+        },
+    )
+    cfg.terminations["locomotion_prior_clip_finished"] = TerminationTermCfg(
+        func=locomotion_prior_clip_finished,
+        params={"command_name": "locomotion_prior"},
+    )
 
-    # V8 acquires one signed axis at a time before introducing mixed commands.
+    # V8h uses a short privileged gait prior, then acquires one signed axis at a
+    # time before introducing mixed commands.  The first two stages are internal
+    # to the existing 1,500-update external gate: at 500 the prior starts fading
+    # while non-forward commands appear, and at 1,000 it is permanently disabled.
     # Checkpoints at 1500/3000/4500/6000/8000 are external capability gates;
     # the reproducible wrapper stops at each boundary and resumes only after the
     # fixed signed-axis evaluator passes.  Limb tracking is deliberately delayed
@@ -600,6 +676,53 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=ResumeSafeStepBasedStagedCurriculum,
             params={
                 "stages": [
+                    {
+                        "name": "fade locomotion prior and introduce signed axes",
+                        "step": 500 * 24,
+                        "apply": lambda env: _set_teleop_locomotion_stage(
+                            env,
+                            envelope=MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
+                            signed_axis_ranges=(
+                                MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES
+                            ),
+                            signed_axis_probabilities=(
+                                MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES
+                            ),
+                            linear_tracking_std=(
+                                MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S
+                            ),
+                            angular_tracking_std=(
+                                MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S
+                            ),
+                        ),
+                    },
+                    {
+                        "name": "disable locomotion prior and restore v8g sampler",
+                        "step": 1000 * 24,
+                        "apply": lambda env: (
+                            _set_teleop_locomotion_stage(
+                                env,
+                                envelope=MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
+                                signed_axis_ranges=(
+                                    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
+                                ),
+                                signed_axis_probabilities=(
+                                    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                                ),
+                                linear_tracking_std=(
+                                    MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S
+                                ),
+                                angular_tracking_std=(
+                                    MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S
+                                ),
+                            ),
+                            set_locomotion_prior_enabled(
+                                env,
+                                command_name="locomotion_prior",
+                                enabled=False,
+                            ),
+                        ),
+                    },
                     {
                         "name": "intermediate isolated signed axes",
                         "step": 1500 * 24,

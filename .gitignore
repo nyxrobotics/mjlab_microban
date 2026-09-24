@@ -4,7 +4,6 @@ src/mjlab_microban/robot/microban/scad/
 
 .vscode/*
 .venv/*
-uv.lock
 
 logs/*
 wandb/*
@@ -15,3 +14,4 @@ artifacts/
 # them local; the training guide records how to regenerate and checksum them.
 data/motions/*.jsonl
 data/motions/*.npz
+!data/motions/microban_twist2_walk002_locomotion_prior.npz

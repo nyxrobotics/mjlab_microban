@@ -21,8 +21,11 @@ If you don't have it yet, you can install it by following the instructions [here
 
 Then, clone this repository and run the following command in your terminal:
 ```
-uv sync
+uv sync --locked
 ```
+
+The tracked `uv.lock` is part of the training provenance. Do not regenerate it
+inside a canonical run; review and commit dependency updates separately.
 
 ## Using a velocity agent
 
@@ -78,6 +81,8 @@ scripts/train_microban_teleop.sh train
 The complete observation/action contract, staged curriculum, resume and safe
 18-action ONNX export procedure are in
 [`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
+The v8h TWIST2-derived critic-only warm-start is specified separately in
+[`docs/teleop_v8h_locomotion_prior.md`](docs/teleop_v8h_locomotion_prior.md).
 
 Evaluate a saved hybrid checkpoint headlessly before export or hardware use:
 

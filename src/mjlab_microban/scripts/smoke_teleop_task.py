@@ -30,6 +30,10 @@ from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotation,
     UniformVelocityCommandWithRotationCfg,
 )
+from mjlab_microban.tasks.microban_locomotion_prior import (
+    MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
+    LocomotionPriorCommand,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
@@ -67,6 +71,9 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
     MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
+    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
     make_microban_teleop_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
@@ -235,9 +242,9 @@ def main() -> None:
             MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
         ),
         expected_signed_axis_probabilities=(
-            MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+            MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES
         ),
-        expected_signed_axis_ranges=MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+        expected_signed_axis_ranges=MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
     )
     _assert_velocity_envelope(
         cfg.commands["twist"], MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE
@@ -269,9 +276,9 @@ def main() -> None:
                 MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
             ),
             expected_signed_axis_probabilities=(
-                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES
             ),
-            expected_signed_axis_ranges=MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
+            expected_signed_axis_ranges=MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
         )
         env_ids = torch.arange(args.num_envs, device=args.device)
         _assert_runtime_signed_axis_sampling(twist, env_ids)
@@ -296,6 +303,18 @@ def main() -> None:
         leaked_terms = actor_term_names & forbidden
         if leaked_terms:
             raise AssertionError(f"Non-deployable actor observations: {leaked_terms}")
+        if "locomotion_prior" in actor_term_names:
+            raise AssertionError("Privileged locomotion prior leaked into actor")
+        if "locomotion_prior" not in env.observation_manager.active_terms["critic"]:
+            raise AssertionError("Critic is missing privileged locomotion prior")
+        prior = env.command_manager.get_term("locomotion_prior")
+        if not isinstance(prior, LocomotionPriorCommand):
+            raise TypeError("Locomotion prior command built the wrong runtime type")
+        if prior.command.shape != (
+            args.num_envs,
+            MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
+        ):
+            raise AssertionError("Locomotion prior command width drifted")
 
         event_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
         motion = event_cfg.func
@@ -600,7 +619,19 @@ def main() -> None:
         curriculum = curriculum_cfg.func
         if not isinstance(curriculum, ResumeSafeStepBasedStagedCurriculum):
             raise TypeError(f"Unexpected curriculum type: {type(curriculum).__name__}")
-        stage_boundaries = (1500, 3000, 4500, 6000, 8000, 12000, 14000, 16000, 18000)
+        stage_boundaries = (
+            500,
+            1000,
+            1500,
+            3000,
+            4500,
+            6000,
+            8000,
+            12000,
+            14000,
+            16000,
+            18000,
+        )
         for expected_stage, boundary in enumerate(stage_boundaries):
             env.common_step_counter = boundary * 24 - 1
             env.curriculum_manager.compute()
@@ -630,7 +661,26 @@ def main() -> None:
             twist_cfg = env.command_manager.get_term_cfg("twist")
             linear_reward = env.reward_manager.get_term_cfg("track_linear_velocity")
             angular_reward = env.reward_manager.get_term_cfg("track_angular_velocity")
-            if boundary == 1500:
+            if boundary == 500:
+                if (
+                    twist_cfg.signed_axis_ranges
+                    != MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES
+                    or twist_cfg.signed_axis_probabilities
+                    != MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES
+                    or not prior.cfg.enabled
+                ):
+                    raise AssertionError("Locomotion-prior fade stage drifted")
+            elif boundary == 1000:
+                if (
+                    twist_cfg.signed_axis_ranges
+                    != MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
+                    or twist_cfg.signed_axis_probabilities
+                    != MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                    or prior.cfg.enabled
+                    or prior.command.any()
+                ):
+                    raise AssertionError("Locomotion prior was not disabled exactly")
+            elif boundary == 1500:
                 _assert_velocity_envelope(
                     twist_cfg, MICROBAN_TELEOP_INTERMEDIATE_VELOCITY_ENVELOPE
                 )
