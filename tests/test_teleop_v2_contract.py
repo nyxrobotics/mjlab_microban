@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Focused tests for the Microban teleop-v3 training/deployment contract."""
+"""Focused tests for the Microban teleop-v4 training/deployment contract."""
 
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResetFixedFootTargetCommand,
     effective_action_after_target_clip,
     linear_velocity_tracking_error_l1,
-    normalized_target_clip_excess_huber,
-    normalized_target_near_limit_huber,
+    normalized_target_clip_excess_l1_sum,
+    normalized_target_near_limit_l1_sum,
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
 )
@@ -77,7 +77,7 @@ def _action_env(
 
 
 class EffectiveActionTest(unittest.TestCase):
-    def test_effective_action_and_normalized_huber_penalty(self) -> None:
+    def test_effective_action_and_normalized_l1_sum_penalty(self) -> None:
         raw = torch.tensor([[3.0, -2.0, 0.25], [0.0, 0.0, 0.0]])
         offset = torch.tensor([[0.5, -0.5, 0.0], [0.5, -0.5, 0.0]])
         lower = torch.tensor([[-1.0, -1.0, -2.0], [-1.0, -1.0, -2.0]])
@@ -97,14 +97,9 @@ class EffectiveActionTest(unittest.TestCase):
         target = raw * 2.0 + offset
         clipped = torch.clamp(target, min=lower, max=upper)
         normalized = (target - clipped) / (0.5 * (upper - lower))
-        expected_penalty = torch.nn.functional.smooth_l1_loss(
-            normalized,
-            torch.zeros_like(normalized),
-            beta=0.1,
-            reduction="none",
-        ).mean(dim=-1)
+        expected_penalty = normalized.abs().sum(dim=-1)
         torch.testing.assert_close(
-            normalized_target_clip_excess_huber(env), expected_penalty
+            normalized_target_clip_excess_l1_sum(env), expected_penalty
         )
         torch.testing.assert_close(raw_action_l2(env), raw.square().mean(dim=-1))
 
@@ -117,7 +112,19 @@ class EffectiveActionTest(unittest.TestCase):
             upper=torch.ones_like(raw),
         )
         torch.testing.assert_close(
-            normalized_target_clip_excess_huber(env), torch.zeros(1)
+            normalized_target_clip_excess_l1_sum(env), torch.zeros(1)
+        )
+
+    def test_sparse_clip_penalty_is_not_joint_averaged_or_quadratic(self) -> None:
+        raw = torch.tensor([[1.02, 0.0, 0.0, 0.0]])
+        env = _action_env(
+            raw,
+            offset=torch.zeros_like(raw),
+            lower=-torch.ones_like(raw),
+            upper=torch.ones_like(raw),
+        )
+        torch.testing.assert_close(
+            normalized_target_clip_excess_l1_sum(env), torch.tensor([0.02])
         )
 
     def test_near_limit_penalty_is_asymmetric_and_default_is_always_free(self) -> None:
@@ -129,7 +136,7 @@ class EffectiveActionTest(unittest.TestCase):
             lower=-torch.ones_like(raw),
             upper=torch.ones_like(raw),
         )
-        penalty = normalized_target_near_limit_huber(env, margin_ratio=0.1, beta=0.1)
+        penalty = normalized_target_near_limit_l1_sum(env, margin_ratio=0.1)
         # Joint 0's default is inside the nominal upper margin. It must remain a
         # valid zero-cost target, while excursions beyond that default are costly.
         self.assertEqual(penalty[1].item(), 0.0)
@@ -261,8 +268,8 @@ class TeleopConfigurationTest(unittest.TestCase):
             cfg.observations["critic"].terms["actions"].func,
             effective_action_after_target_clip,
         )
-        self.assertEqual(cfg.rewards["target_clip_excess"].weight, -10.0)
-        self.assertEqual(cfg.rewards["target_near_limit"].weight, -5.0)
+        self.assertEqual(cfg.rewards["target_clip_excess"].weight, -2.0)
+        self.assertEqual(cfg.rewards["target_near_limit"].weight, -1.0)
         self.assertEqual(cfg.rewards["raw_action_l2"].weight, -0.01)
         self.assertEqual(cfg.rewards["action_rate_l2"].weight, -0.02)
         self.assertEqual(cfg.rewards["linear_velocity_error_l1"].weight, -2.0)
@@ -555,10 +562,10 @@ class CheckpointContractTest(unittest.TestCase):
         torch.save({"iter": iteration, "infos": infos}, path)
         return path
 
-    def test_v3_marker_is_required_and_iteration_must_match_filename(self) -> None:
+    def test_v4_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "3")
+        self.assertEqual(parsed.version, "4")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
@@ -578,20 +585,20 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must match"):
             validate_teleop_checkpoint_contract(mismatched)
 
-        # A well-formed v2 checkpoint is still a non-resumable training contract,
+        # A well-formed v3 checkpoint is still a non-resumable training contract,
         # even though tensor shapes and previous-action semantics happen to match.
-        v2 = self._save(16, contract=True)
-        payload = torch.load(v2, map_location="cpu", weights_only=False)
-        payload["infos"]["microban_teleop_training_contract_version"] = "2"
-        torch.save(payload, v2)
-        with self.assertRaisesRegex(ValueError, "v1/v2"):
-            validate_teleop_checkpoint_contract(v2)
+        v3 = self._save(16, contract=True)
+        payload = torch.load(v3, map_location="cpu", weights_only=False)
+        payload["infos"]["microban_teleop_training_contract_version"] = "3"
+        torch.save(payload, v3)
+        with self.assertRaisesRegex(ValueError, "v1/v2/v3"):
+            validate_teleop_checkpoint_contract(v3)
 
-    def test_save_adds_v3_marker_and_legacy_runner_cannot_write(self) -> None:
+    def test_save_adds_v4_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
         fresh.velocity_actor_bootstrap_info = {
-            "mapping_version": "xc330_velocity_63_to_teleop_83_v1",
+            "mapping_version": "xc330_velocity_63_to_teleop_83_v2_preserve_normalizer_count",
             "source_checkpoint_sha256": "a" * 64,
         }
         with patch.object(MjlabOnPolicyRunner, "save") as base_save:
@@ -603,7 +610,7 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "3")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "4")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,

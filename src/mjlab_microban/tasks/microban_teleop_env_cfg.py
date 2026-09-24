@@ -60,8 +60,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResumeSafeStepBasedStagedCurriculum,
     effective_action_after_target_clip,
     linear_velocity_tracking_error_l1,
-    normalized_target_clip_excess_huber,
-    normalized_target_near_limit_huber,
+    normalized_target_clip_excess_l1_sum,
+    normalized_target_near_limit_l1_sum,
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
 )
@@ -323,17 +323,16 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     cfg.rewards["target_clip_excess"] = RewardTermCfg(
-        func=normalized_target_clip_excess_huber,
-        weight=-10.0,
-        params={"action_name": "joint_pos", "beta": 0.1},
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-2.0,
+        params={"action_name": "joint_pos"},
     )
     cfg.rewards["target_near_limit"] = RewardTermCfg(
-        func=normalized_target_near_limit_huber,
-        weight=-5.0,
+        func=normalized_target_near_limit_l1_sum,
+        weight=-1.0,
         params={
             "action_name": "joint_pos",
             "margin_ratio": 0.05,
-            "beta": 0.1,
         },
     )
     cfg.rewards["raw_action_l2"] = RewardTermCfg(
@@ -394,7 +393,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reach_z_range=(-0.08, 0.08),
     )
 
-    # V3 enforces a real capability order: establish locomotion over the complete
+    # V4 retains the capability order: establish locomotion over the complete
     # runtime envelope, add hands with a broad then precise kernel, and only then
     # introduce the more destabilizing single-/two-foot targets.  This avoids the
     # v2 failure mode where every objective arrived before the actor had learned

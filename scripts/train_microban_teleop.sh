@@ -15,6 +15,7 @@ Usage:
 Environment overrides:
   MICROBAN_TELEOP_NUM_ENVS      Parallel environments (default: 4096)
   MICROBAN_TELEOP_TARGET_ITERS  Target total completed PPO iterations (default: 15000)
+  MICROBAN_TELEOP_SAVE_INTERVAL Checkpoint interval in iterations (default: 500)
   MICROBAN_TELEOP_SEED          Environment/agent seed (default: 42)
 
 RUN_NAME is the timestamp directory below
@@ -74,19 +75,25 @@ if [[ -n "${MICROBAN_TELEOP_MAX_ITERS+x}" ]]; then
     echo "[WARN] MICROBAN_TELEOP_MAX_ITERS is deprecated; use MICROBAN_TELEOP_TARGET_ITERS." >&2
 fi
 readonly TARGET_ITERS="${MICROBAN_TELEOP_TARGET_ITERS:-${MICROBAN_TELEOP_MAX_ITERS:-15000}}"
+readonly SAVE_INTERVAL="${MICROBAN_TELEOP_SAVE_INTERVAL:-500}"
 readonly SEED="${MICROBAN_TELEOP_SEED:-42}"
 
-for numeric_value in "${NUM_ENVS}" "${TARGET_ITERS}" "${SEED}"; do
+for numeric_value in "${NUM_ENVS}" "${TARGET_ITERS}" "${SAVE_INTERVAL}" "${SEED}"; do
     if [[ ! "${numeric_value}" =~ ^[0-9]+$ ]]; then
         echo "Environment overrides must be non-negative integers." >&2
         exit 2
     fi
 done
-if (( NUM_ENVS < 1 || TARGET_ITERS < 1 )); then
-    echo "NUM_ENVS and TARGET_ITERS must be positive." >&2
+if (( NUM_ENVS < 1 || TARGET_ITERS < 1 || SAVE_INTERVAL < 1 )); then
+    echo "NUM_ENVS, TARGET_ITERS and SAVE_INTERVAL must be positive." >&2
     exit 2
 fi
-if (( NUM_ENVS > 2147483647 || TARGET_ITERS > 2147483647 || SEED > 2147483647 )); then
+if ((
+    NUM_ENVS > 2147483647
+    || TARGET_ITERS > 2147483647
+    || SAVE_INTERVAL > 2147483647
+    || SEED > 2147483647
+)); then
     echo "Environment overrides must not exceed 2147483647." >&2
     exit 2
 fi
@@ -97,6 +104,7 @@ fi
 for option in "$@"; do
     case "${option}" in
         --agent.max-iterations|--agent.max-iterations=*|\
+        --agent.save-interval|--agent.save-interval=*|\
         --agent.resume|--agent.resume=*|\
         --agent.load-run|--agent.load-run=*|\
         --agent.load-checkpoint|--agent.load-checkpoint=*)
@@ -175,7 +183,7 @@ exec uv run --locked train Mjlab-Teleop-Microban \
     --env.seed "${SEED}" \
     --agent.seed "${SEED}" \
     --agent.max-iterations "${iterations_to_run}" \
-    --agent.save-interval 500 \
+    --agent.save-interval "${SAVE_INTERVAL}" \
     --agent.logger tensorboard \
     --agent.upload-model False \
     --enable-nan-guard True \

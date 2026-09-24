@@ -87,7 +87,7 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "3"
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "4"
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
     "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
@@ -255,12 +255,12 @@ def validate_teleop_checkpoint_contract(
 ) -> TeleopCheckpointContract:
     """Reject checkpoints trained with a different observation/action contract.
 
-    Older checkpoints can have the same tensor widths as v3, so PyTorch can load
-    them without an error and an exporter could otherwise attach current v3
+    Older checkpoints can have the same tensor widths as v4, so PyTorch can load
+    them without an error and an exporter could otherwise attach current v4
     metadata to incompatible training semantics. Validation happens before any
     actor state is loaded. The only legacy escape hatch is explicitly marked
-    diagnostic use for an unversioned v1 checkpoint; v2 must never resume into
-    v3, and the runner forbids optimizer/iteration resume in diagnostic mode.
+    diagnostic use for an unversioned v1 checkpoint; v2/v3 must never resume into
+    v4, and the runner forbids optimizer/iteration resume in diagnostic mode.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
@@ -313,11 +313,11 @@ def validate_teleop_checkpoint_contract(
         )
     if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
         raise ValueError(
-            "Checkpoint is not Microban teleop training contract v3; v1/v2 "
+            "Checkpoint is not Microban teleop training contract v4; v1/v2/v3 "
             "checkpoints require a clean retrain and cannot be resumed/exported"
         )
     if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
-        raise ValueError("Checkpoint previous-action semantics do not match v3")
+        raise ValueError("Checkpoint previous-action semantics do not match v4")
     return TeleopCheckpointContract(
         version=version,
         previous_action_semantics=semantics,
@@ -829,7 +829,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         log_dir: str | None = None,
         device: str = "cpu",
     ) -> None:
-        """Construct a fresh v3 runner and optionally bootstrap its actor only.
+        """Construct a fresh v4 runner and optionally bootstrap its actor only.
 
         Bootstrap options are removed before RSL-RL sees the config.  Requiring
         both an explicit path and SHA-256 prevents a similarly named or replaced
@@ -909,7 +909,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         ``allow_legacy_teleop_contract`` exists solely so the deterministic
         evaluator can characterize the final v1 run.  Once those weights are
         resident in a runner, every path that could create a checkpoint or ONNX
-        must fail before writing anything; otherwise current v3 metadata could
+        must fail before writing anything; otherwise current v4 metadata could
         be attached to an observation-incompatible actor.
         """
 
@@ -917,7 +917,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if contract is not None and contract.diagnostic_legacy:
             raise ValueError(
                 "Legacy teleop checkpoints are diagnostics-only and cannot be "
-                "saved, exported, or tagged with v3 metadata"
+                "saved, exported, or tagged with v4 metadata"
             )
 
     def load(
@@ -928,7 +928,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         map_location: str | None = None,
         allow_legacy_teleop_contract: bool = False,
     ) -> dict:
-        """Validate v3 semantics, then load at the next PPO iteration.
+        """Validate v4 semantics, then load at the next PPO iteration.
 
         RSL-RL stores the zero-based iteration that has just completed.  Its
         default loader resumes *at* that index, repeating one PPO update.  This
@@ -942,7 +942,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if getattr(self, "bootstrap_velocity_provenance", None) is not None:
             raise ValueError(
                 "A velocity-bootstrapped fresh runner cannot also load a teleop "
-                "checkpoint; construct a non-bootstrap runner to resume v3"
+                "checkpoint; construct a non-bootstrap runner to resume v4"
             )
         loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
         contract = validate_teleop_checkpoint_contract(
@@ -1050,7 +1050,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         filename: str = "policy.onnx",
         verbose: bool = False,
     ) -> None:
-        """Export only fresh/resumed v3 weights, never legacy diagnostic weights."""
+        """Export only fresh/resumed v4 weights, never legacy diagnostic weights."""
 
         self._require_nonlegacy_deployment_contract()
         super().export_policy_to_onnx(path, filename, verbose)

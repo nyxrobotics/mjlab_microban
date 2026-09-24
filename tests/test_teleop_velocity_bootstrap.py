@@ -139,7 +139,10 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
             mapped["distribution.log_std_param"], target_distribution
         )
         self.assertNotIn("distribution.std_param", mapped)
-        self.assertEqual(mapped["obs_normalizer.count"].item(), 1_000_000.0)
+        self.assertEqual(
+            mapped["obs_normalizer.count"].item(),
+            source["obs_normalizer.count"].item(),
+        )
         for key in (
             "mlp.0.bias",
             "mlp.2.weight",
@@ -190,6 +193,10 @@ class VelocityBootstrapMappingTest(unittest.TestCase):
                 actor, checkpoint, digest
             )
             self.assertEqual(provenance.checkpoint_sha256, digest)
+            self.assertEqual(
+                provenance.installed_normalizer_count,
+                provenance.source_normalizer_count,
+            )
             self.assertIsNotNone(actor.loaded)
             self.assertNotIn("must_not_copy", actor.loaded or {})
 

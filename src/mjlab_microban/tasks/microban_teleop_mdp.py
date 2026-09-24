@@ -163,38 +163,31 @@ def effective_action_after_target_clip(
     return effective_raw
 
 
-def normalized_target_clip_excess_huber(
+def normalized_target_clip_excess_l1_sum(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
-    beta: float = 0.1,
 ) -> torch.Tensor:
-    """Penalize target saturation equally across different joint ranges.
+    """Return a non-vanishing, range-normalized target saturation barrier.
 
     The absolute target excess is normalized by each soft range's half-width,
-    then passed through smooth-L1/Huber loss.  Values inside the target range are
-    exactly zero; very large legacy-style outputs grow linearly rather than
-    dominating the complete reward with an unbounded square.
+    then summed over joints.  Values inside the target range are exactly zero.
+    L1 intentionally keeps a linear reward/return signal immediately outside
+    the boundary; the v3 joint-mean smooth-L1 term divided sparse violations by
+    18 and made that signal quadratic near the boundary, allowing deterministic
+    target clipping to grow despite a nominally large reward weight.
     """
 
-    if not math.isfinite(beta) or beta <= 0.0:
-        raise ValueError("beta must be finite and positive")
     _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
     clipped_target = torch.clamp(target, min=lower, max=upper)
     half_range = 0.5 * (upper - lower)
     normalized_excess = (target - clipped_target) / half_range
-    return torch.nn.functional.smooth_l1_loss(
-        normalized_excess,
-        torch.zeros_like(normalized_excess),
-        beta=beta,
-        reduction="none",
-    ).mean(dim=-1)
+    return torch.abs(normalized_excess).sum(dim=-1)
 
 
-def normalized_target_near_limit_huber(
+def normalized_target_near_limit_l1_sum(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
     margin_ratio: float = 0.05,
-    beta: float = 0.1,
 ) -> torch.Tensor:
     """Keep action targets inside an asymmetric, default-safe limit margin.
 
@@ -203,14 +196,14 @@ def normalized_target_near_limit_huber(
     The lower/upper preferred bounds therefore move inward by ``margin_ratio``
     only as far as the configured default action offset.  Raw action zero is
     always penalty-free, while targets closer to a limit than that preferred
-    interval receive a normalized smooth-L1 cost.
+    interval receive a normalized L1 cost summed across joints.  The sum keeps
+    a sparse single-joint approach to a limit visible to PPO, and the L1 hinge
+    retains a linear reward/return signal throughout the preferred-margin
+    violation.
     """
 
     if not math.isfinite(margin_ratio) or not 0.0 < margin_ratio < 0.5:
         raise ValueError("margin_ratio must be finite and in (0, 0.5)")
-    if not math.isfinite(beta) or beta <= 0.0:
-        raise ValueError("beta must be finite and positive")
-
     _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
     action = env.action_manager.get_term(action_name)
     assert isinstance(action, JointPositionAction)
@@ -228,12 +221,7 @@ def normalized_target_near_limit_huber(
     preferred_upper = torch.maximum(default_target, upper - margin_ratio * span)
     preferred_target = torch.clamp(target, min=preferred_lower, max=preferred_upper)
     normalized_excess = (target - preferred_target) / (0.5 * span)
-    return torch.nn.functional.smooth_l1_loss(
-        normalized_excess,
-        torch.zeros_like(normalized_excess),
-        beta=beta,
-        reduction="none",
-    ).mean(dim=-1)
+    return torch.abs(normalized_excess).sum(dim=-1)
 
 
 def raw_action_l2(

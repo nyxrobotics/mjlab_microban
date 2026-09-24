@@ -9,6 +9,7 @@ uv.lock
 logs/*
 wandb/*
 policy.onnx
+artifacts/
 
 # Generated/recorded motion datasets are reproducible inputs, not source.  Keep
 # them local; the training guide records how to regenerate and checksum them.

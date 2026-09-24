@@ -246,36 +246,37 @@ class ReportPublicationTest(unittest.TestCase):
             "scenario_reports": scenarios,
             "control_hz": 50.0,
         }
-        v3_report = build_report(
+        v4_report = build_report(
             **common,
             checkpoint_contract=TeleopCheckpointContract(
-                version="3",
+                version="4",
                 previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
                 iteration=14999,
                 common_step_counter=360000,
             ),
         )
-        self.assertEqual(v3_report["status"], "pass")
+        self.assertEqual(v4_report["status"], "pass")
+        self.assertEqual(v4_report["schema_version"], 4)
 
         failing_scenarios = [dict(item) for item in scenarios]
         failing_scenarios[0] = {
             **failing_scenarios[0],
             "acceptance": {"passed": False},
         }
-        failed_v3_report = build_report(
+        failed_v4_report = build_report(
             **{**common, "scenario_reports": failing_scenarios},
             checkpoint_contract=TeleopCheckpointContract(
-                version="3",
+                version="4",
                 previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
                 iteration=14999,
                 common_step_counter=360000,
             ),
         )
-        self.assertTrue(failed_v3_report["summary"]["canonical_coverage"])
-        self.assertFalse(failed_v3_report["summary"]["acceptance_checks_passed"])
-        self.assertEqual(failed_v3_report["status"], "fail")
-        self.assertEqual(evaluation_exit_code(failed_v3_report), 2)
-        self.assertEqual(evaluation_exit_code(v3_report), 0)
+        self.assertTrue(failed_v4_report["summary"]["canonical_coverage"])
+        self.assertFalse(failed_v4_report["summary"]["acceptance_checks_passed"])
+        self.assertEqual(failed_v4_report["status"], "fail")
+        self.assertEqual(evaluation_exit_code(failed_v4_report), 2)
+        self.assertEqual(evaluation_exit_code(v4_report), 0)
 
         legacy_report = build_report(
             **common,
@@ -290,7 +291,7 @@ class ReportPublicationTest(unittest.TestCase):
         self.assertEqual(legacy_report["status"], "diagnostic")
         self.assertEqual(evaluation_exit_code(legacy_report), 3)
         self.assertTrue(legacy_report["training_contract"]["diagnostic_legacy"])
-        self.assertFalse(legacy_report["training_contract"]["v3_deployment_compatible"])
+        self.assertFalse(legacy_report["training_contract"]["v4_deployment_compatible"])
         self.assertFalse(legacy_report["summary"]["deployment_certified"])
         self.assertEqual(evaluation_exit_code({"status": "unknown"}), 2)
         self.assertEqual(evaluation_exit_code({}), 2)

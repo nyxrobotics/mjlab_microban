@@ -48,11 +48,11 @@ The output is exactly 18 actions in model-natural order: right arm (3), right le
 but never output by this policy; the HMD controller owns them. Processed joint
 position targets are clipped to the robot configuration's 90% soft limits.
 
-This is training/deployment contract **v3**. In v1, the observation fed back the
+This is training/deployment contract **v4**. In v1, the observation fed back the
 unbounded network output even when the actuator target had already saturated.
 That created a hidden recurrence and a flat action nullspace: the policy could
 keep producing larger shoulder/hip values while the robot received the same
-clipped target. V2 introduced, and v3 retains, this computation:
+clipped target. V2 introduced, and v4 retains, this computation:
 
 ```text
 absolute_target = default_joint_pos + raw_action * action_scale
@@ -61,11 +61,11 @@ effective_action = (clipped_target - default_joint_pos) / action_scale
 ```
 
 `effective_action` is the next observation in simulation and on the robot. ONNX
-metadata must contain training-contract version `3`, observation-schema version
+metadata must contain training-contract version `4`, observation-schema version
 `2`, and the exact semantic string
 `effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates`.
 The observation-schema version remains `2` because its 83 fields did not change.
-The runtime rejects missing, v1/v2, or otherwise different training metadata.
+The runtime rejects missing, v1/v2/v3, or otherwise different training metadata.
 
 Foot offsets are trained as stance/keypoint targets and fade out continuously as
 the walking command grows. Hand targets remain active while walking; each hand's
@@ -137,16 +137,18 @@ appeared to work.
 
 ## Training
 
-### V3 requires a clean run
+### V4 requires a clean run
 
-Do **not** resume a v1 or v2 checkpoint. Their tensors have compatible widths,
-but v3 changes the optimizer, command curriculum and objective. Every v3
+Do **not** resume a v1, v2 or v3 checkpoint. Their tensors have compatible
+widths, but v4 changes the target-limit objective and velocity-bootstrap
+normalizer contract. Every v4
 checkpoint stores the training-contract version and exact action
 semantic in `infos`; training resume, normal evaluation, automatic export and
 explicit export validate those markers before loading weights. They also require
 the checkpoint's internal iteration to equal its canonical `model_N.pt` suffix.
-An unversioned/v1 or versioned-v2 checkpoint is intentionally unusable for v3
-resume or export. The v1 diagnostics escape hatch below does not accept v2.
+An unversioned/v1 or versioned-v2/v3 checkpoint is intentionally unusable for
+v4 resume or export. The v1 diagnostics escape hatch below does not accept v2
+or v3.
 
 For historical comparison only, the evaluator has an explicit escape hatch:
 
@@ -197,7 +199,7 @@ arguments that would override the calculated resume fields. MjLab writes the
 continuation into a new timestamp directory; use that new directory name for a
 later continuation.
 
-V3 teaches capabilities in strict order. It begins with only locomotion over
+V4 teaches capabilities in strict order. It begins with only locomotion over
 `vx [-0.2, 0.3] m/s`, `vy [-0.1, 0.1] m/s`, moving yaw
 `[-0.4, 0.4] rad/s` and pure yaw `[-0.8, 0.8] rad/s`. At 1,000 iterations this
 widens to `[-0.4, 0.5]`, `[-0.2, 0.2]`, `[-0.8, 0.8]` and `[-1.5, 1.5]`
@@ -221,11 +223,16 @@ Exploration uses an exact joint-ordered log-standard-deviation vector. Each
 initial standard deviation is one third of the nearest soft-limit headroom,
 capped at `0.15 rad`; shoulder roll is only `0.00581776 rad` (`0.333 deg`)
 because its home pose has one degree of headroom. Entropy bonus is zero. A
-normalized smooth-L1 target-clip-excess cost (weight `-10`) and actual joint-
-limit cost (weight `-10`) make saturation expensive. A second weight-`-5`
-asymmetric near-target-limit cost keeps a 5% margin wherever possible, but
+normalized per-joint L1 target-clip-excess sum (weight `-2`) and actual joint-
+limit cost (weight `-10`) make saturation expensive. A second weight-`-1`
+asymmetric per-joint L1 sum keeps a 5% target margin wherever possible, but
 expands that margin to include the configured default so raw action zero is
-always free. The raw-action anchor is `-0.01` and action-rate weight is `-0.02`.
+always free. Summing rather than averaging prevents one unsafe joint from being
+diluted by the other 17; L1 keeps the reward/return signal linear immediately
+outside the hinge instead of quadratically small. The smaller numeric weights
+compensate for removing the joint mean while still making the per-joint
+large-error reward slope 3.6 times stronger than v3. The
+raw-action anchor is `-0.01` and action-rate weight is `-0.02`.
 Planar per-axis absolute-error-sum (L1) and yaw-rate absolute-error (L1) costs
 have weights `-2.0` and `-0.5`. Teleop alone uses foot-distance minimum `0.07 m` at weight `-100`;
 active foot targets are exempt from the otherwise conflicting stationary no-
@@ -233,7 +240,7 @@ stepping cost.
 
 PPO uses a fixed `1e-4` learning rate and three learning epochs. There is no
 adaptive-KL reduction: a run whose recorded learning rate differs from `1e-4`
-is not this v3 recipe.
+is not this v4 recipe.
 
 Checkpoints and automatic ONNX exports are written under:
 
@@ -241,43 +248,83 @@ Checkpoints and automatic ONNX exports are written under:
 logs/rsl_rl/mjlab_microban_teleop/<timestamp>/
 ```
 
-On a **v3-only** resume, the teleop runner starts at the next (not repeated) PPO
+On a **v4-only** resume, the teleop runner starts at the next (not repeated) PPO
 iteration, restores the saved environment step counter, and materializes every
 curriculum stage due at that step before collecting another rollout. There is no
-legacy counter reconstruction or v1/v2-to-v3 fine-tuning path; start a clean run.
+legacy counter reconstruction or v1/v2/v3-to-v4 fine-tuning path; start a clean
+run.
 
 ### Optional pinned XC330 velocity actor bootstrap
 
-The preferred first v3 canary may initialize the shared actor inputs from the
+The preferred first v4 canary may initialize the shared actor inputs from the
 known XC330 velocity checkpoint. This is explicit opt-in, not resume. The loader
 requires the checkpoint path and exact SHA-256, verifies the 63-value source and
 83-value target layouts, then maps base angular velocity, gravity, 18 joint
 positions, 18 joint velocities, 18 previous actions and three twist commands.
 The new HMD, foot and hand first-layer columns are zero. Their normalizer is
-initialized to mean zero and variance/std one; the copied normalizer count is
-capped at one million so the new inputs can adapt. Downstream actor MLP layers
-are copied.
+initialized to mean zero and variance/std one. The source normalizer's complete
+sample count is preserved exactly so the copied 63-column velocity feature
+statistics cannot be overwritten in the first few hundred teleop updates. The
+new columns remain identity-normalized and learn through their initially-zero
+first-layer weights. Downstream actor MLP layers are copied.
+
+This is a safety-critical v4 correction. In the rejected v3 canary
+`2026-09-24_21-13-38`, the source count `1,474,560,000` was capped to
+`1,000,000`; it had already become `50,250,304` by `model_500`, while the mean
+shared-input standard deviation changed from `0.8574` to `0.3829`. Over the same
+neutral evaluation, deterministic target clipping rose from `0.00370` at
+`model_0` to `0.20778` at `model_500`. An ablation also produced `0.5116` clip
+fraction (and a fall) with the model-0 actor plus model-500 normalizer, and
+`0.145` with the model-500 actor plus model-0 normalizer, confirming that both
+normalizer drift and policy drift mattered. The v3 joint-mean smooth-L1 costs
+also diluted sparse violations and made the reward/return signal quadratically
+small at their hinges. That run must not be resumed.
 
 The action distribution, critic, optimizer and PPO iteration are deliberately
-not copied. Bootstrap plus `resume` is rejected, and a v2 teleop checkpoint is
-not a bootstrap source. Every resulting v3 checkpoint records the source path,
+not copied. Bootstrap plus `resume` is rejected, and an older teleop checkpoint
+is not a bootstrap source. Every resulting v4 checkpoint records the source path,
 SHA-256, mapping version, normalizer counts and non-copied components in
-`infos.velocity_actor_bootstrap`; that provenance is retained across a later v3
-resume. The currently audited source is:
+`infos.velocity_actor_bootstrap`; that provenance is retained across a later v4
+resume. The currently audited source is checked into this repository so a fresh
+clone can run the exact canary without relying on an ignored local training
+directory:
 
 ```text
-logs/rsl_rl/mjlab_microban_velocity/2026-09-22_02-54-27/model_14999.pt
+checkpoints/xc330_velocity/model_14999.pt
 sha256 b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141
 ```
 
-Run the first 3,000-iteration locomotion canary with the checked script. It
-verifies the local bytes before invoking the normal training wrapper:
+Run the initial 501-update locomotion safety canary with the checked script. It
+verifies the local bytes before invoking the normal training wrapper, saves
+`model_500.pt` (checkpoint suffixes are zero-based), and uses a 50-iteration
+checkpoint interval for the v4 safety gates:
 
 ```bash
 MICROBAN_TELEOP_NUM_ENVS=4096 \
-MICROBAN_TELEOP_TARGET_ITERS=3000 \
-scripts/train_microban_teleop_v3_canary.sh
+MICROBAN_TELEOP_TARGET_ITERS=501 \
+scripts/train_microban_teleop_v4_canary.sh
 ```
+
+After the uninterrupted 501-update canary finishes, evaluate neutral
+deterministically at `model_0`, `model_50`, `model_100`, `model_250` and
+`model_500` before resuming beyond 501 updates. Target clipping must trend down
+and must be below the deployment threshold `0.001` at `model_500`; a rise, fall,
+non-finite value or actual joint-limit violation rejects the run. The script
+keeps every 50th checkpoint so these gates do not depend on TensorBoard
+interpolation. Override
+`MICROBAN_TELEOP_SAVE_INTERVAL` only when deliberately running a shorter smoke.
+After `model_500` passes, resume from that source run to the complete locomotion
+envelope with the normal wrapper:
+
+```bash
+MICROBAN_TELEOP_TARGET_ITERS=3000 \
+MICROBAN_TELEOP_SAVE_INTERVAL=50 \
+scripts/train_microban_teleop.sh resume <v4-canary-run>
+```
+
+Resume writes a new timestamp directory. Record that continuation name from the
+console output and use it, not `<v4-canary-run>`, for evaluation and any later
+resume.
 
 If the same audited bytes live elsewhere, set
 `MICROBAN_TELEOP_BOOTSTRAP_CHECKPOINT=/absolute/path/model_14999.pt`; changing
@@ -289,18 +336,19 @@ is expected to exit `3` with `status: diagnostic`, not canonical `pass`:
 
 ```bash
 uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
-  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<canary-run>/model_2999.pt \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<locomotion-continuation-run>/model_2999.pt \
   --steps 300 --settle-steps 50 \
   --scenarios neutral,max_forward,max_backward,max_lateral_left,max_lateral_right,max_stationary_yaw_left,max_stationary_yaw_right \
-  --output artifacts/<canary-run>_locomotion_3000.json
+  --output artifacts/<locomotion-continuation-run>_locomotion_3000.json
 ```
 
 Proceed only if the report has no hard-safety failure, responds with the correct
 sign on every axis, and clip/actual-limit metrics are already trending downward.
-Resume the same run to at least 7,000 for hands and 10,000 for feet, inspecting
-the corresponding saved checkpoints after each capability boundary. Only the
-complete 15,000-iteration run is eligible for the full canonical acceptance
-suite below.
+Resume from the latest continuation directory to at least 7,000 for hands and
+10,000 for feet, each time using the newly written timestamp for the next stage
+and inspecting the corresponding saved checkpoints after each capability
+boundary. Only the complete 15,000-iteration run is eligible for the full
+canonical acceptance suite below.
 
 Do not copy the resulting model to the robot merely because training completed.
 First run a viewer/evaluation pass with neutral, maximum and mixed stick/keypoint

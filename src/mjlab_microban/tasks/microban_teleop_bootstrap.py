@@ -27,8 +27,9 @@ import torch
 
 VELOCITY_ACTOR_OBSERVATION_WIDTH = 63
 TELEOP_ACTOR_OBSERVATION_WIDTH = 83
-BOOTSTRAP_NORMALIZER_COUNT_CAP = 1_000_000.0
-VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION = "xc330_velocity_63_to_teleop_83_v1"
+VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION = (
+    "xc330_velocity_63_to_teleop_83_v2_preserve_normalizer_count"
+)
 
 # velocity: base_ang_vel(3), gravity(3), joint_pos(18), joint_vel(18),
 # actions(18), command(3)
@@ -125,8 +126,6 @@ def expand_velocity_observation_to_teleop(
 def bootstrap_teleop_actor_state(
     target_actor_state: Mapping[str, object],
     velocity_actor_state: Mapping[str, object],
-    *,
-    max_normalizer_count: float = BOOTSTRAP_NORMALIZER_COUNT_CAP,
 ) -> dict[str, torch.Tensor]:
     """Return a teleop actor state initialized only from shared velocity inputs.
 
@@ -135,11 +134,6 @@ def bootstrap_teleop_actor_state(
     identity initialization (zero variance would cause division by zero).  The
     target action-distribution parameters remain untouched.
     """
-
-    if not isinstance(max_normalizer_count, (int, float)) or not (
-        0.0 < float(max_normalizer_count) < float("inf")
-    ):
-        raise ValueError("max_normalizer_count must be finite and positive")
 
     target_first = target_actor_state.get("mlp.0.weight")
     source_first = velocity_actor_state.get("mlp.0.weight")
@@ -215,9 +209,13 @@ def bootstrap_teleop_actor_state(
         raise ValueError(
             "Velocity actor normalizer count must be finite and non-negative"
         )
-    result["obs_normalizer.count"] = target_count.new_tensor(
-        min(source_count_value, float(max_normalizer_count))
-    )
+    # Preserve the source sample count exactly.  Capping the v3 bootstrap at
+    # one million let a single 4096-env rollout contribute almost ten percent
+    # of the running statistics; after 500 updates, the shared 63 input columns
+    # had effectively lost the normalization under which the copied velocity
+    # actor was trained.  The 20 new columns remain identity-normalized and can
+    # still learn through their initially-zero first-layer weights.
+    result["obs_normalizer.count"] = target_count.new_tensor(source_count_value)
     return result
 
 
@@ -225,8 +223,6 @@ def load_velocity_actor_bootstrap(
     target_actor: torch.nn.Module,
     checkpoint_path: str | Path,
     checkpoint_sha256: str,
-    *,
-    max_normalizer_count: float = BOOTSTRAP_NORMALIZER_COUNT_CAP,
 ) -> VelocityActorBootstrapProvenance:
     """Verify a pinned checkpoint and install only its mapped actor weights."""
 
@@ -257,14 +253,11 @@ def load_velocity_actor_bootstrap(
     mapped = bootstrap_teleop_actor_state(
         target_actor.state_dict(),
         velocity_actor_state,
-        max_normalizer_count=max_normalizer_count,
     )
     target_actor.load_state_dict(mapped, strict=True)
     return VelocityActorBootstrapProvenance(
         checkpoint_path=checkpoint,
         checkpoint_sha256=actual_sha256,
         source_normalizer_count=float(source_count.item()),
-        installed_normalizer_count=min(
-            float(source_count.item()), float(max_normalizer_count)
-        ),
+        installed_normalizer_count=float(source_count.item()),
     )
