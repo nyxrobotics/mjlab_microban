@@ -86,6 +86,11 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "2"
+MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
+MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
+    "effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates"
+)
 
 # A fixed, deterministic input corpus makes the checkpoint -> PyTorch -> ONNX
 # comparison reproducible on every export host.  The tolerances allow ordinary
@@ -141,6 +146,17 @@ class TeleopExportProvenance:
         if parity_verified:
             metadata["onnx_parity_verified"] = "true"
         return metadata
+
+
+@dataclass(frozen=True)
+class TeleopCheckpointContract:
+    """Validated identity of the training semantics stored in a checkpoint."""
+
+    version: str
+    previous_action_semantics: str
+    iteration: int
+    common_step_counter: int
+    diagnostic_legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -227,6 +243,85 @@ def collect_teleop_export_provenance(
         exporter_source_commit=source_commit,
         exporter_source_dirty=source_dirty,
         exporter_source_sha256=_sha256_file(source_path),
+    )
+
+
+def validate_teleop_checkpoint_contract(
+    checkpoint_path: str | Path,
+    *,
+    map_location: str | torch.device | None = "cpu",
+    allow_legacy_diagnostic: bool = False,
+) -> TeleopCheckpointContract:
+    """Reject checkpoints trained with a different observation/action contract.
+
+    A v1 checkpoint has the same tensor widths as v2, so PyTorch can load it
+    without an error and an exporter could otherwise attach current v2 metadata
+    to incompatible weights.  Validation happens before any actor state is
+    loaded.  The only legacy escape hatch is explicitly marked diagnostic use;
+    callers must separately prevent it from producing a passing/deployable
+    report, and the runner forbids it when iteration/optimizer state is resumed.
+    """
+
+    checkpoint = Path(checkpoint_path).resolve()
+    match = _CHECKPOINT_NAME_RE.fullmatch(checkpoint.name)
+    if match is None:
+        raise ValueError(
+            "Checkpoint filename must be model_<iteration>.pt for contract "
+            f"validation, got {checkpoint.name!r}"
+        )
+    expected_iteration = int(match.group(1))
+    loaded = torch.load(checkpoint, map_location=map_location, weights_only=False)
+    if not isinstance(loaded, dict):
+        raise TypeError("Teleop checkpoint must contain a dictionary")
+    iteration = loaded.get("iter")
+    if (
+        not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration != expected_iteration
+    ):
+        raise ValueError(
+            "Checkpoint internal iteration must match its model_<iteration>.pt "
+            f"filename ({iteration!r} != {expected_iteration})"
+        )
+
+    infos = loaded.get("infos")
+    if not isinstance(infos, dict):
+        raise TypeError("Teleop checkpoint infos must be a dictionary")
+    env_state = infos.get("env_state")
+    common_step_counter = (
+        env_state.get("common_step_counter") if isinstance(env_state, dict) else None
+    )
+    if (
+        not isinstance(common_step_counter, int)
+        or isinstance(common_step_counter, bool)
+        or common_step_counter < 0
+    ):
+        raise ValueError(
+            "Teleop checkpoint common_step_counter must be a non-negative integer"
+        )
+
+    version = infos.get("microban_teleop_training_contract_version")
+    semantics = infos.get("previous_action_semantics")
+    if version is None and semantics is None and allow_legacy_diagnostic:
+        return TeleopCheckpointContract(
+            version="legacy_unversioned_v1",
+            previous_action_semantics="raw_policy_output_before_target_clip",
+            iteration=iteration,
+            common_step_counter=common_step_counter,
+            diagnostic_legacy=True,
+        )
+    if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
+        raise ValueError(
+            "Checkpoint is not Microban teleop training contract v2; legacy v1 "
+            "checkpoints require a clean retrain and cannot be resumed/exported"
+        )
+    if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
+        raise ValueError("Checkpoint previous-action semantics do not match v2")
+    return TeleopCheckpointContract(
+        version=version,
+        previous_action_semantics=semantics,
+        iteration=iteration,
+        common_step_counter=common_step_counter,
     )
 
 
@@ -506,7 +601,14 @@ def _as_action_vector(value: float | torch.Tensor, count: int) -> list[float]:
 
 def _command_target_bounds(
     env: ManagerBasedRlEnv,
-) -> tuple[list[float], list[float], list[float], list[float]]:
+) -> tuple[
+    list[float],
+    list[float],
+    list[float],
+    list[float],
+    list[float],
+    list[float],
+]:
     """Derive deploy-time keypoint clamps from the registered command config."""
 
     foot_cfg = env.command_manager.get_term_cfg("foot_target")
@@ -514,11 +616,18 @@ def _command_target_bounds(
 
     foot_xy_lower, foot_xy_upper = map(float, foot_cfg.reach_xy_range)
     foot_z_lower, foot_z_upper = map(float, foot_cfg.lift_height_range)
-    # A foot command is zero when that foot is not selected for lifting, so zero
-    # is part of the effective training range even though sampled lift heights
-    # are strictly positive.
+    # Exact XYZ zero is the inactive-foot command, so metadata keeps a zero Z
+    # lower bound even though active lift samples start at the floor-band edge.
+    # The contract is disjoint: exact-zero inactive, or an active positive lift.
     foot_xyz_lower = [foot_xy_lower, foot_xy_lower, min(0.0, foot_z_lower)]
     foot_xyz_upper = [foot_xy_upper, foot_xy_upper, max(0.0, foot_z_upper)]
+
+    both_xy_lower, both_xy_upper = map(float, foot_cfg.both_feet_reach_xy_range)
+    _both_z_lower, both_z_upper = map(float, foot_cfg.both_feet_lift_height_range)
+    # Exact zero likewise represents an inactive ordinary stance for both feet;
+    # it is not an active sample inside the positive floor band.
+    both_xyz_lower = [both_xy_lower, both_xy_lower, 0.0]
+    both_xyz_upper = [both_xy_upper, both_xy_upper, both_z_upper]
 
     hand_xy_lower, hand_xy_upper = map(float, hand_cfg.reach_xy_range)
     hand_z_lower, hand_z_upper = map(float, hand_cfg.reach_z_range)
@@ -528,6 +637,8 @@ def _command_target_bounds(
     return (
         foot_xyz_lower * 2,
         foot_xyz_upper * 2,
+        both_xyz_lower * 2,
+        both_xyz_upper * 2,
         hand_xyz_lower * 2,
         hand_xyz_upper * 2,
     )
@@ -588,6 +699,8 @@ def get_microban_teleop_metadata(
     (
         foot_target_lower,
         foot_target_upper,
+        simultaneous_both_feet_target_lower,
+        simultaneous_both_feet_target_upper,
         hand_target_lower,
         hand_target_upper,
     ) = _command_target_bounds(env)
@@ -595,7 +708,10 @@ def get_microban_teleop_metadata(
     return {
         "run_path": run_path,
         "policy_type": "microban_pico_hybrid_teleop",
-        "observation_schema_version": "1",
+        "microban_teleop_training_contract_version": (
+            MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+        ),
+        "observation_schema_version": MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION,
         "control_hz": float(1.0 / env.step_dt),
         "joint_names": action_joint_names,
         "action_joint_names": action_joint_names,
@@ -621,7 +737,7 @@ def get_microban_teleop_metadata(
         ],
         "locomotion_command_units": ["m_s", "m_s", "rad_s"],
         "locomotion_command_frame": "robot_body_forward_left_yaw_up",
-        "previous_action_semantics": "raw_policy_output_before_target_clip",
+        "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
         "action_target_semantics": "default_joint_pos_plus_raw_action_times_scale",
         "action_clip_semantics": "absolute_joint_position_radians",
         "foot_target_semantics": (
@@ -632,6 +748,13 @@ def get_microban_teleop_metadata(
         "foot_target_units": "metres",
         "foot_target_lower": foot_target_lower,
         "foot_target_upper": foot_target_upper,
+        "simultaneous_both_feet_target_lower": (simultaneous_both_feet_target_lower),
+        "simultaneous_both_feet_target_upper": (simultaneous_both_feet_target_upper),
+        "simultaneous_both_feet_target_semantics": (
+            "left_and_right_nonzero_offsets_use_conservative_stationary_"
+            "training_support"
+        ),
+        "simultaneous_both_feet_requires_zero_twist": "true",
         "hand_target_semantics": (
             "left_xyz_then_right_xyz_then_left_right_active_flags_"
             "trunk_frame_offset_from_episode_reset_reference_metres_"
@@ -696,6 +819,24 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
     """Velocity-style PPO runner with Microban-safe automatic ONNX export."""
 
     env: RslRlVecEnvWrapper
+    loaded_checkpoint_contract: TeleopCheckpointContract | None = None
+
+    def _require_nonlegacy_deployment_contract(self) -> None:
+        """Prevent diagnostic v1 weights from ever being saved or exported.
+
+        ``allow_legacy_teleop_contract`` exists solely so the deterministic
+        evaluator can characterize the final v1 run.  Once those weights are
+        resident in a runner, every path that could create a checkpoint or ONNX
+        must fail before writing anything; otherwise current v2 metadata could
+        be attached to an observation-incompatible actor.
+        """
+
+        contract = self.loaded_checkpoint_contract
+        if contract is not None and contract.diagnostic_legacy:
+            raise ValueError(
+                "Legacy teleop checkpoints are diagnostics-only and cannot be "
+                "saved, exported, or tagged with v2 metadata"
+            )
 
     def load(
         self,
@@ -703,39 +844,52 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         load_cfg: dict | None = None,
         strict: bool = True,
         map_location: str | None = None,
+        allow_legacy_teleop_contract: bool = False,
     ) -> dict:
-        """Resume at the next PPO iteration and rebuild curriculum state.
+        """Validate v2 semantics, then load at the next PPO iteration.
 
         RSL-RL stores the zero-based iteration that has just completed.  Its
         default loader resumes *at* that index, repeating one PPO update.  This
         task treats a checkpoint named ``model_N.pt`` as ``N + 1`` completed
-        iterations and starts at ``N + 1`` instead.  MjLab persists the exact
-        environment step counter; legacy checkpoints without that field are
-        reconstructed from the completed iteration count.
+        iterations and starts at ``N + 1`` instead.  V1 weights have identical
+        tensor widths but incompatible previous-action semantics, so they are
+        rejected before state loading.  An explicit legacy mode exists only for
+        actor-only diagnostics and can never resume training.
         """
 
+        loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
+        contract = validate_teleop_checkpoint_contract(
+            path,
+            map_location=map_location or "cpu",
+            allow_legacy_diagnostic=allow_legacy_teleop_contract,
+        )
+        if contract.diagnostic_legacy:
+            actor_only = (
+                load_cfg is not None
+                and load_cfg.get("actor") is True
+                and not any(
+                    bool(load_cfg.get(name, False))
+                    for name in ("critic", "optimizer", "iteration", "rnd")
+                )
+            )
+            if not actor_only:
+                raise ValueError(
+                    "Legacy teleop checkpoints permit only an explicit actor-only "
+                    "diagnostic load and cannot resume training"
+                )
+        self.loaded_checkpoint_contract = contract
         infos = super().load(
             path,
             load_cfg=load_cfg,
             strict=strict,
             map_location=map_location,
         )
-        loads_iteration = load_cfg is None or bool(load_cfg.get("iteration", False))
         if not loads_iteration:
             return infos
 
         self.current_learning_iteration += 1
         env = self.env.unwrapped
-        env_state = infos.get("env_state") if isinstance(infos, dict) else None
-        if not isinstance(env_state, dict) or "common_step_counter" not in env_state:
-            env.common_step_counter = (
-                self.current_learning_iteration * self.cfg["num_steps_per_env"]
-            )
-            print(
-                "[INFO] Checkpoint has no environment step counter; reconstructed "
-                f"common_step_counter={env.common_step_counter}"
-            )
-        elif (
+        if (
             not isinstance(env.common_step_counter, int)
             or isinstance(env.common_step_counter, bool)
             or env.common_step_counter < 0
@@ -751,7 +905,15 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         return infos
 
     def save(self, path: str, infos=None) -> None:
-        super().save(path, infos)
+        self._require_nonlegacy_deployment_contract()
+        contract_infos = {
+            **(infos or {}),
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": (MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS),
+        }
+        super().save(path, contract_infos)
         policy_dir, _filename, onnx_path = self._get_export_paths(path)
         temporary_path = unique_teleop_onnx_temporary_path(onnx_path)
         temporary_filename = temporary_path.name
@@ -784,3 +946,14 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             print(
                 f"[WARN] Microban teleop ONNX export failed (training continues): {exc}"
             )
+
+    def export_policy_to_onnx(
+        self,
+        path: str,
+        filename: str = "policy.onnx",
+        verbose: bool = False,
+    ) -> None:
+        """Export only fresh/resumed v2 weights, never legacy diagnostic weights."""
+
+        self._require_nonlegacy_deployment_contract()
+        super().export_policy_to_onnx(path, filename, verbose)

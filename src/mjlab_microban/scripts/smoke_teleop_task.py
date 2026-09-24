@@ -41,6 +41,7 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
+    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     HmdNeckTargetMotion,
     ResetFixedFootTargetCommand,
     ResetFixedHandTargetCommand,
@@ -387,13 +388,53 @@ def main() -> None:
             != 0.3
         ):
             raise AssertionError("Foot activation curriculum was not materialized")
-        if env.command_manager.get_term_cfg("twist").ranges.lin_vel_x != (-0.7, 0.7):
-            raise AssertionError("Velocity curriculum was not materialized")
-        if env.command_manager.get_term_cfg("twist").ranges.ang_vel_z != (-1.5, 1.5):
-            raise AssertionError("Yaw curriculum was not materialized")
+        if env.command_manager.get_term_cfg("twist").ranges.lin_vel_x != (-0.5, 0.6):
+            raise AssertionError("Intermediate velocity stage was not materialized")
+        if env.command_manager.get_term_cfg("twist").ranges.ang_vel_z != (-1.0, 1.0):
+            raise AssertionError("Intermediate yaw stage was not materialized")
+        if env.command_manager.get_term_cfg("foot_target").rel_both_feet_envs != 0.1:
+            raise AssertionError("Both-foot curriculum was not materialized")
+        foot_cfg = env.command_manager.get_term_cfg("foot_target")
+        if foot_cfg.lift_height_range != (
+            MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+            0.05,
+        ):
+            raise AssertionError("Single-foot floor-band support drifted")
+        if foot_cfg.both_feet_lift_height_range != (
+            MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+            0.012,
+        ):
+            raise AssertionError("Initial both-foot floor-band support drifted")
         env.curriculum_manager.compute()
         if curriculum.current_stage != 3:
             raise AssertionError("Curriculum stages were applied more than once")
+
+        env.common_step_counter = 6000 * 24
+        env.curriculum_manager.compute()
+        if curriculum.current_stage != 5:
+            raise AssertionError(
+                "Resume curriculum materialized stage "
+                f"{curriculum.current_stage}, expected 5"
+            )
+        twist_cfg = env.command_manager.get_term_cfg("twist")
+        if twist_cfg.ranges.lin_vel_x != (-0.5, 0.7):
+            raise AssertionError("Final asymmetric velocity stage was not materialized")
+        if twist_cfg.ranges.lin_vel_y != (-0.3, 0.3):
+            raise AssertionError("Final lateral velocity stage was not materialized")
+        if twist_cfg.ranges.ang_vel_z != (-1.5, 1.5):
+            raise AssertionError("Final moving-yaw stage was not materialized")
+        if twist_cfg.rotation_env_ang_vel_range != (-3.0, 3.0):
+            raise AssertionError("Final pure-yaw stage was not materialized")
+        if env.command_manager.get_term_cfg(
+            "foot_target"
+        ).both_feet_lift_height_range != (
+            MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+            0.02,
+        ):
+            raise AssertionError("Final both-foot floor-band support drifted")
+        env.curriculum_manager.compute()
+        if curriculum.current_stage != 5:
+            raise AssertionError("Final curriculum stages were applied more than once")
 
         report = {
             "status": "pass",

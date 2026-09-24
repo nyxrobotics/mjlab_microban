@@ -79,6 +79,18 @@ The complete observation/action contract, staged curriculum, resume and safe
 18-action ONNX export procedure are in
 [`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
 
+Evaluate a saved hybrid checkpoint headlessly before export or hardware use:
+
+```bash
+uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_14999.pt \
+  --output artifacts/model_14999_evaluation.json
+```
+
+This deterministic CPU pass does not open a viewer or robot socket. It covers
+neutral, runtime extrema and mixed hand/foot commands, writes checkpoint-hashed
+JSON metrics, and returns status 2 when the documented simulation gates fail.
+
 Once training is complete, play back a checkpoint with:
 
 ```

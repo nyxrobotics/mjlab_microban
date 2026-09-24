@@ -17,17 +17,19 @@ them at the same bounded rate as the robot runtime.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import math
 from typing import Any
 
 import torch
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from rsl_rl.modules.distribution import GaussianDistribution
 
 from mjlab_microban.tasks.mdp import (
     FootTargetCommand,
@@ -36,7 +38,6 @@ from mjlab_microban.tasks.mdp import (
     HandTargetCommandCfg,
 )
 from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
-
 
 # Runtime command limits from microban/src/moves/hmd_head.py.  The event further
 # intersects these with Entity.data.soft_joint_pos_limits, so the effective
@@ -55,6 +56,146 @@ MICROBAN_HMD_SLEW_RATES_RAD_S: dict[str, float] = {
 }
 
 MICROBAN_HMD_RETARGET_INTERVAL_S = (0.35, 1.50)
+
+# The live PICO bridge treats a support-foot target at or below this height as
+# measurement jitter and projects the complete XYZ vector to exact zero.  V2
+# training samples active feet from this boundary upward so the first live value
+# above the floor band remains inside learned support.
+MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M = 0.0025
+
+
+class PerJointGaussianDistribution(GaussianDistribution):
+    """RSL-RL Gaussian initialized with one exact standard deviation per joint.
+
+    Microban's action coordinates are joint-position deltas in radians.  Their
+    usable ranges differ by more than an order of magnitude, and the shoulder
+    roll home positions are only one degree inside an absolute soft limit.  A
+    scalar one-radian exploration standard deviation therefore starts training
+    with pervasive target clipping.  This distribution keeps RSL-RL's ordinary
+    state-independent Gaussian behavior while making the initial vector an
+    explicit, ordered part of the task contract.
+    """
+
+    def __init__(
+        self,
+        output_dim: int,
+        init_std: Sequence[float],
+        std_type: str = "log",
+    ) -> None:
+        if isinstance(init_std, (str, bytes)):
+            raise TypeError("init_std must be a numeric sequence")
+        values = torch.as_tensor(tuple(init_std), dtype=torch.float32)
+        if values.shape != (output_dim,):
+            raise ValueError(
+                f"init_std must contain {output_dim} values, got {values.numel()}"
+            )
+        if not bool(torch.isfinite(values).all().item()) or not bool(
+            torch.all(values > 0.0).item()
+        ):
+            raise ValueError("every init_std value must be finite and positive")
+
+        # Let the upstream implementation create the correctly registered
+        # parameter, then replace it without changing its state-dict key.
+        super().__init__(output_dim, init_std=1.0, std_type=std_type)
+        with torch.no_grad():
+            if std_type == "scalar":
+                self.std_param.copy_(values)
+            elif std_type == "log":
+                self.log_std_param.copy_(torch.log(values))
+
+
+def _joint_position_action_tensors(
+    env: ManagerBasedRlEnv,
+    action_name: str,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return raw, effective-raw, target, lower and upper action tensors."""
+
+    action = env.action_manager.get_term(action_name)
+    if not isinstance(action, JointPositionAction):
+        raise TypeError(f"{action_name!r} must be a JointPositionAction")
+    if action.cfg.clip is None or not hasattr(action, "_clip"):
+        raise ValueError(f"{action_name!r} must define absolute target clips")
+
+    raw = action.raw_action
+    scale = torch.as_tensor(action.scale, dtype=raw.dtype, device=raw.device)
+    offset = torch.as_tensor(action.offset, dtype=raw.dtype, device=raw.device)
+    if not bool(torch.isfinite(scale).all().item()) or not bool(
+        torch.all(scale > 0.0).item()
+    ):
+        raise ValueError("joint-position action scale must be finite and positive")
+    if not bool(torch.isfinite(offset).all().item()):
+        raise ValueError("joint-position action offset must be finite")
+
+    clip = action._clip
+    lower = clip[..., 0]
+    upper = clip[..., 1]
+    if not bool(torch.all(lower < upper).item()):
+        raise ValueError("joint-position action clips must have lower < upper")
+
+    target = raw * scale + offset
+    clipped_target = torch.clamp(target, min=lower, max=upper)
+    effective_raw = (clipped_target - offset) / scale
+    return raw, effective_raw, target, lower, upper
+
+
+def effective_action_after_target_clip(
+    env: ManagerBasedRlEnv,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Previous action actually sent to the target pipeline, in raw coordinates.
+
+    The returned value has the actor's 18-wide delta/radian coordinates, but an
+    out-of-range policy output is first converted to an absolute target, clipped
+    to the configured soft joint bounds, and converted back.  Deployment stores
+    exactly the same value, preventing an unbounded raw output from feeding back
+    through the next observation while the physical target remains saturated.
+    """
+
+    _, effective_raw, _, _, _ = _joint_position_action_tensors(env, action_name)
+    return effective_raw
+
+
+def normalized_target_clip_excess_huber(
+    env: ManagerBasedRlEnv,
+    action_name: str = "joint_pos",
+    beta: float = 0.1,
+) -> torch.Tensor:
+    """Penalize target saturation equally across different joint ranges.
+
+    The absolute target excess is normalized by each soft range's half-width,
+    then passed through smooth-L1/Huber loss.  Values inside the target range are
+    exactly zero; very large legacy-style outputs grow linearly rather than
+    dominating the complete reward with an unbounded square.
+    """
+
+    if not math.isfinite(beta) or beta <= 0.0:
+        raise ValueError("beta must be finite and positive")
+    _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
+    clipped_target = torch.clamp(target, min=lower, max=upper)
+    half_range = 0.5 * (upper - lower)
+    normalized_excess = (target - clipped_target) / half_range
+    return torch.nn.functional.smooth_l1_loss(
+        normalized_excess,
+        torch.zeros_like(normalized_excess),
+        beta=beta,
+        reduction="none",
+    ).mean(dim=-1)
+
+
+def raw_action_l2(
+    env: ManagerBasedRlEnv,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Small magnitude anchor that removes the target-clip policy nullspace."""
+
+    raw, _, _, _, _ = _joint_position_action_tensors(env, action_name)
+    return torch.square(raw).mean(dim=-1)
 
 
 class ResumeSafeStepBasedStagedCurriculum:
@@ -127,17 +268,43 @@ class ResetFixedFootTargetCommand(FootTargetCommand):
     reflects the newly reset joint state.
     """
 
-    def __init__(self, cfg: "ResetFixedFootTargetCommandCfg", env: ManagerBasedRlEnv):
+    def __init__(self, cfg: ResetFixedFootTargetCommandCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
+        if not 0.0 <= cfg.rel_both_feet_envs <= 1.0:
+            raise ValueError("rel_both_feet_envs must be in [0, 1]")
+        if not (
+            cfg.both_feet_lift_height_range[0] <= cfg.both_feet_lift_height_range[1]
+        ):
+            raise ValueError("both-feet lift range must have lower <= upper")
+        if not (cfg.both_feet_reach_xy_range[0] <= cfg.both_feet_reach_xy_range[1]):
+            raise ValueError("both-feet XY range must have lower <= upper")
         self._reference_pending = torch.ones(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self.is_both_feet_env = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._previous_both_feet_env = torch.zeros_like(self.is_both_feet_env)
+        self._velocity_cache_valid = torch.zeros_like(self.is_both_feet_env)
+        self._velocity_command_counter: torch.Tensor | None = None
+        self._saved_vel_command_b: torch.Tensor | None = None
+        self._saved_vel_command_w: torch.Tensor | None = None
+        self._saved_is_rotation_env: torch.Tensor | None = None
 
     def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
         if not isinstance(env_ids, torch.Tensor):
             raise TypeError("Foot target reset requires explicit environment IDs")
         self._reference_pending[env_ids] = True
-        return super().reset(env_ids)
+        extras = super().reset(env_ids)
+
+        # Command counters restart from the same value every episode, so equality
+        # alone cannot distinguish a fresh twist from the previous episode's
+        # cached command.  Clear both transition history and cache validity for
+        # exactly the reset rows.  The first post-reset update will snapshot the
+        # new episode's twist before applying any both-feet stationary mask.
+        self._previous_both_feet_env[env_ids] = False
+        self._velocity_cache_valid[env_ids] = False
+        return extras
 
     def _capture_pending_reference(self) -> None:
         env_ids = self._reference_pending.nonzero(as_tuple=False).flatten()
@@ -153,17 +320,92 @@ class ResetFixedFootTargetCommand(FootTargetCommand):
         super()._resample_command(env_ids)
         self._default_foot_pos_b[env_ids] = reference
 
+        both_random = torch.rand(len(env_ids), device=self.device)
+        both_mask = both_random < self.cfg.rel_both_feet_envs
+        both_ids = env_ids[both_mask]
+        self.is_both_feet_env[env_ids] = False
+        self.is_both_feet_env[both_ids] = True
+        self.is_single_support_env[both_ids] = False
+        if len(both_ids) == 0:
+            return
+
+        xy_lower, xy_upper = self.cfg.both_feet_reach_xy_range
+        z_lower, z_upper = self.cfg.both_feet_lift_height_range
+        offsets = torch.empty((len(both_ids), 2, 3), device=self.device)
+        offsets[..., :2].uniform_(xy_lower, xy_upper)
+        offsets[..., 2].uniform_(z_lower, z_upper)
+        self.foot_target_offset_b[both_ids] = offsets
+
     def _update_metrics(self) -> None:
         self._capture_pending_reference()
         super()._update_metrics()
 
     def _update_command(self) -> None:
         self._capture_pending_reference()
+        velocity = self._env.command_manager.get_term(self.cfg.velocity_command_name)
+        if self._velocity_command_counter is None:
+            self._velocity_command_counter = velocity.command_counter.clone()
+            self._saved_vel_command_b = velocity.vel_command_b.clone()
+            if hasattr(velocity, "vel_command_w"):
+                self._saved_vel_command_w = velocity.vel_command_w.clone()
+            if hasattr(velocity, "is_rotation_env"):
+                self._saved_is_rotation_env = velocity.is_rotation_env.clone()
+
+        assert self._saved_vel_command_b is not None
+        assert self._velocity_command_counter is not None
+        resampled = (~self._velocity_cache_valid) | (
+            velocity.command_counter != self._velocity_command_counter
+        )
+        entered = self.is_both_feet_env & ~self._previous_both_feet_env
+        save_ids = resampled | entered
+        self._saved_vel_command_b[save_ids] = velocity.vel_command_b[save_ids]
+        if self._saved_vel_command_w is not None:
+            self._saved_vel_command_w[save_ids] = velocity.vel_command_w[save_ids]
+        if self._saved_is_rotation_env is not None:
+            self._saved_is_rotation_env[save_ids] = velocity.is_rotation_env[save_ids]
+
+        # A foot-target resample may leave the both-feet regime before the
+        # independent twist timer fires. Restore the latest unmasked twist now;
+        # otherwise the zero injected below can persist for several seconds.
+        exited_ids = (
+            (self._previous_both_feet_env & ~self.is_both_feet_env)
+            .nonzero(as_tuple=False)
+            .flatten()
+        )
+        velocity.vel_command_b[exited_ids] = self._saved_vel_command_b[exited_ids]
+        if self._saved_vel_command_w is not None:
+            velocity.vel_command_w[exited_ids] = self._saved_vel_command_w[exited_ids]
+        if self._saved_is_rotation_env is not None:
+            velocity.is_rotation_env[exited_ids] = self._saved_is_rotation_env[
+                exited_ids
+            ]
+
+        both_ids = self.is_both_feet_env.nonzero(as_tuple=False).flatten()
+        velocity.vel_command_b[both_ids] = 0.0
+        if hasattr(velocity, "vel_command_w"):
+            velocity.vel_command_w[both_ids] = 0.0
+        if hasattr(velocity, "is_rotation_env"):
+            velocity.is_rotation_env[both_ids] = False
+        self._previous_both_feet_env.copy_(self.is_both_feet_env)
+        self._velocity_command_counter.copy_(velocity.command_counter)
+        self._velocity_cache_valid.fill_(True)
 
 
 @dataclass(kw_only=True)
 class ResetFixedFootTargetCommandCfg(FootTargetCommandCfg):
-    """Configuration for episode-reset-fixed foot targets."""
+    """Episode-fixed feet, including conservative stationary two-foot targets."""
+
+    lift_height_range: tuple[float, float] = (
+        MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+        0.05,
+    )
+    rel_both_feet_envs: float = 0.0
+    both_feet_lift_height_range: tuple[float, float] = (
+        MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+        0.012,
+    )
+    both_feet_reach_xy_range: tuple[float, float] = (-0.01, 0.01)
+    velocity_command_name: str = "twist"
 
     def build(self, env: ManagerBasedRlEnv) -> ResetFixedFootTargetCommand:
         return ResetFixedFootTargetCommand(self, env)
@@ -172,7 +414,7 @@ class ResetFixedFootTargetCommandCfg(FootTargetCommandCfg):
 class ResetFixedHandTargetCommand(HandTargetCommand):
     """Hand offsets whose trunk-frame zero is fixed for one episode."""
 
-    def __init__(self, cfg: "ResetFixedHandTargetCommandCfg", env: ManagerBasedRlEnv):
+    def __init__(self, cfg: ResetFixedHandTargetCommandCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
         self._reference_pending = torch.ones(
             self.num_envs, dtype=torch.bool, device=self.device
@@ -244,11 +486,10 @@ class HmdNeckTargetMotion:
         names = tuple(asset_cfg.joint_names or ())
         if names != MICROBAN_HMD_JOINT_NAMES:
             raise ValueError(
-                "HMD joint order must be "
-                f"{MICROBAN_HMD_JOINT_NAMES}, got {names}"
+                f"HMD joint order must be {MICROBAN_HMD_JOINT_NAMES}, got {names}"
             )
         if not isinstance(asset_cfg.joint_ids, list):
-            raise ValueError("HMD joint selection must resolve to three explicit IDs")
+            raise TypeError("HMD joint selection must resolve to three explicit IDs")
 
         self.asset: Entity = env.scene[asset_cfg.name]
         self.joint_names = names
@@ -275,12 +516,8 @@ class HmdNeckTargetMotion:
         # Limits may be per-environment after domain randomization.  Keep the
         # intersection as an (N, 3) tensor rather than assuming one global row.
         soft_limits = self.asset.data.soft_joint_pos_limits[:, self.joint_ids]
-        self.position_lower = torch.maximum(
-            configured_lower, soft_limits[..., 0]
-        )
-        self.position_upper = torch.minimum(
-            configured_upper, soft_limits[..., 1]
-        )
+        self.position_lower = torch.maximum(configured_lower, soft_limits[..., 0])
+        self.position_upper = torch.minimum(configured_upper, soft_limits[..., 1])
         if not bool(torch.all(self.position_lower < self.position_upper).item()):
             raise ValueError("Configured HMD ranges do not overlap the soft limits")
 
@@ -299,9 +536,7 @@ class HmdNeckTargetMotion:
         if len(interval) != 2:
             raise ValueError("retarget_interval_s must contain (minimum, maximum)")
         self.retarget_interval_s = (float(interval[0]), float(interval[1]))
-        if not (
-            0.0 < self.retarget_interval_s[0] <= self.retarget_interval_s[1]
-        ):
+        if not (0.0 < self.retarget_interval_s[0] <= self.retarget_interval_s[1]):
             raise ValueError("HMD retarget interval must be finite and positive")
         if not all(math.isfinite(value) for value in self.retarget_interval_s):
             raise ValueError("HMD retarget interval must be finite")
@@ -320,9 +555,7 @@ class HmdNeckTargetMotion:
             env.num_envs, dtype=torch.float32, device=env.device
         )
 
-    def _explicit_env_ids(
-        self, env_ids: torch.Tensor | slice | None
-    ) -> torch.Tensor:
+    def _explicit_env_ids(self, env_ids: torch.Tensor | slice | None) -> torch.Tensor:
         if env_ids is None or isinstance(env_ids, slice):
             return torch.arange(
                 self.current_target.shape[0],
@@ -367,13 +600,10 @@ class HmdNeckTargetMotion:
             neutral = self.asset.data.default_joint_pos[indices][:, self.joint_ids]
             sampled = torch.where(neutral_mask, neutral, sampled)
 
-        self.goal_target[indices] = torch.clamp(
-            sampled, min=lower, max=upper
-        )
+        self.goal_target[indices] = torch.clamp(sampled, min=lower, max=upper)
         minimum, maximum = self.retarget_interval_s
         self.time_to_retarget_s[indices] = (
-            torch.rand(count, device=self.current_target.device)
-            * (maximum - minimum)
+            torch.rand(count, device=self.current_target.device) * (maximum - minimum)
             + minimum
         )
 
