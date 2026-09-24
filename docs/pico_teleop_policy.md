@@ -35,13 +35,13 @@ The actor observation is 83 floats in this exact term order:
 the actor because the real robot does not provide them. The critic may use
 simulation-only signals during asymmetric actor-critic training.
 
-> **Real-robot deployment blocker:** the training `base_ang_vel` is expressed in
-> the trunk/body frame, but the current `microban` `Observer` forwards the BMI088
-> gyroscope in its raw sensor frame. Only the quaternion/projected-gravity path
-> currently applies `IMU_MOUNT_QUAT`. Do not deploy this policy until a live-policy
-> adapter rotates angular velocity into the body frame and its axis/sign mapping is
-> verified with small, supported-fixture roll/pitch/yaw motions. Training and ONNX
-> export may proceed because the simulation side already uses the body frame.
+> **Supported-robot acceptance blocker:** the `microban` `PicoHybridMove` now
+> rotates the raw BMI088 gyro with `IMU_MOUNT_QUAT` before constructing
+> `base_ang_vel`, and the ONNX contract requires the body-frame metadata. Unit
+> tests lock that software transform, but the physical mount axes/signs have not
+> yet been certified on the assembled robot. Do not deploy this policy until
+> small, torque-off roll/pitch/yaw motions in a support fixture confirm the
+> mapping. Training, simulation and ONNX export may proceed meanwhile.
 
 The output is exactly 18 actions in model-natural order: right arm (3), right leg
 (6), left arm (3), left leg (6). `head`, `neck_roll` and `neck_pitch` are observed
@@ -172,6 +172,18 @@ Do not copy the resulting model to the robot merely because training completed.
 First run a viewer/evaluation pass with neutral, maximum and mixed stick/keypoint
 commands and inspect falls, joint-limit saturation, foot slip and self-collision.
 
+For a quick simulation-only checkpoint preview (no robot network socket), run:
+
+```bash
+uv run --locked play Mjlab-Teleop-Microban \
+  --checkpoint-file logs/rsl_rl/mjlab_microban_teleop/<run>/model_<iteration>.pt \
+  --num-envs 1 --viewer native
+```
+
+Close the MuJoCo window to finish. This shares the GPU, so running it alongside
+a 4,096-environment training job reduces training throughput even though the
+single preview environment uses comparatively little memory.
+
 ## Deterministic export
 
 Export the latest run:
@@ -207,11 +219,32 @@ action in policy output order. The independent HMD controller writes the three
 excluded head/neck joints after the policy output is mapped to the 18 arm/leg
 servos.
 
-The current `microban_teleop` native mapper exposes only pelvis-relative absolute
-positions as a preview, and `_wire_snapshot()` deliberately strips both target
-fields. Those values are **not** valid policy offsets. Live enablement still needs
-a calibrated per-session reference subtraction, training-range clamps, freshness
-and jump rejection, plus an explicit policy-contract opt-in on both ends.
+The sibling `microban_teleop` native mapper now implements the live offset
+contract. While `pico_teleop` is selected and the left trigger is released, it
+collects at least 20 unique fresh body frames over at least 0.5 seconds, freezes
+the median trunk-frame hand/foot zero, and derives separate arm and leg scales:
+
+```text
+scale = 0.9 * Microban reference limb length / operator limb length
+```
+
+The Microban reference lengths come from the same MJCF chains as the offline
+retargeter and are protected by a cross-repository contract test. Live targets
+stay inside 80% of the trained hand/foot bounds and are slew-limited at every
+50 Hz packet. Required joint clocks, source/host gaps, body jumps, implausible
+limb lengths and sample-to-send age all fail closed. A rejected frame clears
+`walk`, zeros velocity and target slew state, and requires another trigger
+release before rearming. `_wire_snapshot()` independently repeats the 80% range
+and paired-target checks immediately before UDP serialization.
+
+Policy selection is controller state: left X toggles `walk` / `pico_teleop`
+only while the left trigger is released. It is not selected through an
+environment variable. The robot runtime independently validates the ONNX
+contract and rejects hybrid walking snapshots without paired foot targets; the
+bridge requires complete foot and hand mappings atomically. See
+`microban_teleop/docs/twist2_microban.md` and
+`microban/docs/pico_teleop_runtime.md` for the reproducible operator and robot
+runbooks.
 
 Never substitute world-frame target positions or inferred base linear velocity
 without retraining; either change would violate the learned input distribution.
