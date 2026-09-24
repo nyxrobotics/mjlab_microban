@@ -13,9 +13,10 @@
 """Drive the Microban MJLab simulation from a live PICO 4 Ultra stream.
 
 This entry point is deliberately simulation-only.  It has no robot address,
-UDP sender, motor controller, or deployment option.  XRoboToolkit frames pass
-through ``microban_teleop``'s validated native mapper, then drive the same
-83-observation/18-action task used to train the Microban PICO policy.
+UDP sender, motor controller, or deployment option.  Legacy XRoboToolkit or
+authenticated Microban Unity frames pass through ``microban_teleop``'s
+validated native mapper, then drive the same 83-observation/18-action task used
+to train the Microban PICO policy.
 """
 
 from __future__ import annotations
@@ -241,6 +242,56 @@ class _WebServerThread:
             loop.call_soon_threadsafe(loop.stop)
         if self._thread.is_alive():
             self._thread.join(timeout=5.0)
+
+
+class _NativeServerThread:
+    """Run the authenticated PICO listener beside the blocking viewer."""
+
+    def __init__(self, server: Any) -> None:
+        self.server = server
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="microban-sim-pico-native",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        try:
+            loop.run_until_complete(self.server.start())
+        except BaseException as exc:  # noqa: BLE001 - propagate thread startup
+            self._error = exc
+            self._ready.set()
+            loop.run_until_complete(self.server.close())
+            loop.close()
+            return
+        self._ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            loop.run_until_complete(self.server.close())
+            loop.close()
+
+    def start(self) -> None:
+        self._thread.start()
+        if not self._ready.wait(timeout=5.0):
+            raise RuntimeError("authenticated PICO input server did not start")
+        if self._error is not None:
+            raise RuntimeError("authenticated PICO input server failed") from self._error
+
+    def close(self) -> None:
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            raise RuntimeError("authenticated PICO input server did not stop")
 
 
 @dataclass(frozen=True)
@@ -697,6 +748,7 @@ class LivePicoSimulationPolicy:
         self._last_status_ns = 0
         self._previous_sampled_at_ns: int | None = None
         self._last_fault: str | None = None
+        self._pending_authority_token: Any = None
 
         self.robot = env.scene["robot"]
         joint_ids, names = self.robot.find_joints(
@@ -774,13 +826,20 @@ class LivePicoSimulationPolicy:
     def reset(self) -> None:
         self.mapper.reset()
         self._previous_sampled_at_ns = None
+        self._pending_authority_token = None
         self.hmd_current_target.copy_(self.robot.data.joint_pos[:, self.hmd_joint_ids])
         self.walk_last_action.zero_()
 
     def _read_command(self) -> SimulationCommand:
         try:
-            frame = self.source.read()
+            read_with_token = getattr(self.source, "read_with_token", None)
+            if callable(read_with_token):
+                frame, self._pending_authority_token = read_with_token()
+            else:
+                frame = self.source.read()
+                self._pending_authority_token = None
         except Exception as exc:  # noqa: BLE001 - SDK faults must fail closed
+            self._pending_authority_token = None
             self.mapper.reset()
             return neutral_simulation_command(
                 fault=f"PICO source read failed: {type(exc).__name__}: {exc}"
@@ -890,6 +949,39 @@ class LivePicoSimulationPolicy:
             self.hmd_current_target, joint_ids=self.hmd_joint_ids
         )
 
+    def _inject_with_authority(
+        self, command: SimulationCommand
+    ) -> SimulationCommand:
+        """Serialize final simulation injection with native owner invalidation."""
+
+        def inject() -> None:
+            # This callback is deliberately bounded and never performs network
+            # I/O. NativeNetworkSource holds its authority lock across it so a
+            # disconnect cannot occur between validation and command injection.
+            self._inject_command(command)
+            self._write_hmd_target(command)
+
+        authority = getattr(self, "_pending_authority_token", None)
+        guarded_inject = getattr(
+            getattr(self, "source", None), "run_if_current", None
+        )
+        if authority is None or not callable(guarded_inject):
+            inject()
+            return command
+
+        injected, _result = guarded_inject(authority, inject)
+        if injected:
+            return command
+
+        self.mapper.reset()
+        self._pending_authority_token = None
+        neutral = neutral_simulation_command(
+            fault="native authority changed before simulation injection"
+        )
+        self._inject_command(neutral)
+        self._write_hmd_target(neutral)
+        return neutral
+
     def _print_status(self, command: SimulationCommand) -> None:
         now_ns = self.clock_ns()
         if now_ns - self._last_status_ns < self.status_period_ns:
@@ -911,9 +1003,7 @@ class LivePicoSimulationPolicy:
         if reset_buf is not None and bool(reset_buf.any().item()):
             self.reset()
 
-        command = self._read_command()
-        self._inject_command(command)
-        self._write_hmd_target(command)
+        command = self._inject_with_authority(self._read_command())
         if self.camera_publisher is not None:
             self.camera_publisher.capture_if_due()
         self._print_status(command)
@@ -978,6 +1068,10 @@ def _default_teleop_root() -> Path:
     return Path(__file__).resolve().parents[4] / "microban_teleop"
 
 
+def _default_native_config() -> Path:
+    return Path.home() / ".config" / "microban-teleop" / "native_transport.json"
+
+
 def _default_walk_checkpoint() -> Path:
     return Path(__file__).resolve().parents[1] / "agents" / "velocity.pt"
 
@@ -1006,11 +1100,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viewer", choices=("native", "viser"), default="native")
     parser.add_argument(
         "--input",
-        choices=("webxr", "native"),
+        choices=("webxr", "native", "pico-app"),
         default="webxr",
         help=(
             "webxr: one PICO Browser app for controls and camera (default); "
-            "native: XRoboToolkit full-body input, without simultaneous HMD video"
+            "native: legacy XRoboToolkit full-body service; "
+            "pico-app: authenticated Microban Unity client"
+        ),
+    )
+    parser.add_argument(
+        "--native-config",
+        type=Path,
+        default=_default_native_config(),
+        help=(
+            "owner-only pairing/listen configuration used by --input pico-app "
+            "(default: ~/.config/microban-teleop/native_transport.json)"
         ),
     )
     parser.add_argument(
@@ -1055,7 +1159,9 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         value is not None
         for value in (args.body_scale, args.hand_scale, args.foot_scale)
     ):
-        parser.error("body scale overrides require --input native")
+        parser.error("body scale overrides require --input native or pico-app")
+    if args.input == "pico-app" and not args.native_config.expanduser().is_file():
+        parser.error(f"native pairing config not found: {args.native_config}")
     package = args.teleop_root.resolve() / "src" / "microban_teleop"
     if not package.is_dir():
         parser.error(f"microban_teleop package not found below: {args.teleop_root}")
@@ -1068,6 +1174,20 @@ def _load_native_classes(teleop_root: Path) -> tuple[Any, Any]:
     mapping = importlib.import_module("microban_teleop.twist2.mapping")
     tracking = importlib.import_module("microban_teleop.twist2.tracking")
     return tracking.XRobotSource, mapping.NativeControlMapper
+
+
+def _load_pico_app_classes(teleop_root: Path) -> tuple[Any, Any, Any, Any]:
+    source_root = str(teleop_root.resolve() / "src")
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
+    mapping = importlib.import_module("microban_teleop.twist2.mapping")
+    native_server = importlib.import_module("microban_teleop.native_server")
+    return (
+        native_server.load_pairing_store,
+        native_server.NativeInputServer,
+        native_server.NativeNetworkSource,
+        mapping.NativeControlMapper,
+    )
 
 
 def _load_webxr_classes(teleop_root: Path) -> tuple[Any, Any]:
@@ -1154,6 +1274,7 @@ def run(args: argparse.Namespace) -> int:
     source: _Source | None = None
     camera_publisher: StereoMjpegPublisher | None = None
     web_server: _WebServerThread | None = None
+    native_server_thread: _NativeServerThread | None = None
     try:
         validate_microban_teleop_observation_contract(env)
         runner_class = load_runner_cls(TASK)
@@ -1189,6 +1310,27 @@ def run(args: argparse.Namespace) -> int:
                 hand_scale_override=args.hand_scale,
                 foot_scale_override=args.foot_scale,
             )
+        elif args.input == "pico-app":
+            (
+                load_pairing_store,
+                server_class,
+                source_class,
+                mapper_class,
+            ) = _load_pico_app_classes(args.teleop_root)
+            pairing_store = load_pairing_store(args.native_config.expanduser())
+            source = source_class(stale_after_ns=int(args.stale_s * 1.0e9))
+            mapper = mapper_class(
+                body_scale=args.body_scale,
+                hand_scale_override=args.hand_scale,
+                foot_scale_override=args.foot_scale,
+            )
+            native_server = server_class(
+                pairing_store,
+                source=source,
+                on_reset=mapper.reset,
+            )
+            native_server_thread = _NativeServerThread(native_server)
+            native_server_thread.start()
         else:
             settings_class, application_class = _load_webxr_classes(args.teleop_root)
             webxr_source = WebXrSimulationSource()
@@ -1246,7 +1388,7 @@ def run(args: argparse.Namespace) -> int:
                 "WebXR supplies neutral hand/foot targets; Motion Tracker full-body "
                 "targets require --input native."
             )
-        else:
+        elif args.input == "native":
             print(
                 "Hold left X with the left trigger released to calibrate body targets, "
                 "then keep X held."
@@ -1254,6 +1396,22 @@ def run(args: argparse.Namespace) -> int:
             print(
                 "Native XRoboToolkit and PICO Browser are separate foreground apps; "
                 "the MJPEG endpoint below is diagnostic only in native mode."
+            )
+        else:
+            address = native_server.address
+            print(
+                "Authenticated Microban PICO app input: "
+                f"{address[0]}:{address[1] if address is not None else 'not-started'}"
+                if address is not None
+                else "Authenticated Microban PICO app input did not expose an address."
+            )
+            print(
+                "Hold left X with the left trigger released to calibrate body targets, "
+                "then keep X held."
+            )
+            print(
+                "The current MJPEG endpoint is diagnostic until the calibrated Unity "
+                "stereo renderer is enabled."
             )
         print("Hold left trigger to move; hold right trigger to center head yaw.")
         if camera_publisher is not None:
@@ -1272,6 +1430,8 @@ def run(args: argparse.Namespace) -> int:
     finally:
         if web_server is not None:
             web_server.close()
+        if native_server_thread is not None:
+            native_server_thread.close()
         if camera_publisher is not None:
             camera_publisher.close()
         if source is not None:

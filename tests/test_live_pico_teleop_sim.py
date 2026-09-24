@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,8 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     SimulationCommand,
     WebXrSimulationMapper,
     WebXrSimulationSource,
+    _NativeServerThread,
+    _default_native_config,
     _legacy_body_joint_indices,
     _legacy_walk_adapters,
     _patch_command_observation,
@@ -469,6 +473,47 @@ class DualActorDispatchTests(unittest.TestCase):
         self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
         self.assertTrue(torch.equal(policy.walk_last_action, torch.zeros((1, 18))))
 
+    def test_authority_change_between_map_and_injection_forces_neutral(self) -> None:
+        command = SimulationCommand(
+            enabled=True,
+            twist=(0.1, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="walk",
+        )
+        policy = self._policy(command)
+        injected: list[SimulationCommand] = []
+        reset_count = 0
+
+        class ChangedAuthoritySource:
+            @staticmethod
+            def run_if_current(_token, _callback):
+                return False, None
+
+        def reset_mapper() -> None:
+            nonlocal reset_count
+            reset_count += 1
+
+        policy.source = ChangedAuthoritySource()
+        policy.mapper = SimpleNamespace(reset=reset_mapper)
+        policy._pending_authority_token = object()
+        policy._inject_command = injected.append
+        policy._write_hmd_target = lambda _command: None
+        policy.walk_actor = lambda _observation: (_ for _ in ()).throw(
+            AssertionError("actor must not run after authority loss")
+        )
+        observations = TensorDict({"actor": torch.zeros((1, 83))}, batch_size=(1,))
+        action = policy(observations)
+
+        self.assertEqual(reset_count, 1)
+        self.assertEqual(len(injected), 1)
+        self.assertFalse(injected[0].enabled)
+        self.assertIn("authority changed", injected[0].fault or "")
+        self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
+
 
 class CliSafetyTests(unittest.TestCase):
     def test_cli_has_no_robot_destination_or_send_switch(self) -> None:
@@ -487,6 +532,34 @@ class CliSafetyTests(unittest.TestCase):
         args = build_parser().parse_args(["--checkpoint", str(Path("model_14999.pt"))])
         self.assertEqual(args.teleop_root.name, "microban_teleop")
         self.assertEqual(args.input, "webxr")
+
+    def test_authenticated_pico_app_is_a_distinct_input_backend(self) -> None:
+        args = build_parser().parse_args(
+            ["--checkpoint", "model_14999.pt", "--input", "pico-app"]
+        )
+        self.assertEqual(args.input, "pico-app")
+        self.assertEqual(args.native_config, _default_native_config())
+
+    def test_native_server_thread_starts_and_closes_async_server(self) -> None:
+        class FakeServer:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.closed = threading.Event()
+
+            async def start(self) -> None:
+                await asyncio.sleep(0)
+                self.started.set()
+
+            async def close(self) -> None:
+                await asyncio.sleep(0)
+                self.closed.set()
+
+        server = FakeServer()
+        thread = _NativeServerThread(server)
+        thread.start()
+        self.assertTrue(server.started.is_set())
+        thread.close()
+        self.assertTrue(server.closed.is_set())
 
 
 if __name__ == "__main__":
