@@ -69,28 +69,31 @@ Start the training with:
 uv run train Mjlab-Velocity-Microban --env.scene.num-envs 4096
 ```
 
-For the PICO 4 Ultra hybrid teleoperation policy, use the checked wrapper so
-the smoke gate, seeds, environment count, checkpoint cadence and local logger
-are reproducible:
+For the PICO 4 Ultra hybrid teleoperation policy, first train and gate the
+isolated bounded velocity actor, then start the SHA-pinned contract-v9 stage
+driver:
 
 ```bash
-scripts/train_microban_teleop.sh smoke
-scripts/train_microban_teleop.sh train
+scripts/train_microban_safe_velocity.sh reward-canary
+scripts/train_microban_safe_velocity.sh evaluate <safe-model.pt> <receipt.json>
+scripts/train_microban_teleop_v9.sh start \
+  <safe-model.pt> <safe-model-sha256> <receipt.json>
 ```
 
 The complete observation/action contract, staged curriculum, resume and safe
 18-action ONNX export procedure are in
 [`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
-The v8i TWIST2-derived critic prior and direct, training-only locomotion teacher
-are specified in
-[`docs/teleop_v8i_direct_locomotion_bc.md`](docs/teleop_v8i_direct_locomotion_bc.md).
+The active accepted-safe-velocity bootstrap, 2,048-environment staged training,
+and boundary-gate procedure are specified in
+[`docs/teleop_v9_safe_velocity_bootstrap.md`](docs/teleop_v9_safe_velocity_bootstrap.md).
+The v8i/v8j documents are retained only as rejected-canary records.
 
 Evaluate a saved hybrid checkpoint headlessly before export or hardware use:
 
 ```bash
 uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
-  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_14999.pt \
-  --output artifacts/model_14999_evaluation.json
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
+  --output artifacts/model_19999_evaluation.json
 ```
 
 This deterministic CPU pass does not open a viewer or robot socket. It covers

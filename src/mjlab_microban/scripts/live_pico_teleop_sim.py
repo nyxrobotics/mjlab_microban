@@ -1010,7 +1010,7 @@ class LivePicoSimulationPolicy:
         if not command.enabled:
             self.walk_last_action.zero_()
             # Deadman release always returns the shared Microban initial pose:
-            # raw zero in the teleop environment's +10 degree shoulder frame.
+            # raw zero in the teleop environment's 0 degree shoulder frame.
             # The legacy walk actor's own 0 degree HOME is used only while its
             # policy is actively selected and the trigger is held.
             return self.zero_action.clone()
@@ -1262,6 +1262,16 @@ def _load_legacy_walk_actor(checkpoint: Path, device: str) -> LegacyWalkActor:
         wrapped_env.close()
 
 
+def _construct_checkpoint_consumer_runner(env, agent_cfg, device: str):
+    """Construct the explicit actor-load-only runner used by live simulation."""
+
+    agent_cfg.checkpoint_consumer_mode = True
+    runner_class = load_runner_cls(TASK)
+    if runner_class is None:
+        raise RuntimeError(f"No runner is registered for {TASK}")
+    return runner_class(env, asdict(agent_cfg), device=device)
+
+
 def run(args: argparse.Namespace) -> int:
     configure_torch_backends()
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1277,10 +1287,9 @@ def run(args: argparse.Namespace) -> int:
     native_server_thread: _NativeServerThread | None = None
     try:
         validate_microban_teleop_observation_contract(env)
-        runner_class = load_runner_cls(TASK)
-        if runner_class is None:
-            raise RuntimeError(f"No runner is registered for {TASK}")
-        runner = runner_class(wrapped_env, asdict(agent_cfg), device=device)
+        runner = _construct_checkpoint_consumer_runner(
+            wrapped_env, agent_cfg, device
+        )
         runner.load(
             str(args.checkpoint.resolve()),
             load_cfg={"actor": True},

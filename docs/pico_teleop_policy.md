@@ -11,14 +11,12 @@ commands and compact end-effector targets every control tick, then produces the
 18 arm/leg joint targets that must keep the physical robot balanced.
 
 BeyondMimic/TWIST2-style full-motion tracking remains an offline reference
-pipeline, not a command streamed to the robot. V8i uses one audited retargeted
-walking clip as a **critic-only training prior and direct actor teacher** for the
-first 1,000 updates. It is faded to zero and disabled before the first
-1,500-update gate; the deployed actor never observes it. The exact loss,
-isolation and provenance contract is in
-[`teleop_v8i_direct_locomotion_bc.md`](teleop_v8i_direct_locomotion_bc.md), with
-the underlying reset and phase behavior in
-[`teleop_v8h_locomotion_prior.md`](teleop_v8h_locomotion_prior.md).
+pipeline, not a command streamed to the robot. Historical v8j tried a retargeted
+walk004 clip as a privileged prior/teacher, but its dynamics gate fell in every
+rollout. Contract v9 therefore never activates that command, reward, termination,
+or BC optimizer path. The old design remains documented only as a rejected
+experiment in
+[`teleop_v8j_split_locomotion_bc.md`](teleop_v8j_split_locomotion_bc.md).
 
 ## Deployment contract
 
@@ -37,10 +35,9 @@ The actor observation is 83 floats in this exact term order:
 
 `base_lin_vel`, global/root position and terrain height scans are forbidden from
 the actor because the real robot does not provide them. The critic may use
-simulation-only signals during asymmetric actor-critic training. In v8i that
-includes a 39-value `[blend, sin, cos, q_ref, dq_ref, q_lead_5]` locomotion-prior
-command. The bounded actor is supervised against `q_lead_5` only during
-training; the payload is never appended to the 83-value actor observation.
+simulation-only signals during asymmetric actor-critic training. Its historical
+39-value locomotion-prior slot remains exact zero only to keep critic topology
+stable; it never reaches the 83-value actor or an auxiliary optimizer.
 
 > **Supported-robot acceptance blocker:** the `microban` `PicoHybridMove` now
 > rotates the raw BMI088 gyro with `IMU_MOUNT_QUAT` before constructing
@@ -58,11 +55,11 @@ Processed joint-position targets therefore remain strictly inside the robot
 configuration's 90% soft limits; the environment and physical runtime retain
 their target clip as an independent defense.
 
-This is training/deployment contract **v8**. In v1, the observation fed back the
+This is training/deployment contract **v9**. In v1, the observation fed back the
 unbounded network output even when the actuator target had already saturated.
 That created a hidden recurrence and a flat action nullspace: the policy could
 keep producing larger shoulder/hip values while the robot received the same
-clipped target. V2 introduced, and v8 retains, this computation:
+clipped target. V2 introduced, and v9 retains, this computation:
 
 ```text
 absolute_target = default_joint_pos + raw_action * action_scale
@@ -71,11 +68,11 @@ effective_action = (clipped_target - default_joint_pos) / action_scale
 ```
 
 `effective_action` is the next observation in simulation and on the robot. ONNX
-metadata must contain training-contract version `8`, observation-schema version
+metadata must contain training-contract version `9`, observation-schema version
 `2`, and the exact semantic string
 `effective_action_after_absolute_target_soft_clip_in_raw_delta_coordinates`.
 The observation-schema version remains `2` because its 83 fields did not change.
-The runtime rejects missing, v1/v2/v3/v4/v5/v6/v7, or otherwise different training
+The runtime rejects missing, v1-v8, or otherwise different training
 metadata.
 
 Foot offsets are trained as stance/keypoint targets and fade out continuously as
@@ -90,12 +87,9 @@ when a policy session is reset or enabled, then keep it fixed until the next
 explicit reset. It must not reinterpret each incoming tracker packet as a new
 zero pose.
 
-The task-specific home pose also sets both shoulder-pitch joints to `+10 deg`,
-matching the committed control-runtime contract in
-`microban/src/constants.py:NEUTRAL_POSE`. This is a software-contract match, not
-a physical measurement or calibration of the assembled robot. Its history does
-not establish that either task predates the other. The override is intentionally
-local to the PICO task and does not modify the velocity or get-up environments.
+The task uses the shared software HOME pose: shoulder pitch `0 deg`, right/left
+shoulder roll `-10/+10 deg`, and elbow `-20 deg`. This is a commanded software
+pose, not a physical measurement or calibration of the assembled robot.
 
 ## HMD-owned neck motion during training
 
@@ -167,7 +161,7 @@ The command must finish with a JSON report containing `"status": "pass"`, an
 actor shape ending in 83, action dimension 18, the three HMD joint names and their
 effective ranges. It also checks the resolved joint order, body-action clips,
 absence of non-hardware actor terms, HMD seed reproducibility, target slew and
-soft limits, play-mode disablement, finite steps, the `+10 deg` shoulder home,
+soft limits, play-mode disablement, finite steps, the `0 deg` shoulder-pitch HOME,
 action-aligned export metadata, episode-fixed keypoint references across periodic
 resampling, one-pass resume curriculum materialization, and the formal rotation-
 command type and ranges. The latter is important because the registered/Tyro CLI
@@ -175,7 +169,39 @@ rebuilds dataclasses: a dynamically attached command `build` callback or rotatio
 fields would otherwise disappear even if direct Python environment construction
 appeared to work.
 
-## Training (contract v8; authoritative)
+## Training (contract v9; authoritative)
+
+Contract v9 requires an explicitly pinned, acceptance-gated checkpoint from the
+dedicated bounded/raw `Mjlab-SafeVelocity-Microban` task. Pass its path,
+SHA-256, and passing fixed-forward evaluator receipt to
+`scripts/train_microban_teleop_v9.sh start`; use the same wrapper's `resume`
+mode afterward. No source digest or receipt is hard-coded. The strict loader
+rejects legacy model999/model14999 actors, the safe-velocity canaries affected by
+the forced-forward reset bug, normalized actors, unbounded actors, and any
+source that differs in topology, bounds, recipe, digest, or receipt binding.
+
+The exact 63-to-83 mapping, raw actor/normalized critic contract, HOME pose,
+source provenance, and start/resume commands are documented in
+[`teleop_v9_safe_velocity_bootstrap.md`](teleop_v9_safe_velocity_bootstrap.md).
+The full PICO observation and step-based HMD/feet/hands/velocity curriculum are
+retained. The dynamically rejected walk004 locomotion prior/direct BC is not:
+its command, rewards, termination, reset teleport/launch, and optimizer step are
+all disabled in v9.
+
+V9 also fixes simulator contact capacity at `nconmax=512`, `njmax=2048` after
+observing 248 contacts/513 constraints in a fall. At this capacity a 4,096-env
+run attempted a measured 12.7 GB single EPA allocation and OOMed on the RTX
+4090. The authoritative v9 wrapper fixes exactly 2,048 environments and advances
+only one SHA-gated canonical boundary at a time; its final interval is
+`18000->20000`.
+
+The physical Microban repository's `src/moves/pico_hybrid.py` now accepts only
+contract-v9 deployment metadata and independently validates all seven embedded
+safe-velocity bootstrap identity fields. It also uses the same shoulder-pitch
+`0 deg` software HOME as this training environment. A v8 or lineage-incomplete
+ONNX fails before motor commands are enabled.
+
+## Rejected contract-v8 notes (do not execute)
 
 Contract v8 must start from a clean actor. Do not resume or bootstrap from an
 older teleop or velocity checkpoint. The old tensors may load structurally, but
@@ -207,16 +233,15 @@ wrappers reject all bootstrap/pristine options. V8 requires a clean actor start.
 
 ### What v8 changes
 
-After the short v8i prior/teacher, the velocity command sampler is an exclusive
+After the short v8j prior/teacher, the velocity command sampler is an exclusive
 categorical distribution over
 `standing`, forward, backward, left, right, yaw-left, yaw-right and (later)
 mixed motion. Early training gives each signed direction its own examples rather
 than relying on three independently sampled axes, which previously made mixed
 commands dominate and left no pure backward/lateral cases. Updates 0--500 use
-20% standing and 80% forward at `0.06..0.11 m/s`. At update 500, while the prior
-fades, sampling becomes 10% standing, 30% forward and 12% for each of the other
-five signed directions. Update 1,000 restores 10% standing and 15% for each of
-the six directions. At the later mixed stage the probabilities become 10% for
+20% standing and 80% forward at `0.06..0.11 m/s`; the teacher is full through
+update 250 and then fades to zero. Update 500 restores 10% standing and 15% for
+each of the six signed directions. At the later mixed stage the probabilities become 10% for
 standing and each pure direction, and 30% mixed.
 
 The first signed ranges deliberately exclude the zero deadband:
@@ -229,23 +254,23 @@ The first signed ranges deliberately exclude the zero deadband:
 | yaw left/right | `+/-0.80..1.20 rad/s` | `+/-0.40..1.50` | `+/-0.40..3.00` |
 
 The tracking kernels start at `0.35/0.80` (linear/yaw) and later widen to
-`0.50/1.25`. Non-shoulder-roll exploration starts at latent
-standard deviation `1.0`; the close shoulder-roll sides retain their guarded
+`0.50/1.25`. All axes except shoulder roll start at latent standard deviation
+`0.15`; the close shoulder-roll sides retain their guarded
 one-third-headroom width. The two shoulder-roll output rows start with zero
 weights and deterministic inward latent biases `-0.25/+0.25`; all rows remain
 trainable. The exact checkpoint/ONNX marker is
 `microban_teleop_actor_initialization =
-clean_random_except_inward_shoulder_roll_v1_nonshoulder_std_1_v1`, so older v8
+clean_random_except_inward_shoulder_roll_v1_other_action_std_0p15_v1`, so older v8
 runs without this initialization cannot resume or export. Learned log-standard
 deviations are projected into their numerical interval after every optimizer
 step, and load rejects an out-of-range saved parameter. PPO uses three epochs,
-entropy coefficient `0.005`, adaptive learning rate starting at `1e-4`, and the
+entropy coefficient `0.0`, adaptive learning rate starting at `1e-4`, and the
 exact latent-action replay contract. The bounded physical transform,
 effective-action feedback, predicted joint-state guard and independent actuator
 target clip remain in force.
 
 The exact semantic recipe marker is `microban_teleop_recipe_revision =
-v8i_clean_shoulder_std1_twist2_direct_bc_launch_v2`.
+v8j_clean_shoulder_std0p15_entropy0_twist2_split_bc_lead2_launch_v1`.
 The non-vanishing linear/yaw L1 tracking weights are `-4.0/-1.0`; this doubles
 only the tracking incentive after the v8f diagnostic remained safely static.
 Pose, joint-limit, collision, and bounded-action safety terms are unchanged.
@@ -376,7 +401,7 @@ intentional rerun may replace that stage's reports and receipt with:
 
 ```bash
 MICROBAN_TELEOP_GATE_FORCE=1 \
-scripts/evaluate_microban_teleop_v8_stage.sh <run-directory-name>
+scripts/evaluate_microban_teleop_v9_stage.sh <run-directory-name>
 ```
 
 Forced evaluation first moves any existing pass receipt to a timestamped
@@ -385,11 +410,11 @@ then fails or is interrupted, the canonical receipt path remains absent and the
 old pass cannot unlock training. A new receipt is published atomically only
 after every required report passes and is hashed.
 
-The lower-level `scripts/train_microban_teleop.sh` still supports debugging and
-defaults to 4,096 environments, seed 42, a checkpoint every 500 updates and
-20,000 total updates. It does not enforce stage receipts; do not use its direct
-`train`/`resume` modes for the canonical production run. Environment overrides
-remain available for explicitly non-canonical diagnostics.
+The lower-level `scripts/train_microban_teleop.sh` retains only the environment
+smoke command. Its direct `train` and `resume` modes, and the old v8 stage
+trainer, fail immediately. All v9 training must use the accepted-source
+2048-environment canonical wrapper so a legacy command cannot construct the
+known-OOM 4096-environment contact model before being rejected.
 
 The final gate command creates three nominal full-suite reports, three
 moving-neck full-suite reports and one receipt. Do not export or copy the policy
@@ -816,12 +841,12 @@ uv run --locked play Mjlab-Teleop-Microban \
 ```
 
 Close the MuJoCo window to finish. This shares the GPU, so running it alongside
-a 4,096-environment training job reduces training throughput even though the
+a 2,048-environment training job reduces training throughput even though the
 single preview environment uses comparatively little memory.
 
 </details>
 
-## Current v8 final acceptance
+## Current v9 final acceptance
 
 The final stage evaluator already invokes the canonical headless suite under all
 three fixed seeds. For a standalone rerun of one seed:
@@ -830,7 +855,7 @@ three fixed seeds. For a standalone rerun of one seed:
 uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
   --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
   --seed 42 --steps 1000 --settle-steps 50 \
-  --output artifacts/model_19999_v8_evaluation_seed42.json
+  --output artifacts/model_19999_v9_evaluation_seed42.json
 ```
 
 Run the independent moving-neck version with the same checkpoint, seed and
@@ -841,7 +866,7 @@ diagnostic, so use the stage wrapper for the authoritative combined gate:
 uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_checkpoint \
   --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
   --seed 42 --steps 1000 --settle-steps 50 --moving-hmd-neck \
-  --output artifacts/model_19999_v8_evaluation_seed42_moving_hmd.json
+  --output artifacts/model_19999_v9_evaluation_seed42_moving_hmd.json
 ```
 
 Canonical coverage is the evaluator's exact ordered 33-scenario list. It
@@ -878,7 +903,7 @@ by binding the exact schema-3 pass receipt:
 uv run --locked python -m mjlab_microban.scripts.export_teleop_onnx \
   --checkpoint logs/rsl_rl/mjlab_microban_teleop/<timestamp>/model_19999.pt \
   --acceptance-receipt \
-    artifacts/teleop_v8_gates/<timestamp>_boundary_20000_gate.json \
+    artifacts/teleop_v9_gates/<timestamp>_boundary_20000_gate.json \
   --require-final-acceptance \
   --output artifacts/microban_teleop.onnx
 ```
@@ -909,7 +934,7 @@ command are in `docs/teleop_onnx_export_gate.md`.
 
 ## Live PICO mapping
 
-Before actor normalization, construct the observation exactly as documented
+Before raw actor inference, construct the observation exactly as documented
 above. Convert retargeted foot/hand positions to trunk-relative metre offsets
 from the fixed policy-session reset reference and preserve left/right order. Set
 an inactive hand's XYZ values to zero and its flag to zero. After converting a

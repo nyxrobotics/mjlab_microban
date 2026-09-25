@@ -7,11 +7,10 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 import os
-import numpy as np
 from pathlib import Path
 
 import mujoco
-from mjlab.actuator import XmlActuatorCfg
+import numpy as np
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -51,9 +50,9 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
 
 FULL_COLLISION = CollisionCfg(
     geom_names_expr=(r".*_collision",),
-    condim={r"^(left|right)_foot_collision$": 3, r".*_collision": 1},
-    priority={r"^(left|right)_foot_collision$": 1},
-    friction={r"^(left|right)_foot_collision$": (1.0,)},
+    condim={r"^(left|right)_foot_collision_[1-6]$": 3, r".*_collision": 1},
+    priority={r"^(left|right)_foot_collision_[1-6]$": 1},
+    friction={r"^(left|right)_foot_collision_[1-6]$": (1.0,)},
 )
 
 import bam.actuators
@@ -105,9 +104,9 @@ MICROBAN_ROBOT_CFG = EntityCfg(
 )
 
 if __name__ == "__main__":
-    import mujoco.viewer as viewer
     from mjlab.scene import Scene, SceneCfg
     from mjlab.terrains import TerrainEntityCfg
+    from mujoco import viewer
 
     SCENE_CFG = SceneCfg(
         terrain=TerrainEntityCfg(terrain_type="plane"),

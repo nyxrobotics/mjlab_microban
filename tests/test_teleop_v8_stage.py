@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Tests for fail-closed canonical-v8 stage continuation."""
+"""Tests for fail-closed canonical-v9 stage continuation."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ from mjlab_microban.scripts.teleop_v8_stage import (
     StageInterval,
     resolve_stage_interval,
     validate_interrupted_stage_checkpoint,
+)
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
@@ -79,7 +82,7 @@ class StageWrapperReceiptContractTest(unittest.TestCase):
 
     def test_receipt_and_resume_bind_reports_evaluator_and_recipe(self) -> None:
         evaluator = self._script("evaluate_microban_teleop_v8_stage.sh")
-        trainer = self._script("train_microban_teleop_v8_stage.sh")
+        trainer = self._script("train_microban_teleop_v9.sh")
         required_fields = (
             "training_provenance_sha256",
             "recipe_revision",
@@ -170,14 +173,19 @@ class InterruptedStageProvenanceTest(unittest.TestCase):
         self.assertIsNone(result["parent_gate"])
 
     def test_resumed_stage_requires_exact_pinned_parent_gate(self) -> None:
-        parent_checkpoint_sha256 = "b" * 64
+        parent_checkpoint = self.root / "parent_model_1499.pt"
+        parent_checkpoint.write_bytes(b"pinned parent checkpoint")
+        parent_checkpoint_sha256 = sha256_file(parent_checkpoint)
         gate = self.gate_root / "parent_boundary_1500_gate.json"
         gate.write_text(
             json.dumps(
                 {
                     "status": "pass",
-                    "training_contract_version": "8",
+                    "training_contract_version": (
+                        MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+                    ),
                     "completed_iterations": 1500,
+                    "checkpoint": str(parent_checkpoint),
                     "checkpoint_sha256": parent_checkpoint_sha256,
                 }
             ),

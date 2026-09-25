@@ -1,5 +1,10 @@
 # V8i direct locomotion teacher
 
+> Historical failed canary. V8i produced safe stationary checkpoints but did
+> not acquire commanded forward motion. Do not resume or deploy it. The active
+> clean-start recipe is documented in
+> [`teleop_v8j_split_locomotion_bc.md`](teleop_v8j_split_locomotion_bc.md).
+
 V8i keeps the V8h audited TWIST2 locomotion prior and adds a short-lived,
 deployment-invisible supervised update. Its purpose is to avoid the static local
 optimum observed in V8h, where the exponential imitation reward was effectively

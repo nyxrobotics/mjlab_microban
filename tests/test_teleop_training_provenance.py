@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
 import tempfile
 import unittest
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +29,8 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
     canonical_json_sha256,
     collect_training_provenance,
+    collect_training_source_manifest,
+    inherit_initial_stage_safe_velocity_identity,
     validate_canonical_stage_critical_config,
     validate_training_provenance,
 )
@@ -59,8 +64,9 @@ class TrainingProvenanceTest(unittest.TestCase):
             "resume": False,
             "logger": "tensorboard",
             "upload_model": False,
-            "bootstrap_velocity_checkpoint": None,
-            "bootstrap_velocity_checkpoint_sha256": None,
+            "safe_velocity_checkpoint": "/pinned/model_7.pt",
+            "safe_velocity_checkpoint_sha256": "a" * 64,
+            "safe_velocity_acceptance_receipt": "/pinned/acceptance.json",
             "save_pristine_checkpoint": False,
             "algorithm": {"learning_rate": 1.0e-4},
         }
@@ -68,7 +74,7 @@ class TrainingProvenanceTest(unittest.TestCase):
         return result
 
     @staticmethod
-    def _env(*, seed: int = 42, num_envs: int = 4096) -> SimpleNamespace:
+    def _env(*, seed: int = 42, num_envs: int = 2048) -> SimpleNamespace:
         return SimpleNamespace(
             clip_actions=None,
             unwrapped=SimpleNamespace(
@@ -83,7 +89,7 @@ class TrainingProvenanceTest(unittest.TestCase):
         return collect_training_provenance(
             self._env(),
             runner_cfg or self._runner_cfg(),
-            training_contract_version="8",
+            training_contract_version="9",
             recipe_revision="recipe-test",
             actor_initialization="actor-test",
             project_root=self.root,
@@ -112,9 +118,30 @@ class TrainingProvenanceTest(unittest.TestCase):
             changed_source["source"]["tree_sha256"],
         )
 
-    def test_real_resolved_v8_configs_are_deterministically_serializable(self) -> None:
+    def test_source_manifest_binds_xc330_identification_json_bytes(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        copied_root = self.root / "copied-project"
+        shutil.copytree(project_root / "src", copied_root / "src")
+        relative_path = "src/mjlab_microban/robot/xc330_params.json"
+        copied_json = copied_root / relative_path
+
+        original = collect_training_source_manifest(copied_root)
+        self.assertIn(relative_path, original["files"])
+        self.assertEqual(
+            original["files"][relative_path],
+            hashlib.sha256(copied_json.read_bytes()).hexdigest(),
+        )
+
+        copied_json.write_bytes(copied_json.read_bytes() + b"\n")
+        changed = collect_training_source_manifest(copied_root)
+        self.assertNotEqual(
+            original["files"][relative_path], changed["files"][relative_path]
+        )
+        self.assertNotEqual(original["tree_sha256"], changed["tree_sha256"])
+
+    def test_real_resolved_v9_configs_are_deterministically_serializable(self) -> None:
         env_cfg = make_microban_teleop_env_cfg(play=False)
-        env_cfg.scene.num_envs = 4096
+        env_cfg.scene.num_envs = 2048
         env_cfg.seed = 42
         runner_cfg = asdict(MicrobanTeleopRlCfg)
         runner_cfg.update(
@@ -126,12 +153,12 @@ class TrainingProvenanceTest(unittest.TestCase):
         )
         env = SimpleNamespace(
             clip_actions=None,
-            unwrapped=SimpleNamespace(cfg=env_cfg, num_envs=4096),
+            unwrapped=SimpleNamespace(cfg=env_cfg, num_envs=2048),
         )
         manifest, digest = collect_training_provenance(
             env,
             runner_cfg,
-            training_contract_version="8",
+            training_contract_version="9",
             recipe_revision="recipe-test",
             actor_initialization="actor-test",
         )
@@ -143,7 +170,7 @@ class TrainingProvenanceTest(unittest.TestCase):
         validated = validate_training_provenance(
             manifest,
             digest,
-            expected_contract_version="8",
+            expected_contract_version="9",
             expected_recipe_revision="recipe-test",
             expected_actor_initialization="actor-test",
         )
@@ -154,7 +181,7 @@ class TrainingProvenanceTest(unittest.TestCase):
             validate_training_provenance(manifest, digest)
 
         forged_digest = canonical_json_sha256(manifest)
-        with self.assertRaisesRegex(ValueError, "canonical v8 stage config"):
+        with self.assertRaisesRegex(ValueError, "canonical v9 stage config"):
             validate_canonical_stage_critical_config(manifest)
         validate_training_provenance(manifest, forged_digest)
 
@@ -189,6 +216,9 @@ class TrainingProvenanceTest(unittest.TestCase):
                 "stage_target_boundary": 1500,
                 "parent_checkpoint_sha256": None,
                 "parent_gate_sha256": None,
+                "resume_source_checkpoint_path": None,
+                "resume_source_checkpoint_sha256": None,
+                "resume_source_checkpoint_iteration": None,
             },
         )
 
@@ -220,9 +250,110 @@ class TrainingProvenanceTest(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, environment, clear=False),
-            self.assertRaisesRegex(ValueError, "adjacent v8 boundary pair"),
+            self.assertRaisesRegex(ValueError, "adjacent v9 boundary pair"),
         ):
             self._collect()
+
+    def test_interrupted_initial_stage_inherits_only_checkpoint_safe_identity(
+        self,
+    ) -> None:
+        fresh_environment = {
+            "MICROBAN_TELEOP_PROVENANCE_MODE": (
+                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
+            ),
+            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "0",
+            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "1500",
+            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": "",
+            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "",
+        }
+        with patch.dict(os.environ, fresh_environment, clear=False):
+            loaded, _loaded_digest = self._collect()
+        resume_source = self.root / "model_499.pt"
+        resume_source.write_bytes(b"interrupted initial checkpoint")
+        resume_source_sha256 = hashlib.sha256(resume_source.read_bytes()).hexdigest()
+        resume_environment = {
+            **fresh_environment,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": (
+                resume_source_sha256
+            ),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "499",
+        }
+        with patch.dict(os.environ, resume_environment, clear=False):
+            current, _current_digest = self._collect(
+                runner_cfg=self._runner_cfg(
+                    resume=True,
+                    safe_velocity_checkpoint=None,
+                    safe_velocity_checkpoint_sha256=None,
+                    safe_velocity_acceptance_receipt=None,
+                )
+            )
+        bootstrap_info = {
+            "source_checkpoint_path": "/pinned/model_7.pt",
+            "source_checkpoint_sha256": "a" * 64,
+            "source_acceptance_receipt_path": "/pinned/acceptance.json",
+        }
+
+        inherited, digest = inherit_initial_stage_safe_velocity_identity(
+            current, loaded, bootstrap_info
+        )
+        self.assertEqual(digest, canonical_json_sha256(inherited))
+        self.assertEqual(
+            inherited["resolved_config"]["critical"][
+                "safe_velocity_checkpoint"
+            ],
+            "/pinned/model_7.pt",
+        )
+        self.assertIsNone(
+            inherited["resolved_config"]["runner"][
+                "safe_velocity_checkpoint"
+            ]
+        )
+        self.assertTrue(inherited["resolved_config"]["critical"]["resume"])
+        validate_canonical_stage_critical_config(inherited)
+
+        changed = deepcopy(loaded)
+        changed["resolved_config"]["critical"][
+            "safe_velocity_acceptance_receipt"
+        ] = "/pinned/different.json"
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            inherit_initial_stage_safe_velocity_identity(
+                current, changed, bootstrap_info
+            )
+
+    def test_later_stage_still_rejects_resupplied_safe_source(self) -> None:
+        resume_source = self.root / "model_1499.pt"
+        resume_source.write_bytes(b"boundary checkpoint")
+        resume_source_sha256 = hashlib.sha256(resume_source.read_bytes()).hexdigest()
+        environment = {
+            "MICROBAN_TELEOP_PROVENANCE_MODE": (
+                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
+            ),
+            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "1500",
+            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "3000",
+            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": resume_source_sha256,
+            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "c" * 64,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": (
+                resume_source_sha256
+            ),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "1499",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            valid, _digest = self._collect(
+                runner_cfg=self._runner_cfg(
+                    resume=True,
+                    safe_velocity_checkpoint=None,
+                    safe_velocity_checkpoint_sha256=None,
+                    safe_velocity_acceptance_receipt=None,
+                )
+            )
+            invalid, _invalid_digest = self._collect(
+                runner_cfg=self._runner_cfg(resume=True)
+            )
+        validate_canonical_stage_critical_config(valid)
+        with self.assertRaisesRegex(ValueError, "source bootstrap identity"):
+            validate_canonical_stage_critical_config(invalid)
 
 
 if __name__ == "__main__":

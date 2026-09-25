@@ -15,6 +15,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import onnx
@@ -24,6 +26,7 @@ from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
 from mjlab_microban.scripts import evaluate_teleop_checkpoint as teleop_evaluator
+from mjlab_microban.scripts import export_teleop_onnx as teleop_exporter
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_ACTOR_INITIALIZATION,
@@ -39,6 +42,27 @@ from mjlab_microban.tasks.microban_policy_export import (
     unique_teleop_onnx_temporary_path,
     validate_pytorch_onnx_parity,
 )
+from mjlab_microban.tasks.microban_safe_velocity_checkpoint import (
+    inspect_safe_velocity_checkpoint,
+)
+from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
+    microban_safe_velocity_action_delta_bounds,
+    microban_safe_velocity_initial_action_std,
+)
+from mjlab_microban.tasks.microban_safe_velocity_mdp import (
+    MICROBAN_SAFE_VELOCITY_RECIPE_INFO_KEY,
+    MICROBAN_SAFE_VELOCITY_RECIPE_REVISION,
+    MicrobanSafeVelocityBoundedGaussianDistribution,
+)
+from mjlab_microban.tasks.microban_teleop_bootstrap import (
+    SAFE_VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+    SAFE_VELOCITY_COPIED_DISTRIBUTION_KEYS,
+    SAFE_VELOCITY_NEW_TELEOP_OBSERVATION_COLUMNS,
+    SAFE_VELOCITY_TARGET_ACTOR_TOPOLOGY,
+    SafeVelocityActorBootstrapProvenance,
+    serialize_safe_velocity_actor_bootstrap_provenance,
+    validate_safe_velocity_acceptance_receipt,
+)
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     microban_teleop_action_delta_bounds,
     microban_teleop_initial_action_std,
@@ -47,6 +71,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     AsymmetricBoundedGaussianDistribution,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
+    MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
@@ -77,7 +102,172 @@ def _write_zero_policy(path: Path) -> None:
     onnx.save(helper.make_model(graph), path)
 
 
-def _write_generic_checkpoint(path: Path, *, iteration: int = 42) -> None:
+class ExportMetadataWiringTest(unittest.TestCase):
+    def test_only_acceptance_backed_export_materializes_final_stage_bounds(
+        self,
+    ) -> None:
+        raw_env = object()
+        checkpoint = Path("/logs/canonical_run/model_19999.pt")
+        for acceptance, expected in ((None, False), (object(), True)):
+            with (
+                self.subTest(acceptance=acceptance is not None),
+                patch.object(
+                    teleop_exporter,
+                    "get_microban_teleop_metadata",
+                    return_value={"marker": expected},
+                ) as collect,
+            ):
+                result = teleop_exporter._collect_export_metadata(
+                    raw_env,
+                    checkpoint,
+                    SimpleNamespace(acceptance=acceptance),
+                )
+                self.assertEqual(result, {"marker": expected})
+                collect.assert_called_once_with(
+                    raw_env,
+                    run_path="canonical_run",
+                    canonical_final_stage=expected,
+                )
+
+
+def _write_accepted_safe_source(root: Path) -> dict[str, object]:
+    safe_root = root / "accepted_safe_source"
+    safe_root.mkdir(exist_ok=True)
+    source_path = safe_root / "model_7.pt"
+    lower, upper = microban_safe_velocity_action_delta_bounds()
+    actor = MLPModel(
+        obs=TensorDict(
+            {"actor": torch.zeros((1, 63), dtype=torch.float32)},
+            batch_size=[1],
+        ),
+        obs_groups={"actor": ["actor"]},
+        obs_set="actor",
+        output_dim=18,
+        hidden_dims=(512, 256, 128),
+        activation="elu",
+        obs_normalization=False,
+        distribution_cfg={
+            "class_name": MicrobanSafeVelocityBoundedGaussianDistribution,
+            "init_std": microban_safe_velocity_initial_action_std(),
+            "lower_bound": lower,
+            "upper_bound": upper,
+            "std_type": "log",
+        },
+    )
+    torch.save(
+        {
+            "actor_state_dict": actor.state_dict(),
+            "iter": 7,
+            "infos": {
+                MICROBAN_SAFE_VELOCITY_RECIPE_INFO_KEY: (
+                    MICROBAN_SAFE_VELOCITY_RECIPE_REVISION
+                ),
+                "env_state": {"common_step_counter": 8 * 24},
+            },
+        },
+        source_path,
+    )
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    identity = inspect_safe_velocity_checkpoint(
+        source_path, expected_sha256=source_sha256
+    )
+    receipt_path = safe_root / "acceptance.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "gate": "microban_safe_velocity_fixed_forward_v3",
+                "checkpoint": {
+                    "path": str(identity.path),
+                    "sha256": identity.sha256,
+                    "iteration": identity.iteration,
+                    "checkpoint_schema_version": identity.schema_version,
+                    "recipe_revision": identity.recipe_revision,
+                    "actor_topology": list(identity.actor_topology),
+                    "actor_obs_normalization": identity.actor_obs_normalization,
+                    "observation_schema": [
+                        list(item) for item in identity.observation_schema
+                    ],
+                    "action_joint_names": list(identity.action_joint_names),
+                },
+                "configuration": {
+                    "device": "cuda:0",
+                    "num_envs": 64,
+                    "steps_requested": 200,
+                    "steps_executed": 200,
+                    "seed": 42,
+                    "command_vx_m_s": 0.08,
+                    "actual_command_exactly_verified_each_step": True,
+                    "step_dt_s": 0.02,
+                    "guard_lookahead_s": 0.12,
+                    "guard_margin_ratio": 0.05,
+                    "absolute_clip_max_tensor_error_rad": 0.0,
+                },
+                "thresholds": {
+                    "completion_fraction_min": 0.95,
+                    "fall_fraction_max": 0.0,
+                    "nonfinite_fraction_max": 0.0,
+                    "forward_velocity_p05_m_s_min": 0.01,
+                    "forward_displacement_p05_m_min": 0.02,
+                    "actual_soft_limit_violation_rad_max": 1.0e-6,
+                    "actual_lookahead_soft_limit_violation_rad_max": 1.0e-6,
+                    "target_clip_rad_max": 1.0e-7,
+                },
+                "metrics": {
+                    "completion_fraction": 1.0,
+                    "fall_fraction": 0.0,
+                    "nonfinite_fraction": 0.0,
+                    "forward_velocity_p05_m_s": 0.03,
+                    "forward_velocity_median_m_s": 0.03,
+                    "forward_displacement_p05_m": 0.03,
+                    "forward_displacement_median_m": 0.03,
+                    "maximum_actual_soft_limit_violation_rad": 0.0,
+                    "maximum_actual_lookahead_soft_limit_violation_rad": 0.0,
+                    "maximum_preferred_margin_lookahead_excess_rad": 0.0,
+                    "maximum_target_clip_rad": 0.0,
+                    "minimum_root_height_m": 0.2,
+                },
+                "checks": {
+                    name: True
+                    for name in (
+                        "completion",
+                        "no_falls",
+                        "finite",
+                        "forward_velocity",
+                        "forward_displacement",
+                        "actual_soft_limits",
+                        "actual_lookahead_soft_limits",
+                        "absolute_target_clip",
+                    )
+                },
+                "status": "pass",
+                "summary": {"passed": True, "failed_checks": []},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    acceptance = validate_safe_velocity_acceptance_receipt(receipt_path, identity)
+    return serialize_safe_velocity_actor_bootstrap_provenance(
+        SafeVelocityActorBootstrapProvenance(
+            source=identity,
+            acceptance_receipt=acceptance,
+            mapping_version=SAFE_VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+            target_actor_topology=SAFE_VELOCITY_TARGET_ACTOR_TOPOLOGY,
+            new_teleop_observation_columns=(
+                SAFE_VELOCITY_NEW_TELEOP_OBSERVATION_COLUMNS
+            ),
+            copied_distribution_keys=SAFE_VELOCITY_COPIED_DISTRIBUTION_KEYS,
+        )
+    )
+
+
+def _write_generic_checkpoint(
+    path: Path,
+    bootstrap_info: dict[str, object],
+    *,
+    iteration: int = 42,
+) -> None:
     files = {"src/mjlab_microban/test_recipe.py": "a" * 64}
     manifest = {
         "schema_version": MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
@@ -118,13 +308,16 @@ def _write_generic_checkpoint(path: Path, *, iteration: int = 42) -> None:
                 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
                     canonical_json_sha256(manifest)
                 ),
+                "safe_velocity_actor_bootstrap": bootstrap_info,
             },
         },
         path,
     )
 
 
-def _write_final_canonical_checkpoint(path: Path) -> None:
+def _write_final_canonical_checkpoint(
+    path: Path, bootstrap_info: dict[str, object]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     files = {"src/mjlab_microban/final_recipe.py": "b" * 64}
     manifest = {
@@ -135,7 +328,7 @@ def _write_final_canonical_checkpoint(path: Path) -> None:
         "actor_initialization": MICROBAN_TELEOP_ACTOR_INITIALIZATION,
         "resolved_config": {
             "critical": {
-                "num_envs": 4096,
+                "num_envs": 2048,
                 "environment_seed": 42,
                 "runner_seed": 42,
                 "num_steps_per_env": 24,
@@ -145,8 +338,12 @@ def _write_final_canonical_checkpoint(path: Path) -> None:
                 "logger": "tensorboard",
                 "upload_model": False,
                 "wrapper_clip_actions": None,
+                "checkpoint_consumer_mode": False,
                 "bootstrap_velocity_checkpoint": None,
                 "bootstrap_velocity_checkpoint_sha256": None,
+                "safe_velocity_checkpoint": None,
+                "safe_velocity_checkpoint_sha256": None,
+                "safe_velocity_acceptance_receipt": None,
                 "save_pristine_checkpoint": False,
             },
             "environment": {},
@@ -158,11 +355,14 @@ def _write_final_canonical_checkpoint(path: Path) -> None:
             "files": files,
         },
         "invocation": {
-            "mode": "canonical_v8_stage",
+            "mode": MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
             "stage_start_boundary": 18_000,
             "stage_target_boundary": 20_000,
             "parent_checkpoint_sha256": "c" * 64,
             "parent_gate_sha256": "d" * 64,
+            "resume_source_checkpoint_path": "/pinned/model_17999.pt",
+            "resume_source_checkpoint_sha256": "c" * 64,
+            "resume_source_checkpoint_iteration": 17_999,
         },
     }
     torch.save(
@@ -184,6 +384,7 @@ def _write_final_canonical_checkpoint(path: Path) -> None:
                 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
                     canonical_json_sha256(manifest)
                 ),
+                "safe_velocity_actor_bootstrap": bootstrap_info,
             },
         },
         path,
@@ -359,8 +560,9 @@ class ParityGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
+        self.bootstrap_info = _write_accepted_safe_source(self.root)
         self.checkpoint = self.root / "model_42.pt"
-        _write_generic_checkpoint(self.checkpoint)
+        _write_generic_checkpoint(self.checkpoint, self.bootstrap_info)
         self.temporary_onnx = self.root / ".policy.onnx.tmp"
         self.output_onnx = self.root / "policy.onnx"
 
@@ -401,8 +603,8 @@ class ParityGateTest(unittest.TestCase):
         second = self.root / "second" / "model_42.pt"
         first.parent.mkdir()
         second.parent.mkdir()
-        _write_generic_checkpoint(first)
-        _write_generic_checkpoint(second)
+        _write_generic_checkpoint(first, self.bootstrap_info)
+        _write_generic_checkpoint(second, self.bootstrap_info)
         selected = self.root / "selected" / "model_42.pt"
         selected.parent.mkdir()
         selected.symlink_to(first)
@@ -530,13 +732,25 @@ class ParityGateTest(unittest.TestCase):
             provenance.training.source_tree_sha256,
         )
         self.assertEqual(metadata["training_stage_start_boundary"], "none")
+        self.assertEqual(
+            metadata["safe_velocity_source_checkpoint_sha256"],
+            self.bootstrap_info["source_checkpoint_sha256"],
+        )
+        self.assertEqual(
+            metadata["safe_velocity_acceptance_receipt_sha256"],
+            self.bootstrap_info["source_acceptance_receipt_sha256"],
+        )
+        self.assertEqual(
+            metadata["safe_velocity_bootstrap_mapping_version"],
+            self.bootstrap_info["mapping_version"],
+        )
         self.assertEqual(metadata["deployment_accepted"], "false")
         self.assertEqual(metadata["acceptance_receipt_sha256"], "none")
 
     def test_final_receipt_is_verified_and_bound_into_onnx(self) -> None:
         run = self.root / "canonical_run"
         checkpoint = run / "model_19999.pt"
-        _write_final_canonical_checkpoint(checkpoint)
+        _write_final_canonical_checkpoint(checkpoint, self.bootstrap_info)
         unaccepted = collect_teleop_export_provenance(
             checkpoint, require_final_canonical_stage=True
         )
@@ -564,9 +778,20 @@ class ParityGateTest(unittest.TestCase):
             item.key: item.value for item in onnx.load(self.output_onnx).metadata_props
         }
         self.assertEqual(metadata["canonical_training_stage"], "true")
-        self.assertEqual(metadata["training_provenance_mode"], "canonical_v8_stage")
+        self.assertEqual(
+            metadata["training_provenance_mode"],
+            MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+        )
         self.assertEqual(metadata["training_stage_start_boundary"], "18000")
         self.assertEqual(metadata["training_stage_target_boundary"], "20000")
+        self.assertEqual(
+            metadata["training_resume_source_checkpoint_sha256"],
+            "c" * 64,
+        )
+        self.assertEqual(
+            metadata["training_resume_source_checkpoint_iteration"],
+            "17999",
+        )
         self.assertEqual(metadata["deployment_accepted"], "true")
         self.assertEqual(metadata["acceptance_receipt_schema_version"], "3")
         self.assertEqual(metadata["acceptance_status"], "pass")
@@ -590,7 +815,7 @@ class ParityGateTest(unittest.TestCase):
     def test_final_receipt_fails_closed_on_hashed_report_mutation(self) -> None:
         run = self.root / "canonical_run"
         checkpoint = run / "model_19999.pt"
-        _write_final_canonical_checkpoint(checkpoint)
+        _write_final_canonical_checkpoint(checkpoint, self.bootstrap_info)
         unaccepted = collect_teleop_export_provenance(checkpoint)
         receipt, reports = _write_final_acceptance_receipt(
             self.root,

@@ -64,8 +64,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
 _CHECKPOINT_RE = re.compile(r"^model_(?:(\d+)|(pristine))\.pt$")
-TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v8_1"
-TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v8_1"
+TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v9_1"
+TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v9_1"
 
 # These are the physical command limits applied by microban's central input
 # scaler and the final teleop-training curriculum.  Stationary yaw is wider
@@ -1967,6 +1967,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _construct_checkpoint_consumer_runner(env, agent_cfg, device: str):
+    """Construct the explicit actor-load-only runner used by this evaluator."""
+
+    agent_cfg.checkpoint_consumer_mode = True
+    runner_cls = load_runner_cls(TASK)
+    if runner_cls is None:
+        raise RuntimeError(f"No runner is registered for {TASK}")
+    return runner_cls(env, asdict(agent_cfg), device=device)
+
+
 def main() -> None:
     args = parse_args()
     scenarios = default_scenarios()
@@ -2062,8 +2072,9 @@ def main() -> None:
         elif "hmd_neck_target_motion" in active_event_names:
             raise RuntimeError("Nominal evaluator unexpectedly enabled HMD motion")
         validate_microban_teleop_observation_contract(raw_env)
-        runner_cls = load_runner_cls(TASK)
-        runner = runner_cls(wrapped_env, asdict(agent_cfg), device=args.device)
+        runner = _construct_checkpoint_consumer_runner(
+            wrapped_env, agent_cfg, args.device
+        )
         fingerprint_before = checkpoint_fingerprint(checkpoint)
         try:
             runner.load(

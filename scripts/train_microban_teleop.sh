@@ -9,14 +9,10 @@ usage() {
     cat <<'EOF'
 Usage:
   scripts/train_microban_teleop.sh smoke
-  scripts/train_microban_teleop.sh train [additional train options]
-  scripts/train_microban_teleop.sh resume RUN_NAME [additional train options]
 
-Environment overrides:
-  MICROBAN_TELEOP_NUM_ENVS      Parallel environments (default: 4096)
-  MICROBAN_TELEOP_TARGET_ITERS  Target total completed PPO iterations (default: 20000)
-  MICROBAN_TELEOP_SAVE_INTERVAL Checkpoint interval in iterations (default: 500)
-  MICROBAN_TELEOP_SEED          Environment/agent seed (default: 42)
+Direct train/resume modes are retired for contract v9. Use
+scripts/train_microban_teleop_v9.sh with an accepted safe-velocity source;
+that driver owns the 2048-environment canonical stages and gate lineage.
 
 The PPO rollout length is fixed at 24 steps per environment. The wrapper rejects
 --agent.num-steps-per-env in both space-separated and --option=value forms.
@@ -48,19 +44,12 @@ case "${mode}" in
             --device cuda:0 --num-envs 4 --steps 5
         ;;
     train)
-        shift
+        echo "Direct teleop training is retired; use scripts/train_microban_teleop_v9.sh start." >&2
+        exit 2
         ;;
     resume)
-        if (( $# < 2 )); then
-            usage >&2
-            exit 2
-        fi
-        run_name="$2"
-        if [[ ! "${run_name}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
-            echo "RUN_NAME must be one literal run directory name using only letters, digits, '_' and '-'." >&2
-            exit 2
-        fi
-        shift 2
+        echo "Direct teleop resume is retired; use scripts/train_microban_teleop_v9.sh resume RUN_NAME." >&2
+        exit 2
         ;;
     *)
         echo "Unknown mode: ${mode}" >&2

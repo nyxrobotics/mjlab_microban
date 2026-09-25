@@ -15,23 +15,31 @@ different retargeted clip.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
-from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
-from mjlab_microban.tasks.microban_tracking_mdp import controlled_motion_command
-
+from mjlab_microban.tasks.microban_policy_export import (
+    guarded_teleop_actor_raw_bounds,
+)
+from mjlab_microban.tasks.microban_tracking_mdp import (
+    MicrobanTrackingBoundedGaussianDistribution,
+    controlled_motion_command,
+    motion_anchor_planar_position_error_l1,
+    motion_anchor_planar_velocity_error_l1,
+)
 
 # Stable model/export contracts.  Retargeting must emit these exact orders.
 MICROBAN_JOINT_NAMES: tuple[str, ...] = (
@@ -85,6 +93,7 @@ MICROBAN_BODY_NAMES: tuple[str, ...] = (
 
 # HMD-driven neck joints never enter the body policy action or observation vectors.
 MICROBAN_BODY_JOINT_PATTERN = r"^(?!head$|neck_roll$|neck_pitch$).*$"
+MICROBAN_TRACKING_ACTION_JOINT_NAMES: tuple[str, ...] = MICROBAN_JOINT_NAMES[3:]
 
 # Absolute position-target limits for the 18 policy-controlled joints.  MjLab
 # shrinks each MJCF interval by the articulation's 0.9 soft-limit factor about
@@ -145,8 +154,64 @@ MICROBAN_END_EFFECTOR_BODY_NAMES: tuple[str, ...] = (
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MICROBAN_TRACKING_MOTION_FILE = (
-    _REPOSITORY_ROOT / "data" / "motions" / "microban_twist2.npz"
+    _REPOSITORY_ROOT
+    / "data"
+    / "motions"
+    / "microban_twist2_walk004_locomotion_prior.npz"
 )
+
+# The approved candidate has 268 samples at the 50 Hz policy rate.  MjLab's
+# initial reset advances MotionCommand from frame 0 to frame 1 before the first
+# policy observation, so an active episode contains exactly frames 1..267: 267
+# steps.  Stopping there prevents MotionCommand's end-of-clip state teleport
+# from entering the rollout and prevents a stationary policy from appearing to
+# survive an arbitrarily long episode.
+MICROBAN_TRACKING_CLIP_FRAME_COUNT = 268
+MICROBAN_TRACKING_POLICY_HZ = 50.0
+MICROBAN_TRACKING_CLIP_STEP_COUNT = MICROBAN_TRACKING_CLIP_FRAME_COUNT - 1
+MICROBAN_TRACKING_CLIP_DURATION_S = (
+    MICROBAN_TRACKING_CLIP_STEP_COUNT / MICROBAN_TRACKING_POLICY_HZ
+)
+
+
+def microban_tracking_action_delta_bounds() -> tuple[
+    tuple[float, ...], tuple[float, ...]
+]:
+    """Return guarded raw-delta bounds in the 18-action tracking order."""
+
+    defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
+    ordered_defaults = tuple(
+        float(defaults[name]) for name in MICROBAN_TRACKING_ACTION_JOINT_NAMES
+    )
+    ordered_lower = tuple(
+        MICROBAN_BODY_JOINT_SOFT_LIMITS[name][0]
+        for name in MICROBAN_TRACKING_ACTION_JOINT_NAMES
+    )
+    ordered_upper = tuple(
+        MICROBAN_BODY_JOINT_SOFT_LIMITS[name][1]
+        for name in MICROBAN_TRACKING_ACTION_JOINT_NAMES
+    )
+    return guarded_teleop_actor_raw_bounds(
+        ordered_defaults,
+        ordered_lower,
+        ordered_upper,
+        (1.0,) * len(MICROBAN_TRACKING_ACTION_JOINT_NAMES),
+    )
+
+
+def microban_tracking_initial_action_std() -> tuple[float, ...]:
+    """Return conservative per-joint latent exploration widths."""
+
+    defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
+    values: list[float] = []
+    for name in MICROBAN_TRACKING_ACTION_JOINT_NAMES:
+        lower, upper = MICROBAN_BODY_JOINT_SOFT_LIMITS[name]
+        default = float(defaults[name])
+        headroom = min(default - lower, upper - default)
+        if not math.isfinite(headroom) or headroom <= 0.0:
+            raise ValueError(f"{name} home pose is outside its action clip")
+        values.append(headroom / 3.0 if "shoulder_roll" in name else 0.15)
+    return tuple(values)
 
 
 def _motion_path(motion_file: str | Path | None) -> str:
@@ -255,7 +320,22 @@ def make_microban_tracking_env_cfg(
 
     # Position tolerances are scaled for a roughly 30 cm robot, rather than the
     # generic adult-size humanoid defaults.
-    cfg.rewards["motion_global_root_pos"].params["std"] = 0.05
+    # A 5 cm kernel saturated after the robot fell a few body lengths behind
+    # and produced a stable-but-stationary local optimum.  The wider kernel and
+    # two non-vanishing L1 terms keep forward displacement and velocity visible
+    # to PPO over the complete 0.41 m reference clip.
+    cfg.rewards["motion_global_root_pos"].params["std"] = 0.20
+    cfg.rewards["motion_global_root_pos"].weight = 2.0
+    cfg.rewards["motion_anchor_planar_position_l1"] = RewardTermCfg(
+        func=motion_anchor_planar_position_error_l1,
+        weight=-2.0,
+        params={"command_name": "motion"},
+    )
+    cfg.rewards["motion_anchor_planar_velocity_l1"] = RewardTermCfg(
+        func=motion_anchor_planar_velocity_error_l1,
+        weight=-4.0,
+        params={"command_name": "motion"},
+    )
     cfg.rewards["motion_body_pos"].params["std"] = 0.04
     cfg.rewards["motion_body_lin_vel"].params["std"] = 0.5
     cfg.rewards["motion_body_ang_vel"].params["std"] = 2.0
@@ -272,8 +352,14 @@ def make_microban_tracking_env_cfg(
     cfg.viewer.body_name = "trunk"
     cfg.viewer.distance = 1.2
     cfg.viewer.fovy = 55.0
-    cfg.sim.nconmax = 128
-    cfg.sim.njmax = 512
+    # A fallen Microban can exceed 240 simultaneous contacts.  The previous
+    # 128/512 capacities overflowed during rejection-gate rollouts, which can
+    # silently drop contacts and make a failed policy look different from the
+    # simulated dynamics it is meant to be judged under.
+    cfg.sim.nconmax = 512
+    cfg.sim.njmax = 2048
+    cfg.episode_length_s = MICROBAN_TRACKING_CLIP_DURATION_S
+    cfg.is_finite_horizon = True
 
     if play:
         cfg.episode_length_s = int(1e9)
@@ -291,11 +377,19 @@ MicrobanTrackingRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
-        obs_normalization=True,
+        # RSL-RL updates this normalizer after every collected step, but stores
+        # each step's old log probability before that update.  Recomputing all
+        # 24 steps with the final normalizer made the very first PPO ratio
+        # inconsistent even before a weight update (surrogate +0.23).  The
+        # 99-value tracking observation is already physically scaled, so keep
+        # actor inputs raw and retain normalization only for the critic.
+        obs_normalization=False,
         distribution_cfg={
-            "class_name": "GaussianDistribution",
-            "init_std": 1.0,
-            "std_type": "scalar",
+            "class_name": MicrobanTrackingBoundedGaussianDistribution,
+            "init_std": microban_tracking_initial_action_std(),
+            "lower_bound": microban_tracking_action_delta_bounds()[0],
+            "upper_bound": microban_tracking_action_delta_bounds()[1],
+            "std_type": "log",
         },
     ),
     critic=RslRlModelCfg(
@@ -304,13 +398,20 @@ MicrobanTrackingRlCfg = RslRlOnPolicyRunnerCfg(
         obs_normalization=True,
     ),
     algorithm=RslRlPpoAlgorithmCfg(
+        class_name=(
+            "mjlab_microban.tasks.microban_tracking_mdp:MicrobanTrackingBoundedPPO"
+        ),
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=5,
+        entropy_coef=0.0,
+        # Production-width one-update diagnostics with actor normalization
+        # enabled crossed the trust region before the first optimizer step.
+        # With raw actor inputs, 3e-5/3 epochs keeps the initial surrogate near
+        # zero while still allowing the adaptive scheduler to grow the rate.
+        num_learning_epochs=3,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
+        learning_rate=3.0e-5,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,

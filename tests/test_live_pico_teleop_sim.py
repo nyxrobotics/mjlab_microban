@@ -25,10 +25,10 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     SimulationCommand,
     WebXrSimulationMapper,
     WebXrSimulationSource,
-    _NativeServerThread,
     _default_native_config,
     _legacy_body_joint_indices,
     _legacy_walk_adapters,
+    _NativeServerThread,
     _patch_command_observation,
     _walk_actor_observation,
     build_parser,
@@ -362,7 +362,7 @@ class ObservationPatchTests(unittest.TestCase):
         walk_scale = torch.ones((1, 18))
         main_offset = torch.zeros((1, 18))
         walk_offset = torch.zeros((1, 18))
-        shoulder_pitch = math.radians(10.0)
+        shoulder_pitch = math.radians(0.0)
         main_offset[:, [0, 9]] = shoulder_pitch
         position_offset, output_scale, output_offset = _legacy_walk_adapters(
             main_scale, main_offset, walk_scale, walk_offset

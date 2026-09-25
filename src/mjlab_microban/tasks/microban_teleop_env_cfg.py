@@ -15,10 +15,8 @@ privileged simulation state may still be used by the critic during training.
 
 from __future__ import annotations
 
-import math
 from copy import deepcopy
 from dataclasses import MISSING, dataclass, fields
-from xml.etree import ElementTree
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -27,14 +25,12 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microban.robot.microban_constants import (
     MICROBAN_ROBOT_CFG,
-    MICROBAN_XML,
 )
 from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotationCfg,
@@ -51,9 +47,7 @@ from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_SHA256,
     LocomotionPriorCommandCfg,
     locomotion_prior_action_target_error_exp,
-    locomotion_prior_clip_finished,
     locomotion_prior_joint_position_error_exp,
-    set_locomotion_prior_enabled,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -65,15 +59,18 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     guarded_teleop_actor_raw_bounds,
+)
+from mjlab_microban.tasks.microban_safe_velocity_mdp import (
+    MicrobanSafeVelocityBoundedGaussianDistribution,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RETARGET_INTERVAL_S,
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
-    AsymmetricBoundedGaussianDistribution,
     HmdNeckTargetMotion,
     ResetFixedFootTargetCommandCfg,
     ResetFixedHandTargetCommandCfg,
@@ -86,6 +83,9 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
 )
+from mjlab_microban.tasks.microban_tracking_env_cfg import (
+    MICROBAN_BODY_JOINT_SOFT_LIMITS,
+)
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     make_microban_velocity_env_cfg,
 )
@@ -95,42 +95,12 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
 class MicrobanTeleopPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """PPO settings plus the finite privileged locomotion-teacher contract."""
 
-    locomotion_prior_bc_coefficient: float = 0.5
+    locomotion_prior_bc_forward_coefficient: float = 0.0
+    locomotion_prior_bc_neutral_leg_coefficient: float = 0.0
+    locomotion_prior_bc_arm_home_coefficient: float = 0.0
     locomotion_prior_bc_error_scale_rad: float = 0.15
     locomotion_prior_bc_chunks: int = 4
     locomotion_prior_bc_max_target_projection_rad: float = 1.0e-3
-    locomotion_prior_bc_neutral_anchor_relative_weight: float = 1.0
-
-
-def _microban_soft_joint_position_clip() -> dict[str, tuple[float, float]]:
-    """Derive action target clips with Entity's soft-limit formula.
-
-    Keeping this derived from the model XML prevents the task and robot limits
-    from drifting apart.  ``JointPositionAction`` applies the clip after adding
-    the default-pose offset, so these are absolute target-position limits.
-    """
-
-    articulation = MICROBAN_ROBOT_CFG.articulation
-    if articulation is None:
-        raise ValueError("Microban must be configured as an articulation")
-    factor = articulation.soft_joint_pos_limit_factor
-
-    ranges: dict[str, tuple[float, float]] = {}
-    root = ElementTree.parse(MICROBAN_XML).getroot()
-    for joint in root.iter("joint"):
-        name = joint.get("name")
-        raw_range = joint.get("range")
-        if name is None or raw_range is None:
-            continue
-        lower, upper = (float(value) for value in raw_range.split())
-        midpoint = 0.5 * (lower + upper)
-        half_range = 0.5 * (upper - lower) * factor
-        ranges[name] = (midpoint - half_range, midpoint + half_range)
-
-    missing = set(MICROBAN_TELEOP_ACTION_JOINT_NAMES) - ranges.keys()
-    if missing:
-        raise ValueError(f"Missing Microban joint ranges: {sorted(missing)}")
-    return {name: ranges[name] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES}
 
 
 MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
@@ -231,48 +201,29 @@ MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES = {
     "yaw_right": 0.0,
     "mixed": 0.0,
 }
-MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES = {
-    "standing": 0.10,
-    "forward": 0.30,
-    "backward": 0.12,
-    "lateral_left": 0.12,
-    "lateral_right": 0.12,
-    "yaw_left": 0.12,
-    "yaw_right": 0.12,
-    "mixed": 0.0,
-}
 MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES = {
     **MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     "forward": MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S,
 }
-MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT = 2.0
-MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT = 1.0
+MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT = 0.0
+MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT = 0.0
 MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD = 0.15
 
 
 def microban_teleop_initial_action_std() -> tuple[float, ...]:
-    """Return ordered bounded-latent exploration widths.
+    """Match the dedicated bounded safe-velocity actor's initial widths."""
 
-    Contract v7 inherited direct-action Gaussian widths, which restricted most
-    joints to narrow latent widths and converged to a stationary local optimum.
-    The v8 actor is physically bounded after sampling, so all joints except the
-    asymmetric shoulder-roll axes start at 1.0 latent standard deviation.  The
-    shoulder-roll widths remain one third of their one-degree physical
-    headroom and also satisfy the tighter operational-envelope cap.
-    """
-
-    defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
-    defaults["left_shoulder_pitch"] = math.radians(10.0)
-    defaults["right_shoulder_pitch"] = math.radians(10.0)
-    clips = _microban_soft_joint_position_clip()
+    lower, upper = microban_teleop_action_delta_bounds()
     values: list[float] = []
-    for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES:
-        lower, upper = clips[name]
-        default = float(defaults[name])
-        headroom = min(default - lower, upper - default)
-        if headroom <= 0.0:
-            raise ValueError(f"{name} home pose is outside its action clip")
-        values.append(headroom / 3.0 if "shoulder_roll" in name else 1.0)
+    for name, lower_value, upper_value in zip(
+        MICROBAN_TELEOP_ACTION_JOINT_NAMES, lower, upper, strict=True
+    ):
+        if "shoulder_roll" in name:
+            values.append(min(-lower_value, upper_value) * 1024.0 / 18.0)
+        elif "shoulder" in name or "elbow" in name:
+            values.append(0.05)
+        else:
+            values.append(0.08)
     return tuple(values)
 
 
@@ -289,14 +240,17 @@ def microban_teleop_action_delta_bounds() -> tuple[
     """
 
     defaults = dict(MICROBAN_ROBOT_CFG.init_state.joint_pos or {})
-    defaults["left_shoulder_pitch"] = math.radians(10.0)
-    defaults["right_shoulder_pitch"] = math.radians(10.0)
-    clips = _microban_soft_joint_position_clip()
     ordered_defaults = tuple(
         float(defaults[name]) for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES
     )
-    ordered_lower = tuple(clips[name][0] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-    ordered_upper = tuple(clips[name][1] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+    ordered_lower = tuple(
+        MICROBAN_BODY_JOINT_SOFT_LIMITS[name][0]
+        for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES
+    )
+    ordered_upper = tuple(
+        MICROBAN_BODY_JOINT_SOFT_LIMITS[name][1]
+        for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES
+    )
     return guarded_teleop_actor_raw_bounds(
         ordered_defaults,
         ordered_lower,
@@ -397,6 +351,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Reuse the validated locomotion dynamics/rewards without mutating the
     # deployed velocity configuration object.
     cfg = make_microban_velocity_env_cfg(play=play)
+    # Rejected fall rollouts reached 248 contacts / 513 constraints.  Reserve
+    # enough capacity to simulate the failure faithfully instead of silently
+    # dropping contacts or constraints at the moment the policy is least stable.
+    cfg.sim.nconmax = 512
+    cfg.sim.njmax = 2048
 
     # Materialize the velocity task's runtime-only rotation extensions as a
     # proper dataclass before this config crosses the registry/Tyro CLI boundary.
@@ -416,9 +375,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rotation_env_ang_vel_range = (
             MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE["rotation_ang_vel_z"]
         )
-        # V8i first uses the exact speed range represented by the retargeted
-        # forward clip.  Update 500 introduces every signed axis while the
-        # imitation blend fades; update 1000 restores the original v8g sampler.
+        # Contract v9 starts inside the velocity range certified by the accepted
+        # safe-source gate. At update 500 it expands to signed isolated axes.
         initial_twist.signed_axis_probabilities = deepcopy(
             MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES
         )
@@ -432,16 +390,14 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rel_world_envs = 0.0
         initial_twist.init_velocity_prob = 0.0
 
-    # The current control runtime's NEUTRAL_POSE constant uses +10 degrees for
-    # both shoulder-pitch joints.  This is a provisional software-contract match,
-    # not a measured physical calibration or a claim about which task predates
-    # another.  Keep the override local to this task so the deployed/get-up tasks
-    # remain untouched.
+    # Use the shared robot HOME exactly: shoulder pitch 0 degrees, asymmetric
+    # shoulder roll -10/+10 degrees, and elbows -20 degrees.  This is a software
+    # command convention; it is not presented as a measured hardware zero.
     teleop_joint_pos = cfg.scene.entities["robot"].init_state.joint_pos
     if teleop_joint_pos is None:
         raise ValueError("Microban teleop requires an explicit initial joint pose")
-    teleop_joint_pos["left_shoulder_pitch"] = math.radians(10.0)
-    teleop_joint_pos["right_shoulder_pitch"] = math.radians(10.0)
+    teleop_joint_pos["left_shoulder_pitch"] = 0.0
+    teleop_joint_pos["right_shoulder_pitch"] = 0.0
 
     # Head yaw + two neck axes are owned by the HMD controller.  Exact names make
     # accidental action-space growth fail loudly in the smoke test/exporter.
@@ -450,7 +406,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         raise TypeError("Expected velocity base task to use JointPositionActionCfg")
     action.actuator_names = MICROBAN_TELEOP_ACTION_JOINT_NAMES
     action.scale = 1.0
-    action.clip = _microban_soft_joint_position_clip()
+    action.clip = MICROBAN_BODY_JOINT_SOFT_LIMITS
 
     if not play:
         # The real HMD controller owns these joints independently of the policy.
@@ -646,7 +602,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         resampling_time_range=(1.0e9, 1.0e9),
         motion_file=str(MICROBAN_LOCOMOTION_PRIOR_PATH),
         expected_sha256=MICROBAN_LOCOMOTION_PRIOR_SHA256,
-        enabled=not play,
+        # Retain the 39-wide critic term for checkpoint topology stability, but
+        # never activate the dynamically rejected walk004 reference.
+        enabled=False,
     )
     cfg.observations["critic"].terms["locomotion_prior"] = ObservationTermCfg(
         func=velocity_mdp.generated_commands,
@@ -669,16 +627,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "std": MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
         },
     )
-    cfg.terminations["locomotion_prior_clip_finished"] = TerminationTermCfg(
-        func=locomotion_prior_clip_finished,
-        params={"command_name": "locomotion_prior"},
-    )
+    cfg.terminations.pop("locomotion_prior_clip_finished", None)
 
-    # V8i uses a short privileged gait prior/direct teacher, then acquires one
-    # signed axis at a
-    # time before introducing mixed commands.  The first two stages are internal
-    # to the existing 1,500-update external gate: at 500 the prior starts fading
-    # while non-forward commands appear, and at 1,000 it is permanently disabled.
+    # V9 never applies the dynamically rejected walk004 prior or direct BC.
+    # The first stage changes only the command sampler, then acquires one signed
+    # axis at a time before introducing mixed commands.
     # Checkpoints at 1500/3000/4500/6000/8000 are external capability gates;
     # the reproducible wrapper stops at each boundary and resumes only after the
     # fixed signed-axis evaluator passes.  Limb tracking is deliberately delayed
@@ -689,49 +642,22 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "stages": [
                     {
-                        "name": "fade locomotion prior and introduce signed axes",
+                        "name": "expand from safe-source forward to signed axes",
                         "step": 500 * 24,
                         "apply": lambda env: _set_teleop_locomotion_stage(
                             env,
                             envelope=MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
                             signed_axis_ranges=(
-                                MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES
+                                MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
                             ),
                             signed_axis_probabilities=(
-                                MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES
+                                MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
                             ),
                             linear_tracking_std=(
                                 MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S
                             ),
                             angular_tracking_std=(
                                 MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S
-                            ),
-                        ),
-                    },
-                    {
-                        "name": "disable locomotion prior and restore v8g sampler",
-                        "step": 1000 * 24,
-                        "apply": lambda env: (
-                            _set_teleop_locomotion_stage(
-                                env,
-                                envelope=MICROBAN_TELEOP_INITIAL_VELOCITY_ENVELOPE,
-                                signed_axis_ranges=(
-                                    MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
-                                ),
-                                signed_axis_probabilities=(
-                                    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
-                                ),
-                                linear_tracking_std=(
-                                    MICROBAN_TELEOP_INITIAL_LINEAR_TRACKING_STD_M_S
-                                ),
-                                angular_tracking_std=(
-                                    MICROBAN_TELEOP_INITIAL_ANGULAR_TRACKING_STD_RAD_S
-                                ),
-                            ),
-                            set_locomotion_prior_enabled(
-                                env,
-                                command_name="locomotion_prior",
-                                enabled=False,
                             ),
                         ),
                     },
@@ -903,7 +829,10 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                             ),
                             env.command_manager.get_term_cfg("foot_target").__setattr__(
                                 "both_feet_lift_height_range",
-                                (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
+                                (
+                                    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+                                    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
+                                ),
                             ),
                         ),
                     },
@@ -925,10 +854,15 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 @dataclass
 class MicrobanTeleopRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Runner config retaining retired bootstrap fields for fail-closed parsing."""
+    """Contract-v9 runner config for one pinned safe-velocity source."""
 
-    bootstrap_velocity_checkpoint: str | None = None
-    bootstrap_velocity_checkpoint_sha256: str | None = None
+    # This is an intentionally separate constructor path for tools that create a
+    # blank policy and immediately load a validated checkpoint actor.  It must
+    # never be enabled by a training launch.
+    checkpoint_consumer_mode: bool = False
+    safe_velocity_checkpoint: str | None = None
+    safe_velocity_checkpoint_sha256: str | None = None
+    safe_velocity_acceptance_receipt: str | None = None
     save_pristine_checkpoint: bool = False
 
 
@@ -936,9 +870,11 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
-        obs_normalization=True,
+        # Match the source actor and avoid changing coordinates between PPO
+        # rollout collection and old-log-probability evaluation.
+        obs_normalization=False,
         distribution_cfg={
-            "class_name": AsymmetricBoundedGaussianDistribution,
+            "class_name": MicrobanSafeVelocityBoundedGaussianDistribution,
             "init_std": microban_teleop_initial_action_std(),
             "lower_bound": microban_teleop_action_delta_bounds()[0],
             "upper_bound": microban_teleop_action_delta_bounds()[1],
@@ -964,7 +900,7 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.0,
         # Three passes keep the first production-width update inside the policy
         # trust region.  Five passes at both 1e-3 and 3e-4 drove the adaptive
         # schedule directly to its 1e-5 floor and yielded a neutral actor that
@@ -974,9 +910,9 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         # Production-width one-update diagnostics at both 1e-3 and 3e-4
         # overshot the KL target, drove the adaptive scheduler straight to 1e-5
         # and produced neutral policies that fell after roughly two seconds.
-        # V8 keeps the safer v7 starting rate while retaining adaptive
-        # scheduling plus the new signed-command curriculum, wider bounded
-        # exploration and nonzero entropy that address v7's stationary optimum.
+        # V8 keeps the safer v7 starting rate and adaptive scheduling.  V8j
+        # removes the entropy incentive because the bounded std still grew
+        # while the actor converged to the stationary local optimum.
         learning_rate=1.0e-4,
         schedule="adaptive",
         gamma=0.99,

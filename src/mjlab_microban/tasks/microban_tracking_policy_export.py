@@ -42,7 +42,6 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_JOINT_NAMES
 
-
 TRACKING_ONNX_OUTPUT_NAMES: tuple[str, ...] = (
     "actions",
     "joint_pos",
@@ -114,18 +113,10 @@ def validate_microban_tracking_onnx(
         )
 
     _require_trailing_shape(outputs["actions"], (expected_action_count,))
-    _require_trailing_shape(
-        outputs["joint_pos"], (expected_reference_joint_count,)
-    )
-    _require_trailing_shape(
-        outputs["joint_vel"], (expected_reference_joint_count,)
-    )
-    _require_trailing_shape(
-        outputs["body_pos_w"], (expected_reference_body_count, 3)
-    )
-    _require_trailing_shape(
-        outputs["body_quat_w"], (expected_reference_body_count, 4)
-    )
+    _require_trailing_shape(outputs["joint_pos"], (expected_reference_joint_count,))
+    _require_trailing_shape(outputs["joint_vel"], (expected_reference_joint_count,))
+    _require_trailing_shape(outputs["body_pos_w"], (expected_reference_body_count, 3))
+    _require_trailing_shape(outputs["body_quat_w"], (expected_reference_body_count, 4))
     _require_trailing_shape(
         outputs["body_lin_vel_w"], (expected_reference_body_count, 3)
     )
@@ -175,8 +166,7 @@ def get_microban_tracking_metadata(
 
     action_joint_ids = action.target_ids.detach().cpu().tolist()
     joint_name_to_ctrl_id = {
-        actuator.target.split("/")[-1]: actuator.id
-        for actuator in robot.spec.actuators
+        actuator.target.split("/")[-1]: actuator.id for actuator in robot.spec.actuators
     }
     ctrl_ids = [joint_name_to_ctrl_id[name] for name in action_joint_names]
     stiffness = env.sim.mj_model.actuator_gainprm[ctrl_ids, 0].tolist()
@@ -217,6 +207,30 @@ class MicrobanTrackingOnPolicyRunner(MotionTrackingOnPolicyRunner):
 
     env: RslRlVecEnvWrapper
 
+    def learn(
+        self,
+        num_learning_iterations: int,
+        init_at_random_ep_len: bool = False,
+    ) -> None:
+        """Train from a synchronized clip boundary in every environment.
+
+        MjLab's generic CLI passes ``init_at_random_ep_len=True`` to every task.
+        That randomizes only the episode counters, not MotionCommand's frame,
+        and therefore injects artificial early timeouts into this finite,
+        start-aligned clip.  The tracking contract deliberately ignores that
+        generic flag and starts every environment at the same boundary.
+        """
+
+        if init_at_random_ep_len:
+            print(
+                "[INFO] Microban tracking disables random initial episode "
+                "lengths for synchronized one-clip training"
+            )
+        return super().learn(
+            num_learning_iterations=num_learning_iterations,
+            init_at_random_ep_len=False,
+        )
+
     def save(self, path: str, infos=None) -> None:
         # Bypass MotionTrackingOnPolicyRunner.save(), whose generic metadata maps
         # every robot joint onto an 18-wide action tensor.  The direct parent
@@ -254,7 +268,7 @@ class MicrobanTrackingOnPolicyRunner(MotionTrackingOnPolicyRunner):
                 if self.registry_name is not None:
                     wandb.run.use_artifact(self.registry_name)
                     self.registry_name = None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- export failure must not stop training.
             # Never leave a partially exported or ambiguously described model
             # where deployment tooling could pick it up.
             temporary_path.unlink(missing_ok=True)

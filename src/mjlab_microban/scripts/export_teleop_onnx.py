@@ -35,6 +35,29 @@ TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
 
 
+def _construct_checkpoint_consumer_runner(env, agent_cfg, device: str):
+    """Construct the explicit actor-load-only runner used by this exporter."""
+
+    agent_cfg.checkpoint_consumer_mode = True
+    runner_cls = load_runner_cls(TASK)
+    if runner_cls is None:
+        raise RuntimeError(f"No runner is registered for {TASK}")
+    return runner_cls(env, asdict(agent_cfg), device=device)
+
+
+def _collect_export_metadata(raw_env, checkpoint: Path, provenance):
+    """Collect diagnostic or final-stage metadata from the play environment."""
+
+    return get_microban_teleop_metadata(
+        raw_env,
+        run_path=checkpoint.parent.name,
+        # The export environment is play=True and has no curriculum manager.
+        # Only an acceptance-backed final artifact may advertise the final
+        # simultaneous-foot command support.
+        canonical_final_stage=provenance.acceptance is not None,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -54,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Schema-3 final v8 gate receipt. When omitted the ONNX is explicitly "
+            "Schema-3 final v9 gate receipt. When omitted the ONNX is explicitly "
             "marked deployment_accepted=false."
         ),
     )
@@ -93,8 +116,9 @@ def main() -> None:
     env = RslRlVecEnvWrapper(raw_env)
 
     try:
-        runner_cls = load_runner_cls(TASK)
-        runner = runner_cls(env, asdict(agent_cfg), device=args.device)
+        runner = _construct_checkpoint_consumer_runner(
+            env, agent_cfg, args.device
+        )
         runner.load(
             str(checkpoint),
             load_cfg={"actor": True},
@@ -108,9 +132,7 @@ def main() -> None:
             runner.export_policy_to_onnx(
                 str(temporary_output.parent), temporary_output.name
             )
-            metadata = get_microban_teleop_metadata(
-                raw_env, run_path=checkpoint.parent.name
-            )
+            metadata = _collect_export_metadata(raw_env, checkpoint, provenance)
             parity = publish_gated_teleop_onnx(
                 temporary_output,
                 args.output,

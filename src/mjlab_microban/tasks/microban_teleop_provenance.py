@@ -23,6 +23,7 @@ import json
 import math
 import os
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from enum import Enum
 from itertools import pairwise
 from pathlib import Path
@@ -32,7 +33,7 @@ import numpy as np
 import torch
 
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 1
-MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v8_stage"
+MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v9_stage"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY = "microban_teleop_training_provenance"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
     "microban_teleop_training_provenance_sha256"
@@ -57,6 +58,14 @@ _CANONICAL_STAGE_ENV_NAMES = (
     "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY",
     "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256",
     "MICROBAN_TELEOP_PARENT_GATE_SHA256",
+    "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH",
+    "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256",
+    "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION",
+)
+_SAFE_VELOCITY_IDENTITY_FIELDS = (
+    "safe_velocity_checkpoint",
+    "safe_velocity_checkpoint_sha256",
+    "safe_velocity_acceptance_receipt",
 )
 
 
@@ -200,6 +209,98 @@ def canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def inherit_initial_stage_safe_velocity_identity(
+    current_manifest: object,
+    loaded_manifest: object,
+    bootstrap_info: object,
+) -> tuple[dict, str]:
+    """Restore a pinned safe-source identity on an interrupted initial resume.
+
+    The canonical wrapper intentionally does not put mutable bootstrap paths back
+    on a resume command line.  Consequently, the runner's provisional manifest
+    has ``None`` for the three safe-source fields until it has authenticated the
+    teleop checkpoint being resumed.  Copy only those fields from that checkpoint
+    and require them to agree exactly with its independently validated bootstrap
+    record.  All other resolved current-process config remains untouched.
+    """
+
+    manifests: list[tuple[str, dict]] = []
+    for label, value in (
+        ("current", current_manifest),
+        ("loaded", loaded_manifest),
+    ):
+        if not isinstance(value, dict):
+            raise TypeError(f"{label.title()} training provenance must be a dictionary")
+        if value.get("canonical_stage") is not True:
+            raise ValueError(
+                f"{label.title()} training provenance is not a canonical stage"
+            )
+        invocation = value.get("invocation")
+        if not isinstance(invocation, dict):
+            raise TypeError(
+                f"{label.title()} training provenance invocation is malformed"
+            )
+        if (
+            invocation.get("stage_start_boundary") != 0
+            or invocation.get("stage_target_boundary") != 1500
+            or invocation.get("parent_checkpoint_sha256") is not None
+            or invocation.get("parent_gate_sha256") is not None
+        ):
+            raise ValueError(
+                "Safe-source inheritance is valid only within canonical stage "
+                "0->1500 with null parents"
+            )
+        resolved = value.get("resolved_config")
+        critical = resolved.get("critical") if isinstance(resolved, dict) else None
+        if not isinstance(critical, dict):
+            raise TypeError(
+                f"{label.title()} training provenance critical config is malformed"
+            )
+        manifests.append((label, critical))
+
+    if not isinstance(bootstrap_info, dict):
+        raise TypeError("Loaded safe-velocity bootstrap info must be a dictionary")
+    expected = {
+        "safe_velocity_checkpoint": bootstrap_info.get("source_checkpoint_path"),
+        "safe_velocity_checkpoint_sha256": bootstrap_info.get(
+            "source_checkpoint_sha256"
+        ),
+        "safe_velocity_acceptance_receipt": bootstrap_info.get(
+            "source_acceptance_receipt_path"
+        ),
+    }
+    if any(not isinstance(value, str) or not value for value in expected.values()):
+        raise ValueError("Loaded safe-velocity bootstrap identity is incomplete")
+
+    current_critical = manifests[0][1]
+    loaded_critical = manifests[1][1]
+    current_values = {
+        name: current_critical.get(name) for name in _SAFE_VELOCITY_IDENTITY_FIELDS
+    }
+    if any(value is not None for value in current_values.values()):
+        raise ValueError(
+            "Interrupted initial-stage resume must inherit its safe source from "
+            "the checkpoint, not from mutable runner arguments"
+        )
+    loaded_values = {
+        name: loaded_critical.get(name) for name in _SAFE_VELOCITY_IDENTITY_FIELDS
+    }
+    if loaded_values != expected:
+        mismatches = [
+            name
+            for name in _SAFE_VELOCITY_IDENTITY_FIELDS
+            if loaded_values[name] != expected[name]
+        ]
+        raise ValueError(
+            "Loaded initial-stage safe-source provenance disagrees with its "
+            "validated bootstrap record: " + ", ".join(mismatches)
+        )
+
+    inherited = deepcopy(current_manifest)
+    inherited["resolved_config"]["critical"].update(expected)
+    return inherited, canonical_json_sha256(inherited)
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -210,14 +311,17 @@ def collect_training_source_manifest(project_root: str | Path | None = None) -> 
     root = Path(project_root).resolve() if project_root is not None else _project_root()
     candidates = set((root / "src" / "mjlab_microban").rglob("*.py"))
     candidates.update((root / "src" / "mjlab_microban").rglob("*.xml"))
+    candidates.update((root / "src" / "mjlab_microban").rglob("*.json"))
     candidates.update(
         root / relative
         for relative in (
-            "data/motions/microban_twist2_walk002_locomotion_prior.npz",
+            "data/motions/microban_twist2_walk004_locomotion_prior.npz",
             "pyproject.toml",
             "uv.lock",
             "scripts/train_microban_teleop.sh",
-            "scripts/train_microban_teleop_v8_stage.sh",
+            "scripts/train_microban_teleop_v9.sh",
+            "scripts/evaluate_microban_teleop_v8_stage.sh",
+            "scripts/evaluate_microban_teleop_v9_stage.sh",
         )
     )
     files = {
@@ -243,6 +347,31 @@ def _optional_sha256_env(name: str) -> str | None:
     ):
         raise ValueError(f"{name} must be empty or one lowercase SHA-256")
     return value
+
+
+def _optional_existing_file_env(name: str) -> str | None:
+    value = os.environ.get(name, "")
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(f"{name} must be an absolute path")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{name} does not identify an existing file") from exc
+    if not resolved.is_file():
+        raise ValueError(f"{name} does not identify a file")
+    return str(resolved)
+
+
+def _optional_nonnegative_int_env(name: str) -> int | None:
+    value = os.environ.get(name, "")
+    if not value:
+        return None
+    if not value.isdecimal():
+        raise ValueError(f"{name} must be empty or a non-negative decimal integer")
+    return int(value)
 
 
 def _stage_boundary_env(name: str, *, required: bool) -> int | None:
@@ -273,7 +402,7 @@ def _validate_canonical_stage_lineage(
     allowed_intervals = set(pairwise(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES))
     if (start_boundary, target_boundary) not in allowed_intervals:
         raise ValueError(
-            "Canonical stage interval is not one adjacent v8 boundary pair: "
+            "Canonical stage interval is not one adjacent v9 boundary pair: "
             f"{start_boundary}->{target_boundary}"
         )
     parents = (parent_checkpoint_sha256, parent_gate_sha256)
@@ -322,6 +451,34 @@ def collect_training_provenance(
         "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256"
     )
     parent_gate_sha256 = _optional_sha256_env("MICROBAN_TELEOP_PARENT_GATE_SHA256")
+    resume_source_checkpoint_path = _optional_existing_file_env(
+        "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH"
+    )
+    resume_source_checkpoint_sha256 = _optional_sha256_env(
+        "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256"
+    )
+    resume_source_checkpoint_iteration = _optional_nonnegative_int_env(
+        "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION"
+    )
+    resume_source_values = (
+        resume_source_checkpoint_path,
+        resume_source_checkpoint_sha256,
+        resume_source_checkpoint_iteration,
+    )
+    if any(value is not None for value in resume_source_values) and any(
+        value is None for value in resume_source_values
+    ):
+        raise ValueError(
+            "Canonical resume source requires checkpoint path, SHA-256, and "
+            "iteration together"
+        )
+    if (
+        resume_source_checkpoint_path is not None
+        and resume_source_checkpoint_sha256 is not None
+        and sha256_file(resume_source_checkpoint_path)
+        != resume_source_checkpoint_sha256
+    ):
+        raise ValueError("Canonical resume source checkpoint SHA-256 mismatch")
     if canonical_stage:
         assert start_boundary is not None and target_boundary is not None
         _validate_canonical_stage_lineage(
@@ -354,11 +511,15 @@ def collect_training_provenance(
         "wrapper_clip_actions": canonicalize_training_config(
             getattr(env, "clip_actions", None)
         ),
-        "bootstrap_velocity_checkpoint": runner_cfg.get(
-            "bootstrap_velocity_checkpoint"
+        "checkpoint_consumer_mode": runner_cfg.get(
+            "checkpoint_consumer_mode", False
         ),
-        "bootstrap_velocity_checkpoint_sha256": runner_cfg.get(
-            "bootstrap_velocity_checkpoint_sha256"
+        "safe_velocity_checkpoint": runner_cfg.get("safe_velocity_checkpoint"),
+        "safe_velocity_checkpoint_sha256": runner_cfg.get(
+            "safe_velocity_checkpoint_sha256"
+        ),
+        "safe_velocity_acceptance_receipt": runner_cfg.get(
+            "safe_velocity_acceptance_receipt"
         ),
         "save_pristine_checkpoint": bool(
             runner_cfg.get("save_pristine_checkpoint", False)
@@ -382,6 +543,11 @@ def collect_training_provenance(
             "stage_target_boundary": target_boundary,
             "parent_checkpoint_sha256": parent_checkpoint_sha256,
             "parent_gate_sha256": parent_gate_sha256,
+            "resume_source_checkpoint_path": resume_source_checkpoint_path,
+            "resume_source_checkpoint_sha256": resume_source_checkpoint_sha256,
+            "resume_source_checkpoint_iteration": (
+                resume_source_checkpoint_iteration
+            ),
         },
     }
     return manifest, canonical_json_sha256(manifest)
@@ -444,6 +610,42 @@ def validate_training_provenance(
     return manifest
 
 
+def validate_resume_source_checkpoint_file(
+    manifest: Mapping[str, Any],
+) -> Path | None:
+    """Re-hash the exact intermediate checkpoint pinned by a resume process."""
+
+    invocation = manifest.get("invocation")
+    if not isinstance(invocation, dict):
+        raise TypeError("Training provenance invocation is malformed")
+    path_value = invocation.get("resume_source_checkpoint_path")
+    sha256 = invocation.get("resume_source_checkpoint_sha256")
+    iteration = invocation.get("resume_source_checkpoint_iteration")
+    values = (path_value, sha256, iteration)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError("Resume source checkpoint identity is incomplete")
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        raise ValueError("Resume source checkpoint path must be absolute")
+    try:
+        path = Path(path_value).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("Resume source checkpoint file is missing") from exc
+    if str(path) != path_value or not path.is_file():
+        raise ValueError("Resume source checkpoint path is not canonical")
+    if (
+        not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration < 0
+        or path.name != f"model_{iteration}.pt"
+    ):
+        raise ValueError("Resume source checkpoint filename/iteration mismatch")
+    if not isinstance(sha256, str) or sha256_file(path) != sha256:
+        raise ValueError("Resume source checkpoint SHA-256 mismatch")
+    return path
+
+
 def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> None:
     """Reject a provenance-tagged stage whose actual critical config drifted."""
 
@@ -453,7 +655,7 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
     if not isinstance(critical, dict) or not isinstance(invocation, dict):
         raise TypeError("Canonical training provenance config is malformed")
     expected = {
-        "num_envs": 4096,
+        "num_envs": 2048,
         "environment_seed": 42,
         "runner_seed": 42,
         "num_steps_per_env": 24,
@@ -461,8 +663,7 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         "logger": "tensorboard",
         "upload_model": False,
         "wrapper_clip_actions": None,
-        "bootstrap_velocity_checkpoint": None,
-        "bootstrap_velocity_checkpoint_sha256": None,
+        "checkpoint_consumer_mode": False,
         "save_pristine_checkpoint": False,
     }
     mismatches = [
@@ -470,6 +671,83 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         for key, value in expected.items()
         if critical.get(key) != value
     ]
+    start_boundary = invocation.get("stage_start_boundary")
+    safe_path = critical.get("safe_velocity_checkpoint")
+    safe_sha256 = critical.get("safe_velocity_checkpoint_sha256")
+    safe_receipt = critical.get("safe_velocity_acceptance_receipt")
+    if start_boundary == 0:
+        if not isinstance(safe_path, str) or not safe_path:
+            mismatches.append("initial v9 stage requires safe_velocity_checkpoint")
+        if (
+            not isinstance(safe_sha256, str)
+            or len(safe_sha256) != _SHA256_HEX_LENGTH
+            or any(character not in "0123456789abcdef" for character in safe_sha256)
+        ):
+            mismatches.append(
+                "initial v9 stage requires safe_velocity_checkpoint_sha256"
+            )
+        if not isinstance(safe_receipt, str) or not safe_receipt:
+            mismatches.append(
+                "initial v9 stage requires safe_velocity_acceptance_receipt"
+            )
+    elif any(value is not None for value in (safe_path, safe_sha256, safe_receipt)):
+        mismatches.append("resume v9 stages must source bootstrap identity from checkpoint")
+    resume_source_path = invocation.get("resume_source_checkpoint_path")
+    resume_source_sha256 = invocation.get("resume_source_checkpoint_sha256")
+    resume_source_iteration = invocation.get("resume_source_checkpoint_iteration")
+    resume_source_values = (
+        resume_source_path,
+        resume_source_sha256,
+        resume_source_iteration,
+    )
+    resume = critical.get("resume")
+    if not isinstance(resume, bool):
+        mismatches.append("resume must be boolean")
+    if isinstance(start_boundary, int) and start_boundary > 0 and resume is not True:
+        mismatches.append("noninitial canonical stages must resume")
+    if resume is True:
+        if not isinstance(resume_source_path, str) or not Path(
+            resume_source_path
+        ).is_absolute():
+            mismatches.append("resume source checkpoint path must be absolute")
+        if (
+            not isinstance(resume_source_sha256, str)
+            or len(resume_source_sha256) != _SHA256_HEX_LENGTH
+            or any(
+                character not in "0123456789abcdef"
+                for character in resume_source_sha256
+            )
+        ):
+            mismatches.append("resume source checkpoint SHA-256 is malformed")
+        if (
+            not isinstance(resume_source_iteration, int)
+            or isinstance(resume_source_iteration, bool)
+            or resume_source_iteration < 0
+        ):
+            mismatches.append("resume source checkpoint iteration is invalid")
+        if (
+            isinstance(start_boundary, int)
+            and isinstance(target_boundary := invocation.get("stage_target_boundary"), int)
+            and isinstance(resume_source_iteration, int)
+            and not isinstance(resume_source_iteration, bool)
+        ):
+            completed = resume_source_iteration + 1
+            if not start_boundary <= completed < target_boundary:
+                mismatches.append(
+                    "resume source checkpoint iteration is outside the stage"
+                )
+            if (
+                start_boundary > 0
+                and completed == start_boundary
+                and resume_source_sha256 != invocation.get(
+                    "parent_checkpoint_sha256"
+                )
+            ):
+                mismatches.append(
+                    "boundary resume source SHA-256 differs from stage parent"
+                )
+    elif any(value is not None for value in resume_source_values):
+        mismatches.append("fresh stages cannot claim a resume source checkpoint")
     if invocation.get("mode") != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
         mismatches.append(f"mode={invocation.get('mode')!r}")
     try:
@@ -483,5 +761,5 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         mismatches.append(str(exc))
     if mismatches:
         raise ValueError(
-            "Checkpoint is not a canonical v8 stage config: " + "; ".join(mismatches)
+            "Checkpoint is not a canonical v9 stage config: " + "; ".join(mismatches)
         )

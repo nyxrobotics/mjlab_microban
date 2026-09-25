@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Evaluate one exact v8 curriculum boundary under three fixed simulation seeds.
+# Evaluate one exact current-v9 curriculum boundary under three fixed seeds.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly LOG_ROOT="${PROJECT_ROOT}/logs/rsl_rl/mjlab_microban_teleop"
-readonly GATE_ROOT="${PROJECT_ROOT}/artifacts/teleop_v8_gates"
+readonly GATE_ROOT="${PROJECT_ROOT}/artifacts/teleop_v9_gates"
 readonly EVALUATION_SEEDS=(42 43 44)
 
 cd -- "${PROJECT_ROOT}"
@@ -71,7 +71,7 @@ case "${COMPLETED_ITERATIONS}" in
         scenarios=""
         ;;
     *)
-        echo "Latest checkpoint has ${COMPLETED_ITERATIONS} completed updates, not a v8 stage boundary." >&2
+        echo "Latest checkpoint has ${COMPLETED_ITERATIONS} completed updates, not a v9 stage boundary." >&2
         exit 2
         ;;
 esac
@@ -259,7 +259,7 @@ checkpoint_infos = (
     checkpoint_payload.get("infos") if isinstance(checkpoint_payload, dict) else None
 )
 if not isinstance(checkpoint_infos, dict):
-    raise SystemExit("v8 stage gate failed: checkpoint infos are missing")
+    raise SystemExit("v9 stage gate failed: checkpoint infos are missing")
 training_provenance = validate_training_provenance(
     checkpoint_infos.get(MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY),
     checkpoint_infos.get(MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY),
@@ -296,8 +296,11 @@ def validate_report(
         failures.append(f"{report_path.name}: evaluation was not 1000 steps")
     if report.get("settle_steps") != 50:
         failures.append(f"{report_path.name}: settle window was not 50 steps")
-    if report.get("training_contract", {}).get("version") != "8":
-        failures.append(f"{report_path.name}: not training contract v8")
+    if (
+        report.get("training_contract", {}).get("version")
+        != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+    ):
+        failures.append(f"{report_path.name}: not current training contract")
     if (
         report.get("training_contract", {}).get("training_provenance_sha256")
         != training_provenance_sha256
@@ -432,12 +435,12 @@ if moving_hmd_required:
 elif moving_hmd_report_paths:
     failures.append("moving-HMD reports are forbidden before boundary 12000")
 if failures:
-    raise SystemExit("v8 stage gate failed: " + "; ".join(failures))
+    raise SystemExit("v9 stage gate failed: " + "; ".join(failures))
 
 gate = {
     "schema_version": 3,
     "status": "pass",
-    "training_contract_version": "8",
+    "training_contract_version": MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     "recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
     "training_provenance_sha256": training_provenance_sha256,
     "evaluator_revision": TELEOP_EVALUATOR_REVISION,
@@ -477,5 +480,5 @@ try:
 finally:
     if os.path.exists(temporary_name):
         os.unlink(temporary_name)
-print(f"[PASS] v8 boundary {completed_iterations}, seeds 42/43/44: {gate_path}")
+print(f"[PASS] v9 boundary {completed_iterations}, seeds 42/43/44: {gate_path}")
 PY

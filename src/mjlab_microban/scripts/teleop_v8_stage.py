@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Fail-closed planning and provenance checks for the v8 stage wrapper."""
+"""Fail-closed planning and provenance checks for canonical teleop v9 stages."""
 
 from __future__ import annotations
 
@@ -33,7 +33,10 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     validate_training_provenance,
 )
 
-V8_STAGE_BOUNDARIES = MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES[1:]
+V9_STAGE_BOUNDARIES = MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES[1:]
+# Import compatibility for the historical module/test name.  The accepted
+# checkpoint contract itself is v9-only.
+V8_STAGE_BOUNDARIES = V9_STAGE_BOUNDARIES
 
 
 @dataclass(frozen=True)
@@ -54,20 +57,20 @@ def resolve_stage_interval(completed_iterations: int) -> StageInterval:
         raise TypeError("completed_iterations must be an integer")
     if completed_iterations < 1:
         raise ValueError("A resumable checkpoint must contain at least one update")
-    if completed_iterations >= V8_STAGE_BOUNDARIES[-1]:
-        if completed_iterations == V8_STAGE_BOUNDARIES[-1]:
+    if completed_iterations >= V9_STAGE_BOUNDARIES[-1]:
+        if completed_iterations == V9_STAGE_BOUNDARIES[-1]:
             raise ValueError(
                 "The final 20,000-update boundary is already reached; evaluate/export it"
             )
-        raise ValueError("Checkpoint exceeds the final v8 stage boundary")
+        raise ValueError("Checkpoint exceeds the final v9 stage boundary")
 
     previous = 0
-    for boundary in V8_STAGE_BOUNDARIES:
+    for boundary in V9_STAGE_BOUNDARIES:
         if completed_iterations == boundary:
-            boundary_index = V8_STAGE_BOUNDARIES.index(boundary)
+            boundary_index = V9_STAGE_BOUNDARIES.index(boundary)
             return StageInterval(
                 start_boundary=boundary,
-                target_boundary=V8_STAGE_BOUNDARIES[boundary_index + 1],
+                target_boundary=V9_STAGE_BOUNDARIES[boundary_index + 1],
                 interrupted=False,
             )
         if completed_iterations < boundary:
@@ -77,7 +80,7 @@ def resolve_stage_interval(completed_iterations: int) -> StageInterval:
                 interrupted=True,
             )
         previous = boundary
-    raise AssertionError("Unreachable v8 stage interval")
+    raise AssertionError("Unreachable v9 stage interval")
 
 
 def _checkpoint_infos(checkpoint_path: Path) -> dict[str, Any]:
@@ -101,11 +104,15 @@ def _validate_parent_gate(
         if not candidate.is_file() or sha256_file(candidate) != parent_gate_sha256:
             continue
         gate = json.loads(candidate.read_text(encoding="utf-8"))
+        parent_checkpoint = Path(gate.get("checkpoint", "")).resolve()
         if (
             gate.get("status") == "pass"
-            and gate.get("training_contract_version") == "8"
+            and gate.get("training_contract_version")
+            == MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
             and gate.get("completed_iterations") == start_boundary
             and gate.get("checkpoint_sha256") == parent_checkpoint_sha256
+            and parent_checkpoint.is_file()
+            and sha256_file(parent_checkpoint) == parent_checkpoint_sha256
         ):
             matches.append(candidate.resolve())
     if len(matches) != 1:

@@ -7,7 +7,7 @@ the robot. A deployable export requires the exact schema-3 final gate receipt:
 uv run python -m mjlab_microban.scripts.export_teleop_onnx \
   --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
   --acceptance-receipt \
-    artifacts/teleop_v8_gates/<run>_boundary_20000_gate.json \
+    artifacts/teleop_v9_gates/<run>_boundary_20000_gate.json \
   --require-final-acceptance \
   --device cpu \
   --output artifacts/microban_teleop.onnx
@@ -24,6 +24,14 @@ completed-update count, exporter source SHA-256, source Git commit, and dirty
 state. The exporter also revalidates the checkpoint's deterministic training
 manifest and copies its complete-manifest SHA-256, exact source-tree SHA-256,
 recipe, actor initialization, canonical/generic mode, and stage/parent lineage.
+A resumed canonical manifest separately binds the exact intermediate checkpoint
+path, SHA-256, and iteration used to start that process. ONNX omits the
+host-specific absolute path but carries
+`training_resume_source_checkpoint_sha256` and
+`training_resume_source_checkpoint_iteration` for auditability.
+A contract-v9 export also carries the accepted safe-velocity source checkpoint
+SHA-256/iteration/recipe, receipt SHA-256/schema/gate, and 63-to-83 mapping
+revision.
 A generic checkpoint is always represented as `canonical_training_stage=false`
 with `none` lineage values. The exporter hashes the checkpoint again immediately
 before publication; if it changed while being loaded or exported, publication
@@ -53,8 +61,15 @@ output, using a same-directory atomic rename. A failure therefore preserves the
 last known-good output. Automatic checkpoint ONNX exports use the same gate; an
 automatic export failure is logged without stopping PPO training.
 
+The exporter builds a curriculum-free play environment. Its ordinary diagnostic
+metadata therefore retains the early/play simultaneous-foot lift ceiling of
+`0.012 m`. When, and only when, a validated final acceptance receipt is supplied,
+the exporter materializes the shared final-curriculum ceiling of `0.020 m` in
+`simultaneous_both_feet_target_upper`. This keeps nonaccepted diagnostics honest
+while making the final artifact match the support learned at stage `18000`.
+
 The robot policy loader must fail closed on these deployment fields. It requires
-`canonical_training_stage=true`, `training_provenance_mode=canonical_v8_stage`,
+`canonical_training_stage=true`, `training_provenance_mode=canonical_v9_stage`,
 stage `18000->20000`, `deployment_accepted=true`, receipt schema `3`, status
 `pass`, and boundary `20000`, in addition to validating all SHA/revision/recipe
 and actor-initialization fields. To inspect them without running the robot:
@@ -66,7 +81,14 @@ import onnx
 model = onnx.load("artifacts/microban_teleop.onnx")
 for item in model.metadata_props:
     if item.key.startswith(
-        ("checkpoint_", "training_", "acceptance_", "exporter_", "onnx_parity_")
+        (
+            "checkpoint_",
+            "training_",
+            "safe_velocity_",
+            "acceptance_",
+            "exporter_",
+            "onnx_parity_",
+        )
     ) or item.key in ("canonical_training_stage", "deployment_accepted"):
         print(f"{item.key}={item.value}")
 PY
@@ -80,7 +102,12 @@ The training identity fields are:
   `training_provenance_mode`;
 - `canonical_training_stage`, `training_stage_start_boundary`,
   `training_stage_target_boundary`, `training_parent_checkpoint_sha256`, and
-  `training_parent_gate_sha256`.
+  `training_parent_gate_sha256`;
+- `training_resume_source_checkpoint_sha256` and
+  `training_resume_source_checkpoint_iteration` (`none` for a fresh generic
+  start). A final deployable `18000->20000` artifact requires both fields: the
+  iteration must be `17999..19998`, covering the stage-parent checkpoint and
+  any exact interrupted-resume checkpoint before the final model.
 
 The acceptance identity fields are `deployment_accepted`,
 `acceptance_receipt_schema_version`, `acceptance_receipt_sha256`,
@@ -93,6 +120,11 @@ training-provenance and recipe fields outside the receipt namespace. A
 nonaccepted artifact uses literal `none` for every unavailable acceptance
 identity and `0` for both counts; missing keys are never equivalent to a
 diagnostic export.
+
+The physical Microban repository's `src/moves/pico_hybrid.py` now requires
+contract-v9 metadata, including the seven safe-velocity source, receipt, and
+mapping identity fields embedded here. A v8 or lineage-incomplete ONNX is
+rejected before the hardware runtime can enable motor commands.
 
 Run the focused regression tests after changing the exporter or policy wrapper:
 

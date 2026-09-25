@@ -9,25 +9,33 @@
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
-from mjlab_microban.tasks.microban_velocity_env_cfg import (
-    make_microban_velocity_env_cfg,
-    MicrobanVelocityRlCfg,
-)
 from mjlab_microban.tasks.microban_getup_env_cfg import (
-    make_microban_getup_env_cfg,
     MicrobanGetupRlCfg,
-)
-from mjlab_microban.tasks.microban_tracking_env_cfg import (
-    make_microban_tracking_env_cfg,
-    MicrobanTrackingRlCfg,
-)
-from mjlab_microban.tasks.microban_teleop_env_cfg import (
-    make_microban_teleop_env_cfg,
-    MicrobanTeleopRlCfg,
+    make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
+from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
+    MICROBAN_SAFE_VELOCITY_TASK_ID,
+    MicrobanSafeVelocityRlCfg,
+    make_microban_safe_velocity_env_cfg,
+)
+from mjlab_microban.tasks.microban_safe_velocity_mdp import (
+    MicrobanSafeVelocityOnPolicyRunner,
+)
+from mjlab_microban.tasks.microban_teleop_env_cfg import (
+    MicrobanTeleopRlCfg,
+    make_microban_teleop_env_cfg,
+)
+from mjlab_microban.tasks.microban_tracking_env_cfg import (
+    MicrobanTrackingRlCfg,
+    make_microban_tracking_env_cfg,
+)
 from mjlab_microban.tasks.microban_tracking_policy_export import (
     MicrobanTrackingOnPolicyRunner,
+)
+from mjlab_microban.tasks.microban_velocity_env_cfg import (
+    MicrobanVelocityRlCfg,
+    make_microban_velocity_env_cfg,
 )
 
 register_mjlab_task(
@@ -36,6 +44,14 @@ register_mjlab_task(
     play_env_cfg=make_microban_velocity_env_cfg(play=True),
     rl_cfg=MicrobanVelocityRlCfg,
     runner_cls=VelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_SAFE_VELOCITY_TASK_ID,
+    env_cfg=make_microban_safe_velocity_env_cfg(),
+    play_env_cfg=make_microban_safe_velocity_env_cfg(play=True),
+    rl_cfg=MicrobanSafeVelocityRlCfg,
+    runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
 register_mjlab_task(

@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the audited v8h locomotion-prior fallback."""
+"""Contract tests for the audited v8j locomotion-prior teacher."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS,
     MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES,
     MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES,
+    MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S,
     MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S,
     MICROBAN_LOCOMOTION_PRIOR_PATH,
     MICROBAN_LOCOMOTION_PRIOR_SHA256,
@@ -51,7 +52,6 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
-    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
     make_microban_teleop_env_cfg,
@@ -114,6 +114,21 @@ class LocomotionPriorArtifactTest(unittest.TestCase):
                 source_joint_names.index(name)
                 for name in MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES
             ]
+            source_max_qdot = float(
+                np.max(np.abs(archive["joint_vel"][:, source_leg_ids]))
+            )
+            consumed_source_max_qdot = float(
+                np.max(
+                    np.abs(
+                        archive["joint_vel"][
+                            MICROBAN_LOCOMOTION_PRIOR_START_FRAME : (
+                                MICROBAN_LOCOMOTION_PRIOR_END_FRAME + 1
+                            ),
+                            source_leg_ids,
+                        ]
+                    )
+                )
+            )
             for frame in (
                 MICROBAN_LOCOMOTION_PRIOR_START_FRAME,
                 MICROBAN_LOCOMOTION_PRIOR_END_FRAME,
@@ -130,7 +145,7 @@ class LocomotionPriorArtifactTest(unittest.TestCase):
             MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S[1]
             / MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S
         )
-        scaled_max_qdot = (
+        loaded_consumed_max_qdot = (
             arrays.joint_vel[
                 MICROBAN_LOCOMOTION_PRIOR_START_FRAME : (
                     MICROBAN_LOCOMOTION_PRIOR_END_FRAME + 1
@@ -139,14 +154,22 @@ class LocomotionPriorArtifactTest(unittest.TestCase):
             .abs()
             .max()
             .item()
-            * rate
         )
-        self.assertLess(scaled_max_qdot, 4.55)
-        self.assertGreater(scaled_max_qdot, 4.53)
+        self.assertAlmostEqual(
+            loaded_consumed_max_qdot, consumed_source_max_qdot, places=7
+        )
+        self.assertLessEqual(
+            source_max_qdot,
+            MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S,
+        )
+        self.assertLessEqual(
+            loaded_consumed_max_qdot * rate,
+            MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S * rate,
+        )
 
     def test_training_source_manifest_hashes_the_binary_prior(self) -> None:
         manifest = collect_training_source_manifest()
-        relative = "data/motions/microban_twist2_walk002_locomotion_prior.npz"
+        relative = "data/motions/microban_twist2_walk004_locomotion_prior.npz"
         self.assertEqual(manifest["files"][relative], MICROBAN_LOCOMOTION_PRIOR_SHA256)
         lock_path = MICROBAN_LOCOMOTION_PRIOR_PATH.parents[2] / "uv.lock"
         self.assertEqual(
@@ -197,7 +220,7 @@ class LocomotionPriorScheduleTest(unittest.TestCase):
         )
         self.assertEqual(
             locomotion_prior_blend(MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP),
-            1.0,
+            0.0,
         )
 
     def test_command_is_39_wide_non_looping_and_play_can_be_exact_zero(self) -> None:
@@ -354,7 +377,7 @@ class LocomotionPriorResetTest(unittest.TestCase):
         )
         term._env = SimpleNamespace(
             num_envs=1,
-            common_step_counter=(MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP),
+            common_step_counter=(MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP - 1),
             device="cpu",
             step_dt=0.02,
             command_manager=SimpleNamespace(get_command=lambda name: twist),
@@ -363,7 +386,11 @@ class LocomotionPriorResetTest(unittest.TestCase):
         term.command_counter = torch.ones(1, dtype=torch.long)
         term.time_left = torch.zeros(1)
 
-        term.reset(torch.tensor([0]))
+        with patch(
+            "mjlab_microban.tasks.microban_locomotion_prior.torch.rand",
+            return_value=torch.ones(1),
+        ):
+            term.reset(torch.tensor([0]))
 
         self.assertFalse(term.teleported.item())
         self.assertTrue(term.launching.item())
@@ -564,8 +591,13 @@ class LocomotionPriorConfigurationTest(unittest.TestCase):
         self.assertIn("locomotion_prior", train.observations["critic"].terms)
         self.assertNotIn("locomotion_prior", play.observations["actor"].terms)
         self.assertIn("locomotion_prior", play.observations["critic"].terms)
-        self.assertTrue(train.commands["locomotion_prior"].enabled)
+        self.assertFalse(train.commands["locomotion_prior"].enabled)
         self.assertFalse(play.commands["locomotion_prior"].enabled)
+        self.assertEqual(train.rewards["locomotion_prior_action_target"].weight, 0.0)
+        self.assertEqual(
+            train.rewards["locomotion_prior_joint_position"].weight, 0.0
+        )
+        self.assertNotIn("locomotion_prior_clip_finished", train.terminations)
         self.assertEqual(set(train.rewards), set(play.rewards))
         self.assertEqual(set(train.terminations), set(play.terminations))
 
@@ -582,10 +614,7 @@ class LocomotionPriorConfigurationTest(unittest.TestCase):
         self.assertEqual(sum(twist.signed_axis_probabilities.values()), 1.0)
         stages = cfg.curriculum["staged_curriculum"].params["stages"]
         self.assertEqual(
-            [stage["step"] // 24 for stage in stages[:3]], [500, 1000, 1500]
-        )
-        self.assertEqual(
-            sum(MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES.values()), 1.0
+            [stage["step"] // 24 for stage in stages[:3]], [500, 1500, 3000]
         )
         self.assertEqual(
             MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES["forward"], (0.06, 0.11)

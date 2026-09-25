@@ -2,6 +2,9 @@
 # Fail-closed stage driver for the Microban PICO training contract v8.
 set -euo pipefail
 
+echo "Contract-v8 training is rejected; use scripts/train_microban_teleop_v9.sh." >&2
+exit 2
+
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly LOG_ROOT="${PROJECT_ROOT}/logs/rsl_rl/mjlab_microban_teleop"

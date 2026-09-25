@@ -10,7 +10,8 @@
 
 from __future__ import annotations
 
-import math
+import hashlib
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -42,6 +43,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
     MICROBAN_TELEOP_RECIPE_REVISION,
@@ -52,14 +54,32 @@ from mjlab_microban.tasks.microban_policy_export import (
     validate_bounded_actor_checkpoint_buffers,
     validate_finite_actor_state,
     validate_finite_checkpoint_actor_state,
+    validate_safe_velocity_actor_bootstrap_info,
     validate_teleop_checkpoint_contract,
-    validate_velocity_actor_bootstrap_info,
+)
+from mjlab_microban.tasks.microban_safe_velocity_checkpoint import (
+    inspect_safe_velocity_checkpoint,
+)
+from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
+    MICROBAN_SAFE_VELOCITY_SAGITTAL_LEG_JOINT_NAMES,
+    microban_safe_velocity_action_delta_bounds,
+    microban_safe_velocity_initial_action_std,
+)
+from mjlab_microban.tasks.microban_safe_velocity_mdp import (
+    MICROBAN_SAFE_VELOCITY_RECIPE_INFO_KEY,
+    MICROBAN_SAFE_VELOCITY_RECIPE_REVISION,
+    MicrobanSafeVelocityBoundedGaussianDistribution,
 )
 from mjlab_microban.tasks.microban_teleop_bootstrap import (
+    SAFE_VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+    SAFE_VELOCITY_COPIED_DISTRIBUTION_KEYS,
+    SAFE_VELOCITY_NEW_TELEOP_OBSERVATION_COLUMNS,
+    SAFE_VELOCITY_TARGET_ACTOR_TOPOLOGY,
     TELEOP_SHOULDER_ROLL_ACTION_INDICES,
     TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES,
-    TELEOP_SHOULDER_ROLL_INITIALIZATION,
-    VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+    SafeVelocityActorBootstrapProvenance,
+    serialize_safe_velocity_actor_bootstrap_provenance,
+    validate_safe_velocity_acceptance_receipt,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
@@ -78,7 +98,6 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
     MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
     MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT,
-    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT,
     MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
@@ -104,7 +123,9 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     yaw_velocity_tracking_error_l1,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
     canonical_json_sha256,
 )
 
@@ -687,51 +708,58 @@ class AsymmetricBoundedGaussianTest(unittest.TestCase):
 
 class TeleopConfigurationTest(unittest.TestCase):
     def test_export_separates_single_and_simultaneous_foot_support(self) -> None:
-        foot_cfg = SimpleNamespace(
-            reach_xy_range=(-0.03, 0.03),
-            lift_height_range=(MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.05),
-            both_feet_reach_xy_range=(-0.01, 0.01),
-            both_feet_lift_height_range=(
-                MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
-                0.02,
-            ),
+        # Export constructs this exact play configuration. Its curriculum is
+        # disabled, so the ordinary metadata path must retain the early/play
+        # 12 mm simultaneous-foot ceiling.
+        play_cfg = make_microban_teleop_env_cfg(play=True)
+        foot_cfg = play_cfg.commands["foot_target"]
+        manager = SimpleNamespace(get_term_cfg=lambda name: play_cfg.commands[name])
+        diagnostic_bounds = _command_target_bounds(
+            SimpleNamespace(command_manager=manager)
         )
-        hand_cfg = SimpleNamespace(
-            reach_xy_range=(-0.08, 0.08),
-            reach_z_range=(-0.08, 0.08),
+        self.assertEqual(diagnostic_bounds[0], [-0.03, -0.03, 0.0] * 2)
+        self.assertEqual(diagnostic_bounds[1], [0.03, 0.03, 0.05] * 2)
+        self.assertEqual(diagnostic_bounds[2], [-0.01, -0.01, 0.0] * 2)
+        self.assertEqual(diagnostic_bounds[3], [0.01, 0.01, 0.012] * 2)
+
+        final_bounds = _command_target_bounds(
+            SimpleNamespace(command_manager=manager),
+            canonical_final_stage=True,
         )
-        manager = SimpleNamespace(
-            get_term_cfg=lambda name: {
-                "foot_target": foot_cfg,
-                "hand_target": hand_cfg,
-            }[name]
+        self.assertEqual(
+            final_bounds[3],
+            [0.01, 0.01, MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M] * 2,
         )
-        bounds = _command_target_bounds(SimpleNamespace(command_manager=manager))
-        self.assertEqual(bounds[0], [-0.03, -0.03, 0.0] * 2)
-        self.assertEqual(bounds[1], [0.03, 0.03, 0.05] * 2)
-        self.assertEqual(bounds[2], [-0.01, -0.01, 0.0] * 2)
-        self.assertEqual(bounds[3], [0.01, 0.01, 0.02] * 2)
+        # Rendering final deployment metadata must not mutate the play config
+        # subsequently used by diagnostic/non-accepted exports.
+        self.assertEqual(
+            foot_cfg.both_feet_lift_height_range,
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+        )
 
     def test_ordered_std_vector_and_reward_contract(self) -> None:
         std = microban_teleop_initial_action_std()
         self.assertEqual(len(std), len(MICROBAN_TELEOP_ACTION_JOINT_NAMES))
-        expected_shoulder_roll = math.radians(1.0) / 3.0
-        for name in ("right_shoulder_roll", "left_shoulder_roll"):
-            self.assertAlmostEqual(
-                std[MICROBAN_TELEOP_ACTION_JOINT_NAMES.index(name)],
-                expected_shoulder_roll,
-                places=7,
+        safe_std = microban_safe_velocity_initial_action_std()
+        differing = {
+            name
+            for name, teleop_value, safe_value in zip(
+                MICROBAN_TELEOP_ACTION_JOINT_NAMES, std, safe_std, strict=True
             )
-        self.assertTrue(all(0.0 < value <= 1.0 for value in std))
-        self.assertTrue(
-            all(
-                value == 1.0
-                for name, value in zip(
-                    MICROBAN_TELEOP_ACTION_JOINT_NAMES, std, strict=True
-                )
-                if "shoulder_roll" not in name
-            )
+            if teleop_value != safe_value
+        }
+        self.assertEqual(
+            differing,
+            set(MICROBAN_SAFE_VELOCITY_SAGITTAL_LEG_JOINT_NAMES),
         )
+        self.assertTrue(all(0.0 < value <= 1.0 for value in std))
+        for name, value in zip(MICROBAN_TELEOP_ACTION_JOINT_NAMES, std, strict=True):
+            if "shoulder_roll" in name:
+                self.assertLess(value, 0.01)
+            elif "shoulder" in name or "elbow" in name:
+                self.assertEqual(value, 0.05)
+            else:
+                self.assertEqual(value, 0.08)
 
         cfg = make_microban_teleop_env_cfg()
         self.assertIs(
@@ -778,6 +806,10 @@ class TeleopConfigurationTest(unittest.TestCase):
         self.assertIsInstance(
             cfg.commands["locomotion_prior"], LocomotionPriorCommandCfg
         )
+        self.assertFalse(cfg.commands["locomotion_prior"].enabled)
+        self.assertEqual(cfg.rewards["locomotion_prior_action_target"].weight, 0.0)
+        self.assertEqual(cfg.rewards["locomotion_prior_joint_position"].weight, 0.0)
+        self.assertNotIn("locomotion_prior_clip_finished", cfg.terminations)
         self.assertEqual(MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH, 39)
         self.assertEqual(cfg.rewards["dof_pos_limits"].weight, -10.0)
         self.assertEqual(cfg.rewards["feet_distance"].weight, -100.0)
@@ -798,12 +830,21 @@ class TeleopConfigurationTest(unittest.TestCase):
             cfg.rewards["hand_target_tracking"].params["std"],
             MICROBAN_TELEOP_HAND_TRACKING_STD_M,
         )
-        self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.005)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.0)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-4)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "adaptive")
         self.assertEqual(
-            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_coefficient, 0.5
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_forward_coefficient,
+            0.0,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_neutral_leg_coefficient,
+            0.0,
+        )
+        self.assertEqual(
+            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_arm_home_coefficient,
+            0.0,
         )
         self.assertEqual(
             MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_error_scale_rad,
@@ -815,16 +856,12 @@ class TeleopConfigurationTest(unittest.TestCase):
             1.0e-3,
         )
         self.assertEqual(
-            MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_neutral_anchor_relative_weight,
-            1.0,
-        )
-        self.assertEqual(
             MicrobanTeleopRlCfg.algorithm.class_name,
             "mjlab_microban.tasks.microban_teleop_mdp:LatentActionPPO",
         )
         self.assertIs(
             MicrobanTeleopRlCfg.actor.distribution_cfg["class_name"],
-            AsymmetricBoundedGaussianDistribution,
+            MicrobanSafeVelocityBoundedGaussianDistribution,
         )
         self.assertEqual(
             tuple(MicrobanTeleopRlCfg.actor.distribution_cfg["init_std"]), std
@@ -903,7 +940,6 @@ class TeleopConfigurationTest(unittest.TestCase):
             [stage["step"] for stage in stages],
             [
                 500 * 24,
-                1000 * 24,
                 1500 * 24,
                 3000 * 24,
                 4500 * 24,
@@ -937,7 +973,7 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
         )
         self.assertEqual(
-            stages[6]["name"],
+            stages[5]["name"],
             "enable moving-HMD and stationary no-step guard",
         )
         self.assertEqual(
@@ -955,14 +991,14 @@ class TeleopConfigurationTest(unittest.TestCase):
         prior_cfg = cfg.commands["locomotion_prior"]
         prior = object.__new__(LocomotionPriorCommand)
         prior.cfg = prior_cfg
-        prior.eligible = torch.ones(1, dtype=torch.bool)
-        prior.finished = torch.ones(1, dtype=torch.bool)
-        prior.teleported = torch.ones(1, dtype=torch.bool)
-        prior.launching = torch.ones(1, dtype=torch.bool)
-        prior.launch_step = torch.ones(1, dtype=torch.long)
-        prior.launch_start_joint_pos = torch.ones(1, 12)
-        prior.phase_rate = torch.ones(1)
-        prior._skip_next_advance = torch.ones(1, dtype=torch.bool)
+        prior.eligible = torch.zeros(1, dtype=torch.bool)
+        prior.finished = torch.zeros(1, dtype=torch.bool)
+        prior.teleported = torch.zeros(1, dtype=torch.bool)
+        prior.launching = torch.zeros(1, dtype=torch.bool)
+        prior.launch_step = torch.zeros(1, dtype=torch.long)
+        prior.launch_start_joint_pos = torch.zeros(1, 12)
+        prior.phase_rate = torch.zeros(1)
+        prior._skip_next_advance = torch.zeros(1, dtype=torch.bool)
         reward_cfgs = {
             name: SimpleNamespace(weight=term.weight, params=dict(term.params))
             for name, term in cfg.rewards.items()
@@ -1007,11 +1043,9 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
-            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
         )
         expected_foot_weights = (
-            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
@@ -1024,7 +1058,6 @@ class TeleopConfigurationTest(unittest.TestCase):
             3.0,
         )
         expected_hmd_neutral_probabilities = (
-            MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
             MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY,
@@ -1052,12 +1085,6 @@ class TeleopConfigurationTest(unittest.TestCase):
         ):
             stage["apply"](env)
             if stage_index == 0:
-                self.assertEqual(
-                    twist.cfg.signed_axis_probabilities,
-                    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
-                )
-                self.assertTrue(prior_cfg.enabled)
-            elif stage_index == 1:
                 self.assertEqual(
                     twist.cfg.signed_axis_ranges,
                     MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
@@ -1231,6 +1258,132 @@ class CheckpointContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
+        safe_root = self.root / "safe"
+        safe_root.mkdir()
+        self.safe_source_path = safe_root / "model_7.pt"
+        lower, upper = microban_safe_velocity_action_delta_bounds()
+        observation = TensorDict(
+            {"actor": torch.zeros((1, 63), dtype=torch.float32)},
+            batch_size=[1],
+        )
+        safe_actor = MLPModel(
+            obs=observation,
+            obs_groups={"actor": ["actor"]},
+            obs_set="actor",
+            output_dim=18,
+            hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=False,
+            distribution_cfg={
+                "class_name": MicrobanSafeVelocityBoundedGaussianDistribution,
+                "init_std": microban_safe_velocity_initial_action_std(),
+                "lower_bound": lower,
+                "upper_bound": upper,
+                "std_type": "log",
+            },
+        )
+        torch.save(
+            {
+                "actor_state_dict": safe_actor.state_dict(),
+                "iter": 7,
+                "infos": {
+                    MICROBAN_SAFE_VELOCITY_RECIPE_INFO_KEY: (
+                        MICROBAN_SAFE_VELOCITY_RECIPE_REVISION
+                    ),
+                    "env_state": {"common_step_counter": 8 * 24},
+                },
+            },
+            self.safe_source_path,
+        )
+        self.safe_source_sha256 = hashlib.sha256(
+            self.safe_source_path.read_bytes()
+        ).hexdigest()
+        source_identity = inspect_safe_velocity_checkpoint(
+            self.safe_source_path,
+            expected_sha256=self.safe_source_sha256,
+        )
+        self.safe_receipt_path = safe_root / "acceptance.json"
+        self.safe_receipt_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "gate": "microban_safe_velocity_fixed_forward_v3",
+                    "checkpoint": {
+                        "path": str(source_identity.path),
+                        "sha256": source_identity.sha256,
+                        "iteration": source_identity.iteration,
+                        "checkpoint_schema_version": source_identity.schema_version,
+                        "recipe_revision": source_identity.recipe_revision,
+                        "actor_topology": list(source_identity.actor_topology),
+                        "actor_obs_normalization": (
+                            source_identity.actor_obs_normalization
+                        ),
+                        "observation_schema": [
+                            list(item) for item in source_identity.observation_schema
+                        ],
+                        "action_joint_names": list(source_identity.action_joint_names),
+                    },
+                    "configuration": {
+                        "device": "cuda:0",
+                        "num_envs": 64,
+                        "steps_requested": 200,
+                        "steps_executed": 200,
+                        "seed": 42,
+                        "command_vx_m_s": 0.08,
+                        "actual_command_exactly_verified_each_step": True,
+                        "step_dt_s": 0.02,
+                        "guard_lookahead_s": 0.12,
+                        "guard_margin_ratio": 0.05,
+                        "absolute_clip_max_tensor_error_rad": 0.0,
+                    },
+                    "thresholds": {
+                        "completion_fraction_min": 0.95,
+                        "fall_fraction_max": 0.0,
+                        "nonfinite_fraction_max": 0.0,
+                        "forward_velocity_p05_m_s_min": 0.01,
+                        "forward_displacement_p05_m_min": 0.02,
+                        "actual_soft_limit_violation_rad_max": 1.0e-6,
+                        "actual_lookahead_soft_limit_violation_rad_max": 1.0e-6,
+                        "target_clip_rad_max": 1.0e-7,
+                    },
+                    "metrics": {
+                        "completion_fraction": 1.0,
+                        "fall_fraction": 0.0,
+                        "nonfinite_fraction": 0.0,
+                        "forward_velocity_p05_m_s": 0.03,
+                        "forward_velocity_median_m_s": 0.03,
+                        "forward_displacement_p05_m": 0.03,
+                        "forward_displacement_median_m": 0.03,
+                        "maximum_actual_soft_limit_violation_rad": 0.0,
+                        "maximum_actual_lookahead_soft_limit_violation_rad": 0.0,
+                        "maximum_preferred_margin_lookahead_excess_rad": 0.0,
+                        "maximum_target_clip_rad": 0.0,
+                        "minimum_root_height_m": 0.2,
+                    },
+                    "checks": {
+                        name: True
+                        for name in (
+                            "completion",
+                            "no_falls",
+                            "finite",
+                            "forward_velocity",
+                            "forward_displacement",
+                            "actual_soft_limits",
+                            "actual_lookahead_soft_limits",
+                            "absolute_target_clip",
+                        )
+                    },
+                    "status": "pass",
+                    "summary": {"passed": True, "failed_checks": []},
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        self.safe_receipt_identity = validate_safe_velocity_acceptance_receipt(
+            self.safe_receipt_path,
+            source_identity,
+        )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -1249,6 +1402,9 @@ class CheckpointContractTest(unittest.TestCase):
             "env_state": {"common_step_counter": (iteration + 1) * 24}
         }
         if contract:
+            training_provenance, training_provenance_sha256 = (
+                self._training_provenance()
+            )
             infos.update(
                 {
                     "microban_teleop_training_contract_version": (
@@ -1263,6 +1419,11 @@ class CheckpointContractTest(unittest.TestCase):
                     "microban_teleop_recipe_revision": (
                         MICROBAN_TELEOP_RECIPE_REVISION
                     ),
+                    MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: (training_provenance),
+                    MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
+                        training_provenance_sha256
+                    ),
+                    "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
                 }
             )
         path = self.root / f"model_{filename_iteration}.pt"
@@ -1292,8 +1453,8 @@ class CheckpointContractTest(unittest.TestCase):
             for key, value in distribution.state_dict().items()
         }
 
-    @staticmethod
-    def _current_infos(*, pristine: bool = False) -> dict[str, object]:
+    def _current_infos(self, *, pristine: bool = False) -> dict[str, object]:
+        training_provenance, training_provenance_sha256 = self._training_provenance()
         infos: dict[str, object] = {
             "env_state": {"common_step_counter": 0 if pristine else 24},
             "microban_teleop_training_contract_version": (
@@ -1304,6 +1465,11 @@ class CheckpointContractTest(unittest.TestCase):
                 MICROBAN_TELEOP_ACTOR_INITIALIZATION
             ),
             "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: training_provenance,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
+                training_provenance_sha256
+            ),
+            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
         }
         if pristine:
             infos["pristine_pre_update"] = True
@@ -1328,45 +1494,97 @@ class CheckpointContractTest(unittest.TestCase):
         }
         return manifest, canonical_json_sha256(manifest)
 
-    @staticmethod
-    def _valid_bootstrap_info() -> dict[str, object]:
-        return {
-            "mapping_version": VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
-            "source_checkpoint_path": "/pinned/model_14999.pt",
-            "source_checkpoint_sha256": "a" * 64,
-            "source_normalizer_count": 1_474_560_000.0,
-            "installed_normalizer_count": 1_474_560_000.0,
-            "copied_state": (
-                "actor_normalizer_and_mlp_except_guarded_shoulder_roll_head"
+    def _canonical_initial_training_provenance(
+        self,
+        *,
+        resume: bool,
+        include_safe_identity: bool,
+        resume_source: Path | None = None,
+    ) -> tuple[dict[str, object], str]:
+        manifest, _digest = self._training_provenance()
+        safe_values = {
+            "safe_velocity_checkpoint": (
+                str(self.safe_source_path.resolve()) if include_safe_identity else None
             ),
-            "shoulder_roll_initialization": TELEOP_SHOULDER_ROLL_INITIALIZATION,
-            "shoulder_roll_action_indices": list(TELEOP_SHOULDER_ROLL_ACTION_INDICES),
-            "shoulder_roll_initial_latent_biases": list(
-                TELEOP_SHOULDER_ROLL_INITIAL_LATENT_BIASES
+            "safe_velocity_checkpoint_sha256": (
+                self.safe_source_sha256 if include_safe_identity else None
             ),
-            "distribution_copied": False,
-            "critic_copied": False,
-            "optimizer_copied": False,
+            "safe_velocity_acceptance_receipt": (
+                str(self.safe_receipt_path.resolve()) if include_safe_identity else None
+            ),
         }
+        manifest["canonical_stage"] = True
+        manifest["resolved_config"] = {
+            "critical": {
+                "num_envs": 2048,
+                "environment_seed": 42,
+                "runner_seed": 42,
+                "num_steps_per_env": 24,
+                "save_interval": 500,
+                "max_iterations_for_process": 1000,
+                "resume": resume,
+                "logger": "tensorboard",
+                "upload_model": False,
+                "wrapper_clip_actions": None,
+                "checkpoint_consumer_mode": False,
+                "save_pristine_checkpoint": False,
+                **safe_values,
+            },
+            "environment": {},
+            "runner": {"resume": resume, **safe_values},
+        }
+        manifest["invocation"] = {
+            "mode": "canonical_v9_stage",
+            "stage_start_boundary": 0,
+            "stage_target_boundary": 1500,
+            "parent_checkpoint_sha256": None,
+            "parent_gate_sha256": None,
+            "resume_source_checkpoint_path": (
+                str(resume_source.resolve()) if resume_source is not None else None
+            ),
+            "resume_source_checkpoint_sha256": (
+                hashlib.sha256(resume_source.read_bytes()).hexdigest()
+                if resume_source is not None
+                else None
+            ),
+            "resume_source_checkpoint_iteration": (
+                int(resume_source.stem.removeprefix("model_"))
+                if resume_source is not None
+                else None
+            ),
+        }
+        return manifest, canonical_json_sha256(manifest)
+
+    def _valid_bootstrap_info(self) -> dict[str, object]:
+        identity = inspect_safe_velocity_checkpoint(
+            self.safe_source_path,
+            expected_sha256=self.safe_source_sha256,
+        )
+        return serialize_safe_velocity_actor_bootstrap_provenance(
+            SafeVelocityActorBootstrapProvenance(
+                source=identity,
+                acceptance_receipt=self.safe_receipt_identity,
+                mapping_version=SAFE_VELOCITY_ACTOR_BOOTSTRAP_MAPPING_VERSION,
+                target_actor_topology=SAFE_VELOCITY_TARGET_ACTOR_TOPOLOGY,
+                new_teleop_observation_columns=(
+                    SAFE_VELOCITY_NEW_TELEOP_OBSERVATION_COLUMNS
+                ),
+                copied_distribution_keys=SAFE_VELOCITY_COPIED_DISTRIBUTION_KEYS,
+            )
+        )
 
     def test_current_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "8")
+        self.assertEqual(parsed.version, "9")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
         legacy = self._save(13, contract=False)
-        with self.assertRaisesRegex(ValueError, "clean retrain"):
+        with self.assertRaisesRegex(ValueError, "v1-v8"):
             validate_teleop_checkpoint_contract(legacy)
-        diagnostic = validate_teleop_checkpoint_contract(
-            legacy, allow_legacy_diagnostic=True
-        )
-        self.assertTrue(diagnostic.diagnostic_legacy)
-        self.assertEqual(
-            diagnostic.previous_action_semantics,
-            "raw_policy_output_before_target_clip",
-        )
+        with self.assertRaisesRegex(ValueError, "v1-v8"):
+            validate_teleop_checkpoint_contract(legacy, allow_legacy_diagnostic=True)
 
         mismatched = self._save(14, filename_iteration=15, contract=True)
         with self.assertRaisesRegex(ValueError, "must match"):
@@ -1388,40 +1606,50 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "recipe revision"):
             validate_teleop_checkpoint_contract(missing_recipe)
 
+        v8i = self._save(17, contract=True)
+        payload = torch.load(v8i, map_location="cpu", weights_only=False)
+        payload["infos"]["microban_teleop_actor_initialization"] = (
+            "clean_random_except_inward_shoulder_roll_v1_nonshoulder_std_1_v1"
+        )
+        payload["infos"]["microban_teleop_recipe_revision"] = (
+            "v8i_clean_shoulder_std1_twist2_direct_bc_launch_v2"
+        )
+        torch.save(payload, v8i)
+        with self.assertRaisesRegex(ValueError, "actor initialization"):
+            validate_teleop_checkpoint_contract(v8i)
+
         # Every superseded version remains non-resumable even when tensor widths
         # and previous-action semantics happen to match the current contract.
-        for index, version in enumerate(("2", "3", "4", "5", "6", "7"), start=16):
+        for index, version in enumerate(("2", "3", "4", "5", "6", "7", "8"), start=16):
             with self.subTest(version=version):
                 old = self._save(index, contract=True)
                 payload = torch.load(old, map_location="cpu", weights_only=False)
                 payload["infos"]["microban_teleop_training_contract_version"] = version
                 torch.save(payload, old)
-                with self.assertRaisesRegex(ValueError, "clean retrain"):
+                with self.assertRaisesRegex(ValueError, "v1-v8"):
                     validate_teleop_checkpoint_contract(old)
 
-    def test_guarded_shoulder_bootstrap_provenance_is_fail_closed(self) -> None:
+    def test_safe_velocity_bootstrap_provenance_is_fail_closed(self) -> None:
         valid = self._valid_bootstrap_info()
-        validate_velocity_actor_bootstrap_info(valid)
+        validate_safe_velocity_actor_bootstrap_info(valid)
 
         invalid_cases = {
             "mapping_version": "superseded_v3",
-            "shoulder_roll_action_indices": [10, 1],
-            "shoulder_roll_initial_latent_biases": [-0.15, 0.15],
-            "shoulder_roll_initialization": "untracked_initialization",
-            "copied_state": "actor_normalizer_and_mlp_only",
-            "distribution_copied": True,
+            "source_recipe_revision": "invalid-old-canary",
+            "source_actor_observation_normalization": True,
+            "target_actor_topology": [83, 1, 18],
+            "new_teleop_observation_columns": [0],
+            "copied_state": "actor_mlp_only",
+            "distribution_contract_equal": False,
         }
         for key, value in invalid_cases.items():
             with self.subTest(key=key):
                 candidate = deepcopy(valid)
                 candidate[key] = value
-                with self.assertRaisesRegex(ValueError, "guarded shoulder contract"):
-                    validate_velocity_actor_bootstrap_info(candidate)
-
-        mismatched_count = deepcopy(valid)
-        mismatched_count["installed_normalizer_count"] = 1.0
-        with self.assertRaisesRegex(ValueError, "preserve"):
-            validate_velocity_actor_bootstrap_info(mismatched_count)
+                with self.assertRaisesRegex(ValueError, "contract v9"):
+                    validate_safe_velocity_actor_bootstrap_info(
+                        candidate, verify_source_checkpoint=False
+                    )
 
         path = self._save(30, contract=True)
         payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -1430,23 +1658,12 @@ class CheckpointContractTest(unittest.TestCase):
             "mapping_version": "superseded_v3",
         }
         torch.save(payload, path)
-        with self.assertRaisesRegex(ValueError, "requires a clean actor"):
+        with self.assertRaisesRegex(ValueError, "retired legacy"):
             validate_teleop_checkpoint_contract(path)
 
     def test_pristine_checkpoint_requires_explicit_pre_update_contract(self) -> None:
         path = self.root / "model_pristine.pt"
-        infos = {
-            "env_state": {"common_step_counter": 0},
-            "microban_teleop_training_contract_version": (
-                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
-            ),
-            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
-            "microban_teleop_actor_initialization": (
-                MICROBAN_TELEOP_ACTOR_INITIALIZATION
-            ),
-            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
-            "pristine_pre_update": True,
-        }
+        infos = self._current_infos(pristine=True)
         torch.save({"iter": -1, "infos": infos}, path)
         contract = validate_teleop_checkpoint_contract(path)
         self.assertEqual(contract.iteration, -1)
@@ -1599,7 +1816,9 @@ class CheckpointContractTest(unittest.TestCase):
                 runner = object.__new__(MicrobanTeleopOnPolicyRunner)
                 runner.alg = SimpleNamespace(get_policy=lambda: policy)
                 with patch.object(
-                    MjlabOnPolicyRunner, "load", return_value={}
+                    MjlabOnPolicyRunner,
+                    "load",
+                    return_value=self._current_infos(pristine=pristine),
                 ) as base_load:
                     runner.load(str(path), load_cfg={"actor": True})
                 base_load.assert_called_once()
@@ -1655,14 +1874,14 @@ class CheckpointContractTest(unittest.TestCase):
         prior_cfg = deepcopy(cfg.commands["locomotion_prior"])
         prior = object.__new__(LocomotionPriorCommand)
         prior.cfg = prior_cfg
-        prior.eligible = torch.ones(2, dtype=torch.bool)
-        prior.finished = torch.ones(2, dtype=torch.bool)
-        prior.teleported = torch.ones(2, dtype=torch.bool)
-        prior.launching = torch.ones(2, dtype=torch.bool)
-        prior.launch_step = torch.ones(2, dtype=torch.long)
-        prior.launch_start_joint_pos = torch.ones(2, 12)
-        prior.phase_rate = torch.ones(2)
-        prior._skip_next_advance = torch.ones(2, dtype=torch.bool)
+        prior.eligible = torch.zeros(2, dtype=torch.bool)
+        prior.finished = torch.zeros(2, dtype=torch.bool)
+        prior.teleported = torch.zeros(2, dtype=torch.bool)
+        prior.launching = torch.zeros(2, dtype=torch.bool)
+        prior.launch_step = torch.zeros(2, dtype=torch.long)
+        prior.launch_start_joint_pos = torch.zeros(2, 12)
+        prior.phase_rate = torch.zeros(2)
+        prior._skip_next_advance = torch.zeros(2, dtype=torch.bool)
         reward_cfgs = {
             name: SimpleNamespace(weight=term.weight, params=dict(term.params))
             for name, term in cfg.rewards.items()
@@ -1685,7 +1904,6 @@ class CheckpointContractTest(unittest.TestCase):
         def restore_curriculum() -> None:
             self.assertEqual(env.common_step_counter, 1000 * 24)
             stages[0]["apply"](env)
-            stages[1]["apply"](env)
 
         env.curriculum_manager = SimpleNamespace(
             compute=Mock(side_effect=restore_curriculum)
@@ -1744,6 +1962,211 @@ class CheckpointContractTest(unittest.TestCase):
             ],
         )
 
+    def test_interrupted_initial_resume_preserves_safe_identity_on_save(self) -> None:
+        expected = self._bounded_actor_state()
+        policy = SimpleNamespace(state_dict=lambda: expected)
+        loaded_manifest, loaded_digest = self._canonical_initial_training_provenance(
+            resume=False,
+            include_safe_identity=True,
+        )
+        infos = {
+            "env_state": {"common_step_counter": 500 * 24},
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
+            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
+        }
+        checkpoint = self.root / "model_499.pt"
+        torch.save(
+            {
+                "actor_state_dict": {
+                    key: value.clone() for key, value in expected.items()
+                },
+                "iter": 499,
+                "infos": infos,
+            },
+            checkpoint,
+        )
+
+        current_manifest, current_digest = self._canonical_initial_training_provenance(
+            resume=True,
+            include_safe_identity=False,
+            resume_source=checkpoint,
+        )
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.teleop_training_resume = True
+        runner.checkpoint_consumer_mode = False
+        runner.safe_velocity_bootstrap_provenance = None
+        runner.teleop_training_provenance = current_manifest
+        runner.teleop_training_provenance_sha256 = current_digest
+        runner.loaded_checkpoint_contract = None
+
+        with patch.object(MjlabOnPolicyRunner, "load", return_value=infos) as base_load:
+            runner.load(str(checkpoint), load_cfg={"actor": True})
+        base_load.assert_called_once()
+
+        inherited = runner.teleop_training_provenance
+        critical = inherited["resolved_config"]["critical"]
+        self.assertEqual(
+            critical["safe_velocity_checkpoint"],
+            str(self.safe_source_path.resolve()),
+        )
+        self.assertEqual(
+            critical["safe_velocity_checkpoint_sha256"],
+            self.safe_source_sha256,
+        )
+        self.assertEqual(
+            critical["safe_velocity_acceptance_receipt"],
+            str(self.safe_receipt_path.resolve()),
+        )
+        self.assertEqual(
+            runner.teleop_training_provenance_sha256,
+            canonical_json_sha256(inherited),
+        )
+        self.assertEqual(
+            inherited["invocation"]["resume_source_checkpoint_path"],
+            str(checkpoint.resolve()),
+        )
+        self.assertEqual(
+            inherited["invocation"]["resume_source_checkpoint_sha256"],
+            hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            inherited["invocation"]["resume_source_checkpoint_iteration"], 499
+        )
+
+        output = self.root / "model_500.pt"
+        with patch.object(MjlabOnPolicyRunner, "save") as base_save:
+            runner.save(str(output))
+        saved_infos = base_save.call_args.args[-1]
+        self.assertEqual(
+            saved_infos[MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY], inherited
+        )
+        self.assertEqual(
+            saved_infos[MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY],
+            runner.teleop_training_provenance_sha256,
+        )
+        checkpoint.write_bytes(b"replaced after runner load")
+        with (
+            patch.object(MjlabOnPolicyRunner, "save") as replaced_save,
+            self.assertRaisesRegex(ValueError, "source checkpoint SHA-256 mismatch"),
+        ):
+            runner.save(str(self.root / "model_501.pt"))
+        replaced_save.assert_not_called()
+
+    def test_later_interrupted_resume_pins_exact_intermediate_checkpoint(self) -> None:
+        expected = self._bounded_actor_state()
+        policy = SimpleNamespace(state_dict=lambda: expected)
+        boundary_source = self.root / "model_1499.pt"
+        boundary_source.write_bytes(b"accepted boundary checkpoint")
+        parent_checkpoint_sha256 = hashlib.sha256(
+            boundary_source.read_bytes()
+        ).hexdigest()
+        parent_gate_sha256 = "d" * 64
+
+        loaded_manifest, _loaded_digest = self._canonical_initial_training_provenance(
+            resume=True,
+            include_safe_identity=False,
+            resume_source=boundary_source,
+        )
+        loaded_manifest["invocation"].update(
+            {
+                "stage_start_boundary": 1500,
+                "stage_target_boundary": 3000,
+                "parent_checkpoint_sha256": parent_checkpoint_sha256,
+                "parent_gate_sha256": parent_gate_sha256,
+            }
+        )
+        loaded_digest = canonical_json_sha256(loaded_manifest)
+        infos = {
+            "env_state": {"common_step_counter": 2000 * 24},
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
+            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
+        }
+        checkpoint = self.root / "model_1999.pt"
+        torch.save(
+            {
+                "actor_state_dict": {
+                    key: value.clone() for key, value in expected.items()
+                },
+                "iter": 1999,
+                "infos": infos,
+            },
+            checkpoint,
+        )
+
+        current_manifest, _current_digest = self._canonical_initial_training_provenance(
+            resume=True,
+            include_safe_identity=False,
+            resume_source=checkpoint,
+        )
+        current_manifest["invocation"].update(
+            {
+                "stage_start_boundary": 1500,
+                "stage_target_boundary": 3000,
+                "parent_checkpoint_sha256": parent_checkpoint_sha256,
+                "parent_gate_sha256": parent_gate_sha256,
+            }
+        )
+
+        def make_runner(manifest: dict[str, object]) -> MicrobanTeleopOnPolicyRunner:
+            runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+            runner.alg = SimpleNamespace(get_policy=lambda: policy)
+            runner.teleop_training_resume = True
+            runner.checkpoint_consumer_mode = False
+            runner.safe_velocity_bootstrap_provenance = None
+            runner.teleop_training_provenance = manifest
+            runner.teleop_training_provenance_sha256 = canonical_json_sha256(manifest)
+            runner.loaded_checkpoint_contract = None
+            return runner
+
+        runner = make_runner(current_manifest)
+        with (
+            patch.object(MjlabOnPolicyRunner, "load", return_value=infos),
+            patch.object(
+                MicrobanTeleopOnPolicyRunner,
+                "_validate_canonical_parent_gate",
+            ),
+        ):
+            runner.load(str(checkpoint), load_cfg={"actor": True})
+        self.assertEqual(
+            runner.teleop_training_provenance["invocation"][
+                "resume_source_checkpoint_sha256"
+            ],
+            hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        )
+
+        changed_source = deepcopy(current_manifest)
+        changed_source["invocation"]["resume_source_checkpoint_sha256"] = "0" * 64
+        changed_runner = make_runner(changed_source)
+        with (
+            patch.object(MjlabOnPolicyRunner, "load") as base_load,
+            patch.object(
+                MicrobanTeleopOnPolicyRunner,
+                "_validate_canonical_parent_gate",
+            ),
+            self.assertRaisesRegex(ValueError, "resume source.*SHA-256"),
+        ):
+            changed_runner.load(str(checkpoint), load_cfg={"actor": True})
+        base_load.assert_not_called()
+
     def test_save_adds_current_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None
@@ -1752,7 +2175,7 @@ class CheckpointContractTest(unittest.TestCase):
                 state_dict=lambda: {"mlp.weight": torch.zeros(1)}
             )
         )
-        fresh.velocity_actor_bootstrap_info = None
+        fresh.safe_velocity_actor_bootstrap_info = self._valid_bootstrap_info()
         (
             fresh.teleop_training_provenance,
             fresh.teleop_training_provenance_sha256,
@@ -1766,7 +2189,7 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "8")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "9")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
@@ -1784,12 +2207,10 @@ class CheckpointContractTest(unittest.TestCase):
             fresh.teleop_training_provenance_sha256,
         )
         self.assertNotIn("velocity_actor_bootstrap", saved_infos)
-
-        fresh.velocity_actor_bootstrap_info = self._valid_bootstrap_info()
-        with patch.object(MjlabOnPolicyRunner, "save") as base_save:
-            with self.assertRaisesRegex(ValueError, "requires a clean actor"):
-                fresh.save(str(self.root / "model_bootstrapped.pt"))
-            base_save.assert_not_called()
+        self.assertEqual(
+            saved_infos["safe_velocity_actor_bootstrap"],
+            fresh.safe_velocity_actor_bootstrap_info,
+        )
 
         legacy = object.__new__(MicrobanTeleopOnPolicyRunner)
         legacy.loaded_checkpoint_contract = TeleopCheckpointContract(
@@ -1818,19 +2239,10 @@ class CheckpointContractTest(unittest.TestCase):
         )
         with (
             patch.object(MjlabOnPolicyRunner, "load") as base_load,
-            self.assertRaisesRegex(ValueError, "cannot be resumed/exported"),
+            self.assertRaisesRegex(ValueError, "v1-v8"),
         ):
             runner.load(str(checkpoint), load_cfg={"actor": True})
         base_load.assert_not_called()
-
-        with patch.object(MjlabOnPolicyRunner, "load", return_value={}) as base_load:
-            runner.load(
-                str(checkpoint),
-                load_cfg={"actor": True},
-                allow_legacy_teleop_contract=True,
-            )
-            base_load.assert_called_once()
-        self.assertTrue(runner.loaded_checkpoint_contract.diagnostic_legacy)
 
         for load_cfg in (
             None,
@@ -1841,7 +2253,7 @@ class CheckpointContractTest(unittest.TestCase):
             with (
                 self.subTest(load_cfg=load_cfg),
                 patch.object(MjlabOnPolicyRunner, "load") as base_load,
-                self.assertRaisesRegex(ValueError, "cannot resume training"),
+                self.assertRaisesRegex(ValueError, "v1-v8"),
             ):
                 runner.load(
                     str(checkpoint),

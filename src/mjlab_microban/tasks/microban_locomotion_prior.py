@@ -8,7 +8,7 @@
 
 """Short-lived privileged locomotion prior for Microban teleoperation.
 
-The prior is deliberately unavailable to the actor.  During the first 1,000
+The prior is deliberately unavailable to the actor.  During the first 500
 PPO updates it gives the asymmetric critic, two training rewards and the
 training-only actor teacher a retargeted, forward-walking reference.  Early
 episodes start directly at frame 109.  That teleport probability then fades
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 
-MICROBAN_LOCOMOTION_PRIOR_FILENAME = "microban_twist2_walk002_locomotion_prior.npz"
+MICROBAN_LOCOMOTION_PRIOR_FILENAME = "microban_twist2_walk004_locomotion_prior.npz"
 MICROBAN_LOCOMOTION_PRIOR_PATH = (
     Path(__file__).resolve().parents[3]
     / "data"
@@ -49,16 +49,17 @@ MICROBAN_LOCOMOTION_PRIOR_PATH = (
     / MICROBAN_LOCOMOTION_PRIOR_FILENAME
 )
 MICROBAN_LOCOMOTION_PRIOR_SHA256 = (
-    "e789594b7711eb7e001edbde12064c9068e9649dfa6945626478171b48ad9fa0"
+    "100656a04438e5b7c09d80e63f79f3e758650a20d87326f3e3970616e6fb69e2"
 )
 MICROBAN_LOCOMOTION_PRIOR_FPS = 50.0
 MICROBAN_LOCOMOTION_PRIOR_START_FRAME = 109
 MICROBAN_LOCOMOTION_PRIOR_END_FRAME = 267
-MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES = 5
-MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S = 0.0780311897
+MICROBAN_LOCOMOTION_PRIOR_LEAD_FRAMES = 2
+MICROBAN_LOCOMOTION_PRIOR_NOMINAL_FORWARD_VELOCITY_M_S = 0.07803119436095032
 MICROBAN_LOCOMOTION_PRIOR_FORWARD_VELOCITY_RANGE_M_S = (0.06, 0.11)
-MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP = 500 * 24
-MICROBAN_LOCOMOTION_PRIOR_FADE_END_STEP = 1000 * 24
+MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S = 5.0
+MICROBAN_LOCOMOTION_PRIOR_FULL_BLEND_END_STEP = 250 * 24
+MICROBAN_LOCOMOTION_PRIOR_FADE_END_STEP = 500 * 24
 MICROBAN_LOCOMOTION_PRIOR_FULL_TELEPORT_END_STEP = 100 * 24
 MICROBAN_LOCOMOTION_PRIOR_TELEPORT_FADE_END_STEP = 500 * 24
 MICROBAN_LOCOMOTION_PRIOR_LAUNCH_STEPS = 20
@@ -100,6 +101,14 @@ MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES: tuple[str, ...] = (
     "left_knee",
     "left_ankle_pitch",
     "left_ankle_roll",
+)
+MICROBAN_LOCOMOTION_PRIOR_SAGITTAL_LEG_JOINT_NAMES: tuple[str, ...] = (
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle_pitch",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle_pitch",
 )
 
 
@@ -246,7 +255,7 @@ def _load_locomotion_prior(
         raise ValueError("Locomotion prior policy action order mismatch")
     if not body_names or body_names[0] != "trunk":
         raise ValueError("Locomotion prior root body must be trunk at index zero")
-    if source_session_id != "twist2-b06178f19a22-0807_yanjie_walk_002":
+    if source_session_id != "twist2-b06178f19a22-0807_yanjie_walk_004":
         raise ValueError("Locomotion prior source session mismatch")
     if source_schema != "microban.twist2.capture@1":
         raise ValueError("Locomotion prior source schema mismatch")
@@ -273,6 +282,15 @@ def _load_locomotion_prior(
     source_leg_ids = [
         joint_names.index(name) for name in MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES
     ]
+    maximum_source_joint_speed = float(np.max(np.abs(joint_vel[:, source_leg_ids])))
+    if (
+        maximum_source_joint_speed
+        > MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S
+    ):
+        raise ValueError(
+            "Locomotion prior source joint speed exceeds the retargeting gate: "
+            f"{maximum_source_joint_speed:.9g} rad/s"
+        )
     tensor = lambda value: torch.as_tensor(
         value.copy(), dtype=torch.float32, device=device
     )
@@ -673,7 +691,7 @@ def locomotion_prior_action_target_error_exp(
     action_name: str,
     std: float,
 ) -> torch.Tensor:
-    """Reward the clipped absolute leg target at the +5-frame reference."""
+    """Reward the clipped absolute leg target at the configured lead reference."""
 
     if not math.isfinite(std) or std <= 0.0:
         raise ValueError("Locomotion-prior reward std must be finite and positive")

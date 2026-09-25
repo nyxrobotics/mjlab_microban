@@ -46,6 +46,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
     MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
+    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
     get_microban_teleop_metadata,
@@ -71,10 +72,10 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_MIXED_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
     MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
-    MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
     make_microban_teleop_env_cfg,
+    microban_teleop_action_delta_bounds,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
@@ -102,7 +103,7 @@ def _assert_rotation_command_cfg(
     expected_signed_axis_probabilities: dict[str, float] | None = None,
     expected_signed_axis_ranges: dict[str, tuple[float, float]] | None = None,
 ) -> None:
-    """Check rotation and optional v8 signed-axis config survive construction."""
+    """Check rotation and optional v9 signed-axis config survive construction."""
 
     if not isinstance(command_cfg, UniformVelocityCommandWithRotationCfg):
         raise TypeError(
@@ -235,6 +236,10 @@ def main() -> None:
     )
 
     cfg = make_microban_teleop_env_cfg(play=False)
+    if cfg.sim.nconmax < 512 or cfg.sim.njmax < 2048:
+        raise AssertionError(
+            "Contract v9 requires nconmax>=512 and njmax>=2048"
+        )
     _assert_rotation_command_cfg(
         cfg.commands["twist"],
         expected_rel_rotation_envs=0.0,
@@ -315,6 +320,16 @@ def main() -> None:
             MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
         ):
             raise AssertionError("Locomotion prior command width drifted")
+        if prior.cfg.enabled or prior.command.any():
+            raise AssertionError("Contract v9 locomotion prior must start disabled")
+        for name in (
+            "locomotion_prior_action_target",
+            "locomotion_prior_joint_position",
+        ):
+            if env.reward_manager.get_term_cfg(name).weight != 0.0:
+                raise AssertionError(f"Contract v9 reward {name!r} must stay zero")
+        if "locomotion_prior_clip_finished" in env.termination_manager.active_terms:
+            raise AssertionError("Contract v9 retains a retired prior termination")
 
         event_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
         motion = event_cfg.func
@@ -454,6 +469,11 @@ def main() -> None:
             )
 
         metadata = get_microban_teleop_metadata(env, run_path="smoke")
+        final_deployment_metadata = get_microban_teleop_metadata(
+            env,
+            run_path="smoke",
+            canonical_final_stage=True,
+        )
         expected_observation_names = [
             name for name, _ in MICROBAN_TELEOP_OBSERVATION_SCHEMA
         ]
@@ -505,6 +525,19 @@ def main() -> None:
         if metadata["foot_target_upper"] != [0.03, 0.03, 0.05] * 2:
             raise AssertionError(
                 f"Unexpected foot target upper bounds: {metadata['foot_target_upper']}"
+            )
+        if metadata["simultaneous_both_feet_target_upper"] != (
+            [0.01, 0.01, 0.012] * 2
+        ):
+            raise AssertionError(
+                "Diagnostic metadata did not retain play simultaneous-foot support"
+            )
+        if final_deployment_metadata["simultaneous_both_feet_target_upper"] != (
+            [0.01, 0.01, MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M] * 2
+        ):
+            raise AssertionError(
+                "Final deployment metadata did not materialize final-stage "
+                "simultaneous-foot support"
             )
         if metadata["hand_target_lower"] != [-0.08, -0.08, -0.08] * 2:
             raise AssertionError(
@@ -578,6 +611,20 @@ def main() -> None:
         }
         if any(len(values) != 18 for values in exact_bounds.values()):
             raise AssertionError("Exact JSON action bounds are not action-aligned")
+        expected_actor_lower, expected_actor_upper = (
+            microban_teleop_action_delta_bounds()
+        )
+        for name, expected in (
+            ("actor_raw_action_lower", expected_actor_lower),
+            ("actor_raw_action_upper", expected_actor_upper),
+        ):
+            if not torch.equal(
+                torch.tensor(exact_bounds[name], dtype=torch.float32),
+                torch.tensor(expected, dtype=torch.float32),
+            ):
+                raise AssertionError(
+                    f"Metadata {name!r} differs from bounded actor contract"
+                )
         for actor_lower, actor_upper, soft_lower, soft_upper in zip(
             exact_bounds["actor_raw_action_lower"],
             exact_bounds["actor_raw_action_upper"],
@@ -601,7 +648,7 @@ def main() -> None:
         defaults = dict(
             zip(metadata["action_joint_names"], metadata["default_joint_pos"])
         )
-        expected_shoulder_pitch = math.radians(10.0)
+        expected_shoulder_pitch = 0.0
         for side in ("left", "right"):
             name = f"{side}_shoulder_pitch"
             if not math.isclose(
@@ -612,7 +659,7 @@ def main() -> None:
                     f"runtime constant {expected_shoulder_pitch}"
                 )
 
-        # Walk every v8 boundary at the exact global step.  This checks both that
+        # Walk every v9 boundary at the exact global step. This checks both that
         # no stage is applied one step early and that resuming on a boundary
         # materializes the complete command/reward state in one compute.
         curriculum_cfg = env.curriculum_manager.get_term_cfg("staged_curriculum")
@@ -621,7 +668,6 @@ def main() -> None:
             raise TypeError(f"Unexpected curriculum type: {type(curriculum).__name__}")
         stage_boundaries = (
             500,
-            1000,
             1500,
             3000,
             4500,
@@ -638,7 +684,7 @@ def main() -> None:
             if curriculum.current_stage != expected_stage:
                 raise AssertionError(
                     f"Curriculum stage {expected_stage + 1} applied before "
-                    f"its v8 boundary {boundary}"
+                    f"its v9 boundary {boundary}"
                 )
             if boundary == 8000:
                 if motion.neutral_probability != (
@@ -654,7 +700,7 @@ def main() -> None:
             env.curriculum_manager.compute()
             if curriculum.current_stage != expected_stage + 1:
                 raise AssertionError(
-                    f"V8 boundary {boundary} materialized stage "
+                    f"V9 boundary {boundary} materialized stage "
                     f"{curriculum.current_stage}, expected {expected_stage + 1}"
                 )
 
@@ -662,15 +708,6 @@ def main() -> None:
             linear_reward = env.reward_manager.get_term_cfg("track_linear_velocity")
             angular_reward = env.reward_manager.get_term_cfg("track_angular_velocity")
             if boundary == 500:
-                if (
-                    twist_cfg.signed_axis_ranges
-                    != MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES
-                    or twist_cfg.signed_axis_probabilities
-                    != MICROBAN_TELEOP_PRIOR_FADE_AXIS_PROBABILITIES
-                    or not prior.cfg.enabled
-                ):
-                    raise AssertionError("Locomotion-prior fade stage drifted")
-            elif boundary == 1000:
                 if (
                     twist_cfg.signed_axis_ranges
                     != MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES
@@ -825,7 +862,7 @@ def main() -> None:
             raise AssertionError("Single-foot floor-band support drifted")
         if foot_cfg.both_feet_lift_height_range != (
             MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
-            0.02,
+            MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
         ):
             raise AssertionError("Final both-foot floor-band support drifted")
         if (
@@ -846,6 +883,8 @@ def main() -> None:
             "seed": args.seed,
             "actor_observation_shape": list(observations["actor"].shape),
             "action_dim": env.action_manager.total_action_dim,
+            "nconmax": cfg.sim.nconmax,
+            "njmax": cfg.sim.njmax,
             "action_joint_names": action.target_names,
             "hmd_joint_names": list(motion.joint_names),
             "hmd_effective_limits_rad": [
@@ -856,7 +895,7 @@ def main() -> None:
             "twist_command_type": type(twist).__name__,
             "rotation_env_ang_vel_range": list(twist.cfg.rotation_env_ang_vel_range),
             "signed_axis_modes": list(twist.cfg.signed_axis_probabilities),
-            "v8_curriculum_boundaries": list(stage_boundaries),
+            "v9_curriculum_boundaries": list(stage_boundaries),
             "keypoint_reference": "episode_reset_fixed",
             "resume_curriculum_stage": curriculum.current_stage,
             "terminated": int(terminated.sum().item()),
