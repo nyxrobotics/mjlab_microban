@@ -629,13 +629,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.terminations.pop("locomotion_prior_clip_finished", None)
 
-    # V9 never applies the dynamically rejected walk004 prior or direct BC.
+    # V10 never applies the dynamically rejected walk004 prior or direct BC.
     # The first stage changes only the command sampler, then acquires one signed
     # axis at a time before introducing mixed commands.
-    # Checkpoints at 1500/3000/4500/6000/8000 are external capability gates;
-    # the reproducible wrapper stops at each boundary and resumes only after the
-    # fixed signed-axis evaluator passes.  Limb tracking is deliberately delayed
-    # far beyond locomotion so a stationary multi-objective optimum cannot win.
+    # The v9 model_1499 state is migrated in full, then contract-v10 gates at
+    # 3000/7000/10000/15000. Limb tracking stays behind the locomotion stages so
+    # a stationary multi-objective optimum cannot win.
     cfg.curriculum = {
         "staged_curriculum": CurriculumTermCfg(
             func=ResumeSafeStepBasedStagedCurriculum,
@@ -744,8 +743,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                         ),
                     },
                     {
-                        "name": "enable moving-HMD and stationary no-step guard",
-                        "step": 8000 * 24,
+                        "name": (
+                            "enable moving-HMD, stationary no-step guard, and broad "
+                            "hand tracking"
+                        ),
+                        "step": 7000 * 24,
                         "apply": lambda env: (
                             set_stepping_parameters(
                                 env,
@@ -758,12 +760,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                                     MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY
                                 ),
                             ),
-                        ),
-                    },
-                    {
-                        "name": "enable broad hand tracking",
-                        "step": 12000 * 24,
-                        "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "hand_target_tracking"
                             ).__setattr__("weight", 1.0),
@@ -779,7 +775,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     },
                     {
                         "name": "tighten hand tracking",
-                        "step": 14000 * 24,
+                        "step": 8500 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "hand_target_tracking"
@@ -793,7 +789,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     },
                     {
                         "name": "enable broad stationary foot tracking",
-                        "step": 16000 * 24,
+                        "step": 10000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "foot_target_tracking"
@@ -814,7 +810,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     },
                     {
                         "name": "tighten foot tracking",
-                        "step": 18000 * 24,
+                        "step": 12000 * 24,
                         "apply": lambda env: (
                             env.reward_manager.get_term_cfg(
                                 "foot_target_tracking"
@@ -836,6 +832,22 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                             ),
                         ),
                     },
+                    {
+                        "name": "materialize final deployment envelope",
+                        "step": 15000 * 24,
+                        "apply": lambda env: (
+                            env.command_manager.get_term_cfg("foot_target").__setattr__(
+                                "both_feet_lift_height_range",
+                                (
+                                    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+                                    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
+                                ),
+                            ),
+                            env.command_manager.get_term_cfg("hand_target").__setattr__(
+                                "rel_active", 0.7
+                            ),
+                        ),
+                    },
                 ]
             },
         )
@@ -854,7 +866,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 @dataclass
 class MicrobanTeleopRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Contract-v9 runner config for one pinned safe-velocity source."""
+    """Contract-v10 fixed-LR full-state migration/resume configuration."""
 
     # This is an intentionally separate constructor path for tools that create a
     # blank policy and immediately load a validated checkpoint actor.  It must
@@ -901,20 +913,14 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.0,
-        # Three passes keep the first production-width update inside the policy
-        # trust region.  Five passes at both 1e-3 and 3e-4 drove the adaptive
-        # schedule directly to its 1e-5 floor and yielded a neutral actor that
-        # fell after roughly two seconds.
+        # Three passes retain the accepted contract-v9 PPO topology.
         num_learning_epochs=3,
         num_mini_batches=4,
-        # Production-width one-update diagnostics at both 1e-3 and 3e-4
-        # overshot the KL target, drove the adaptive scheduler straight to 1e-5
-        # and produced neutral policies that fell after roughly two seconds.
-        # V8 keeps the safer v7 starting rate and adaptive scheduling.  V8j
-        # removes the entropy incentive because the bounded std still grew
-        # while the actor converged to the stationary local optimum.
-        learning_rate=1.0e-4,
-        schedule="adaptive",
+        # V9's adaptive rate rose after the safe model_2500 region and degraded
+        # deterministic yaw safety. V10 therefore pins both the algorithm scalar
+        # and every optimizer param group at the observed 1e-5 floor.
+        learning_rate=1.0e-5,
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,
@@ -922,7 +928,7 @@ MicrobanTeleopRlCfg = MicrobanTeleopRunnerCfg(
     ),
     wandb_project="mjlab_microban_teleop",
     experiment_name="mjlab_microban_teleop",
-    save_interval=500,
+    save_interval=100,
     num_steps_per_env=MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
-    max_iterations=20_000,
+    max_iterations=15_000,
 )

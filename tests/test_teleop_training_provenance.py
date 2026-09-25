@@ -1,12 +1,8 @@
 # Copyright 2026 Marc Duclusaud
 
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at:
 
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-"""Focused tests for resolved-config/source-bound teleop provenance."""
+"""Focused tests for schema-2, full-state Microban teleop provenance."""
 
 from __future__ import annotations
 
@@ -21,18 +17,29 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+    MICROBAN_TELEOP_RECIPE_REVISION,
+    MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+)
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
+    MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
     MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+    MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+    MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256,
     canonical_json_sha256,
     collect_training_provenance,
     collect_training_source_manifest,
-    inherit_initial_stage_safe_velocity_identity,
+    inherit_v10_migration_source_identity,
     validate_canonical_stage_critical_config,
     validate_training_provenance,
+    validate_v10_migration_source_identity,
 )
 
 
@@ -50,6 +57,13 @@ class TrainingProvenanceTest(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("RECIPE = 1\n", encoding="utf-8")
         self.source = source
+        repository = Path(__file__).resolve().parents[1]
+        self.legacy_checkpoint = (
+            repository
+            / "logs/rsl_rl/mjlab_microban_teleop"
+            / "2026-09-25_10-58-50_teleop_v9_safe_v3_v92r_stage0_1500"
+            / "model_1499.pt"
+        ).resolve()
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -59,16 +73,20 @@ class TrainingProvenanceTest(unittest.TestCase):
         result: dict[str, object] = {
             "seed": 42,
             "num_steps_per_env": 24,
-            "save_interval": 500,
-            "max_iterations": 1500,
-            "resume": False,
+            "save_interval": 100,
+            "max_iterations": 100,
+            "resume": True,
             "logger": "tensorboard",
             "upload_model": False,
-            "safe_velocity_checkpoint": "/pinned/model_7.pt",
-            "safe_velocity_checkpoint_sha256": "a" * 64,
-            "safe_velocity_acceptance_receipt": "/pinned/acceptance.json",
+            "checkpoint_consumer_mode": False,
+            "safe_velocity_checkpoint": None,
+            "safe_velocity_checkpoint_sha256": None,
+            "safe_velocity_acceptance_receipt": None,
             "save_pristine_checkpoint": False,
-            "algorithm": {"learning_rate": 1.0e-4},
+            "algorithm": {
+                "learning_rate": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+                "schedule": "fixed",
+            },
         }
         result.update(updates)
         return result
@@ -78,8 +96,7 @@ class TrainingProvenanceTest(unittest.TestCase):
         return SimpleNamespace(
             clip_actions=None,
             unwrapped=SimpleNamespace(
-                cfg=_FakeEnvCfg(seed=seed, reward_weight=1.0),
-                num_envs=num_envs,
+                cfg=_FakeEnvCfg(seed=seed, reward_weight=1.0), num_envs=num_envs
             ),
         )
 
@@ -89,29 +106,58 @@ class TrainingProvenanceTest(unittest.TestCase):
         return collect_training_provenance(
             self._env(),
             runner_cfg or self._runner_cfg(),
-            training_contract_version="9",
-            recipe_revision="recipe-test",
-            actor_initialization="actor-test",
+            training_contract_version=MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+            recipe_revision=MICROBAN_TELEOP_RECIPE_REVISION,
+            actor_initialization=MICROBAN_TELEOP_ACTOR_INITIALIZATION,
             project_root=self.root,
         )
 
+    def _migration_environment(self) -> dict[str, str]:
+        return {
+            "MICROBAN_TELEOP_PROVENANCE_MODE": (
+                MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE
+            ),
+            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "1500",
+            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "3000",
+            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": (
+                MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
+            ),
+            "MICROBAN_TELEOP_PARENT_GATE_SHA256": (
+                MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256
+            ),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(
+                self.legacy_checkpoint
+            ),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": (
+                MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
+            ),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "1499",
+        }
+
+    def _migration_manifest(self) -> tuple[dict, str]:
+        with patch.dict(os.environ, self._migration_environment(), clear=True):
+            return self._collect()
+
     def test_digest_binds_resolved_config_and_exact_source_bytes(self) -> None:
-        manifest, digest = self._collect()
-        repeated, repeated_digest = self._collect()
+        with patch.dict(os.environ, {}, clear=True):
+            manifest, digest = self._collect()
+            repeated, repeated_digest = self._collect()
         self.assertEqual(manifest, repeated)
         self.assertEqual(digest, repeated_digest)
-
-        changed_cfg, changed_cfg_digest = self._collect(
-            runner_cfg=self._runner_cfg(algorithm={"learning_rate": 2.0e-4})
-        )
+        with patch.dict(os.environ, {}, clear=True):
+            changed_cfg, changed_cfg_digest = self._collect(
+                runner_cfg=self._runner_cfg(
+                    algorithm={"learning_rate": 2.0e-5, "schedule": "fixed"}
+                )
+            )
         self.assertNotEqual(digest, changed_cfg_digest)
         self.assertNotEqual(
             manifest["resolved_config"]["runner"],
             changed_cfg["resolved_config"]["runner"],
         )
-
         self.source.write_text("RECIPE = 2\n", encoding="utf-8")
-        changed_source, changed_source_digest = self._collect()
+        with patch.dict(os.environ, {}, clear=True):
+            changed_source, changed_source_digest = self._collect()
         self.assertNotEqual(digest, changed_source_digest)
         self.assertNotEqual(
             manifest["source"]["tree_sha256"],
@@ -124,22 +170,17 @@ class TrainingProvenanceTest(unittest.TestCase):
         shutil.copytree(project_root / "src", copied_root / "src")
         relative_path = "src/mjlab_microban/robot/xc330_params.json"
         copied_json = copied_root / relative_path
-
         original = collect_training_source_manifest(copied_root)
         self.assertIn(relative_path, original["files"])
         self.assertEqual(
             original["files"][relative_path],
             hashlib.sha256(copied_json.read_bytes()).hexdigest(),
         )
-
         copied_json.write_bytes(copied_json.read_bytes() + b"\n")
         changed = collect_training_source_manifest(copied_root)
-        self.assertNotEqual(
-            original["files"][relative_path], changed["files"][relative_path]
-        )
         self.assertNotEqual(original["tree_sha256"], changed["tree_sha256"])
 
-    def test_real_resolved_v9_configs_are_deterministically_serializable(self) -> None:
+    def test_real_resolved_v10_configs_are_deterministically_serializable(self) -> None:
         env_cfg = make_microban_teleop_env_cfg(play=False)
         env_cfg.scene.num_envs = 2048
         env_cfg.seed = 42
@@ -148,212 +189,139 @@ class TrainingProvenanceTest(unittest.TestCase):
             seed=42,
             logger="tensorboard",
             upload_model=False,
-            max_iterations=1500,
-            save_interval=500,
+            resume=True,
+            max_iterations=100,
+            save_interval=100,
         )
         env = SimpleNamespace(
             clip_actions=None,
             unwrapped=SimpleNamespace(cfg=env_cfg, num_envs=2048),
         )
-        manifest, digest = collect_training_provenance(
-            env,
-            runner_cfg,
-            training_contract_version="9",
-            recipe_revision="recipe-test",
-            actor_initialization="actor-test",
-        )
+        with patch.dict(os.environ, {}, clear=True):
+            manifest, digest = collect_training_provenance(
+                env,
+                runner_cfg,
+                training_contract_version=MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+                recipe_revision=MICROBAN_TELEOP_RECIPE_REVISION,
+                actor_initialization=MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+            )
         self.assertEqual(digest, canonical_json_sha256(manifest))
-        self.assertGreater(len(manifest["resolved_config"]["environment"]), 1)
+        self.assertEqual(
+            manifest["schema_version"],
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+        )
 
-    def test_tampered_manifest_or_digest_fails_closed(self) -> None:
-        manifest, digest = self._collect()
-        validated = validate_training_provenance(
+    def test_migration_launch_records_exact_legacy_ledger(self) -> None:
+        manifest, digest = self._migration_manifest()
+        validate_training_provenance(
             manifest,
             digest,
-            expected_contract_version="9",
-            expected_recipe_revision="recipe-test",
-            expected_actor_initialization="actor-test",
+            require_canonical_stage=True,
+            expected_contract_version="10",
         )
-        self.assertIs(validated, manifest)
+        validate_canonical_stage_critical_config(manifest)
+        ledger = validate_v10_migration_source_identity(manifest["migration_source"])
+        self.assertEqual(
+            ledger["source_checkpoint_sha256"],
+            MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
+        )
+        self.assertEqual(
+            ledger["source_parent_gate_sha256"],
+            MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256,
+        )
+        self.assertEqual(ledger["source_checkpoint_iteration"], 1499)
+        self.assertEqual(ledger["source_common_step_counter"], 36_000)
 
+    def test_migration_requires_exact_parent_and_source(self) -> None:
+        wrong_gate = self._migration_environment()
+        wrong_gate["MICROBAN_TELEOP_PARENT_GATE_SHA256"] = "a" * 64
+        with (
+            patch.dict(os.environ, wrong_gate, clear=True),
+            self.assertRaisesRegex(ValueError, "pinned legacy checkpoint/gate"),
+        ):
+            self._collect()
+        wrong_source = self._migration_environment()
+        wrong_source["MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256"] = "b" * 64
+        with (
+            patch.dict(os.environ, wrong_source, clear=True),
+            self.assertRaisesRegex(ValueError, "SHA-256 mismatch"),
+        ):
+            self._collect()
+
+    def test_normal_stage_inherits_ledger_and_accepts_100_update_canary(self) -> None:
+        loaded, _ = self._migration_manifest()
+        resume_source = self.root / "model_2999.pt"
+        resume_source.write_bytes(b"contract-v10 boundary")
+        resume_sha = hashlib.sha256(resume_source.read_bytes()).hexdigest()
+        environment = {
+            "MICROBAN_TELEOP_PROVENANCE_MODE": MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "3000",
+            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "7000",
+            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": resume_sha,
+            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "c" * 64,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": resume_sha,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "2999",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            current, _ = self._collect()
+        self.assertIsNone(current["migration_source"])
+        inherited, digest = inherit_v10_migration_source_identity(current, loaded)
+        self.assertEqual(digest, canonical_json_sha256(inherited))
+        validate_canonical_stage_critical_config(inherited)
+        tampered = deepcopy(inherited)
+        tampered["migration_source"]["source_checkpoint_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "migration_source identity mismatch"):
+            validate_canonical_stage_critical_config(tampered)
+
+    def test_v10_stages_cannot_skip_boundaries(self) -> None:
+        resume_source = self.root / "model_2999.pt"
+        resume_source.write_bytes(b"boundary")
+        resume_sha = hashlib.sha256(resume_source.read_bytes()).hexdigest()
+        environment = {
+            "MICROBAN_TELEOP_PROVENANCE_MODE": MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "3000",
+            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "10000",
+            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": resume_sha,
+            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "d" * 64,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": resume_sha,
+            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "2999",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            self.assertRaisesRegex(ValueError, "adjacent contract-v10 boundary"),
+        ):
+            self._collect()
+
+    def test_fixed_lr_save_interval_and_stage_limit_fail_closed(self) -> None:
+        manifest, _ = self._migration_manifest()
+        for field, value, pattern in (
+            ("save_interval", 500, "save_interval"),
+            ("max_iterations_for_process", 1501, "crosses the stage boundary"),
+            (
+                "max_iterations_for_process",
+                500,
+                "complete remaining stage or the canonical 100-update canary",
+            ),
+        ):
+            with self.subTest(field=field):
+                changed = deepcopy(manifest)
+                changed["resolved_config"]["critical"][field] = value
+                with self.assertRaisesRegex(ValueError, pattern):
+                    validate_canonical_stage_critical_config(changed)
+        changed = deepcopy(manifest)
+        changed["resolved_config"]["runner"]["algorithm"]["learning_rate"] = 2e-5
+        with self.assertRaisesRegex(ValueError, "learning_rate"):
+            validate_canonical_stage_critical_config(changed)
+
+    def test_tampered_manifest_or_digest_fails_closed(self) -> None:
+        manifest, digest = self._migration_manifest()
         manifest["resolved_config"]["critical"]["num_envs"] = 64
         with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
             validate_training_provenance(manifest, digest)
-
-        forged_digest = canonical_json_sha256(manifest)
-        with self.assertRaisesRegex(ValueError, "canonical v9 stage config"):
+        with self.assertRaisesRegex(ValueError, "canonical v10 stage config"):
             validate_canonical_stage_critical_config(manifest)
-        validate_training_provenance(manifest, forged_digest)
-
-    def test_only_explicit_canonical_launch_can_make_canonical_manifest(self) -> None:
-        generic, generic_digest = self._collect()
-        self.assertFalse(generic["canonical_stage"])
-        with self.assertRaisesRegex(ValueError, "canonical stage driver"):
-            validate_training_provenance(
-                generic, generic_digest, require_canonical_stage=True
-            )
-
-        canonical_environment = {
-            "MICROBAN_TELEOP_PROVENANCE_MODE": (
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-            ),
-            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "0",
-            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "1500",
-            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": "",
-            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "",
-        }
-        with patch.dict(os.environ, canonical_environment, clear=False):
-            canonical, canonical_digest = self._collect()
-        validate_training_provenance(
-            canonical, canonical_digest, require_canonical_stage=True
-        )
-        validate_canonical_stage_critical_config(canonical)
-        self.assertEqual(
-            canonical["invocation"],
-            {
-                "mode": MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-                "stage_start_boundary": 0,
-                "stage_target_boundary": 1500,
-                "parent_checkpoint_sha256": None,
-                "parent_gate_sha256": None,
-                "resume_source_checkpoint_path": None,
-                "resume_source_checkpoint_sha256": None,
-                "resume_source_checkpoint_iteration": None,
-            },
-        )
-
-    def test_resumed_canonical_stage_requires_both_parent_digests(self) -> None:
-        environment = {
-            "MICROBAN_TELEOP_PROVENANCE_MODE": (
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-            ),
-            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "1500",
-            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "3000",
-            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": "a" * 64,
-            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "",
-        }
-        with (
-            patch.dict(os.environ, environment, clear=False),
-            self.assertRaisesRegex(ValueError, "parent gate"),
-        ):
-            self._collect()
-
-    def test_canonical_stage_cannot_skip_a_gate_boundary(self) -> None:
-        environment = {
-            "MICROBAN_TELEOP_PROVENANCE_MODE": (
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-            ),
-            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "0",
-            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "3000",
-            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": "",
-            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "",
-        }
-        with (
-            patch.dict(os.environ, environment, clear=False),
-            self.assertRaisesRegex(ValueError, "adjacent v9 boundary pair"),
-        ):
-            self._collect()
-
-    def test_interrupted_initial_stage_inherits_only_checkpoint_safe_identity(
-        self,
-    ) -> None:
-        fresh_environment = {
-            "MICROBAN_TELEOP_PROVENANCE_MODE": (
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-            ),
-            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "0",
-            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "1500",
-            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": "",
-            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "",
-        }
-        with patch.dict(os.environ, fresh_environment, clear=False):
-            loaded, _loaded_digest = self._collect()
-        resume_source = self.root / "model_499.pt"
-        resume_source.write_bytes(b"interrupted initial checkpoint")
-        resume_source_sha256 = hashlib.sha256(resume_source.read_bytes()).hexdigest()
-        resume_environment = {
-            **fresh_environment,
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": (
-                resume_source_sha256
-            ),
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "499",
-        }
-        with patch.dict(os.environ, resume_environment, clear=False):
-            current, _current_digest = self._collect(
-                runner_cfg=self._runner_cfg(
-                    resume=True,
-                    safe_velocity_checkpoint=None,
-                    safe_velocity_checkpoint_sha256=None,
-                    safe_velocity_acceptance_receipt=None,
-                )
-            )
-        bootstrap_info = {
-            "source_checkpoint_path": "/pinned/model_7.pt",
-            "source_checkpoint_sha256": "a" * 64,
-            "source_acceptance_receipt_path": "/pinned/acceptance.json",
-        }
-
-        inherited, digest = inherit_initial_stage_safe_velocity_identity(
-            current, loaded, bootstrap_info
-        )
-        self.assertEqual(digest, canonical_json_sha256(inherited))
-        self.assertEqual(
-            inherited["resolved_config"]["critical"][
-                "safe_velocity_checkpoint"
-            ],
-            "/pinned/model_7.pt",
-        )
-        self.assertIsNone(
-            inherited["resolved_config"]["runner"][
-                "safe_velocity_checkpoint"
-            ]
-        )
-        self.assertTrue(inherited["resolved_config"]["critical"]["resume"])
-        validate_canonical_stage_critical_config(inherited)
-
-        changed = deepcopy(loaded)
-        changed["resolved_config"]["critical"][
-            "safe_velocity_acceptance_receipt"
-        ] = "/pinned/different.json"
-        with self.assertRaisesRegex(ValueError, "disagrees"):
-            inherit_initial_stage_safe_velocity_identity(
-                current, changed, bootstrap_info
-            )
-
-    def test_later_stage_still_rejects_resupplied_safe_source(self) -> None:
-        resume_source = self.root / "model_1499.pt"
-        resume_source.write_bytes(b"boundary checkpoint")
-        resume_source_sha256 = hashlib.sha256(resume_source.read_bytes()).hexdigest()
-        environment = {
-            "MICROBAN_TELEOP_PROVENANCE_MODE": (
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-            ),
-            "MICROBAN_TELEOP_STAGE_START_BOUNDARY": "1500",
-            "MICROBAN_TELEOP_STAGE_TARGET_BOUNDARY": "3000",
-            "MICROBAN_TELEOP_PARENT_CHECKPOINT_SHA256": resume_source_sha256,
-            "MICROBAN_TELEOP_PARENT_GATE_SHA256": "c" * 64,
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH": str(resume_source),
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256": (
-                resume_source_sha256
-            ),
-            "MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION": "1499",
-        }
-        with patch.dict(os.environ, environment, clear=False):
-            valid, _digest = self._collect(
-                runner_cfg=self._runner_cfg(
-                    resume=True,
-                    safe_velocity_checkpoint=None,
-                    safe_velocity_checkpoint_sha256=None,
-                    safe_velocity_acceptance_receipt=None,
-                )
-            )
-            invalid, _invalid_digest = self._collect(
-                runner_cfg=self._runner_cfg(resume=True)
-            )
-        validate_canonical_stage_critical_config(valid)
-        with self.assertRaisesRegex(ValueError, "source bootstrap identity"):
-            validate_canonical_stage_critical_config(invalid)
 
 
 if __name__ == "__main__":

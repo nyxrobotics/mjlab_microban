@@ -50,6 +50,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     MicrobanTeleopOnPolicyRunner,
     TeleopCheckpointContract,
+    TeleopTrainingProvenanceIdentity,
     _command_target_bounds,
     validate_bounded_actor_checkpoint_buffers,
     validate_finite_actor_state,
@@ -126,6 +127,8 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
+    MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE,
     canonical_json_sha256,
 )
 
@@ -831,9 +834,9 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_HAND_TRACKING_STD_M,
         )
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.entropy_coef, 0.0)
-        self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-4)
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.learning_rate, 1.0e-5)
         self.assertEqual(MicrobanTeleopRlCfg.algorithm.num_learning_epochs, 3)
-        self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "adaptive")
+        self.assertEqual(MicrobanTeleopRlCfg.algorithm.schedule, "fixed")
         self.assertEqual(
             MicrobanTeleopRlCfg.algorithm.locomotion_prior_bc_forward_coefficient,
             0.0,
@@ -944,11 +947,11 @@ class TeleopConfigurationTest(unittest.TestCase):
                 3000 * 24,
                 4500 * 24,
                 6000 * 24,
-                8000 * 24,
+                7000 * 24,
+                8500 * 24,
+                10000 * 24,
                 12000 * 24,
-                14000 * 24,
-                16000 * 24,
-                18000 * 24,
+                15000 * 24,
             ],
         )
         self.assertEqual(
@@ -974,7 +977,7 @@ class TeleopConfigurationTest(unittest.TestCase):
         )
         self.assertEqual(
             stages[5]["name"],
-            "enable moving-HMD and stationary no-step guard",
+            "enable moving-HMD, stationary no-step guard, and broad hand tracking",
         )
         self.assertEqual(
             cfg.commands["foot_target"].lift_height_range,
@@ -1042,7 +1045,7 @@ class TeleopConfigurationTest(unittest.TestCase):
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
-            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.012),
+            (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
             (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, 0.02),
         )
         expected_foot_weights = (
@@ -1053,8 +1056,8 @@ class TeleopConfigurationTest(unittest.TestCase):
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
-            MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
             2.0,
+            3.0,
             3.0,
         )
         expected_hmd_neutral_probabilities = (
@@ -1151,7 +1154,8 @@ class TeleopConfigurationTest(unittest.TestCase):
             reward_cfgs["foot_target_tracking"].params["std"],
             MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
         )
-        self.assertEqual(MicrobanTeleopRlCfg.max_iterations, 20_000)
+        self.assertEqual(MicrobanTeleopRlCfg.max_iterations, 15_000)
+        self.assertEqual(MicrobanTeleopRlCfg.save_interval, 100)
         self.assertEqual(
             MicrobanTeleopRlCfg.num_steps_per_env,
             MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
@@ -1430,6 +1434,8 @@ class CheckpointContractTest(unittest.TestCase):
         torch.save(
             {
                 "actor_state_dict": {"mlp.weight": torch.zeros(1)},
+                "critic_state_dict": {"mlp.weight": torch.zeros(1)},
+                "optimizer_state_dict": self._optimizer_state(),
                 "iter": iteration,
                 "infos": infos,
             },
@@ -1451,6 +1457,19 @@ class CheckpointContractTest(unittest.TestCase):
         return {
             f"distribution.{key}": value.detach().clone()
             for key, value in distribution.state_dict().items()
+        }
+
+    @staticmethod
+    def _optimizer_state(*, learning_rate: float = 1.0e-5) -> dict[str, object]:
+        return {
+            "state": {
+                0: {
+                    "step": torch.tensor(1.0),
+                    "exp_avg": torch.zeros(1),
+                    "exp_avg_sq": torch.zeros(1),
+                }
+            },
+            "param_groups": [{"lr": learning_rate, "params": [0]}],
         }
 
     def _current_infos(self, *, pristine: bool = False) -> dict[str, object]:
@@ -1490,6 +1509,7 @@ class CheckpointContractTest(unittest.TestCase):
                 "tree_sha256": canonical_json_sha256(files),
                 "files": files,
             },
+            "migration_source": None,
             "invocation": {"mode": "generic"},
         }
         return manifest, canonical_json_sha256(manifest)
@@ -1576,14 +1596,14 @@ class CheckpointContractTest(unittest.TestCase):
     def test_current_marker_is_required_and_iteration_must_match_filename(self) -> None:
         valid = self._save(12, contract=True)
         parsed = validate_teleop_checkpoint_contract(valid)
-        self.assertEqual(parsed.version, "9")
+        self.assertEqual(parsed.version, "10")
         self.assertFalse(parsed.diagnostic_legacy)
         self.assertEqual(parsed.common_step_counter, 13 * 24)
 
         legacy = self._save(13, contract=False)
-        with self.assertRaisesRegex(ValueError, "v1-v8"):
+        with self.assertRaisesRegex(ValueError, "v1-v9"):
             validate_teleop_checkpoint_contract(legacy)
-        with self.assertRaisesRegex(ValueError, "v1-v8"):
+        with self.assertRaisesRegex(ValueError, "v1-v9"):
             validate_teleop_checkpoint_contract(legacy, allow_legacy_diagnostic=True)
 
         mismatched = self._save(14, filename_iteration=15, contract=True)
@@ -1620,13 +1640,15 @@ class CheckpointContractTest(unittest.TestCase):
 
         # Every superseded version remains non-resumable even when tensor widths
         # and previous-action semantics happen to match the current contract.
-        for index, version in enumerate(("2", "3", "4", "5", "6", "7", "8"), start=16):
+        for index, version in enumerate(
+            ("2", "3", "4", "5", "6", "7", "8", "9"), start=16
+        ):
             with self.subTest(version=version):
                 old = self._save(index, contract=True)
                 payload = torch.load(old, map_location="cpu", weights_only=False)
                 payload["infos"]["microban_teleop_training_contract_version"] = version
                 torch.save(payload, old)
-                with self.assertRaisesRegex(ValueError, "v1-v8"):
+                with self.assertRaisesRegex(ValueError, "v1-v9"):
                     validate_teleop_checkpoint_contract(old)
 
     def test_safe_velocity_bootstrap_provenance_is_fail_closed(self) -> None:
@@ -1661,17 +1683,11 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retired legacy"):
             validate_teleop_checkpoint_contract(path)
 
-    def test_pristine_checkpoint_requires_explicit_pre_update_contract(self) -> None:
+    def test_contract_v10_rejects_pristine_actor_only_checkpoint(self) -> None:
         path = self.root / "model_pristine.pt"
         infos = self._current_infos(pristine=True)
         torch.save({"iter": -1, "infos": infos}, path)
-        contract = validate_teleop_checkpoint_contract(path)
-        self.assertEqual(contract.iteration, -1)
-        self.assertTrue(contract.pristine_pre_update)
-
-        infos["pristine_pre_update"] = False
-        torch.save({"iter": -1, "infos": infos}, path)
-        with self.assertRaisesRegex(ValueError, "pristine_pre_update=true"):
+        with self.assertRaisesRegex(ValueError, "no model_pristine"):
             validate_teleop_checkpoint_contract(path)
 
     def test_current_checkpoint_step_counter_matches_completed_updates(self) -> None:
@@ -1684,6 +1700,61 @@ class CheckpointContractTest(unittest.TestCase):
             r"common_step_counter must equal \(iteration \+ 1\) \* 24",
         ):
             validate_teleop_checkpoint_contract(path)
+
+    def test_canonical_v10_safe_source_must_match_migration_ledger(self) -> None:
+        checkpoint = self._save(0, contract=True)
+        bootstrap = self._valid_bootstrap_info()
+
+        def identity(*, checkpoint_sha256: str, receipt_sha256: str):
+            return TeleopTrainingProvenanceIdentity(
+                schema_version=MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
+                sha256="1" * 64,
+                source_tree_sha256="2" * 64,
+                recipe_revision=MICROBAN_TELEOP_RECIPE_REVISION,
+                actor_initialization=MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+                mode="canonical_v10_stage",
+                canonical_stage=True,
+                stage_start_boundary=3000,
+                stage_target_boundary=7000,
+                parent_checkpoint_sha256="3" * 64,
+                parent_gate_sha256="4" * 64,
+                resume_source_checkpoint_path=str(checkpoint.resolve()),
+                resume_source_checkpoint_sha256=hashlib.sha256(
+                    checkpoint.read_bytes()
+                ).hexdigest(),
+                resume_source_checkpoint_iteration=0,
+                migration_source={
+                    "safe_velocity_checkpoint_sha256": checkpoint_sha256,
+                    "safe_velocity_acceptance_receipt_sha256": receipt_sha256,
+                },
+            )
+
+        matching = identity(
+            checkpoint_sha256=bootstrap["source_checkpoint_sha256"],
+            receipt_sha256=bootstrap["source_acceptance_receipt_sha256"],
+        )
+        validator = (
+            "mjlab_microban.tasks.microban_policy_export."
+            "_validated_training_provenance_identity"
+        )
+        with patch(validator, return_value=matching):
+            validate_teleop_checkpoint_contract(checkpoint)
+
+        for migration_key, wrong_value in (
+            ("checkpoint_sha256", "a" * 64),
+            ("receipt_sha256", "b" * 64),
+        ):
+            values = {
+                "checkpoint_sha256": bootstrap["source_checkpoint_sha256"],
+                "receipt_sha256": bootstrap["source_acceptance_receipt_sha256"],
+            }
+            values[migration_key] = wrong_value
+            with (
+                self.subTest(migration_key=migration_key),
+                patch(validator, return_value=identity(**values)),
+                self.assertRaisesRegex(ValueError, "migration ledger"),
+            ):
+                validate_teleop_checkpoint_contract(checkpoint)
 
     def test_bounded_actor_checkpoint_buffers_are_exactly_pinned(self) -> None:
         path = self.root / "bounds.pt"
@@ -1796,36 +1867,53 @@ class CheckpointContractTest(unittest.TestCase):
         with self.assertRaisesRegex(FloatingPointError, "non-finite"):
             validate_finite_checkpoint_actor_state(checkpoint)
 
-    def test_current_load_pins_bounds_before_base_load_including_pristine(self) -> None:
+    def test_current_consumer_load_pins_bounds_before_base_load(self) -> None:
         expected = self._bounded_actor_state()
         policy = SimpleNamespace(state_dict=lambda: expected)
+        path = self.root / "model_0.pt"
+        torch.save(
+            {
+                "actor_state_dict": {
+                    key: value.clone() for key, value in expected.items()
+                },
+                "critic_state_dict": {"mlp.weight": torch.zeros(1)},
+                "optimizer_state_dict": self._optimizer_state(),
+                "iter": 0,
+                "infos": self._current_infos(),
+            },
+            path,
+        )
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.checkpoint_consumer_mode = True
+        runner.teleop_training_resume = False
+        runner.teleop_migration_resume = False
+        with patch.object(
+            MjlabOnPolicyRunner,
+            "load",
+            return_value=self._current_infos(),
+        ) as base_load:
+            runner.load(str(path), load_cfg={"actor": True})
+        base_load.assert_called_once()
+        self.assertEqual(base_load.call_args.args[0], str(path.resolve()))
+        self.assertFalse(runner.loaded_checkpoint_contract.pristine_pre_update)
 
-        for pristine in (False, True):
-            with self.subTest(pristine=pristine):
-                path = self.root / ("model_pristine.pt" if pristine else "model_0.pt")
-                torch.save(
-                    {
-                        "actor_state_dict": {
-                            key: value.clone() for key, value in expected.items()
-                        },
-                        "iter": -1 if pristine else 0,
-                        "infos": self._current_infos(pristine=pristine),
-                    },
-                    path,
-                )
-                runner = object.__new__(MicrobanTeleopOnPolicyRunner)
-                runner.alg = SimpleNamespace(get_policy=lambda: policy)
-                with patch.object(
-                    MjlabOnPolicyRunner,
-                    "load",
-                    return_value=self._current_infos(pristine=pristine),
-                ) as base_load:
-                    runner.load(str(path), load_cfg={"actor": True})
-                base_load.assert_called_once()
-                self.assertEqual(
-                    runner.loaded_checkpoint_contract.pristine_pre_update,
-                    pristine,
-                )
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.checkpoint_consumer_mode = True
+        runner.teleop_training_resume = False
+        runner.teleop_migration_resume = False
+
+        def mutate_during_load(*args, **kwargs):
+            del args, kwargs
+            path.write_bytes(b"mutated during load")
+            return self._current_infos()
+
+        with (
+            patch.object(MjlabOnPolicyRunner, "load", side_effect=mutate_during_load),
+            self.assertRaisesRegex(ValueError, "changed while it was being loaded"),
+        ):
+            runner.load(str(path), load_cfg={"actor": True})
 
         mismatched_path = self.root / "model_1.pt"
         mismatched = {key: value.clone() for key, value in expected.items()}
@@ -1833,6 +1921,8 @@ class CheckpointContractTest(unittest.TestCase):
         torch.save(
             {
                 "actor_state_dict": mismatched,
+                "critic_state_dict": {"mlp.weight": torch.zeros(1)},
+                "optimizer_state_dict": self._optimizer_state(),
                 "iter": 1,
                 "infos": {
                     **self._current_infos(),
@@ -1843,6 +1933,9 @@ class CheckpointContractTest(unittest.TestCase):
         )
         runner = object.__new__(MicrobanTeleopOnPolicyRunner)
         runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.checkpoint_consumer_mode = True
+        runner.teleop_training_resume = False
+        runner.teleop_migration_resume = False
         with (
             patch.object(MjlabOnPolicyRunner, "load") as base_load,
             self.assertRaisesRegex(ValueError, "guarded action-bound contract"),
@@ -1863,6 +1956,8 @@ class CheckpointContractTest(unittest.TestCase):
                 "actor_state_dict": {
                     key: value.clone() for key, value in expected.items()
                 },
+                "critic_state_dict": {"mlp.weight": torch.zeros(1)},
+                "optimizer_state_dict": self._optimizer_state(),
                 "iter": 999,
                 "infos": infos,
             },
@@ -1922,9 +2017,17 @@ class CheckpointContractTest(unittest.TestCase):
 
         env.reset = Mock(side_effect=reset_under_restored_config)
         runner = object.__new__(MicrobanTeleopOnPolicyRunner)
-        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.alg = SimpleNamespace(
+            get_policy=lambda: policy,
+            learning_rate=1.0e-5,
+            optimizer=SimpleNamespace(param_groups=[{"lr": 1.0e-5}]),
+        )
         runner.env = SimpleNamespace(unwrapped=env)
         runner.current_learning_iteration = 0
+        runner.teleop_training_resume = True
+        runner.teleop_migration_resume = False
+        runner.checkpoint_consumer_mode = False
+        runner.safe_velocity_bootstrap_provenance = None
 
         def restore_checkpoint(*args, **kwargs):
             del args, kwargs
@@ -1932,9 +2035,26 @@ class CheckpointContractTest(unittest.TestCase):
             env.common_step_counter = infos["env_state"]["common_step_counter"]
             return infos
 
-        with patch.object(
-            MjlabOnPolicyRunner, "load", side_effect=restore_checkpoint
-        ) as base_load:
+        contract = TeleopCheckpointContract(
+            version="10",
+            previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            iteration=999,
+            common_step_counter=1000 * 24,
+        )
+        with (
+            patch(
+                "mjlab_microban.tasks.microban_policy_export."
+                "validate_teleop_checkpoint_contract",
+                return_value=contract,
+            ),
+            patch.object(MicrobanTeleopOnPolicyRunner, "_inherit_v10_migration_source"),
+            patch.object(
+                MicrobanTeleopOnPolicyRunner, "_validate_canonical_resume_lineage"
+            ),
+            patch.object(
+                MjlabOnPolicyRunner, "load", side_effect=restore_checkpoint
+            ) as base_load,
+        ):
             runner.load(str(checkpoint))
 
         base_load.assert_called_once()
@@ -1962,288 +2082,51 @@ class CheckpointContractTest(unittest.TestCase):
             ],
         )
 
-    def test_interrupted_initial_resume_preserves_safe_identity_on_save(self) -> None:
-        expected = self._bounded_actor_state()
-        policy = SimpleNamespace(state_dict=lambda: expected)
-        loaded_manifest, loaded_digest = self._canonical_initial_training_provenance(
-            resume=False,
-            include_safe_identity=True,
-        )
-        infos = {
-            "env_state": {"common_step_counter": 500 * 24},
-            "microban_teleop_training_contract_version": (
-                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
-            ),
-            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
-            "microban_teleop_actor_initialization": (
-                MICROBAN_TELEOP_ACTOR_INITIALIZATION
-            ),
-            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
-            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
-        }
-        checkpoint = self.root / "model_499.pt"
-        torch.save(
-            {
-                "actor_state_dict": {
-                    key: value.clone() for key, value in expected.items()
-                },
-                "iter": 499,
-                "infos": infos,
-            },
-            checkpoint,
-        )
-
-        current_manifest, current_digest = self._canonical_initial_training_provenance(
-            resume=True,
-            include_safe_identity=False,
-            resume_source=checkpoint,
-        )
+    def test_training_resume_rejects_partial_state_load(self) -> None:
         runner = object.__new__(MicrobanTeleopOnPolicyRunner)
-        runner.alg = SimpleNamespace(get_policy=lambda: policy)
         runner.teleop_training_resume = True
+        runner.teleop_migration_resume = False
         runner.checkpoint_consumer_mode = False
         runner.safe_velocity_bootstrap_provenance = None
-        runner.teleop_training_provenance = current_manifest
-        runner.teleop_training_provenance_sha256 = current_digest
-        runner.loaded_checkpoint_contract = None
 
-        with patch.object(MjlabOnPolicyRunner, "load", return_value=infos) as base_load:
-            runner.load(str(checkpoint), load_cfg={"actor": True})
-        base_load.assert_called_once()
-
-        inherited = runner.teleop_training_provenance
-        critical = inherited["resolved_config"]["critical"]
-        self.assertEqual(
-            critical["safe_velocity_checkpoint"],
-            str(self.safe_source_path.resolve()),
-        )
-        self.assertEqual(
-            critical["safe_velocity_checkpoint_sha256"],
-            self.safe_source_sha256,
-        )
-        self.assertEqual(
-            critical["safe_velocity_acceptance_receipt"],
-            str(self.safe_receipt_path.resolve()),
-        )
-        self.assertEqual(
-            runner.teleop_training_provenance_sha256,
-            canonical_json_sha256(inherited),
-        )
-        self.assertEqual(
-            inherited["invocation"]["resume_source_checkpoint_path"],
-            str(checkpoint.resolve()),
-        )
-        self.assertEqual(
-            inherited["invocation"]["resume_source_checkpoint_sha256"],
-            hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
-        )
-        self.assertEqual(
-            inherited["invocation"]["resume_source_checkpoint_iteration"], 499
-        )
-
-        output = self.root / "model_500.pt"
-        with patch.object(MjlabOnPolicyRunner, "save") as base_save:
-            runner.save(str(output))
-        saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(
-            saved_infos[MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY], inherited
-        )
-        self.assertEqual(
-            saved_infos[MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY],
-            runner.teleop_training_provenance_sha256,
-        )
-        checkpoint.write_bytes(b"replaced after runner load")
-        with (
-            patch.object(MjlabOnPolicyRunner, "save") as replaced_save,
-            self.assertRaisesRegex(ValueError, "source checkpoint SHA-256 mismatch"),
-        ):
-            runner.save(str(self.root / "model_501.pt"))
-        replaced_save.assert_not_called()
-
-    def test_later_interrupted_resume_pins_exact_intermediate_checkpoint(self) -> None:
-        expected = self._bounded_actor_state()
-        policy = SimpleNamespace(state_dict=lambda: expected)
-        boundary_source = self.root / "model_1499.pt"
-        boundary_source.write_bytes(b"accepted boundary checkpoint")
-        parent_checkpoint_sha256 = hashlib.sha256(
-            boundary_source.read_bytes()
-        ).hexdigest()
-        parent_gate_sha256 = "d" * 64
-
-        loaded_manifest, _loaded_digest = self._canonical_initial_training_provenance(
-            resume=True,
-            include_safe_identity=False,
-            resume_source=boundary_source,
-        )
-        loaded_manifest["invocation"].update(
-            {
-                "stage_start_boundary": 1500,
-                "stage_target_boundary": 3000,
-                "parent_checkpoint_sha256": parent_checkpoint_sha256,
-                "parent_gate_sha256": parent_gate_sha256,
-            }
-        )
-        loaded_digest = canonical_json_sha256(loaded_manifest)
-        infos = {
-            "env_state": {"common_step_counter": 2000 * 24},
-            "microban_teleop_training_contract_version": (
-                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
-            ),
-            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
-            "microban_teleop_actor_initialization": (
-                MICROBAN_TELEOP_ACTOR_INITIALIZATION
-            ),
-            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
-            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
-        }
-        checkpoint = self.root / "model_1999.pt"
-        torch.save(
-            {
-                "actor_state_dict": {
-                    key: value.clone() for key, value in expected.items()
-                },
-                "iter": 1999,
-                "infos": infos,
-            },
-            checkpoint,
-        )
-
-        current_manifest, _current_digest = self._canonical_initial_training_provenance(
-            resume=True,
-            include_safe_identity=False,
-            resume_source=checkpoint,
-        )
-        current_manifest["invocation"].update(
-            {
-                "stage_start_boundary": 1500,
-                "stage_target_boundary": 3000,
-                "parent_checkpoint_sha256": parent_checkpoint_sha256,
-                "parent_gate_sha256": parent_gate_sha256,
-            }
-        )
-
-        def make_runner(manifest: dict[str, object]) -> MicrobanTeleopOnPolicyRunner:
-            runner = object.__new__(MicrobanTeleopOnPolicyRunner)
-            runner.alg = SimpleNamespace(get_policy=lambda: policy)
-            runner.teleop_training_resume = True
-            runner.checkpoint_consumer_mode = False
-            runner.safe_velocity_bootstrap_provenance = None
-            runner.teleop_training_provenance = manifest
-            runner.teleop_training_provenance_sha256 = canonical_json_sha256(manifest)
-            runner.loaded_checkpoint_contract = None
-            return runner
-
-        runner = make_runner(current_manifest)
-        with (
-            patch.object(MjlabOnPolicyRunner, "load", return_value=infos),
-            patch.object(
-                MicrobanTeleopOnPolicyRunner,
-                "_validate_canonical_parent_gate",
-            ),
-        ):
-            runner.load(str(checkpoint), load_cfg={"actor": True})
-        self.assertEqual(
-            runner.teleop_training_provenance["invocation"][
-                "resume_source_checkpoint_sha256"
-            ],
-            hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
-        )
-
-        changed_source = deepcopy(current_manifest)
-        changed_source["invocation"]["resume_source_checkpoint_sha256"] = "0" * 64
-        changed_runner = make_runner(changed_source)
         with (
             patch.object(MjlabOnPolicyRunner, "load") as base_load,
-            patch.object(
-                MicrobanTeleopOnPolicyRunner,
-                "_validate_canonical_parent_gate",
-            ),
-            self.assertRaisesRegex(ValueError, "resume source.*SHA-256"),
+            self.assertRaisesRegex(ValueError, "strict full-state load"),
         ):
-            changed_runner.load(str(checkpoint), load_cfg={"actor": True})
+            runner.load(str(self.root / "model_499.pt"), load_cfg={"actor": True})
         base_load.assert_not_called()
 
-    def test_boundary_resume_hashes_resolved_path_when_loader_passes_string(
-        self,
-    ) -> None:
-        expected = self._bounded_actor_state()
-        policy = SimpleNamespace(state_dict=lambda: expected)
-        loaded_manifest, loaded_digest = self._canonical_initial_training_provenance(
-            resume=False,
-            include_safe_identity=True,
-        )
-        infos = {
-            "env_state": {"common_step_counter": 1500 * 24},
-            "microban_teleop_training_contract_version": (
-                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
-            ),
-            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
-            "microban_teleop_actor_initialization": (
-                MICROBAN_TELEOP_ACTOR_INITIALIZATION
-            ),
-            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
-            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
-            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
-        }
-        checkpoint = self.root / "model_1499.pt"
-        torch.save(
-            {
-                "actor_state_dict": {
-                    key: value.clone() for key, value in expected.items()
-                },
-                "iter": 1499,
-                "infos": infos,
-            },
-            checkpoint,
-        )
-        checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-
-        current_manifest, _current_digest = (
-            self._canonical_initial_training_provenance(
-                resume=True,
-                include_safe_identity=False,
-                resume_source=checkpoint,
-            )
-        )
-        current_manifest["invocation"].update(
-            {
-                "stage_start_boundary": 1500,
-                "stage_target_boundary": 3000,
-                "parent_checkpoint_sha256": checkpoint_sha256,
-                "parent_gate_sha256": "d" * 64,
-            }
-        )
+    def test_migration_rewrites_only_the_pinned_optimizer_learning_rate(self) -> None:
         runner = object.__new__(MicrobanTeleopOnPolicyRunner)
-        runner.alg = SimpleNamespace(get_policy=lambda: policy)
-        runner.teleop_training_resume = True
-        runner.checkpoint_consumer_mode = False
-        runner.safe_velocity_bootstrap_provenance = None
-        runner.teleop_training_provenance = current_manifest
-        runner.teleop_training_provenance_sha256 = canonical_json_sha256(
-            current_manifest
+        runner.alg = SimpleNamespace(
+            learning_rate=MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+            optimizer=SimpleNamespace(
+                param_groups=[
+                    {"lr": MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE}
+                ]
+            ),
         )
-        runner.loaded_checkpoint_contract = None
-
-        with (
-            patch.object(MjlabOnPolicyRunner, "load", return_value=infos) as base_load,
-            patch.object(
-                MicrobanTeleopOnPolicyRunner,
-                "_validate_canonical_parent_gate",
-            ) as parent_gate,
-        ):
-            runner.load(str(checkpoint), load_cfg={"actor": True})
-
-        base_load.assert_called_once()
-        parent_gate.assert_called_once_with(
-            boundary=1500,
-            parent_checkpoint_sha256=checkpoint_sha256,
-            parent_gate_sha256="d" * 64,
+        runner._enforce_fixed_learning_rate_after_load(migrated_from_v9=True)
+        self.assertEqual(
+            runner.alg.optimizer.param_groups,
+            [{"lr": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE}],
         )
+
+        runner.alg.optimizer.param_groups = [
+            {"lr": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE},
+            {"lr": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE},
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly one optimizer"):
+            runner._enforce_fixed_learning_rate_after_load(migrated_from_v9=False)
+
+    def test_normal_v10_resume_fails_closed_on_learning_rate_drift(self) -> None:
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(
+            learning_rate=MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+            optimizer=SimpleNamespace(param_groups=[{"lr": 2.0e-5}]),
+        )
+        with self.assertRaisesRegex(ValueError, "learning-rate invariant"):
+            runner._enforce_fixed_learning_rate_after_load(migrated_from_v9=False)
 
     def test_save_adds_current_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
@@ -2251,14 +2134,24 @@ class CheckpointContractTest(unittest.TestCase):
         fresh.alg = SimpleNamespace(
             get_policy=lambda: SimpleNamespace(
                 state_dict=lambda: {"mlp.weight": torch.zeros(1)}
-            )
+            ),
+            learning_rate=MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+            optimizer=SimpleNamespace(
+                param_groups=[{"lr": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE}]
+            ),
         )
         fresh.safe_velocity_actor_bootstrap_info = self._valid_bootstrap_info()
         (
             fresh.teleop_training_provenance,
             fresh.teleop_training_provenance_sha256,
         ) = self._training_provenance()
-        with patch.object(MjlabOnPolicyRunner, "save") as base_save:
+        def write_checkpoint(path, infos):
+            del infos
+            Path(path).write_bytes(b"complete checkpoint")
+
+        with patch.object(
+            MjlabOnPolicyRunner, "save", side_effect=write_checkpoint
+        ) as base_save:
             fresh.save(
                 str(self.root / "model_0.pt"),
                 {
@@ -2267,7 +2160,7 @@ class CheckpointContractTest(unittest.TestCase):
                 },
             )
         saved_infos = base_save.call_args.args[-1]
-        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "9")
+        self.assertEqual(saved_infos["microban_teleop_training_contract_version"], "10")
         self.assertEqual(
             saved_infos["previous_action_semantics"],
             MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
@@ -2289,6 +2182,25 @@ class CheckpointContractTest(unittest.TestCase):
             saved_infos["safe_velocity_actor_bootstrap"],
             fresh.safe_velocity_actor_bootstrap_info,
         )
+        self.assertEqual(
+            (self.root / "model_0.pt").read_bytes(), b"complete checkpoint"
+        )
+        self.assertEqual(list(self.root.glob(".model_0.pt.*.tmp")), [])
+
+        (self.root / "model_0.pt").write_bytes(b"last known good")
+
+        def interrupted_save(path, infos):
+            del infos
+            Path(path).write_bytes(b"partial checkpoint")
+            raise OSError("simulated power-loss write failure")
+
+        with (
+            patch.object(MjlabOnPolicyRunner, "save", side_effect=interrupted_save),
+            self.assertRaisesRegex(OSError, "simulated power-loss"),
+        ):
+            fresh.save(str(self.root / "model_0.pt"))
+        self.assertEqual((self.root / "model_0.pt").read_bytes(), b"last known good")
+        self.assertEqual(list(self.root.glob(".model_0.pt.*.tmp")), [])
 
         legacy = object.__new__(MicrobanTeleopOnPolicyRunner)
         legacy.loaded_checkpoint_contract = TeleopCheckpointContract(
@@ -2315,9 +2227,13 @@ class CheckpointContractTest(unittest.TestCase):
                 state_dict=lambda: {"mlp.weight": torch.zeros(1)}
             )
         )
+        runner.checkpoint_consumer_mode = True
+        runner.teleop_training_resume = False
+        runner.teleop_migration_resume = False
+        runner.safe_velocity_bootstrap_provenance = None
         with (
             patch.object(MjlabOnPolicyRunner, "load") as base_load,
-            self.assertRaisesRegex(ValueError, "v1-v8"),
+            self.assertRaisesRegex(ValueError, "v1-v9"),
         ):
             runner.load(str(checkpoint), load_cfg={"actor": True})
         base_load.assert_not_called()
@@ -2331,7 +2247,7 @@ class CheckpointContractTest(unittest.TestCase):
             with (
                 self.subTest(load_cfg=load_cfg),
                 patch.object(MjlabOnPolicyRunner, "load") as base_load,
-                self.assertRaisesRegex(ValueError, "v1-v8"),
+                self.assertRaisesRegex(ValueError, "actor-only|v1-v9"),
             ):
                 runner.load(
                     str(checkpoint),

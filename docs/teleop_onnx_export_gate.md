@@ -5,9 +5,9 @@ the robot. A deployable export requires the exact schema-3 final gate receipt:
 
 ```bash
 uv run python -m mjlab_microban.scripts.export_teleop_onnx \
-  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_19999.pt \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop/<run>/model_14999.pt \
   --acceptance-receipt \
-    artifacts/teleop_v9_gates/<run>_boundary_20000_gate.json \
+    artifacts/teleop_v10_gates/<run>_boundary_15000_gate.json \
   --require-final-acceptance \
   --device cpu \
   --output artifacts/microban_teleop.onnx
@@ -29,16 +29,18 @@ path, SHA-256, and iteration used to start that process. ONNX omits the
 host-specific absolute path but carries
 `training_resume_source_checkpoint_sha256` and
 `training_resume_source_checkpoint_iteration` for auditability.
-A contract-v9 export also carries the accepted safe-velocity source checkpoint
+A contract-v10 export also carries the accepted safe-velocity source checkpoint
 SHA-256/iteration/recipe, receipt SHA-256/schema/gate, and 63-to-83 mapping
-revision.
+revision. It additionally carries the pinned v9-to-v10 migration checkpoint,
+provenance tree, gate, optimizer-learning-rate transition, and full-state
+transfer identities.
 A generic checkpoint is always represented as `canonical_training_stage=false`
 with `none` lineage values. The exporter hashes the checkpoint again immediately
 before publication; if it changed while being loaded or exported, publication
 fails.
 
 For a deployable artifact, the exporter additionally requires canonical stage
-`18000->20000` and revalidates the complete final receipt. The receipt must be
+`10000->15000` and revalidates the complete final receipt. The receipt must be
 an exact schema-3 `pass` for the same checkpoint SHA-256 and training provenance,
 the current evaluator and acceptance revisions, and the current evaluator source
 SHA-256. Its three nominal and three moving-HMD report files must still match
@@ -69,12 +71,12 @@ metadata therefore retains the early/play simultaneous-foot lift ceiling of
 `0.012 m`. When, and only when, a validated final acceptance receipt is supplied,
 the exporter materializes the shared final-curriculum ceiling of `0.020 m` in
 `simultaneous_both_feet_target_upper`. This keeps nonaccepted diagnostics honest
-while making the final artifact match the support learned at stage `18000`.
+while making the final artifact match the final contract-v10 support.
 
 The robot policy loader must fail closed on these deployment fields. It requires
-`canonical_training_stage=true`, `training_provenance_mode=canonical_v9_stage`,
-stage `18000->20000`, `deployment_accepted=true`, receipt schema `3`, status
-`pass`, and boundary `20000`, in addition to validating all SHA/revision/recipe
+`canonical_training_stage=true`, `training_provenance_mode=canonical_v10_stage`,
+stage `10000->15000`, `deployment_accepted=true`, receipt schema `3`, status
+`pass`, and boundary `15000`, in addition to validating all SHA/revision/recipe
 and actor-initialization fields. To inspect them without running the robot:
 
 ```bash
@@ -108,9 +110,18 @@ The training identity fields are:
   `training_parent_gate_sha256`;
 - `training_resume_source_checkpoint_sha256` and
   `training_resume_source_checkpoint_iteration` (`none` for a fresh generic
-  start). A final deployable `18000->20000` artifact requires both fields: the
-  iteration must be `17999..19998`, covering the stage-parent checkpoint and
+  start). A final deployable `10000->15000` artifact requires both fields: the
+  iteration must be `9999..14998`, covering the stage-parent checkpoint and
   any exact interrupted-resume checkpoint before the final model.
+
+Canonical v10 artifacts also require
+`migration_source_checkpoint_sha256`,
+`migration_source_checkpoint_iteration`,
+`migration_source_training_provenance_sha256`,
+`migration_source_tree_sha256`, `migration_source_gate_sha256`,
+`migration_state_transfer`, `migration_source_optimizer_learning_rate`, and
+`training_fixed_learning_rate`. These bind the exact accepted v9 source and the
+sole permitted state rewrite (`7.593750000000002e-05` to `1e-5`).
 
 The acceptance identity fields are `deployment_accepted`,
 `acceptance_receipt_schema_version`, `acceptance_receipt_sha256`,
@@ -124,14 +135,15 @@ nonaccepted artifact uses literal `none` for every unavailable acceptance
 identity and `0` for both counts; missing keys are never equivalent to a
 diagnostic export.
 
-The physical Microban repository's `src/moves/pico_hybrid.py` now requires
-contract-v9 metadata, including the seven safe-velocity source, receipt, and
-mapping identity fields embedded here. A v8 or lineage-incomplete ONNX is
-rejected before the hardware runtime can enable motor commands.
+The physical Microban repository's `src/moves/pico_hybrid.py` requires
+contract-v10 metadata, including all migration fields and the seven
+safe-velocity source, receipt, and mapping identity fields embedded here. A
+v8/v9 or lineage-incomplete ONNX is rejected before the hardware runtime can
+enable motor commands.
 
 Run the focused regression tests after changing the exporter or policy wrapper:
 
 ```bash
-uv run python -m unittest tests.test_teleop_onnx_parity_gate -v
-uv run python -m unittest tests.test_microban_policy_export -v
+uv run --locked --with pytest python -m pytest -q \
+  tests/test_teleop_onnx_parity_gate.py tests/test_teleop_v2_contract.py
 ```

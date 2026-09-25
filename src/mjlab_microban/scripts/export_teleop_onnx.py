@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Schema-3 final v9 gate receipt. When omitted the ONNX is explicitly "
+            "Schema-3 final v10 gate receipt. When omitted the ONNX is explicitly "
             "marked deployment_accepted=false."
         ),
     )
@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         "--require-final-acceptance",
         action="store_true",
         help=(
-            "Fail unless --acceptance-receipt proves the canonical 18000->20000 "
+            "Fail unless --acceptance-receipt proves the canonical 10000->15000 "
             "checkpoint passed the exact final evaluator suite."
         ),
     )

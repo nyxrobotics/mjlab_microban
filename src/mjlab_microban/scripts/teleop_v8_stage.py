@@ -25,7 +25,6 @@ from mjlab_microban.tasks.microban_policy_export import (
     validate_teleop_checkpoint_contract,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
-    MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
     sha256_file,
@@ -33,7 +32,21 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     validate_training_provenance,
 )
 
-V9_STAGE_BOUNDARIES = MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES[1:]
+# Historical v9 tooling must retain its own frozen stage plan.  Importing the
+# current contract's boundaries silently changed v9 audit results when v10
+# introduced a new curriculum.
+V9_STAGE_BOUNDARIES = (
+    1_500,
+    3_000,
+    4_500,
+    6_000,
+    8_000,
+    12_000,
+    14_000,
+    16_000,
+    18_000,
+    20_000,
+)
 # Import compatibility for the historical module/test name.  The accepted
 # checkpoint contract itself is v9-only.
 V8_STAGE_BOUNDARIES = V9_STAGE_BOUNDARIES

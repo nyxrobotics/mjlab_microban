@@ -358,9 +358,9 @@ class SafeVelocityBootstrapLoaderTest(unittest.TestCase):
             validate_safe_velocity_acceptance_receipt(rebound, identity)
 
 
-class TeleopV9ConfigurationTest(unittest.TestCase):
+class TeleopV10ConfigurationTest(unittest.TestCase):
     def test_actor_is_raw_critic_normalized_and_bounds_match_source(self) -> None:
-        self.assertEqual(MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION, "9")
+        self.assertEqual(MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION, "10")
         self.assertFalse(MicrobanTeleopRlCfg.actor.obs_normalization)
         self.assertTrue(MicrobanTeleopRlCfg.critic.obs_normalization)
         self.assertIs(
@@ -396,7 +396,7 @@ class TeleopV9ConfigurationTest(unittest.TestCase):
         self,
     ) -> None:
         env = SimpleNamespace(clip_actions=None, num_actions=18)
-        with self.assertRaisesRegex(ValueError, "fresh contract-v9"):
+        with self.assertRaisesRegex(ValueError, "no fresh-run path"):
             MicrobanTeleopOnPolicyRunner(env, {})
         with self.assertRaisesRegex(ValueError, "rejects legacy"):
             MicrobanTeleopOnPolicyRunner(
@@ -406,7 +406,7 @@ class TeleopV9ConfigurationTest(unittest.TestCase):
                     "bootstrap_velocity_checkpoint_sha256": "0" * 64,
                 },
             )
-        with self.assertRaisesRegex(ValueError, "fresh-run only"):
+        with self.assertRaisesRegex(ValueError, "cannot bootstrap a fresh actor"):
             MicrobanTeleopOnPolicyRunner(
                 env,
                 {
@@ -453,7 +453,7 @@ class TeleopV9ConfigurationTest(unittest.TestCase):
             MicrobanTeleopOnPolicyRunner(
                 env, {"checkpoint_consumer_mode": True, "resume": True}
             )
-        with self.assertRaisesRegex(ValueError, "cannot accept fresh"):
+        with self.assertRaisesRegex(ValueError, "cannot bootstrap a fresh actor"):
             MicrobanTeleopOnPolicyRunner(
                 env,
                 {

@@ -20,6 +20,7 @@ import torch
 from tensordict import TensorDict
 
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
+    CANARY_HARD_SAFETY_PROFILE,
     CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M,
     DEPLOYMENT_PERFORMANCE_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
@@ -555,6 +556,39 @@ class ReportPublicationTest(unittest.TestCase):
             ]
         )
         self.assertEqual(evaluation_exit_code(intermediate_report), 3)
+
+        canary_report = build_report(
+            **common,
+            checkpoint_contract=TeleopCheckpointContract(
+                version="10",
+                previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+                iteration=1599,
+                common_step_counter=38400,
+            ),
+            canary_hard_safety_only=True,
+        )
+        self.assertEqual(canary_report["status"], "diagnostic")
+        self.assertEqual(
+            canary_report["acceptance_profile"], CANARY_HARD_SAFETY_PROFILE
+        )
+        self.assertFalse(
+            canary_report["summary"]["performance_acceptance_checks_enforced"]
+        )
+        self.assertEqual(evaluation_exit_code(canary_report), 3)
+        with self.assertRaisesRegex(ValueError, "exclusive"):
+            build_report(
+                **common,
+                checkpoint_contract=TeleopCheckpointContract(
+                    version="10",
+                    previous_action_semantics=(
+                        MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS
+                    ),
+                    iteration=1599,
+                    common_step_counter=38400,
+                ),
+                intermediate_hard_safety_only=True,
+                canary_hard_safety_only=True,
+            )
 
         legacy_report = build_report(
             **common,

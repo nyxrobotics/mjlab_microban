@@ -1,5 +1,11 @@
 # Microban PICO hybrid teleoperation policy
 
+> **Active training/deployment contract: v10.** Follow
+> [`teleop_v10_fixed_lr_recovery.md`](teleop_v10_fixed_lr_recovery.md) for all
+> new training, evaluation, export, and robot deployment. The v8/v9 commands and
+> 20,000-update plan below are retained as historical audit material and must not
+> be used to resume the current policy.
+
 This document is the reproducible runbook for `Mjlab-Teleop-Microban`. The task
 is separate from both the deployed walking task and get-up task, so training or
 changing it cannot silently alter either existing policy.

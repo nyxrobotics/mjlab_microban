@@ -47,6 +47,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+    TELEOP_FINAL_CANONICAL_STAGE_TARGET,
     TeleopCheckpointContract,
     validate_microban_teleop_observation_contract,
     validate_teleop_checkpoint_contract,
@@ -64,9 +65,10 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
 _CHECKPOINT_RE = re.compile(r"^model_(?:(\d+)|(pristine))\.pt$")
-TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v9_2"
-TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v9_2"
+TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v10_1"
+TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v10_1"
 INTERMEDIATE_HARD_SAFETY_PROFILE = "canonical_intermediate_hard_safety_v1"
+CANARY_HARD_SAFETY_PROFILE = "canonical_canary_hard_safety_v1"
 DEPLOYMENT_PERFORMANCE_PROFILE = "deployment_performance_v1"
 
 # These are the physical command limits applied by microban's central input
@@ -1693,7 +1695,11 @@ def build_report(
     checkpoint_contract: TeleopCheckpointContract,
     hmd_neck_motion: dict[str, Any] | None = None,
     intermediate_hard_safety_only: bool = False,
+    canary_hard_safety_only: bool = False,
 ) -> dict[str, Any]:
+    if intermediate_hard_safety_only and canary_hard_safety_only:
+        raise ValueError("Intermediate and canary hard-safety modes are exclusive")
+    hard_safety_only = intermediate_hard_safety_only or canary_hard_safety_only
     if hmd_neck_motion is None:
         hmd_neck_motion = {"enabled": False, "params": None}
     moving_hmd_neck = hmd_neck_motion.get("enabled") is True
@@ -1772,7 +1778,7 @@ def build_report(
     status = "fail" if not acceptance_pass else "diagnostic"
     if (
         acceptance_pass
-        and not intermediate_hard_safety_only
+        and not hard_safety_only
         and canonical_coverage
         and not checkpoint_contract.diagnostic_legacy
         and not checkpoint_contract.pristine_pre_update
@@ -1815,7 +1821,13 @@ def build_report(
         limitations.append(
             "This canonical intermediate-stage gate enforces hard safety only; "
             "velocity and body-target performance remain diagnostic until the "
-            "final 20,000-update deployment gate."
+            f"final {TELEOP_FINAL_CANONICAL_STAGE_TARGET:,}-update deployment gate."
+        )
+    if canary_hard_safety_only:
+        limitations.append(
+            "This interrupted-stage canary enforces hard safety only. It is "
+            "diagnostic evidence for the next 100-update segment and can never "
+            "serve as a canonical stage or deployment receipt."
         )
     if checkpoint_contract.diagnostic_legacy:
         limitations.append(
@@ -1833,7 +1845,9 @@ def build_report(
         "evaluator_revision": TELEOP_EVALUATOR_REVISION,
         "acceptance_revision": TELEOP_ACCEPTANCE_REVISION,
         "acceptance_profile": (
-            INTERMEDIATE_HARD_SAFETY_PROFILE
+            CANARY_HARD_SAFETY_PROFILE
+            if canary_hard_safety_only
+            else INTERMEDIATE_HARD_SAFETY_PROFILE
             if intermediate_hard_safety_only
             else DEPLOYMENT_PERFORMANCE_PROFILE
         ),
@@ -1887,7 +1901,7 @@ def build_report(
             "hard_safety_checks_passed": hard_pass,
             "acceptance_checks_passed": acceptance_pass,
             "performance_acceptance_checks_enforced": (
-                not intermediate_hard_safety_only
+                not hard_safety_only
             ),
             "hmd_motion_evidence_passed": hmd_motion_evidence["passed"],
             "training_contract_check_passed": (
@@ -1989,13 +2003,22 @@ def parse_args() -> argparse.Namespace:
             "neutral_probability=0.0. Even full coverage cannot be canonical."
         ),
     )
-    parser.add_argument(
+    hard_safety_group = parser.add_mutually_exclusive_group()
+    hard_safety_group.add_argument(
         "--intermediate-hard-safety-only",
         action="store_true",
         help=(
-            "Canonical stage gates before 20,000 updates only: enforce all hard "
+            "Canonical stage gates before the final boundary only: enforce all hard "
             "safety and HMD-motion evidence while keeping command/body-target "
             "performance diagnostic. The final deployment gate forbids this mode."
+        ),
+    )
+    hard_safety_group.add_argument(
+        "--canary-hard-safety-only",
+        action="store_true",
+        help=(
+            "Interrupted canonical-stage checkpoints only: enforce hard safety "
+            "without performance and emit a diagnostic, non-deployment report."
         ),
     )
     return parser.parse_args()
@@ -2044,12 +2067,36 @@ def main() -> None:
             training is None
             or not training.canonical_stage
             or training.stage_target_boundary is None
-            or training.stage_target_boundary >= 20_000
+            or training.stage_target_boundary >= TELEOP_FINAL_CANONICAL_STAGE_TARGET
             or checkpoint_contract.iteration != training.stage_target_boundary - 1
         ):
             raise ValueError(
                 "--intermediate-hard-safety-only requires an exact canonical "
-                "stage boundary before 20,000 updates"
+                "stage boundary before the final deployment boundary"
+            )
+    if args.canary_hard_safety_only:
+        if args.moving_hmd_neck:
+            raise ValueError(
+                "--canary-hard-safety-only forbids --moving-hmd-neck; moving-HMD "
+                "coverage is a canonical boundary gate"
+            )
+        training = checkpoint_contract.training_provenance_identity
+        completed_iterations = checkpoint_contract.iteration + 1
+        if (
+            training is None
+            or not training.canonical_stage
+            or training.stage_target_boundary is None
+            or completed_iterations >= training.stage_target_boundary
+            # A deliberate segment's final save is model_<completed-1> and is
+            # divisible by 100 completed updates. RSL-RL's periodic save runs
+            # after iterations whose zero-based index is divisible by 100, so
+            # a power-loss recovery checkpoint has completed % 100 == 1.
+            or completed_iterations % 100 not in (0, 1)
+        ):
+            raise ValueError(
+                "--canary-hard-safety-only requires a deliberate 100-update "
+                "segment or an RSL-RL 100-interval recovery checkpoint inside "
+                "a canonical stage"
             )
 
     configure_torch_backends(allow_tf32=False, deterministic=True)
@@ -2158,7 +2205,10 @@ def main() -> None:
                 settle_steps=args.settle_steps,
                 seed=args.seed,
                 saturation_margin_ratio=args.saturation_margin_ratio,
-                enforce_performance=not args.intermediate_hard_safety_only,
+                enforce_performance=not (
+                    args.intermediate_hard_safety_only
+                    or args.canary_hard_safety_only
+                ),
             )
             for scenario in scenarios
         ]
@@ -2176,6 +2226,7 @@ def main() -> None:
             checkpoint_contract=checkpoint_contract,
             hmd_neck_motion=hmd_neck_motion,
             intermediate_hard_safety_only=args.intermediate_hard_safety_only,
+            canary_hard_safety_only=args.canary_hard_safety_only,
         )
     finally:
         wrapped_env.close()

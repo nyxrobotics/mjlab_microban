@@ -32,8 +32,9 @@ from typing import Any
 import numpy as np
 import torch
 
-MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 1
-MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v9_stage"
+MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 2
+MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v10_stage"
+MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE = "canonical_v10_migration_stage"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY = "microban_teleop_training_provenance"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
     "microban_teleop_training_provenance_sha256"
@@ -41,17 +42,44 @@ MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
 
 _SHA256_HEX_LENGTH = 64
 MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES = (
-    0,
-    1500,
     3000,
-    4500,
-    6000,
-    8000,
-    12000,
-    14000,
-    16000,
-    18000,
-    20000,
+    7000,
+    10000,
+    15000,
+)
+MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY = 1500
+MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY = 3000
+MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256 = (
+    "de8b6139872179679a16d72f3007f6d96cf65c97fa88565841eaa5f89511a65f"
+)
+MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_ITERATION = 1499
+MICROBAN_TELEOP_V10_LEGACY_COMMON_STEP_COUNTER = 36_000
+MICROBAN_TELEOP_V10_LEGACY_TRAINING_PROVENANCE_SHA256 = (
+    "f09f5580f03d3e38deef4916db7aea3bd8b1f683dc02a75079d24dd17923fce9"
+)
+MICROBAN_TELEOP_V10_LEGACY_SOURCE_TREE_SHA256 = (
+    "61a9fc7b1fe10436c0f033f89710e33e9e5470716d94794f110731c18e7d792a"
+)
+MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256 = (
+    "acb2e39411155d70aed2b18561a243bd8ad20eef56e0942d2dafbb4f96f39b7c"
+)
+MICROBAN_TELEOP_V10_LEGACY_SAFE_VELOCITY_CHECKPOINT_SHA256 = (
+    "416a8b16f7f7980822e4e1df81ffaf9515bc18a246e6fc257405a2c46ceece93"
+)
+MICROBAN_TELEOP_V10_LEGACY_SAFE_VELOCITY_ACCEPTANCE_RECEIPT_SHA256 = (
+    "e68701b11774dd30c8e45a2fd89614a2e4423a9486d01a0d936f0fa6fb760492"
+)
+MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE = 7.593750000000002e-05
+MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE = 1.0e-5
+MICROBAN_TELEOP_V10_MIGRATION_SOURCE_SCHEMA_VERSION = 1
+MICROBAN_TELEOP_V9_CANONICAL_STAGE_MODE = "canonical_v9_stage"
+MICROBAN_TELEOP_V9_TRAINING_PROVENANCE_SCHEMA_VERSION = 1
+MICROBAN_TELEOP_V9_TRAINING_CONTRACT_VERSION = "9"
+MICROBAN_TELEOP_V9_RECIPE_REVISION = (
+    "v9_accepted_safe_velocity_bootstrap_no_walk004_prior_full_pico_curriculum_v3"
+)
+MICROBAN_TELEOP_V9_ACTOR_INITIALIZATION = (
+    "bounded_raw_safe_velocity_actor_only_63_to_83_zero_new_columns_v1"
 )
 _CANONICAL_STAGE_ENV_NAMES = (
     "MICROBAN_TELEOP_STAGE_START_BOUNDARY",
@@ -209,6 +237,129 @@ def canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _is_lowercase_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == _SHA256_HEX_LENGTH
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _v10_migration_source_identity(checkpoint_path: str) -> dict[str, object]:
+    """Build the immutable contract-v9 -> contract-v10 migration ledger."""
+
+    return {
+        "schema_version": MICROBAN_TELEOP_V10_MIGRATION_SOURCE_SCHEMA_VERSION,
+        "source_contract_version": MICROBAN_TELEOP_V9_TRAINING_CONTRACT_VERSION,
+        "source_checkpoint_path": checkpoint_path,
+        "source_checkpoint_sha256": MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
+        "source_checkpoint_iteration": (
+            MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_ITERATION
+        ),
+        "source_common_step_counter": (MICROBAN_TELEOP_V10_LEGACY_COMMON_STEP_COUNTER),
+        "source_training_provenance_schema_version": (
+            MICROBAN_TELEOP_V9_TRAINING_PROVENANCE_SCHEMA_VERSION
+        ),
+        "source_training_provenance_sha256": (
+            MICROBAN_TELEOP_V10_LEGACY_TRAINING_PROVENANCE_SHA256
+        ),
+        "source_training_source_tree_sha256": (
+            MICROBAN_TELEOP_V10_LEGACY_SOURCE_TREE_SHA256
+        ),
+        "source_recipe_revision": MICROBAN_TELEOP_V9_RECIPE_REVISION,
+        "source_actor_initialization": MICROBAN_TELEOP_V9_ACTOR_INITIALIZATION,
+        "source_provenance_mode": MICROBAN_TELEOP_V9_CANONICAL_STAGE_MODE,
+        "source_stage_start_boundary": 0,
+        "source_stage_target_boundary": (MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY),
+        "source_parent_gate_sha256": MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256,
+        "source_optimizer_learning_rate": (
+            MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE
+        ),
+        "destination_optimizer_learning_rate": (
+            MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
+        ),
+        "state_transfer": ("actor_critic_optimizer_moments_iteration_common_step_v1"),
+        "safe_velocity_checkpoint_sha256": (
+            MICROBAN_TELEOP_V10_LEGACY_SAFE_VELOCITY_CHECKPOINT_SHA256
+        ),
+        "safe_velocity_acceptance_receipt_sha256": (
+            MICROBAN_TELEOP_V10_LEGACY_SAFE_VELOCITY_ACCEPTANCE_RECEIPT_SHA256
+        ),
+    }
+
+
+def validate_v10_migration_source_identity(
+    migration_source: object,
+    *,
+    verify_source_checkpoint: bool = True,
+) -> dict[str, object]:
+    """Validate the exact legacy source inherited by every canonical v10 stage."""
+
+    if not isinstance(migration_source, dict):
+        raise TypeError("Contract-v10 provenance migration_source must be a dictionary")
+    source_path = migration_source.get("source_checkpoint_path")
+    if not isinstance(source_path, str) or not Path(source_path).is_absolute():
+        raise ValueError("Migration source checkpoint path must be absolute")
+    expected = _v10_migration_source_identity(source_path)
+    if set(migration_source) != set(expected):
+        raise ValueError(
+            "Contract-v10 migration_source key set is not canonical: "
+            f"missing={sorted(set(expected) - set(migration_source))}, "
+            f"unexpected={sorted(set(migration_source) - set(expected))}"
+        )
+    mismatches = [
+        name for name, value in expected.items() if migration_source.get(name) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "Contract-v10 migration_source identity mismatch: " + ", ".join(mismatches)
+        )
+    if verify_source_checkpoint:
+        try:
+            resolved = Path(source_path).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("Migration source checkpoint file is missing") from exc
+        if not resolved.is_file() or str(resolved) != source_path:
+            raise ValueError("Migration source checkpoint path is not canonical")
+        if sha256_file(resolved) != MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256:
+            raise ValueError("Migration source checkpoint SHA-256 mismatch")
+    return migration_source
+
+
+def inherit_v10_migration_source_identity(
+    current_manifest: object,
+    loaded_manifest: object,
+) -> tuple[dict, str]:
+    """Carry the immutable migration ledger into an interrupted/later v10 stage."""
+
+    manifests: list[tuple[str, dict]] = []
+    for label, value in (("current", current_manifest), ("loaded", loaded_manifest)):
+        if not isinstance(value, dict):
+            raise TypeError(f"{label.title()} training provenance must be a dictionary")
+        if (
+            value.get("schema_version")
+            != MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
+            or value.get("canonical_stage") is not True
+        ):
+            raise ValueError(
+                f"{label.title()} training provenance is not canonical contract-v10"
+            )
+        manifests.append((label, value))
+
+    current = manifests[0][1]
+    loaded = manifests[1][1]
+    if current.get("migration_source") is not None:
+        raise ValueError(
+            "A normal v10 resume must inherit migration_source from its authenticated "
+            "checkpoint"
+        )
+    inherited_source = deepcopy(loaded.get("migration_source"))
+    validate_v10_migration_source_identity(inherited_source)
+    inherited = deepcopy(current)
+    inherited["migration_source"] = inherited_source
+    return inherited, canonical_json_sha256(inherited)
+
+
 def inherit_initial_stage_safe_velocity_identity(
     current_manifest: object,
     loaded_manifest: object,
@@ -320,8 +471,10 @@ def collect_training_source_manifest(project_root: str | Path | None = None) -> 
             "uv.lock",
             "scripts/train_microban_teleop.sh",
             "scripts/train_microban_teleop_v9.sh",
+            "scripts/train_microban_teleop_v10.sh",
             "scripts/evaluate_microban_teleop_v8_stage.sh",
             "scripts/evaluate_microban_teleop_v9_stage.sh",
+            "scripts/evaluate_microban_teleop_v10_stage.sh",
         )
     )
     files = {
@@ -387,6 +540,7 @@ def _stage_boundary_env(name: str, *, required: bool) -> int | None:
 
 def _validate_canonical_stage_lineage(
     *,
+    mode: object,
     start_boundary: object,
     target_boundary: object,
     parent_checkpoint_sha256: object,
@@ -399,17 +553,23 @@ def _validate_canonical_stage_lineage(
         or not isinstance(target_boundary, int)
     ):
         raise TypeError("Canonical stage boundaries must be integers")
-    allowed_intervals = set(pairwise(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES))
+    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE:
+        allowed_intervals = {
+            (
+                MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY,
+                MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY,
+            )
+        }
+    elif mode == MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
+        allowed_intervals = set(pairwise(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES))
+    else:
+        raise ValueError("Canonical stage mode is unsupported")
     if (start_boundary, target_boundary) not in allowed_intervals:
         raise ValueError(
-            "Canonical stage interval is not one adjacent v9 boundary pair: "
+            "Canonical stage interval is not one adjacent contract-v10 boundary pair: "
             f"{start_boundary}->{target_boundary}"
         )
     parents = (parent_checkpoint_sha256, parent_gate_sha256)
-    if start_boundary == 0:
-        if parents != (None, None):
-            raise ValueError("The initial canonical stage cannot have a parent")
-        return
     for name, value in zip(("parent checkpoint", "parent gate"), parents, strict=True):
         if (
             not isinstance(value, str)
@@ -417,6 +577,13 @@ def _validate_canonical_stage_lineage(
             or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ValueError(f"Canonical stage {name} must be one lowercase SHA-256")
+    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE and parents != (
+        MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
+        MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256,
+    ):
+        raise ValueError(
+            "Canonical v10 migration requires the pinned legacy checkpoint/gate"
+        )
 
 
 def collect_training_provenance(
@@ -431,10 +598,15 @@ def collect_training_provenance(
     """Collect the resolved config/source manifest and its canonical digest."""
 
     mode = os.environ.get("MICROBAN_TELEOP_PROVENANCE_MODE", "generic")
-    canonical_stage = mode == MICROBAN_TELEOP_CANONICAL_STAGE_MODE
-    if mode not in ("generic", MICROBAN_TELEOP_CANONICAL_STAGE_MODE):
+    canonical_modes = (
+        MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
+        MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+    )
+    canonical_stage = mode in canonical_modes
+    if mode not in ("generic", *canonical_modes):
         raise ValueError(
-            "MICROBAN_TELEOP_PROVENANCE_MODE must be 'generic' or "
+            "MICROBAN_TELEOP_PROVENANCE_MODE must be 'generic', "
+            f"'{MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE}', or "
             f"'{MICROBAN_TELEOP_CANONICAL_STAGE_MODE}'"
         )
     for name in _CANONICAL_STAGE_ENV_NAMES:
@@ -481,7 +653,12 @@ def collect_training_provenance(
         raise ValueError("Canonical resume source checkpoint SHA-256 mismatch")
     if canonical_stage:
         assert start_boundary is not None and target_boundary is not None
+        if any(value is None for value in resume_source_values):
+            raise ValueError(
+                "Canonical contract-v10 stages require an exact resume source"
+            )
         _validate_canonical_stage_lineage(
+            mode=mode,
             start_boundary=start_boundary,
             target_boundary=target_boundary,
             parent_checkpoint_sha256=parent_checkpoint_sha256,
@@ -511,9 +688,7 @@ def collect_training_provenance(
         "wrapper_clip_actions": canonicalize_training_config(
             getattr(env, "clip_actions", None)
         ),
-        "checkpoint_consumer_mode": runner_cfg.get(
-            "checkpoint_consumer_mode", False
-        ),
+        "checkpoint_consumer_mode": runner_cfg.get("checkpoint_consumer_mode", False),
         "safe_velocity_checkpoint": runner_cfg.get("safe_velocity_checkpoint"),
         "safe_velocity_checkpoint_sha256": runner_cfg.get(
             "safe_velocity_checkpoint_sha256"
@@ -525,6 +700,35 @@ def collect_training_provenance(
             runner_cfg.get("save_pristine_checkpoint", False)
         ),
     }
+    migration_source = None
+    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE:
+        assert resume_source_checkpoint_path is not None
+        if (
+            resume_source_checkpoint_iteration
+            == MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_ITERATION
+        ):
+            if (
+                resume_source_checkpoint_sha256
+                != MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
+            ):
+                raise ValueError(
+                    "Canonical v10 migration source is not the pinned model_1499"
+                )
+            migration_source = _v10_migration_source_identity(
+                resume_source_checkpoint_path
+            )
+            validate_v10_migration_source_identity(migration_source)
+        elif (
+            resume_source_checkpoint_iteration is None
+            or resume_source_checkpoint_iteration
+            < MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY
+            or resume_source_checkpoint_iteration
+            >= MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY - 1
+        ):
+            raise ValueError(
+                "Interrupted v10 migration source iteration is outside 1500->3000"
+            )
+
     manifest = {
         "schema_version": MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
         "canonical_stage": canonical_stage,
@@ -537,6 +741,7 @@ def collect_training_provenance(
             "runner": resolved_runner,
         },
         "source": collect_training_source_manifest(project_root),
+        "migration_source": migration_source,
         "invocation": {
             "mode": mode,
             "stage_start_boundary": start_boundary,
@@ -545,9 +750,7 @@ def collect_training_provenance(
             "parent_gate_sha256": parent_gate_sha256,
             "resume_source_checkpoint_path": resume_source_checkpoint_path,
             "resume_source_checkpoint_sha256": resume_source_checkpoint_sha256,
-            "resume_source_checkpoint_iteration": (
-                resume_source_checkpoint_iteration
-            ),
+            "resume_source_checkpoint_iteration": (resume_source_checkpoint_iteration),
         },
     }
     return manifest, canonical_json_sha256(manifest)
@@ -659,7 +862,7 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         "environment_seed": 42,
         "runner_seed": 42,
         "num_steps_per_env": 24,
-        "save_interval": 500,
+        "save_interval": 100,
         "logger": "tensorboard",
         "upload_model": False,
         "wrapper_clip_actions": None,
@@ -671,27 +874,37 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         for key, value in expected.items()
         if critical.get(key) != value
     ]
+    if (
+        manifest.get("schema_version")
+        != MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
+    ):
+        mismatches.append("training provenance schema is not contract-v10 schema 2")
+    if manifest.get("training_contract_version") != "10":
+        mismatches.append("training contract version is not 10")
+
+    mode = invocation.get("mode")
     start_boundary = invocation.get("stage_start_boundary")
+    target_boundary = invocation.get("stage_target_boundary")
     safe_path = critical.get("safe_velocity_checkpoint")
     safe_sha256 = critical.get("safe_velocity_checkpoint_sha256")
     safe_receipt = critical.get("safe_velocity_acceptance_receipt")
-    if start_boundary == 0:
-        if not isinstance(safe_path, str) or not safe_path:
-            mismatches.append("initial v9 stage requires safe_velocity_checkpoint")
-        if (
-            not isinstance(safe_sha256, str)
-            or len(safe_sha256) != _SHA256_HEX_LENGTH
-            or any(character not in "0123456789abcdef" for character in safe_sha256)
-        ):
+    if any(value is not None for value in (safe_path, safe_sha256, safe_receipt)):
+        mismatches.append(
+            "contract-v10 stages inherit safe-source identity from migration_source"
+        )
+
+    runner = resolved.get("runner") if isinstance(resolved, dict) else None
+    algorithm = runner.get("algorithm") if isinstance(runner, dict) else None
+    if not isinstance(algorithm, dict):
+        mismatches.append("resolved runner algorithm config is malformed")
+    else:
+        if algorithm.get("learning_rate") != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE:
             mismatches.append(
-                "initial v9 stage requires safe_velocity_checkpoint_sha256"
+                "algorithm learning_rate must be fixed at "
+                f"{MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE!r}"
             )
-        if not isinstance(safe_receipt, str) or not safe_receipt:
-            mismatches.append(
-                "initial v9 stage requires safe_velocity_acceptance_receipt"
-            )
-    elif any(value is not None for value in (safe_path, safe_sha256, safe_receipt)):
-        mismatches.append("resume v9 stages must source bootstrap identity from checkpoint")
+        if algorithm.get("schedule") != "fixed":
+            mismatches.append("algorithm schedule must be 'fixed'")
     resume_source_path = invocation.get("resume_source_checkpoint_path")
     resume_source_sha256 = invocation.get("resume_source_checkpoint_sha256")
     resume_source_iteration = invocation.get("resume_source_checkpoint_iteration")
@@ -703,12 +916,13 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
     resume = critical.get("resume")
     if not isinstance(resume, bool):
         mismatches.append("resume must be boolean")
-    if isinstance(start_boundary, int) and start_boundary > 0 and resume is not True:
-        mismatches.append("noninitial canonical stages must resume")
+    if resume is not True:
+        mismatches.append("all canonical contract-v10 stages must resume full state")
     if resume is True:
-        if not isinstance(resume_source_path, str) or not Path(
-            resume_source_path
-        ).is_absolute():
+        if (
+            not isinstance(resume_source_path, str)
+            or not Path(resume_source_path).is_absolute()
+        ):
             mismatches.append("resume source checkpoint path must be absolute")
         if (
             not isinstance(resume_source_sha256, str)
@@ -727,7 +941,7 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
             mismatches.append("resume source checkpoint iteration is invalid")
         if (
             isinstance(start_boundary, int)
-            and isinstance(target_boundary := invocation.get("stage_target_boundary"), int)
+            and isinstance(target_boundary, int)
             and isinstance(resume_source_iteration, int)
             and not isinstance(resume_source_iteration, bool)
         ):
@@ -736,22 +950,51 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
                 mismatches.append(
                     "resume source checkpoint iteration is outside the stage"
                 )
-            if (
-                start_boundary > 0
-                and completed == start_boundary
-                and resume_source_sha256 != invocation.get(
-                    "parent_checkpoint_sha256"
-                )
+            if completed == start_boundary and resume_source_sha256 != invocation.get(
+                "parent_checkpoint_sha256"
             ):
                 mismatches.append(
                     "boundary resume source SHA-256 differs from stage parent"
                 )
     elif any(value is not None for value in resume_source_values):
         mismatches.append("fresh stages cannot claim a resume source checkpoint")
-    if invocation.get("mode") != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
-        mismatches.append(f"mode={invocation.get('mode')!r}")
+    max_iterations = critical.get("max_iterations_for_process")
+    if (
+        not isinstance(max_iterations, int)
+        or isinstance(max_iterations, bool)
+        or max_iterations <= 0
+    ):
+        mismatches.append("max_iterations_for_process must be a positive integer")
+    elif (
+        isinstance(target_boundary, int)
+        and isinstance(resume_source_iteration, int)
+        and not isinstance(resume_source_iteration, bool)
+        and max_iterations > target_boundary - (resume_source_iteration + 1)
+    ):
+        mismatches.append("max_iterations_for_process crosses the stage boundary")
+    elif (
+        isinstance(target_boundary, int)
+        and isinstance(resume_source_iteration, int)
+        and not isinstance(resume_source_iteration, bool)
+    ):
+        remaining_iterations = target_boundary - (resume_source_iteration + 1)
+        allowed_iterations = {remaining_iterations}
+        if remaining_iterations > 100:
+            allowed_iterations.add(100)
+        if max_iterations not in allowed_iterations:
+            mismatches.append(
+                "max_iterations_for_process must be either the complete remaining "
+                "stage or the canonical 100-update canary"
+            )
+
+    if mode not in (
+        MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
+        MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
+    ):
+        mismatches.append(f"mode={mode!r}")
     try:
         _validate_canonical_stage_lineage(
+            mode=mode,
             start_boundary=invocation.get("stage_start_boundary"),
             target_boundary=invocation.get("stage_target_boundary"),
             parent_checkpoint_sha256=invocation.get("parent_checkpoint_sha256"),
@@ -759,7 +1002,13 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         )
     except (TypeError, ValueError) as exc:
         mismatches.append(str(exc))
+
+    migration_source = manifest.get("migration_source")
+    try:
+        validate_v10_migration_source_identity(migration_source)
+    except (TypeError, ValueError) as exc:
+        mismatches.append(str(exc))
     if mismatches:
         raise ValueError(
-            "Checkpoint is not a canonical v9 stage config: " + "; ".join(mismatches)
+            "Checkpoint is not a canonical v10 stage config: " + "; ".join(mismatches)
         )
