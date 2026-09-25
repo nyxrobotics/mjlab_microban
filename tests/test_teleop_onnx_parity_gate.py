@@ -14,7 +14,6 @@ import hashlib
 import json
 import tempfile
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,12 +27,6 @@ from tensordict import TensorDict
 
 from mjlab_microban.scripts import evaluate_teleop_checkpoint as teleop_evaluator
 from mjlab_microban.scripts import export_teleop_onnx as teleop_exporter
-from mjlab_microban.tasks import (
-    microban_policy_export as policy_export_module,
-)
-from mjlab_microban.tasks import (
-    microban_teleop_provenance as provenance_module,
-)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_ACTOR_INITIALIZATION,
@@ -41,7 +34,9 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
     MICROBAN_TELEOP_RECIPE_REVISION,
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
-    MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V11_ENTROPY_COEF,
+    MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS,
     TELEOP_FINAL_CANONICAL_STAGE_START,
     TELEOP_FINAL_CANONICAL_STAGE_TARGET,
     TELEOP_ONNX_PARITY_SAMPLE_COUNT,
@@ -85,13 +80,12 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
-    _v10_migration_source_identity,
     canonical_json_sha256,
 )
 
 
 def _minimal_full_training_state() -> dict[str, object]:
-    """Small finite actor/critic/Adam fixture required by contract v10."""
+    """Small finite actor/critic/Adam fixture required by contract v11."""
 
     return {
         "actor_state_dict": {"weight": torch.zeros(1)},
@@ -105,39 +99,10 @@ def _minimal_full_training_state() -> dict[str, object]:
                 }
             },
             "param_groups": [
-                {"lr": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE, "params": [0]}
+                {"lr": MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE, "params": [0]}
             ],
         },
     }
-
-
-@contextmanager
-def _allow_synthetic_v10_migration_source():
-    """Keep ONNX unit tests independent of the multi-megabyte pinned model.
-
-    Production validators still authenticate the exact legacy file.  These
-    tests exercise export/receipt binding with a structurally complete
-    synthetic ledger, so only the external-file identity check is replaced.
-    """
-
-    def accept(value: object, **_kwargs: object) -> object:
-        if not isinstance(value, dict):
-            raise TypeError("synthetic migration source must be a dictionary")
-        return value
-
-    with (
-        patch.object(
-            provenance_module,
-            "validate_v10_migration_source_identity",
-            side_effect=accept,
-        ),
-        patch.object(
-            policy_export_module,
-            "validate_v10_migration_source_identity",
-            side_effect=accept,
-        ),
-    ):
-        yield
 
 
 def _write_zero_policy(path: Path) -> None:
@@ -411,8 +376,12 @@ def _write_final_canonical_checkpoint(
             "environment": {},
             "runner": {
                 "algorithm": {
-                    "learning_rate": MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+                    "learning_rate": MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE,
                     "schedule": "fixed",
+                    "entropy_coef": MICROBAN_TELEOP_V11_ENTROPY_COEF,
+                    "num_learning_epochs": (
+                        MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS
+                    ),
                 }
             },
         },
@@ -432,16 +401,6 @@ def _write_final_canonical_checkpoint(
             "resume_source_checkpoint_iteration": 9_999,
         },
     }
-    migration_source = _v10_migration_source_identity(
-        "/synthetic/pinned/model_1499.pt"
-    )
-    migration_source["safe_velocity_checkpoint_sha256"] = bootstrap_info[
-        "source_checkpoint_sha256"
-    ]
-    migration_source["safe_velocity_acceptance_receipt_sha256"] = bootstrap_info[
-        "source_acceptance_receipt_sha256"
-    ]
-    manifest["migration_source"] = migration_source
     torch.save(
         {
             **_minimal_full_training_state(),
@@ -841,32 +800,29 @@ class ParityGateTest(unittest.TestCase):
         run = self.root / "canonical_run"
         checkpoint = run / "model_14999.pt"
         _write_final_canonical_checkpoint(checkpoint, self.bootstrap_info)
-        with _allow_synthetic_v10_migration_source():
-            unaccepted = collect_teleop_export_provenance(
-                checkpoint, require_final_canonical_stage=True
-            )
+        unaccepted = collect_teleop_export_provenance(
+            checkpoint, require_final_canonical_stage=True
+        )
         receipt, _reports = _write_final_acceptance_receipt(
             self.root,
             checkpoint,
             training_provenance_sha256=unaccepted.training.sha256,
         )
 
-        with _allow_synthetic_v10_migration_source():
-            provenance = collect_teleop_export_provenance(
-                checkpoint,
-                acceptance_receipt=receipt,
-                require_final_acceptance=True,
-            )
+        provenance = collect_teleop_export_provenance(
+            checkpoint,
+            acceptance_receipt=receipt,
+            require_final_acceptance=True,
+        )
         self.assertIsNotNone(provenance.acceptance)
         _write_zero_policy(self.temporary_onnx)
-        with _allow_synthetic_v10_migration_source():
-            publish_gated_teleop_onnx(
-                self.temporary_onnx,
-                self.output_onnx,
-                pytorch_policy=_ZeroPolicy(),
-                policy_metadata={},
-                provenance=provenance,
-            )
+        publish_gated_teleop_onnx(
+            self.temporary_onnx,
+            self.output_onnx,
+            pytorch_policy=_ZeroPolicy(),
+            policy_metadata={},
+            provenance=provenance,
+        )
         metadata = {
             item.key: item.value for item in onnx.load(self.output_onnx).metadata_props
         }
@@ -909,8 +865,7 @@ class ParityGateTest(unittest.TestCase):
         run = self.root / "canonical_run"
         checkpoint = run / "model_14999.pt"
         _write_final_canonical_checkpoint(checkpoint, self.bootstrap_info)
-        with _allow_synthetic_v10_migration_source():
-            unaccepted = collect_teleop_export_provenance(checkpoint)
+        unaccepted = collect_teleop_export_provenance(checkpoint)
         receipt, reports = _write_final_acceptance_receipt(
             self.root,
             checkpoint,
@@ -918,10 +873,7 @@ class ParityGateTest(unittest.TestCase):
         )
         reports[0].write_text("{}\n", encoding="utf-8")
 
-        with (
-            _allow_synthetic_v10_migration_source(),
-            self.assertRaisesRegex(ValueError, "report SHA-256 mismatch"),
-        ):
+        with self.assertRaisesRegex(ValueError, "report SHA-256 mismatch"):
             collect_teleop_export_provenance(
                 checkpoint,
                 acceptance_receipt=receipt,
