@@ -114,6 +114,15 @@ else
             )
             save_interval=15000
             ;;
+        deadline_fallback_post_canary)
+            gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"
+            runner_args+=(
+                --agent.deadline-fallback-resume True
+                --agent.deadline-fallback-resume-gate "${gate}"
+                --agent.deadline-fallback-resume-gate-sha256 "${gate_sha}"
+            )
+            save_interval=15000
+            ;;
         deadline_fallback_canary_complete)
             fail "Deadline fallback canary reached 10100; explicit post-canary promotion is required."
             ;;

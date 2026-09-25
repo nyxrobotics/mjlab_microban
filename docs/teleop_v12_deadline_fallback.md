@@ -53,6 +53,51 @@ requires common step 242400 and Adam step 202000 at the final save. The child
 inherits the exact v1 marker and records the immediate parent checkpoint and
 full-gate paths and hashes.
 
-Further training from model10099 is intentionally rejected. Evaluate its
-normal 10100 foot-canary gate first; a separate explicit post-canary promotion
-decision is required before training beyond that point.
+## Pinned model10099 post-canary promotion
+
+The measured canary is fixed to SHA-256
+`86a81f45f34d91036ab138963c835a3e78db98224f523d3484e1d3ed335082ff`.
+Its canonical tracking report is fixed to SHA-256
+`e8230cff4cd25e8af1d9931d1fcd459db112e5a34c88a20470e22c2019ec5161`.
+That report failed only the original 30 mm hand-RMS check: its worst hand RMS
+was 32.3777 mm and worst hand P95 was 39.9206 mm. All fall, finite-value,
+actual joint-limit, recurrence, HMD-motion, observation-coverage, directional,
+hand-P95, hand-column ablation, and newly activated foot-column ablation checks
+passed. The unchanged 9x300 locomotion gate also passed.
+
+Run the separate exact-canary adjudicator from a clean committed checkout:
+
+```bash
+scripts/evaluate_microban_teleop_v12_deadline_canary.sh \
+  2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926 \
+  artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_tracking.json
+```
+
+It reruns the unchanged 9x300 locomotion suite, all six canonical foot-canary
+scenarios with only hand RMS set to 35 mm, and the unchanged full-83-input ONNX
+CPU parity gate. It then writes a schema-v2 gate and a hash-bound post-canary
+receipt. A different checkpoint, a changed canonical report, any other failed
+check, hand P95 over 50 mm, missing foot causal response, or an ONNX/locomotion
+failure is rejected.
+
+The accepted post-canary receipt is pinned to SHA-256
+`e2ae7b6a59f1f5e641b98d316a8ada2b8d56d82aa6154db2e070771d117d2dad`;
+the corresponding schema-v2 gate SHA-256 is
+`dabc4e70df395ed8bc14fef223c71111a490376c1694309c482efb39e0b3b7fa`.
+Simulation consumers must authenticate the receipt bytes against that fixed
+hash before accepting its structural evidence.
+
+After that gate passes, the normal stage driver recognizes only this explicit
+post-canary authorization and runs the single remaining segment:
+
+```bash
+scripts/train_microban_teleop_v12.sh resume \
+  2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926 \
+  --agent.run-name v12_deadline_post_canary_10100_to15000
+```
+
+This route permits exactly completed update 10100 to completed update 15000,
+uses `save_interval=15000`, and may write only `model_14999.pt`. The final gate
+keeps hand RMS at 35 mm but restores the normal final eight-scenario profile,
+including strict 15 mm foot RMS, 25 mm foot P95, perturbation, all safety and
+causal checks, 9x300 locomotion, and CPU ONNX parity.

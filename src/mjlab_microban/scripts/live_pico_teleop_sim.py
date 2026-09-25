@@ -18,9 +18,10 @@ authenticated Microban Unity frames pass through ``microban_teleop``'s
 validated native mapper. Without a hybrid checkpoint, the audited legacy actor
 runs in its original 63-observation ``Mjlab-Velocity-Microban`` environment and
 its raw 18 actions are executed unchanged. Supplying a hybrid checkpoint keeps
-the separate 83-observation teleoperation environment.  Contract-v12 early
-full-body checkpoints are accepted only through the dedicated, permanently
-non-deployable simulation-preview runner.
+the separate 83-observation teleoperation environment. Contract-v12 preview
+checkpoints stay on their permanently non-deployable task. The one audited
+deadline canary has a separate receipt-bound, bytes-only consumer that uses the
+canonical v12 task but still has simulation output only.
 """
 
 from __future__ import annotations
@@ -72,6 +73,10 @@ from mjlab_microban.scripts.simulation_camera import (
     StereoMjpegPublisher,
     webxr_camera_toml,
 )
+from mjlab_microban.scripts.teleop_v12_deadline_fallback import (
+    validate_deadline_post_canary_receipt_payload,
+    validate_post_canary_receipt,
+)
 from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -86,6 +91,16 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResetFixedFootTargetCommand,
     ResetFixedHandTargetCommand,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
+    validate_deadline_fallback_canary_payload,
+)
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_TASK_ID,
+)
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
     TELEOP_V12_PREVIEW_INFO_KEY,
@@ -98,6 +113,7 @@ from mjlab_microban.tasks.microban_teleop_v12_preview import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     make_teleop_v12_controller_only_preview_consumer,
+    make_teleop_v12_deadline_canary_simulation_consumer,
     make_teleop_v12_preview_consumer,
     make_teleop_v12_unaccepted_simulation_preview_consumer,
     preview_actor_load_cfg,
@@ -105,6 +121,7 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 
 TASK = "Mjlab-Teleop-Microban"
 V12_PREVIEW_TASK = MICROBAN_TELEOP_V12_PREVIEW_TASK_ID
+V12_CANONICAL_TASK = MICROBAN_TELEOP_V12_TASK_ID
 WALK_TASK = "Mjlab-Velocity-Microban"
 AUDITED_LEGACY_WALK_SHA256 = (
     "b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141"
@@ -146,6 +163,16 @@ class UnacceptedSimulationPreviewAuthority:
 
     checkpoint_sha256: str
     iteration: int
+    checkpoint_bytes: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class DeadlineCanaryLiveAuthority:
+    """Exact accepted model10099 authority for canonical-task simulation only."""
+
+    checkpoint_sha256: str
+    acceptance_receipt: Path
+    acceptance_receipt_sha256: str
     checkpoint_bytes: bytes = field(repr=False)
 
 
@@ -2003,6 +2030,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     checkpoint_group.add_argument(
+        "--v12-deadline-canary-checkpoint",
+        type=Path,
+        help=(
+            "simulation-only exact canonical model10099 checkpoint; requires its "
+            "hash-bound post-canary PASS receipt and uses the canonical v12 task"
+        ),
+    )
+    checkpoint_group.add_argument(
         "--unaccepted-simulation-observation-only-v12-preview-checkpoint",
         dest="unaccepted_sim_preview_checkpoint",
         type=Path,
@@ -2040,6 +2075,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "required lowercase SHA-256 of the controller-only phase-1 receipt"
         ),
+    )
+    parser.add_argument(
+        "--v12-deadline-canary-acceptance-receipt",
+        type=Path,
+        help=(
+            "required with --v12-deadline-canary-checkpoint: exact post-canary "
+            "PASS receipt bound to model10099"
+        ),
+    )
+    parser.add_argument(
+        "--v12-deadline-canary-acceptance-receipt-sha256",
+        help="required lowercase SHA-256 of the post-canary PASS receipt",
     )
     parser.add_argument(
         "--unaccepted-simulation-observation-only-v12-preview-sha256",
@@ -2272,11 +2319,22 @@ def _construct_checkpoint_consumer_runner(
     runtime_task: str,
     unaccepted_preview_mode: bool = False,
     controller_only_preview_mode: bool = False,
+    deadline_canary_mode: bool = False,
 ):
     """Construct the explicit actor-load-only runner used by live simulation."""
 
-    if unaccepted_preview_mode and controller_only_preview_mode:
-        raise ValueError("Preview consumer modes are mutually exclusive")
+    if sum(
+        (unaccepted_preview_mode, controller_only_preview_mode, deadline_canary_mode)
+    ) > 1:
+        raise ValueError("Special v12 consumer modes are mutually exclusive")
+    if deadline_canary_mode:
+        if runtime_task != V12_CANONICAL_TASK:
+            raise ValueError(
+                "Deadline-canary consumer requires the canonical contract-v12 task"
+            )
+        return make_teleop_v12_deadline_canary_simulation_consumer(
+            env, agent_cfg, device
+        )
     if unaccepted_preview_mode:
         if runtime_task != V12_PREVIEW_TASK:
             raise ValueError(
@@ -2307,9 +2365,12 @@ def _runtime_task(
     v12_preview_checkpoint: Path | None = None,
     unaccepted_sim_preview_checkpoint: Path | None = None,
     v12_controller_preview_checkpoint: Path | None = None,
+    v12_deadline_canary_checkpoint: Path | None = None,
 ) -> str:
     """Select the original velocity task unless a hybrid actor was requested."""
 
+    if v12_deadline_canary_checkpoint is not None:
+        return V12_CANONICAL_TASK
     if (
         v12_preview_checkpoint is not None
         or unaccepted_sim_preview_checkpoint is not None
@@ -2325,6 +2386,7 @@ def _selected_checkpoint(args: argparse.Namespace) -> Path | None:
     return (
         args.v12_preview_checkpoint
         or args.v12_controller_preview_checkpoint
+        or args.v12_deadline_canary_checkpoint
         or args.unaccepted_sim_preview_checkpoint
         or args.checkpoint
     )
@@ -2618,6 +2680,118 @@ def _validate_controller_preview_live_authority(
     )
 
 
+def _validate_deadline_canary_live_authority(
+    *,
+    checkpoint: Path | None,
+    acceptance_receipt: Path | None,
+    expected_receipt_sha256: str | None,
+) -> DeadlineCanaryLiveAuthority:
+    """Authenticate exact model10099 and its post-canary PASS receipt bytes."""
+
+    if checkpoint is None:
+        raise ValueError("Deadline-canary live simulation requires a checkpoint")
+    if acceptance_receipt is None or expected_receipt_sha256 is None:
+        raise ValueError(
+            "--v12-deadline-canary-checkpoint requires its post-canary PASS "
+            "receipt and SHA-256"
+        )
+    if len(expected_receipt_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in expected_receipt_sha256
+    ):
+        raise ValueError(
+            "Deadline-canary acceptance receipt SHA-256 must be lowercase hex"
+        )
+    if expected_receipt_sha256 != (
+        MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256
+    ):
+        raise ValueError("Deadline-canary receipt is not the pinned PASS receipt")
+
+    receipt_bytes = _read_regular_nonsymlink_bytes(
+        acceptance_receipt, label="Deadline-canary acceptance receipt"
+    )
+    if _sha256_bytes(receipt_bytes) != expected_receipt_sha256:
+        raise ValueError("Deadline-canary acceptance receipt SHA-256 mismatch")
+    try:
+        receipt_payload = json.loads(receipt_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "Deadline-canary acceptance receipt is not valid JSON"
+        ) from exc
+    if not isinstance(receipt_payload, dict):
+        raise TypeError("Deadline-canary acceptance receipt is malformed")
+
+    checkpoint_bytes = _read_regular_nonsymlink_bytes(
+        checkpoint, label="Deadline-canary checkpoint"
+    )
+    checkpoint_sha256 = _sha256_bytes(checkpoint_bytes)
+    if checkpoint_sha256 != MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256:
+        raise ValueError("Deadline-canary checkpoint is not the pinned model10099")
+    validate_deadline_post_canary_receipt_payload(
+        receipt_payload,
+        checkpoint_sha256=checkpoint_sha256,
+        receipt_sha256=expected_receipt_sha256,
+    )
+
+    strict_evidence = receipt_payload.get("strict_failure_report")
+    fallback_evidence = receipt_payload.get("fallback_tracking_report")
+    stage_evidence = receipt_payload.get("full_stage_gate")
+    if not all(
+        isinstance(value, dict) and isinstance(value.get("path"), str)
+        for value in (strict_evidence, fallback_evidence, stage_evidence)
+    ):
+        raise ValueError("Deadline-canary receipt evidence paths are malformed")
+    rebuilt = validate_post_canary_receipt(
+        receipt=acceptance_receipt,
+        checkpoint=checkpoint,
+        strict_tracking_report=Path(strict_evidence["path"]),
+        fallback_tracking_report=Path(fallback_evidence["path"]),
+        stage_gate=Path(stage_evidence["path"]),
+    )
+    if rebuilt != receipt_payload:
+        raise ValueError("Deadline-canary acceptance receipt revalidation drifted")
+    if (
+        _read_regular_nonsymlink_bytes(
+            acceptance_receipt, label="Deadline-canary acceptance receipt"
+        )
+        != receipt_bytes
+    ):
+        raise ValueError("Deadline-canary acceptance receipt changed while validating")
+    if (
+        _read_regular_nonsymlink_bytes(
+            checkpoint, label="Deadline-canary checkpoint"
+        )
+        != checkpoint_bytes
+    ):
+        raise ValueError("Deadline-canary checkpoint changed while validating")
+
+    # Deserialize only the immutable bytes authenticated above. The live runner
+    # receives these bytes, never the mutable path, and is actor-load-only.
+    payload = torch.load(
+        BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("Deadline-canary checkpoint payload is malformed")
+    validate_deadline_fallback_canary_payload(
+        payload,
+        verify_parent_files=True,
+        checkpoint_sha256=checkpoint_sha256,
+    )
+    infos = payload.get("infos")
+    if (
+        payload.get("iter") != MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
+        or not isinstance(infos, dict)
+        or infos.get("env_state")
+        != {"common_step_counter": MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP}
+    ):
+        raise ValueError("Deadline-canary checkpoint clock is not exact")
+    return DeadlineCanaryLiveAuthority(
+        checkpoint_sha256=checkpoint_sha256,
+        acceptance_receipt=acceptance_receipt.expanduser().absolute(),
+        acceptance_receipt_sha256=expected_receipt_sha256,
+        checkpoint_bytes=checkpoint_bytes,
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     configure_torch_backends()
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -2627,12 +2801,14 @@ def run(args: argparse.Namespace) -> int:
     controller_only_preview_mode = (
         args.v12_controller_preview_checkpoint is not None
     )
+    deadline_canary_mode = args.v12_deadline_canary_checkpoint is not None
     unaccepted_preview_mode = args.unaccepted_sim_preview_checkpoint is not None
     preview_mode = (
         accepted_preview_mode
         or controller_only_preview_mode
         or unaccepted_preview_mode
     )
+    immutable_v12_consumer_mode = preview_mode or deadline_canary_mode
     receipt_requested = (
         args.v12_preview_acceptance_receipt is not None
         or args.v12_preview_acceptance_receipt_sha256 is not None
@@ -2651,15 +2827,24 @@ def run(args: argparse.Namespace) -> int:
             "Controller preview receipt options require the dedicated "
             "--v12-controller-preview-checkpoint path"
         )
+    deadline_canary_receipt_requested = (
+        args.v12_deadline_canary_acceptance_receipt is not None
+        or args.v12_deadline_canary_acceptance_receipt_sha256 is not None
+    )
+    if not deadline_canary_mode and deadline_canary_receipt_requested:
+        raise ValueError(
+            "Deadline-canary receipt options require the dedicated "
+            "--v12-deadline-canary-checkpoint path"
+        )
     unaccepted_hash_requested = args.unaccepted_sim_preview_sha256 is not None
     if not unaccepted_preview_mode and unaccepted_hash_requested:
         raise ValueError(
             "Unaccepted simulation preview SHA-256 requires its explicit "
             "observation-only checkpoint option"
         )
-    if preview_mode and device != "cuda:0":
+    if immutable_v12_consumer_mode and device != "cuda:0":
         raise ValueError(
-            "Hash-bound v12 preview acceptance and live inference require cuda:0"
+            "Hash-bound v12 live inference requires cuda:0"
         )
     preview_authority = (
         _validate_preview_live_authority(
@@ -2693,6 +2878,17 @@ def run(args: argparse.Namespace) -> int:
         if unaccepted_preview_mode
         else None
     )
+    deadline_canary_authority = (
+        _validate_deadline_canary_live_authority(
+            checkpoint=checkpoint,
+            acceptance_receipt=args.v12_deadline_canary_acceptance_receipt,
+            expected_receipt_sha256=(
+                args.v12_deadline_canary_acceptance_receipt_sha256
+            ),
+        )
+        if deadline_canary_mode
+        else None
+    )
 
     legacy_only = checkpoint is None
     runtime_task = _runtime_task(
@@ -2700,6 +2896,7 @@ def run(args: argparse.Namespace) -> int:
         args.v12_preview_checkpoint,
         args.unaccepted_sim_preview_checkpoint,
         args.v12_controller_preview_checkpoint,
+        args.v12_deadline_canary_checkpoint,
     )
     env_cfg = load_env_cfg(runtime_task, play=True)
     # Nominalize resets and remove timeout/DR/push events for an operator-owned
@@ -2738,6 +2935,7 @@ def run(args: argparse.Namespace) -> int:
                     preview_authority
                     or controller_preview_authority
                     or unaccepted_preview_authority
+                    or deadline_canary_authority
                 )
                 load_source: str | bytes = (
                     authority.checkpoint_bytes
@@ -2751,20 +2949,28 @@ def run(args: argparse.Namespace) -> int:
                     runtime_task=runtime_task,
                     unaccepted_preview_mode=unaccepted_preview_mode,
                     controller_only_preview_mode=controller_only_preview_mode,
+                    deadline_canary_mode=deadline_canary_mode,
                 )
                 runner.load(
                     load_source,
                     load_cfg=(
-                        preview_actor_load_cfg() if preview_mode else {"actor": True}
+                        preview_actor_load_cfg()
+                        if immutable_v12_consumer_mode
+                        else {"actor": True}
                     ),
                     strict=True,
                     map_location=device,
                 )
                 actor = runner.get_inference_policy(device=device)
             except Exception as exc:
-                if controller_only_preview_mode:
+                if controller_only_preview_mode or deadline_canary_mode:
+                    label = (
+                        "Controller-only phase-1"
+                        if controller_only_preview_mode
+                        else "Deadline-canary model10099"
+                    )
                     raise RuntimeError(
-                        "Controller-only phase-1 checkpoint failed strict loading"
+                        f"{label} checkpoint failed strict bytes-only loading"
                     ) from exc
                 print(
                     "Learned PICO checkpoint unavailable; legacy joystick "
@@ -2929,6 +3135,22 @@ def run(args: argparse.Namespace) -> int:
                 "RESILIENT PREVIEW: body/checkpoint/inference faults use the "
                 "audited legacy actor until left-trigger release; the next "
                 "activation retries the preview actor."
+            )
+        elif deadline_canary_mode:
+            assert deadline_canary_authority is not None
+            print(
+                "SIMULATION-ONLY CANONICAL V12 CANARY: exact accepted model10099 "
+                "runs with the canonical Mjlab-Teleop-V12-Microban task."
+            )
+            print(
+                "HASH-BOUND POST-CANARY ACCEPTANCE: checkpoint_sha256="
+                f"{deadline_canary_authority.checkpoint_sha256} "
+                "receipt_sha256="
+                f"{deadline_canary_authority.acceptance_receipt_sha256}"
+            )
+            print(
+                "No robot or motor output exists in this process; body/inference "
+                "faults use the audited simulation-only legacy locomotion fallback."
             )
         elif controller_only_preview_mode:
             assert controller_preview_authority is not None

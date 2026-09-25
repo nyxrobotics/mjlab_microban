@@ -64,8 +64,12 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
@@ -90,6 +94,8 @@ FOOT_ACTIVATION_CANARY_PROFILE = "whole_body_foot_activation_canary_reachable_sa
 WHOLE_BODY_PROFILE = "whole_body_reachable_performance_v2"
 FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2"
 DEADLINE_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
+DEADLINE_CANARY_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_CANARY_FALLBACK_PROFILE
+DEADLINE_FINAL_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_FINAL_FALLBACK_PROFILE
 TRACKING_PROFILES = (
     PRE_ACTIVATION_EXPOSURE_PROFILE,
     EXPANDED_LOCOMOTION_PROFILE,
@@ -99,6 +105,8 @@ TRACKING_PROFILES = (
     WHOLE_BODY_PROFILE,
     FINAL_PROFILE,
     DEADLINE_FALLBACK_PROFILE,
+    DEADLINE_CANARY_FALLBACK_PROFILE,
+    DEADLINE_FINAL_FALLBACK_PROFILE,
 )
 
 HAND_RMS_MAX_M = 0.03
@@ -121,7 +129,11 @@ def hand_tracking_rms_max_m(profile: str) -> float:
     """Return the profile-specific hand RMS limit; all other limits are fixed."""
 
     required_tracking_scenario_names(profile)
-    if profile == DEADLINE_FALLBACK_PROFILE:
+    if profile in (
+        DEADLINE_FALLBACK_PROFILE,
+        DEADLINE_CANARY_FALLBACK_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
+    ):
         return MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M
     return HAND_RMS_MAX_M
 
@@ -189,6 +201,24 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
             "max_hands_right",
             "max_keypoints_left",
         ),
+        DEADLINE_CANARY_FALLBACK_PROFILE: (
+            "low_forward",
+            "max_hands_left",
+            "max_hands_right",
+            "max_keypoints_left",
+            "max_keypoints_right",
+            "bounded_both_feet",
+        ),
+        DEADLINE_FINAL_FALLBACK_PROFILE: (
+            "low_forward",
+            "max_hands_left",
+            "max_hands_right",
+            "max_keypoints_left",
+            "max_keypoints_right",
+            "bounded_both_feet",
+            "mixed_forward_left",
+            "mixed_backward_right",
+        ),
         HMD_HAND_ACTIVATION_CANARY_PROFILE: (
             "low_forward",
             "max_hands_left",
@@ -245,12 +275,14 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
     if profile in (
         HMD_HAND_PROFILE,
         DEADLINE_FALLBACK_PROFILE,
+        DEADLINE_CANARY_FALLBACK_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
         FOOT_ACTIVATION_CANARY_PROFILE,
         WHOLE_BODY_PROFILE,
         FINAL_PROFILE,
     ):
         names.update(("hand_tracking_rms", "hand_tracking_p95"))
-    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE):
+    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE):
         names.update(("foot_tracking_rms", "foot_tracking_p95"))
     return frozenset(names)
 
@@ -267,6 +299,8 @@ def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
         return frozenset(("hand",))
     if profile in (
         FOOT_ACTIVATION_CANARY_PROFILE,
+        DEADLINE_CANARY_FALLBACK_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
         WHOLE_BODY_PROFILE,
         FINAL_PROFILE,
     ):
@@ -813,6 +847,8 @@ def _acceptance(
     if profile in (
         HMD_HAND_PROFILE,
         DEADLINE_FALLBACK_PROFILE,
+        DEADLINE_CANARY_FALLBACK_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
         FOOT_ACTIVATION_CANARY_PROFILE,
         WHOLE_BODY_PROFILE,
         FINAL_PROFILE,
@@ -829,7 +865,7 @@ def _acceptance(
         checks["hand_tracking_p95"] = bool(active_hand) and all(
             float(value["p95"]) <= HAND_P95_MAX_M for value in active_hand
         )
-    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE):
+    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE):
         active_foot = [
             item["target_error"]["foot"]
             for item in results
@@ -878,6 +914,7 @@ def run_evaluation(
     allow_legacy_preview_v1: bool = False,
     allow_corner_rescue: bool = False,
     allow_deadline_fallback: bool = False,
+    allow_deadline_canary_fallback: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -885,6 +922,12 @@ def run_evaluation(
         raise ValueError(f"Checkpoint SHA-256 mismatch: {digest}")
     if seed != 42 or steps != 300 or settle_steps != 50:
         raise ValueError("Canonical tracking gate requires seed42/300/settle50")
+    if allow_deadline_fallback and allow_deadline_canary_fallback:
+        raise ValueError("Deadline source and canary fallback modes are exclusive")
+    if allow_deadline_canary_fallback and digest != (
+        MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
+    ):
+        raise ValueError("Deadline canary checkpoint SHA-256 mismatch")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
     policy, iteration, infos = _load_actor(
@@ -898,6 +941,10 @@ def run_evaluation(
     completed = iteration + 1
     if allow_deadline_fallback:
         required = DEADLINE_FALLBACK_PROFILE
+    elif allow_deadline_canary_fallback:
+        required = DEADLINE_CANARY_FALLBACK_PROFILE
+    elif infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None:
+        required = DEADLINE_FINAL_FALLBACK_PROFILE
     elif allow_corner_rescue:
         required = HMD_HAND_PROFILE
     elif allow_nondeployable_preview:
@@ -922,7 +969,11 @@ def run_evaluation(
     source_policy.load_state_dict(source_state, strict=True)
     source_policy.eval()
 
-    perturbation = profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE)
+    perturbation = profile in (
+        EXPANDED_LOCOMOTION_PROFILE,
+        FINAL_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
+    )
     cfg = _tracking_cfg(seed=seed, steps=steps, perturbation=perturbation)
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
     wrapped = RslRlVecEnvWrapper(env, clip_actions=None)
@@ -1017,6 +1068,14 @@ def build_parser() -> argparse.ArgumentParser:
             "35mm hand-RMS deadline profile"
         ),
     )
+    parser.add_argument(
+        "--deadline-canary-fallback",
+        action="store_true",
+        help=(
+            "accept only the hash-pinned model10099 foot canary under the "
+            "35mm hand-RMS profile"
+        ),
+    )
     return parser
 
 
@@ -1032,6 +1091,7 @@ def main(argv: list[str] | None = None) -> int:
         settle_steps=args.settle_steps,
         allow_corner_rescue=args.allow_corner_rescue,
         allow_deadline_fallback=args.deadline_fallback,
+        allow_deadline_canary_fallback=args.deadline_canary_fallback,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

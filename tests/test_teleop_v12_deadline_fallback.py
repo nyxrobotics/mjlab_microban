@@ -10,11 +10,17 @@ import pytest
 import torch
 
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    DEADLINE_CANARY_FALLBACK_PROFILE,
     DEADLINE_FALLBACK_PROFILE,
     HMD_HAND_PROFILE,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     _acceptance,
     target_column_ablation_observation_columns,
+)
+from mjlab_microban.scripts.teleop_v12_deadline_fallback import (
+    DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION,
+    DEADLINE_POST_CANARY_RECEIPT_GATE,
+    validate_deadline_post_canary_receipt_payload,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
@@ -26,6 +32,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
@@ -33,10 +40,12 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_REJECTED_V2_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_V1_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
     deadline_fallback_marker,
     deadline_fallback_resume_source,
     deadline_fallback_v1_corner_marker,
+    deadline_post_canary_marker,
     validate_deadline_fallback_canary_payload,
     validate_deadline_fallback_checkpoint_payload,
     validate_deadline_fallback_resume_payload,
@@ -52,6 +61,7 @@ from mjlab_microban.teleop_v12_safety import (
 
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_fallback.sh"
+CANARY_EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_canary.sh"
 TRAINER = ROOT / "scripts/train_microban_teleop_v12.sh"
 
 
@@ -246,7 +256,122 @@ def test_only_rms_is_relaxed_p95_and_safety_are_unchanged() -> None:
     assert safety_checks["actual_soft_limits"] is False
 
 
-def test_canary_is_exact_one_hop_and_cannot_resume_again() -> None:
+def test_canary_fallback_keeps_foot_causality_and_relaxes_only_hand_rms() -> None:
+    result = _tracking_result(rms=0.034, p95=0.049)
+    result["command"]["foot_target"] = [[0.01, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    result["target_error"]["foot"] = {
+        "sample_count": 250,
+        "rms": 0.2,
+        "p95": 0.3,
+    }
+    result["target_column_ablation"]["foot"] = _ablation("foot", True)
+    checks, status = _acceptance([result], DEADLINE_CANARY_FALLBACK_PROFILE)
+    assert status == "pass"
+    assert checks["hand_tracking_rms"] is True
+    assert checks["hand_tracking_p95"] is True
+    assert checks["target_column_ablation_response"] is True
+    assert "foot_tracking_rms" not in checks
+    assert "foot_tracking_p95" not in checks
+
+    result["target_column_ablation"]["foot"]["passed"] = False
+    checks, status = _acceptance([result], DEADLINE_CANARY_FALLBACK_PROFILE)
+    assert status == "fail"
+    assert checks["target_column_ablation_response"] is False
+
+
+def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
+    checks = {
+        name: True
+        for name in (
+            "actual_soft_limits",
+            "all_scenarios_completed",
+            "finite",
+            "forced_hmd_motion",
+            "hand_tracking_p95",
+            "hand_tracking_rms",
+            "no_falls",
+            "nonzero_observation_coverage",
+            "raw_action_recurrence",
+            "target_column_ablation_response",
+            "twist_directional_response",
+        )
+    }
+    report_hashes = {
+        "locomotion": "a" * 64,
+        "tracking": "b" * 64,
+        "onnx": "c" * 64,
+    }
+    receipt = {
+        "schema_version": DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION,
+        "gate": DEADLINE_POST_CANARY_RECEIPT_GATE,
+        "status": "pass",
+        "revision": deadline_post_canary_marker()["revision"],
+        "checkpoint": {
+            "path": "/portable/model_10099.pt",
+            "sha256": MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            "iteration": 10_099,
+            "completed_updates": 10_100,
+        },
+        "lineage": deadline_fallback_marker(),
+        "post_canary_authorization": deadline_post_canary_marker(),
+        "strict_failure_report": {
+            "path": "/portable/strict.json",
+            "sha256": "e8230cff4cd25e8af1d9931d1fcd459db112e5a34c88a20470e22c2019ec5161",
+            "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
+            "status": "fail",
+            "failed_checks": ["hand_tracking_rms"],
+        },
+        "fallback_tracking_report": {
+            "path": "/portable/fallback.json",
+            "sha256": report_hashes["tracking"],
+            "profile": DEADLINE_CANARY_FALLBACK_PROFILE,
+            "status": "pass",
+            "checks": checks,
+        },
+        "full_stage_gate": {
+            "path": "/portable/gate.json",
+            "sha256": "d" * 64,
+            "schema_version": 2,
+            "status": "pass",
+            "checkpoint_sha256": MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            "tracking_profile": DEADLINE_CANARY_FALLBACK_PROFILE,
+            "report_sha256": report_hashes,
+        },
+        "promotion": {
+            "eligible": True,
+            "completed_updates": 10_100,
+            "next_completed_updates": 15_000,
+            "only_threshold_change": "hand_rms_m_max_0.030_to_0.035",
+            "hand_p95_m_max": 0.05,
+            "foot_activation_checks_changed": False,
+            "safety_thresholds_changed": False,
+            "locomotion_gate_changed": False,
+            "onnx_gate_changed": False,
+            "requires_schema_v2_full_stage_gate": True,
+        },
+    }
+    assert validate_deadline_post_canary_receipt_payload(
+        receipt,
+        checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+        receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
+    ) == dict(receipt)
+    with pytest.raises(ValueError, match="receipt SHA-256"):
+        validate_deadline_post_canary_receipt_payload(
+            receipt,
+            checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            receipt_sha256="0" * 64,
+        )
+    drifted = copy.deepcopy(receipt)
+    drifted["fallback_tracking_report"]["checks"]["hand_tracking_p95"] = False
+    with pytest.raises(ValueError, match="fallback evidence"):
+        validate_deadline_post_canary_receipt_payload(
+            drifted,
+            checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
+        )
+
+
+def test_canary_is_exact_one_hop_and_requires_pinned_hash_to_resume() -> None:
     payload = _canary_payload(
         checkpoint_path="repo://parent.pt",
         gate_path="repo://gate.json",
@@ -260,7 +385,7 @@ def test_canary_is_exact_one_hop_and_cannot_resume_again() -> None:
     drifted["iter"] -= 1
     with pytest.raises(ValueError, match="descendant recipe/clock"):
         validate_deadline_fallback_canary_payload(drifted, verify_parent_files=False)
-    with pytest.raises(ValueError, match="post-canary promotion"):
+    with pytest.raises(ValueError, match="checkpoint SHA-256"):
         validate_deadline_fallback_resume_payload(payload, checkpoint_sha256="a" * 64)
 
 
@@ -325,6 +450,17 @@ def test_training_and_save_endpoints_are_exact() -> None:
         common_step_counter=242_400,
         filename="model_10099.pt",
     )
+    validate_deadline_fallback_training_request(
+        current_iteration=10_100,
+        common_step_counter=242_400,
+        num_learning_iterations=4_900,
+        save_interval=15_000,
+    )
+    validate_deadline_fallback_save_endpoint(
+        iteration=14_999,
+        common_step_counter=360_000,
+        filename="model_14999.pt",
+    )
     with pytest.raises(RuntimeError, match="model10099"):
         validate_deadline_fallback_save_endpoint(
             iteration=10_000,
@@ -334,9 +470,13 @@ def test_training_and_save_endpoints_are_exact() -> None:
 
 
 def test_shell_launchers_route_through_explicit_deadline_mode() -> None:
-    subprocess.run(["bash", "-n", str(EVALUATOR), str(TRAINER)], check=True)
+    subprocess.run(
+        ["bash", "-n", str(EVALUATOR), str(CANARY_EVALUATOR), str(TRAINER)],
+        check=True,
+    )
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     trainer = TRAINER.read_text(encoding="utf-8")
+    canary_evaluator = CANARY_EVALUATOR.read_text(encoding="utf-8")
     for required in (
         "create-deadline-fallback",
         "--deadline-fallback",
@@ -351,5 +491,15 @@ def test_shell_launchers_route_through_explicit_deadline_mode() -> None:
         "--agent.deadline-fallback-resume True",
         "save_interval=15000",
         "deadline_fallback_canary_complete",
+        "deadline_fallback_post_canary",
     ):
         assert required in trainer
+    for required in (
+        "create-deadline-canary-fallback",
+        "--deadline-canary-fallback",
+        "CANARY_SHA=",
+        "STRICT_REPORT_SHA=",
+        "create-canary-receipt",
+        "validate-canary-receipt",
+    ):
+        assert required in canary_evaluator

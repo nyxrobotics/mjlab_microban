@@ -52,18 +52,30 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     validate_corner_rescue_lineage_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_COMMON_STEP,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ITERATION,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_OPTIMIZER_STEP,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
     deadline_fallback_resume_source,
     validate_deadline_fallback_canary_payload,
+    validate_deadline_fallback_final_payload,
     validate_deadline_fallback_marker,
     validate_deadline_fallback_resume_payload,
     validate_deadline_fallback_resume_source,
     validate_deadline_fallback_save_endpoint,
     validate_deadline_fallback_training_request,
+    validate_deadline_post_canary_marker,
+    validate_deadline_post_canary_resume_source,
+)
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    deadline_post_canary_resume_source as build_deadline_post_canary_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
@@ -246,6 +258,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     simulation_preview_capable = False
     allow_missing_preview_phase1_acceptance = False
     require_immutable_checkpoint_bytes = False
+    allow_deadline_canary_consumer = False
     consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
     consumer_requires_live_candidate = True
 
@@ -339,7 +352,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if deadline_resume and cfg.get("save_interval") != 15_000:
             raise ValueError(
                 "Deadline fallback requires save_interval=15000 so only the "
-                "unconditional final model10099 is written"
+                "unconditional model10099 or model14999 endpoint is written"
             )
 
         self.checkpoint_consumer_mode = consumer_mode
@@ -355,6 +368,8 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self.teleop_v12_deadline_corner_rescue: dict | None = None
         self.teleop_v12_deadline_fallback: dict | None = None
         self.teleop_v12_deadline_resume_source: dict | None = None
+        self.teleop_v12_deadline_post_canary: dict | None = None
+        self.teleop_v12_deadline_post_canary_resume_source: dict | None = None
         self.teleop_v12_preview: dict | None = None
         self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
@@ -461,6 +476,19 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                     self.teleop_v12_deadline_resume_source
                 )
             )
+            if self.teleop_v12_deadline_post_canary is not None:
+                result[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY] = deepcopy(
+                    validate_deadline_post_canary_marker(
+                        self.teleop_v12_deadline_post_canary
+                    )
+                )
+                result[
+                    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
+                ] = deepcopy(
+                    validate_deadline_post_canary_resume_source(
+                        self.teleop_v12_deadline_post_canary_resume_source
+                    )
+                )
         if self.teleop_v12_preview is not None:
             result["preview_non_deployable"] = True
             result[TELEOP_V12_PREVIEW_INFO_KEY] = dict(self.teleop_v12_preview)
@@ -511,23 +539,42 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 num_learning_iterations=num_learning_iterations,
                 save_interval=int(self.cfg["save_interval"]),
             )
+            expected_source_optimizer_step = (
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                if self.teleop_v12_deadline_post_canary is None
+                else MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP
+            )
             assert_corner_rescue_optimizer_step(
                 {"optimizer_state_dict": self.alg.optimizer.state_dict()},
-                expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
+                expected_step=expected_source_optimizer_step,
             )
         self._validate_live_invariants()
         result = super().learn(num_learning_iterations, init_at_random_ep_len)
         if self.deadline_fallback_resume:
+            canary = self.teleop_v12_deadline_post_canary is None
+            expected_iteration = (
+                MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
+                if canary
+                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_ITERATION
+            )
+            expected_common_step = (
+                MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP
+                if canary
+                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_COMMON_STEP
+            )
+            expected_optimizer_step = (
+                MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP
+                if canary
+                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_OPTIMIZER_STEP
+            )
             if (
-                self.current_learning_iteration
-                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-                or int(self.env.unwrapped.common_step_counter)
-                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP
+                self.current_learning_iteration != expected_iteration
+                or int(self.env.unwrapped.common_step_counter) != expected_common_step
             ):
-                raise RuntimeError("Deadline fallback did not stop at update 10100")
+                raise RuntimeError("Deadline fallback stopped at the wrong endpoint")
             assert_corner_rescue_optimizer_step(
                 {"optimizer_state_dict": self.alg.optimizer.state_dict()},
-                expected_step=MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
+                expected_step=expected_optimizer_step,
             )
         return result
 
@@ -645,40 +692,87 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 deadline_fallback
             ):
                 raise ValueError("Resume gate does not authorize deadline fallback")
-            deadline_resume_source = deadline_fallback_resume_source(
-                checkpoint_path=portable_bootstrap_artifact_path(resolved),
-                gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
-                gate_sha256=self.deadline_fallback_resume_gate_sha256,
+            deadline_post_canary_value = gate.get(
+                MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
             )
+            if iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION:
+                deadline_post_canary = validate_deadline_post_canary_marker(
+                    deadline_post_canary_value
+                )
+                deadline_resume_source = validate_deadline_fallback_resume_source(
+                    infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
+                )
+                deadline_post_canary_resume_source = (
+                    build_deadline_post_canary_resume_source(
+                        checkpoint_path=portable_bootstrap_artifact_path(resolved),
+                        gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
+                        gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                    )
+                )
+            else:
+                if deadline_post_canary_value is not None:
+                    raise ValueError("Selected-v1 gate cannot authorize post-canary")
+                deadline_post_canary = None
+                deadline_post_canary_resume_source = None
+                deadline_resume_source = deadline_fallback_resume_source(
+                    checkpoint_path=portable_bootstrap_artifact_path(resolved),
+                    gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
+                    gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                )
             corner_rescue = None
         else:
             deadline_descendant = (
                 validate_deadline_fallback_canary_payload(
-                    payload, verify_parent_files=True
+                    payload,
+                    verify_parent_files=True,
+                    checkpoint_sha256=(
+                        before_sha256 if self.allow_deadline_canary_consumer else None
+                    ),
                 )
                 if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None
                 else None
             )
-            if deadline_descendant is not None:
+            deadline_canary_consumer = (
+                deadline_descendant is not None
+                and self.allow_deadline_canary_consumer
+                and consumer
+                and self.require_immutable_checkpoint_bytes
+                and isinstance(path, bytes)
+                and iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
+                and before_sha256
+                == MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
+            )
+            if deadline_descendant is not None and not deadline_canary_consumer:
                 raise ValueError(
                     "Deadline-fallback lineage requires explicit gated resume opt-in"
                 )
-            deadline_fallback = None
-            deadline_resume_source = None
-            corner_rescue = validate_corner_rescue_canonical_lineage(
-                infos, iteration=iteration
-            )
-            if infos.get("microban_teleop_recipe_revision") == (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-            ):
-                assert corner_rescue is not None
-                assert_corner_rescue_foot_adapter_zero(payload)
-                assert_corner_rescue_optimizer_step(
-                    payload,
-                    expected_step=(
-                        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
-                    ),
+            if deadline_canary_consumer:
+                deadline_fallback = deadline_descendant
+                deadline_resume_source = validate_deadline_fallback_resume_source(
+                    infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
                 )
+                deadline_post_canary = None
+                deadline_post_canary_resume_source = None
+                corner_rescue = None
+            else:
+                deadline_fallback = None
+                deadline_resume_source = None
+                deadline_post_canary = None
+                deadline_post_canary_resume_source = None
+                corner_rescue = validate_corner_rescue_canonical_lineage(
+                    infos, iteration=iteration
+                )
+                if infos.get("microban_teleop_recipe_revision") == (
+                    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+                ):
+                    assert corner_rescue is not None
+                    assert_corner_rescue_foot_adapter_zero(payload)
+                    assert_corner_rescue_optimizer_step(
+                        payload,
+                        expected_step=(
+                            MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                        ),
+                    )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
             infos.get("action_clip", object()) is not None
         ):
@@ -747,6 +841,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         )
         self.teleop_v12_deadline_fallback = deepcopy(deadline_fallback)
         self.teleop_v12_deadline_resume_source = deepcopy(deadline_resume_source)
+        self.teleop_v12_deadline_post_canary = deepcopy(deadline_post_canary)
+        self.teleop_v12_deadline_post_canary_resume_source = deepcopy(
+            deadline_post_canary_resume_source
+        )
         self.teleop_v12_preview = preview
         self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)
@@ -860,7 +958,14 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             }
         )
         if self.deadline_fallback_resume:
-            validate_deadline_fallback_canary_payload(payload, verify_parent_files=True)
+            if self.teleop_v12_deadline_post_canary is None:
+                validate_deadline_fallback_canary_payload(
+                    payload, verify_parent_files=True
+                )
+            else:
+                validate_deadline_fallback_final_payload(
+                    payload, verify_parent_files=True
+                )
         destination = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, destination)
 
@@ -964,6 +1069,46 @@ class MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(
         raise RuntimeError("Controller-only preview cannot export")
 
 
+class MicrobanTeleopV12DeadlineCanarySimulationConsumer(
+    MicrobanTeleopV12OnPolicyRunner
+):
+    """Bytes-only, read-only consumer for the exact accepted model10099 canary."""
+
+    require_immutable_checkpoint_bytes = True
+    allow_deadline_canary_consumer = True
+
+    def __init__(
+        self,
+        env,
+        train_cfg: dict,
+        log_dir: str | None = None,
+        device: str = "cpu",
+    ) -> None:
+        if (
+            train_cfg.get("checkpoint_consumer_mode") is not True
+            or train_cfg.get("simulation_preview_mode") is not False
+            or train_cfg.get("resume") is not False
+            or log_dir is not None
+        ):
+            raise ValueError(
+                "Deadline-canary live simulation is immutable, read-only, and "
+                "consumer-only"
+            )
+        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
+
+    def learn(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Deadline-canary simulation consumer cannot train")
+
+    def save(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Deadline-canary simulation consumer cannot save")
+
+    def export_policy_to_onnx(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Deadline-canary simulation consumer cannot export")
+
+
 def preview_actor_load_cfg() -> dict[str, bool]:
     """Return the only actor-only load mask accepted by a preview consumer."""
 
@@ -1027,3 +1172,20 @@ def make_teleop_v12_controller_only_preview_consumer(
     cfg["simulation_preview_mode"] = True
     cfg["resume"] = False
     return MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(env, cfg, device=device)
+
+
+def make_teleop_v12_deadline_canary_simulation_consumer(
+    env, agent_cfg, device: str
+) -> MicrobanTeleopV12DeadlineCanarySimulationConsumer:
+    """Construct the canonical-task actor-only consumer for exact model10099."""
+
+    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
+        cfg = asdict(agent_cfg)
+    elif isinstance(agent_cfg, dict):
+        cfg = deepcopy(agent_cfg)
+    else:
+        raise TypeError("Deadline-canary agent_cfg must be a dataclass or dict")
+    cfg["checkpoint_consumer_mode"] = True
+    cfg["simulation_preview_mode"] = False
+    cfg["resume"] = False
+    return MicrobanTeleopV12DeadlineCanarySimulationConsumer(env, cfg, device=device)

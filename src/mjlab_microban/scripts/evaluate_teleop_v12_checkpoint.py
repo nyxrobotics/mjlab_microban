@@ -47,12 +47,17 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     assert_corner_rescue_optimizer_step,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
-    validate_deadline_fallback_canary_payload,
     validate_deadline_fallback_checkpoint_payload,
+    validate_deadline_fallback_descendant_payload,
     validate_deadline_fallback_resume_source,
+    validate_deadline_post_canary_marker,
+    validate_deadline_post_canary_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
@@ -152,7 +157,7 @@ def _load_actor(
             payload, checkpoint_sha256=sha256_file(checkpoint)
         )
     elif infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
-        deadline_marker = validate_deadline_fallback_canary_payload(
+        deadline_marker = validate_deadline_fallback_descendant_payload(
             payload, verify_parent_files=True
         )
         source = validate_deadline_fallback_resume_source(
@@ -176,6 +181,30 @@ def _load_actor(
             or sha256_file(parent_gate) != source["full_stage_gate_sha256"]
         ):
             raise ValueError("Deadline canary parent changed during actor load")
+        post_source_value = infos.get(
+            MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
+        )
+        if post_source_value is not None:
+            post_source = validate_deadline_post_canary_resume_source(post_source_value)
+            canary_checkpoint = resolve_bootstrap_artifact_path(
+                post_source["parent_checkpoint_path"]
+            )
+            canary_gate = resolve_bootstrap_artifact_path(
+                post_source["full_stage_gate_path"]
+            )
+            validated_canary_gate = validate_gate(canary_gate, canary_checkpoint)
+            if validated_canary_gate.get(
+                MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
+            ) != validate_deadline_post_canary_marker(
+                infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
+            ):
+                raise ValueError("Deadline final parent gate authorization drifted")
+            if (
+                sha256_file(canary_checkpoint)
+                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
+                or sha256_file(canary_gate) != post_source["full_stage_gate_sha256"]
+            ):
+                raise ValueError("Deadline final parent changed during actor load")
     else:
         corner_lineage = validate_corner_rescue_canonical_lineage(
             infos, iteration=iteration
