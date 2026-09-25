@@ -307,7 +307,17 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # (now against the correct, un-lowered target) is doing that job on its own.
     cfg.rewards["head_height"] = RewardTermCfg(
         func=head_height_reward,
-        weight=144.0,  # 36.0 -> 144.0 (4x), alongside head_height_sq's own 4x below
+        # 144.0 (4x, per explicit request) reverted back to 36.0: with it at 4x,
+        # standing_bonus (needs SUSTAINED height above 0.9x target, a much
+        # stricter bar than head_height's own peaked-at-target shape) measured
+        # stuck at 0.02-0.08 for 12500 iterations straight (both before and
+        # after lowering pose_curriculum's own trigger threshold to compensate)
+        # — never breaking out, plus a live-training warning sign (Mean action
+        # std climbing 47 -> 108 over that same span, the opposite of the
+        # entropy annealing normally expected). Every EARLIER validated run
+        # using this original 36.0 reliably got standing_bonus past 2.0 within
+        # ~1000-1600 iterations — reverting to the evidence that actually works.
+        weight=36.0,
         params={
             "target_height": HEAD_STANDING_HEIGHT,
             "asset_cfg": HEAD_ASSET_CFG,
@@ -338,7 +348,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # folding into it via a shared blend ratio.
     cfg.rewards["head_height_sq"] = RewardTermCfg(
         func=head_height_reward,
-        weight=80.0,  # 20.0 -> 80.0 (4x), per explicit request: just get up and reach home posture
+        weight=20.0,  # reverted from 80.0 (4x) alongside head_height's own revert above
         params={
             "target_height": HEAD_STANDING_HEIGHT,
             "asset_cfg": HEAD_ASSET_CFG,
@@ -580,9 +590,15 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # time, unlike those.
     cfg.rewards["hip_roll_pose"] = RewardTermCfg(
         func=home_pose_reward,
-        # 240.0 -> 480.0: doubled per explicit request to push hip_roll toward
-        # home harder, matching standing_pose's own current weight.
-        weight=480.0,
+        # 480.0 is the FINAL weight (matching standing_pose's own, after two
+        # explicit-request doublings: 240 -> 480), ramped by pose_curriculum
+        # below alongside standing_pose — was left at a fixed 480.0 from
+        # iteration 0 until now, an inconsistency with every other pose-
+        # matching term in this set (all of which start low specifically
+        # because full-strength pose pressure before the robot has learned to
+        # stand at all was measured to cause a plateau — see standing_pose's
+        # own comment). Fixed for this from-scratch run.
+        weight=6.0,
         params={
             "height_threshold": 0.8 * HEAD_STANDING_HEIGHT,
             "std": {r".*": 0.6},
@@ -784,6 +800,13 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     # actually means "reliably standing", not just noise.
                     "name": "ramp up pose matching",
                     "reward_term_name": "standing_bonus",
+                    # Briefly lowered to 0.1 while head_height/head_height_sq
+                    # were quadrupled (standing_bonus measured stuck at 0.02-0.08
+                    # for 12500 iterations under that config, never breaking
+                    # out) — restored to 2.0 now that head_height/head_height_sq
+                    # are reverted to their original, validated weights (see
+                    # those terms' own comments): every earlier run at THIS
+                    # weight reliably reached 2.0 within ~1000-1600 iterations.
                     "threshold": 2.0,
                     # standing_pose weight history, each measured directly
                     # before moving on (hip_pose and, later, limb_symmetry/
@@ -801,21 +824,34 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     # stage 2's own threshold below, per explicit request after
                     # a live rollout with limb_symmetry/foot_flat both also
                     # active was still nowhere near home and moving too
-                    # erratically.
-                    "apply": lambda env: env.reward_manager.get_term_cfg("standing_pose").__setattr__(
-                        "weight", 480.0
+                    # erratically. hip_roll_pose ramps alongside it here too —
+                    # previously left at a fixed weight from iteration 0
+                    # (an inconsistency, see that term's own comment), now
+                    # fixed for this from-scratch run.
+                    "apply": lambda env: (
+                        env.reward_manager.get_term_cfg("standing_pose").__setattr__("weight", 480.0),
+                        env.reward_manager.get_term_cfg("hip_roll_pose").__setattr__("weight", 480.0),
                     ),
                 },
                 {
                     # home_stillness starts at 0.0 (fully off) — holding a
                     # commanded target still near home is a premature ask before
-                    # the policy can even reliably MATCH that pose yet.
+                    # the policy can even reliably MATCH that pose yet. Gated on
+                    # BOTH standing_pose AND hip_roll_pose (not standing_pose
+                    # alone) — hip_roll_pose is new to this curriculum ramp, so
+                    # gating only on standing_pose could let home_stillness
+                    # engage before hip_roll_pose has caught up, the same
+                    # lagging-term lesson hip_pose/limb_symmetry already taught
+                    # earlier in this reward set's history.
                     "name": "enable home stillness",
-                    "reward_term_name": "standing_pose",
+                    "reward_term_name": ["standing_pose", "hip_roll_pose"],
                     # Doubled to 240.0 alongside standing_pose's own weight
                     # doubling (240.0 -> 480.0) to keep gating on roughly the
                     # same relative "how converged" bar, not a now-trivially-
-                    # already-exceeded absolute number.
+                    # already-exceeded absolute number. Same threshold reused
+                    # for hip_roll_pose (untested at this exact value for that
+                    # term specifically, but same weight scale so a reasonable
+                    # starting assumption).
                     "threshold": 240.0,
                     # 50.0 -> 100.0: doubled per explicit request to push harder
                     # on reducing velocity/trembling once standing.
