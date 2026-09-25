@@ -1457,12 +1457,25 @@ class reward_based_staged_curriculum:
     Curriculum based on stages ending while a reward component gets its mean
     episode reward accross all environments above a threshold.
 
+    "reward_term_name" can be a single term name, or a list of term names — a
+    stage with a list only advances once EVERY named term's mean episode reward
+    has crossed its threshold, not just one of them. Added for a case where two
+    terms (standing_pose/hip_pose) were raised to the same weight and a live
+    rollout showed one of them (hip_pose) lagging behind the other — gating the
+    next stage on standing_pose alone would have let it fire before hip_pose had
+    actually caught up. "threshold" is then EITHER one number (applied to every
+    named term) OR a list the same length as "reward_term_name" (one threshold
+    per term, in the same order) — added because hip_pose's own achievable
+    ceiling measured meaningfully lower than standing_pose's at the same weight
+    (added joint dof, presumably harder to converge), so gating both on the same
+    number was either too easy for one or unreachable for the other.
+
     Stage definitions example:
     stages = [
         {
             "name": "stage 1",
-            "reward_term_name": "term_name",
-            "threshold": 0.5,
+            "reward_term_name": "term_name",  # or ["term_a", "term_b"]
+            "threshold": 0.5,  # or [0.5, 0.3] matching ["term_a", "term_b"]
             "apply": lambda env: env.reward_manager.get_term_cfg("term_name").weight = 1.0,
         },
         ...
@@ -1470,7 +1483,7 @@ class reward_based_staged_curriculum:
     """
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.rewards = torch.zeros(env.num_envs, device=env.device)
+        self.rewards: dict[str, torch.Tensor] = {}
         self.current_stage = 0
         self.stage_first_step = 0
 
@@ -1480,27 +1493,46 @@ class reward_based_staged_curriculum:
         env_ids: torch.Tensor,
         stages: list[dict],
     ) -> dict[str, torch.Tensor]:
-        self.rewards[env_ids] = (
-            env.reward_manager._episode_sums[
-                stages[self.current_stage]["reward_term_name"]
-            ][env_ids]
-            / env.max_episode_length_s
-        )
-        mean_reward = self.rewards.mean().item()
+        # Pre-existing bug, fixed here: this used to index stages[self.current_stage]
+        # unconditionally before checking self.current_stage < len(stages), so once
+        # every stage had actually been applied (self.current_stage == len(stages))
+        # the very next call crashed with IndexError instead of just staying done —
+        # only surfaces once a reward_based_staged_curriculum's LAST stage actually
+        # triggers, which apparently hadn't happened before with this class in this
+        # codebase. Guarding the whole body on the bounds check fixes it.
+        if self.current_stage >= len(stages):
+            return {"stage": self.current_stage}
+
+        stage = stages[self.current_stage]
+        term_names = stage["reward_term_name"]
+        if isinstance(term_names, str):
+            term_names = [term_names]
+        thresholds = stage["threshold"]
+        if not isinstance(thresholds, (list, tuple)):
+            thresholds = [thresholds] * len(term_names)
+
+        mean_rewards = {}
+        for name in term_names:
+            if name not in self.rewards:
+                self.rewards[name] = torch.zeros(env.num_envs, device=env.device)
+            self.rewards[name][env_ids] = (
+                env.reward_manager._episode_sums[name][env_ids] / env.max_episode_length_s
+            )
+            mean_rewards[name] = self.rewards[name].mean().item()
 
         if (
-            self.current_stage < len(stages)
-            and mean_reward >= stages[self.current_stage]["threshold"]
+            all(mean_rewards[name] >= t for name, t in zip(term_names, thresholds))
             and env.common_step_counter >= self.stage_first_step + 100 * 24
         ):
-            stage = stages[self.current_stage]
+            rewards_str = ", ".join(f"{name}={r:.4f}" for name, r in mean_rewards.items())
             print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {mean_reward:.4f})"
+                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {rewards_str})"
             )
             stage["apply"](env)
             self.current_stage += 1
             self.stage_first_step = env.common_step_counter
-            self.rewards.zero_()  # Reset rewards to avoid immediately triggering the next stage
+            for name in term_names:
+                self.rewards[name].zero_()  # Reset rewards to avoid immediately triggering the next stage
 
         return {"stage": self.current_stage}
 
