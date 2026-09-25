@@ -67,6 +67,9 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    validate_bilateral_site_order_checkpoint,
+)
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     reject_preview_checkpoint,
 )
@@ -669,6 +672,7 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     if payload["infos"].get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     infos = payload["infos"]
+    validate_bilateral_site_order_checkpoint(infos)
     reject_preview_checkpoint(infos)
     if infos.get("microban_teleop_recipe_revision") != (
         MICROBAN_TELEOP_V12_RECIPE_REVISION

@@ -59,6 +59,7 @@ from mjlab_microban.scripts.teleop_v12_stage import (
     next_training_target,
     validate_gate,
 )
+from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -73,6 +74,9 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
+)
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    BILATERAL_SITE_ORDER_INFO_KEY,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
@@ -736,6 +740,7 @@ class TeleopV12StageTest(unittest.TestCase):
             infos = {
                 "microban_teleop_training_contract_version": "12",
                 "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+                BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
                 "adapter_gradient_schedule_revision": (
                     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
                 ),

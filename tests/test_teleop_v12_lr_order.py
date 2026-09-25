@@ -11,10 +11,12 @@ from types import SimpleNamespace
 
 import torch
 
+from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.migrate_teleop_v12_lr_order import (
     migrate_checkpoint,
     migrate_checkpoint_payload,
 )
+from mjlab_microban.scripts.teleop_v12_stage import _checkpoint_identity
 from mjlab_microban.tasks.mdp import (
     MICROBAN_BILATERAL_SITE_ORDER_REVISION,
     _resolve_ordered_site_cfg,
@@ -161,6 +163,17 @@ class BilateralSiteOrderTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "observation layout drifted"):
             teleop_v12_observation_term_slices(manager)
+
+    def test_direct_actor_and_stage_consumers_reject_raw_prefix_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "model_9200.pt"
+            torch.save(_checkpoint(), checkpoint)
+            with self.assertRaisesRegex(ValueError, "predates"):
+                _load_actor(checkpoint, device="cpu")
+            with self.assertRaisesRegex(ValueError, "predates"):
+                _checkpoint_identity(checkpoint)
 
 
 class TeleopV12LrMigrationTest(unittest.TestCase):
