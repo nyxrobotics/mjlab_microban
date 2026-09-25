@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
+from mjlab_microban.scripts.teleop_v12_lr_recovery import (
+    PINNED_RAW_MODEL_9200_SHA256,
+    PINNED_SOURCE_COMMON_STEP_COUNTER,
+    PINNED_SOURCE_COMPLETED_UPDATES,
+    PINNED_SOURCE_ITERATION,
+)
+from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
@@ -25,6 +33,15 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     LegacyTeleopProbeIdentity,
     LegacyVelocitySourceIdentity,
     TeleopV12BootstrapProvenance,
+)
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    ACTOR_PERMUTATION,
+    ACTOR_SWAP_BLOCKS,
+    BILATERAL_SITE_ORDER_INFO_KEY,
+    CRITIC_PERMUTATION,
+    CRITIC_SWAP_BLOCKS,
+    MIGRATION_INFO_KEY,
+    MIGRATION_REVISION,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
@@ -65,6 +82,76 @@ def _bootstrap() -> TeleopV12BootstrapProvenance:
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
     )
+
+
+def _lr_order_marker(*, strategy: str = "swap") -> dict:
+    partial_names = {
+        "actor_state_dict.mlp.0.weight",
+        "actor_state_dict.obs_normalizer._mean",
+        "actor_state_dict.obs_normalizer._var",
+        "actor_state_dict.obs_normalizer._std",
+        "critic_state_dict.mlp.0.weight",
+        "critic_state_dict.obs_normalizer._mean",
+        "critic_state_dict.obs_normalizer._var",
+        "critic_state_dict.obs_normalizer._std",
+        "optimizer_state_dict.state.1.exp_avg",
+        "optimizer_state_dict.state.1.exp_avg_sq",
+        "optimizer_state_dict.state.9.exp_avg",
+        "optimizer_state_dict.state.9.exp_avg_sq",
+    }
+    partial = {
+        name: {
+            "untouched_source_sha256": "1" * 64,
+            "untouched_output_sha256": "1" * 64,
+            "source_full_sha256": "2" * 64,
+            "output_full_sha256": "3" * 64,
+        }
+        for name in partial_names
+    }
+    return {
+        "schema_version": 1,
+        "revision": MIGRATION_REVISION,
+        "site_order_revision": MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        "strategy": strategy,
+        "source_checkpoint_path": "/pinned/model_9200.pt",
+        "source_checkpoint_sha256": PINNED_RAW_MODEL_9200_SHA256,
+        "source_clock": {
+            "iteration": PINNED_SOURCE_ITERATION,
+            "completed_updates": PINNED_SOURCE_COMPLETED_UPDATES,
+            "common_step_counter": PINNED_SOURCE_COMMON_STEP_COUNTER,
+        },
+        "actor_w0_optimizer_parameter_id": 1,
+        "critic_w0_optimizer_parameter_id": 9,
+        "actor_swap_blocks": [list(block) for block in ACTOR_SWAP_BLOCKS],
+        "critic_swap_blocks": [list(block) for block in CRITIC_SWAP_BLOCKS],
+        "actor_permutation": list(ACTOR_PERMUTATION),
+        "critic_permutation": list(CRITIC_PERMUTATION),
+        "zeroed_actor_columns": [] if strategy == "swap" else list(range(75, 83)),
+        "foot_adapter_at_source": {
+            "active": False,
+            "maximum_absolute_w0": 0.0,
+            "maximum_absolute_adam_moment": 0.0,
+            "handling": "unlearned_exact_zero_left_untouched",
+        },
+        "tensor_integrity": {
+            "passed": True,
+            "unchanged_tensor_count": 0,
+            "unchanged_tensors": {},
+            "partially_transformed_tensors": partial,
+        },
+    }
+
+
+def _microban_identity() -> dict[str, str]:
+    return {
+        "microban_runtime_validator_source_sha256": "5" * 64,
+        "microban_runtime_contract_source_sha256": "6" * 64,
+        "microban_runtime_selector_source_sha256": "7" * 64,
+        "microban_walk_runtime_source_sha256": "8" * 64,
+        "microban_walk_config_source_sha256": "9" * 64,
+        "microban_runtime_lock_sha256": "a" * 64,
+        "microban_walk_fallback_onnx_sha256": "b" * 64,
+    }
 
 
 def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
@@ -141,6 +228,8 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         "active_actor_columns_at_save": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         deployment.TELEOP_V12_BOOTSTRAP_INFO_KEY: {},
+        BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        MIGRATION_INFO_KEY: _lr_order_marker(),
     }
     return gate, locomotion, tracking, onnx_report, infos
 
@@ -191,11 +280,26 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
             "reference_maximum_absolute_error": 1.0e-6,
             "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
         },
+        microban_source_identity=_microban_identity(),
     )
     assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
     assert json.loads(metadata["runtime_raw_action_guard_absmax_json"]) == [8.0] * 18
     assert metadata["v12_stage_gate_sha256"] == _sha(gate_path)
     assert metadata["deployment_accepted"] == "true"
+    assert metadata["v12_bilateral_site_order_revision"] == (
+        MICROBAN_BILATERAL_SITE_ORDER_REVISION
+    )
+    assert metadata["v12_lr_order_migration_strategy"] == "swap"
+    assert metadata["v12_lr_order_source_checkpoint_sha256"] == (
+        PINNED_RAW_MODEL_9200_SHA256
+    )
+    assert metadata["v12_lr_order_source_checkpoint_iteration"] == "9200"
+    assert metadata["v12_lr_order_source_completed_updates"] == "9201"
+    assert metadata["v12_lr_order_source_common_step_counter"] == "220824"
+    assert len(metadata["v12_lr_order_migration_marker_sha256"]) == 64
+    assert {
+        name: metadata[name] for name in _microban_identity()
+    } == _microban_identity()
     assert metadata["v12_actual_dynamic_soft_limit_overshoot_max_deg"] == str(
         ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG
     )
@@ -213,6 +317,40 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, -10.0, -10.0],
     ]
     assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
+
+
+def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
+    infos = {
+        BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        MIGRATION_INFO_KEY: _lr_order_marker(),
+    }
+    marker = deployment._require_deployable_lr_order_lineage(infos)
+    assert marker["source_checkpoint_sha256"] == PINNED_RAW_MODEL_9200_SHA256
+
+    for case, mutate in (
+        ("raw_pre_fix", lambda value: value.clear()),
+        ("fresh_without_migration", lambda value: value.pop(MIGRATION_INFO_KEY)),
+        (
+            "missing_top_level_revision",
+            lambda value: value.pop(BILATERAL_SITE_ORDER_INFO_KEY),
+        ),
+        (
+            "diagnostic_zero_hand",
+            lambda value: value.__setitem__(
+                MIGRATION_INFO_KEY, _lr_order_marker(strategy="zero_hand")
+            ),
+        ),
+        (
+            "wrong_pinned_source",
+            lambda value: value[MIGRATION_INFO_KEY].__setitem__(
+                "source_checkpoint_sha256", "0" * 64
+            ),
+        ),
+    ):
+        changed = deepcopy(infos)
+        mutate(changed)
+        with pytest.raises((TypeError, ValueError), match="bilateral|predates|migration"):
+            deployment._require_deployable_lr_order_lineage(changed)
 
 
 def test_hashed_report_loader_rejects_changed_evidence(tmp_path: Path) -> None:
@@ -241,9 +379,19 @@ def test_runtime_validator_requires_cpu_only_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "microban"
-    (repo / "tools").mkdir(parents=True)
-    (repo / "tools" / "validate_pico_policy.py").write_text("", encoding="utf-8")
-    (repo / "uv.lock").write_text("", encoding="utf-8")
+    runtime_files = (
+        repo / "tools" / "validate_pico_policy.py",
+        repo / "src" / "moves" / "pico_hybrid.py",
+        repo / "src" / "moves" / "policy_selector.py",
+        repo / "src" / "moves" / "walk.py",
+        repo / "src" / "constants.py",
+        repo / "uv.lock",
+        repo / "src" / "agents" / "walk.onnx",
+    )
+    for runtime_file in runtime_files:
+        runtime_file.parent.mkdir(parents=True, exist_ok=True)
+        runtime_file.write_bytes(f"fixture:{runtime_file.name}".encode())
+    source_identity = deployment._microban_runtime_source_identity(repo)
     policy = tmp_path / "policy.onnx"
     policy.write_bytes(b"onnx")
     monkeypatch.setattr(deployment.shutil, "which", lambda _name: "/usr/bin/uv")
@@ -258,10 +406,30 @@ def test_runtime_validator_requires_cpu_only_pass(
         "checkpoint_completed_updates": 15_000,
         "checkpoint_sha256": "1" * 64,
         "v12_stage_gate_sha256": "2" * 64,
+        "runtime_source_identity": source_identity,
         "onnxruntime_compatibility_smoke": {
             "status": "pass",
             "sample_count": 16,
             "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        },
+        "walk_fallback": {
+            "status": "pass",
+            "policy": str((repo / "src" / "agents" / "walk.onnx").resolve()),
+            "sha256": source_identity["microban_walk_fallback_onnx_sha256"],
+            "providers": ["CPUExecutionProvider"],
+            "input": {"name": "obs", "shape": [1, 63], "type": "tensor(float)"},
+            "output": {
+                "name": "actions",
+                "shape": [1, 18],
+                "type": "tensor(float)",
+            },
+            "smoke": {
+                "status": "pass",
+                "sample_count": 16,
+                "corpus": "deterministic_exact_float32_mod29_v1",
+                "all_outputs_finite": True,
+                "maximum_absolute_output": 1.0,
+            },
         },
     }
     monkeypatch.setattr(
@@ -277,10 +445,23 @@ def test_runtime_validator_requires_cpu_only_pass(
         lambda _path: {
             "checkpoint_sha256": "1" * 64,
             "v12_stage_gate_sha256": "2" * 64,
+            **source_identity,
         },
     )
-    with pytest.raises(RuntimeError, match="not a CPU v12 pass"):
+    with pytest.raises(RuntimeError, match="complete CPU v12"):
         deployment._run_microban_runtime_validator(policy, microban_repo=repo)
+
+    report["onnxruntime_compatibility_smoke"]["providers"] = [
+        "CPUExecutionProvider"
+    ]
+    fallback = report.pop("walk_fallback")
+    with pytest.raises(RuntimeError, match="fallback pass"):
+        deployment._run_microban_runtime_validator(policy, microban_repo=repo)
+
+    report["walk_fallback"] = fallback
+    accepted = deployment._run_microban_runtime_validator(policy, microban_repo=repo)
+    assert accepted["runtime_source_identity"] == source_identity
+    assert accepted["walk_fallback"]["status"] == "pass"
 
 
 def test_runtime_rejection_preserves_last_known_good_output(
@@ -312,6 +493,17 @@ def test_runtime_rejection_preserves_last_known_good_output(
     (microban_repo / "src" / "moves" / "pico_hybrid.py").write_text(
         "# contract\n", encoding="utf-8"
     )
+    (microban_repo / "src" / "moves" / "policy_selector.py").write_text(
+        "# selector\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "moves" / "walk.py").write_text(
+        "# walk\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "constants.py").write_text(
+        "# constants\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "agents").mkdir(parents=True)
+    (microban_repo / "src" / "agents" / "walk.onnx").write_bytes(b"walk")
     (microban_repo / "uv.lock").write_text("# lock\n", encoding="utf-8")
 
     class FakeActor:

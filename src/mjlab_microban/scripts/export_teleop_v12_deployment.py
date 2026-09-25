@@ -39,7 +39,14 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     _export_onnx_atomic,
 )
+from mjlab_microban.scripts.teleop_v12_lr_recovery import (
+    PINNED_RAW_MODEL_9200_SHA256,
+    PINNED_SOURCE_COMMON_STEP_COUNTER,
+    PINNED_SOURCE_COMPLETED_UPDATES,
+    PINNED_SOURCE_ITERATION,
+)
 from mjlab_microban.scripts.teleop_v12_stage import validate_gate
+from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -59,6 +66,14 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    ACTOR_SWAP_BLOCKS,
+    BILATERAL_SITE_ORDER_INFO_KEY,
+    CRITIC_SWAP_BLOCKS,
+    MIGRATION_REVISION,
+    validate_bilateral_site_order_checkpoint,
+    validate_lr_order_migration_marker,
+)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
 )
@@ -70,7 +85,7 @@ from mjlab_microban.teleop_v12_safety import (
 
 FINAL_ITERATION = 14_999
 FINAL_COMPLETED_UPDATES = 15_000
-PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v1"
+PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v2"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 2.0
 RUNTIME_GUARD_SEMANTICS = (
@@ -83,6 +98,17 @@ _BOTH_FEET_LOWER = (-0.01, -0.01, 0.0) * 2
 _BOTH_FEET_UPPER = (0.01, 0.01, 0.02) * 2
 _HAND_LOWER = tuple(-value for value in MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M) * 2
 _HAND_UPPER = MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M * 2
+MICROBAN_RUNTIME_IDENTITY_KEYS = frozenset(
+    {
+        "microban_runtime_validator_source_sha256",
+        "microban_runtime_contract_source_sha256",
+        "microban_runtime_selector_source_sha256",
+        "microban_walk_runtime_source_sha256",
+        "microban_walk_config_source_sha256",
+        "microban_runtime_lock_sha256",
+        "microban_walk_fallback_onnx_sha256",
+    }
+)
 
 # Keep this explicit.  A runtime-side metadata addition must cause a reviewed
 # packager/test change rather than silently producing an artifact that can only
@@ -119,6 +145,18 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "v12_legacy_probe_steps_per_scenario",
         "v12_legacy_probe_settle_steps",
         "v12_legacy_probe_seed",
+        "v12_bilateral_site_order_revision",
+        "v12_lr_order_migration_schema_version",
+        "v12_lr_order_migration_revision",
+        "v12_lr_order_migration_strategy",
+        "v12_lr_order_source_checkpoint_sha256",
+        "v12_lr_order_source_checkpoint_iteration",
+        "v12_lr_order_source_completed_updates",
+        "v12_lr_order_source_common_step_counter",
+        "v12_lr_order_actor_swap_blocks_json",
+        "v12_lr_order_critic_swap_blocks_json",
+        "v12_lr_order_foot_adapter_at_source",
+        "v12_lr_order_migration_marker_sha256",
         "v12_source_to_target_columns_json",
         "v12_extra_observation_columns_json",
         "v12_actor_topology_json",
@@ -204,6 +242,13 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "hand_target_frame",
         "hand_target_units",
         "hand_target_semantics",
+        "microban_runtime_validator_source_sha256",
+        "microban_runtime_contract_source_sha256",
+        "microban_runtime_selector_source_sha256",
+        "microban_walk_runtime_source_sha256",
+        "microban_walk_config_source_sha256",
+        "microban_runtime_lock_sha256",
+        "microban_walk_fallback_onnx_sha256",
     }
 )
 
@@ -240,6 +285,63 @@ def _load_json(path: Path, *, expected_sha256: str | None = None) -> dict[str, A
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _require_deployable_lr_order_lineage(infos: Mapping[str, Any]) -> dict[str, Any]:
+    """Require the exact authenticated recovery used by the canonical v12 run."""
+
+    marker = validate_bilateral_site_order_checkpoint(infos)
+    if infos.get(BILATERAL_SITE_ORDER_INFO_KEY) != (
+        MICROBAN_BILATERAL_SITE_ORDER_REVISION
+    ):
+        raise ValueError(
+            "Final checkpoint does not carry the corrected bilateral site-order revision"
+        )
+    if marker is None:
+        raise ValueError(
+            "Final checkpoint lacks the authenticated model-9200 bilateral migration"
+        )
+    marker = validate_lr_order_migration_marker(marker)
+    expected = {
+        "schema_version": 1,
+        "revision": MIGRATION_REVISION,
+        "site_order_revision": MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        "strategy": "swap",
+        "source_checkpoint_sha256": PINNED_RAW_MODEL_9200_SHA256,
+        "actor_swap_blocks": [list(block) for block in ACTOR_SWAP_BLOCKS],
+        "critic_swap_blocks": [list(block) for block in CRITIC_SWAP_BLOCKS],
+        "zeroed_actor_columns": [],
+        "foot_adapter_at_source": {
+            "active": False,
+            "maximum_absolute_w0": 0.0,
+            "maximum_absolute_adam_moment": 0.0,
+            "handling": "unlearned_exact_zero_left_untouched",
+        },
+    }
+    mismatches = [name for name, value in expected.items() if marker.get(name) != value]
+    expected_clock = {
+        "iteration": PINNED_SOURCE_ITERATION,
+        "completed_updates": PINNED_SOURCE_COMPLETED_UPDATES,
+        "common_step_counter": PINNED_SOURCE_COMMON_STEP_COUNTER,
+    }
+    if marker.get("source_clock") != expected_clock:
+        mismatches.append("source_clock")
+    if mismatches:
+        raise ValueError(
+            "Final checkpoint bilateral migration lineage drifted: "
+            + ", ".join(mismatches)
+        )
+    return marker
 
 
 def _require_final_gate(
@@ -330,6 +432,7 @@ def build_v12_deployment_metadata(
     tracking: Mapping[str, Any],
     onnx_report: Mapping[str, Any],
     packager_parity: Mapping[str, float],
+    microban_source_identity: Mapping[str, str],
 ) -> dict[str, list | str | float]:
     """Translate only already-validated gate evidence to the robot wire contract."""
 
@@ -344,6 +447,13 @@ def build_v12_deployment_metadata(
         TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
     ):
         raise ValueError("Final checkpoint did not activate all v12 adapter columns")
+    if set(microban_source_identity) != MICROBAN_RUNTIME_IDENTITY_KEYS or any(
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for digest in microban_source_identity.values()
+    ):
+        raise ValueError("Microban runtime source identity is incomplete or malformed")
 
     report_hashes = gate.get("report_sha256")
     if not isinstance(report_hashes, Mapping):
@@ -381,6 +491,12 @@ def build_v12_deployment_metadata(
     guard = _runtime_guard(tracking_envelope)
     source = bootstrap.source
     probe = bootstrap.probe
+    lr_order_migration = _require_deployable_lr_order_lineage(infos)
+    if dict(lr_order_migration) != dict(
+        validate_lr_order_migration_marker(lr_order_migration)
+    ):
+        raise RuntimeError("Bilateral migration marker changed during validation")
+    lr_source_clock = lr_order_migration["source_clock"]
     packager_source = Path(__file__).resolve()
 
     metadata: dict[str, list | str | float] = {
@@ -420,6 +536,38 @@ def build_v12_deployment_metadata(
         "v12_legacy_probe_steps_per_scenario": str(probe.steps),
         "v12_legacy_probe_settle_steps": str(probe.settle_steps),
         "v12_legacy_probe_seed": str(probe.seed),
+        "v12_bilateral_site_order_revision": (
+            MICROBAN_BILATERAL_SITE_ORDER_REVISION
+        ),
+        "v12_lr_order_migration_schema_version": str(
+            lr_order_migration["schema_version"]
+        ),
+        "v12_lr_order_migration_revision": str(lr_order_migration["revision"]),
+        "v12_lr_order_migration_strategy": str(lr_order_migration["strategy"]),
+        "v12_lr_order_source_checkpoint_sha256": str(
+            lr_order_migration["source_checkpoint_sha256"]
+        ),
+        "v12_lr_order_source_checkpoint_iteration": str(
+            lr_source_clock["iteration"]
+        ),
+        "v12_lr_order_source_completed_updates": str(
+            lr_source_clock["completed_updates"]
+        ),
+        "v12_lr_order_source_common_step_counter": str(
+            lr_source_clock["common_step_counter"]
+        ),
+        "v12_lr_order_actor_swap_blocks_json": _json(
+            lr_order_migration["actor_swap_blocks"]
+        ),
+        "v12_lr_order_critic_swap_blocks_json": _json(
+            lr_order_migration["critic_swap_blocks"]
+        ),
+        "v12_lr_order_foot_adapter_at_source": (
+            "inactive_exact_zero_left_untouched"
+        ),
+        "v12_lr_order_migration_marker_sha256": _canonical_json_sha256(
+            lr_order_migration
+        ),
         "v12_source_to_target_columns_json": _json(
             [list(pair) for pair in bootstrap.source_to_target_columns]
         ),
@@ -597,6 +745,7 @@ def build_v12_deployment_metadata(
         "v12_deployment_packager_onnxruntime_cpu_max_abs_error": str(
             packager_parity["onnxruntime_cpu_maximum_absolute_error"]
         ),
+        **microban_source_identity,
     }
     missing = REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
     if missing:
@@ -724,6 +873,18 @@ def _run_microban_runtime_validator(
         raise RuntimeError("Microban runtime validator returned invalid JSON") from exc
     smoke = report.get("onnxruntime_compatibility_smoke")
     metadata = _read_onnx_metadata(path)
+    runtime_source_identity = _microban_runtime_source_identity(microban_repo)
+    reported_runtime_source_identity = report.get("runtime_source_identity")
+    walk_fallback = report.get("walk_fallback")
+    walk_smoke = walk_fallback.get("smoke") if isinstance(walk_fallback, Mapping) else None
+    walk_input = walk_fallback.get("input") if isinstance(walk_fallback, Mapping) else None
+    walk_output = walk_fallback.get("output") if isinstance(walk_fallback, Mapping) else None
+    expected_walk_path = str((microban_repo / "src" / "agents" / "walk.onnx").resolve())
+    maximum_walk_output = (
+        walk_smoke.get("maximum_absolute_output")
+        if isinstance(walk_smoke, Mapping)
+        else None
+    )
     if (
         report.get("status") != "pass"
         or report.get("policy") != str(path.resolve())
@@ -739,8 +900,34 @@ def _run_microban_runtime_validator(
         or smoke.get("status") != "pass"
         or smoke.get("sample_count") != 16
         or smoke.get("providers") != ["CPUExecutionProvider"]
+        or reported_runtime_source_identity != runtime_source_identity
+        or any(
+            metadata.get(name) != digest
+            for name, digest in runtime_source_identity.items()
+        )
+        or not isinstance(walk_fallback, Mapping)
+        or walk_fallback.get("status") != "pass"
+        or walk_fallback.get("policy") != expected_walk_path
+        or walk_fallback.get("sha256")
+        != runtime_source_identity["microban_walk_fallback_onnx_sha256"]
+        or walk_fallback.get("providers") != ["CPUExecutionProvider"]
+        or walk_input
+        != {"name": "obs", "shape": [1, 63], "type": "tensor(float)"}
+        or walk_output
+        != {"name": "actions", "shape": [1, 18], "type": "tensor(float)"}
+        or not isinstance(walk_smoke, Mapping)
+        or walk_smoke.get("status") != "pass"
+        or walk_smoke.get("sample_count") != 16
+        or walk_smoke.get("corpus") != "deterministic_exact_float32_mod29_v1"
+        or walk_smoke.get("all_outputs_finite") is not True
+        or isinstance(maximum_walk_output, bool)
+        or not isinstance(maximum_walk_output, (int, float))
+        or not math.isfinite(float(maximum_walk_output))
+        or float(maximum_walk_output) < 0.0
     ):
-        raise RuntimeError("Microban runtime validator report is not a CPU v12 pass")
+        raise RuntimeError(
+            "Microban runtime validator report is not a complete CPU v12/fallback pass"
+        )
     return report
 
 
@@ -764,7 +951,13 @@ def _microban_runtime_source_identity(microban_repo: Path) -> dict[str, str]:
         "microban_runtime_contract_source_sha256": (
             repo / "src" / "moves" / "pico_hybrid.py"
         ),
+        "microban_runtime_selector_source_sha256": (
+            repo / "src" / "moves" / "policy_selector.py"
+        ),
+        "microban_walk_runtime_source_sha256": repo / "src" / "moves" / "walk.py",
+        "microban_walk_config_source_sha256": repo / "src" / "constants.py",
         "microban_runtime_lock_sha256": repo / "uv.lock",
+        "microban_walk_fallback_onnx_sha256": repo / "src" / "agents" / "walk.onnx",
     }
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
@@ -850,6 +1043,16 @@ def package_v12_deployment(
             "microban_runtime_contract": (
                 microban_repo_resolved / "src" / "moves" / "pico_hybrid.py"
             ),
+            "microban_runtime_selector": (
+                microban_repo_resolved / "src" / "moves" / "policy_selector.py"
+            ),
+            "microban_walk_runtime": (
+                microban_repo_resolved / "src" / "moves" / "walk.py"
+            ),
+            "microban_walk_config": microban_repo_resolved / "src" / "constants.py",
+            "microban_walk_fallback": (
+                microban_repo_resolved / "src" / "agents" / "walk.onnx"
+            ),
             "microban_runtime_lock": microban_repo_resolved / "uv.lock",
         },
     )
@@ -867,6 +1070,7 @@ def package_v12_deployment(
         bootstrap = validate_bootstrap_provenance(
             infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
         )
+        _require_deployable_lr_order_lineage(infos)
 
         _export_onnx_atomic(actor, temporary)
         _validate_graph_contract(temporary)
@@ -882,8 +1086,8 @@ def package_v12_deployment(
             tracking=tracking,
             onnx_report=onnx_report,
             packager_parity=initial_parity,
+            microban_source_identity=microban_source_identity,
         )
-        metadata.update(microban_source_identity)
         existing = _read_onnx_metadata(temporary)
         overlap = set(existing).intersection(metadata)
         if overlap:

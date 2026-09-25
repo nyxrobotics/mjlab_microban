@@ -39,7 +39,11 @@ The packager performs the following fail-closed sequence on CPU:
    updates, canonical-boundary kind, final perturbation tracking profile, and
    `status=pass`.
 3. Captures immutable checkpoint bytes before loading the actor, then revalidates
-   the pinned legacy checkpoint/probe and frozen legacy tensors.
+   the pinned legacy checkpoint/probe and frozen legacy tensors. It also
+   requires the corrected bilateral-site revision and the authenticated
+   `swap` migration from the pinned raw `model_9200.pt`; an unmarked pre-fix
+   checkpoint, a fresh-but-unrelated revision marker, or the diagnostic
+   `zero_hand` migration cannot be exported.
 4. Exports a fresh fixed-shape `obs[1,83] -> actions[1,18]` float32 graph.
 5. Copies the hash-bound locomotion, tracking and ONNX evidence into the exact
    metadata keys required by Microban. The per-joint finite-amplitude guard is
@@ -54,10 +58,15 @@ The packager performs the following fail-closed sequence on CPU:
    PyTorch, ONNX `ReferenceEvaluator`, and ONNX Runtime
    `CPUExecutionProvider`, both before and after metadata attachment.
 7. Runs the physical repository's real `tools/validate_pico_policy.py`, including
-   its fixed 16-input runtime smoke, against the final temporary file.
+   its fixed 16-input runtime smoke, against the final temporary file. A pass
+   must contain the separate CPU-only `walk_fallback` load/inference report;
+   merely accepting the learned graph is insufficient.
 8. Embeds and rechecks the SHA-256s of that validator, its
-   `src/moves/pico_hybrid.py` contract parser, and the physical repository's
-   `uv.lock`, so the runtime checked is the runtime recorded.
+   `src/moves/pico_hybrid.py` contract parser, the
+   `src/moves/policy_selector.py` fallback selector, `src/moves/walk.py`,
+   `src/constants.py`, the exact `src/agents/walk.onnx`, and the physical
+   repository's `uv.lock`. The validator independently compares those embedded
+   identities with the files that actually performed admission.
 9. Rehashes and revalidates the complete gate lineage once more immediately
    before an `os.replace` plus directory `fsync` publishes the file.
 
