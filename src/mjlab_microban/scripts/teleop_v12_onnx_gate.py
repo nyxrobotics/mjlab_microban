@@ -33,7 +33,11 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 
 
 def run_gate(
-    *, checkpoint: Path, expected_sha256: str | None, onnx_path: Path
+    *,
+    checkpoint: Path,
+    expected_sha256: str | None,
+    onnx_path: Path,
+    allow_deadline_fallback: bool = False,
 ) -> dict[str, object]:
     try:
         import onnxruntime as ort
@@ -47,7 +51,11 @@ def run_gate(
     checkpoint_digest = sha256_file(checkpoint)
     if expected_sha256 is not None and checkpoint_digest != expected_sha256:
         raise ValueError(f"Checkpoint SHA-256 mismatch: {checkpoint_digest}")
-    target, iteration, _infos = _load_actor(checkpoint, device="cpu")
+    target, iteration, _infos = _load_actor(
+        checkpoint,
+        device="cpu",
+        allow_deadline_fallback=allow_deadline_fallback,
+    )
     _source_identity, source_state = inspect_legacy_velocity_checkpoint(
         "repo://checkpoints/xc330_velocity/model_14999.pt",
         LEGACY_VELOCITY_CHECKPOINT_SHA256,
@@ -69,22 +77,17 @@ def run_gate(
         actual_actions = target(
             TensorDict({"actor": neutral_observations}, batch_size=[10_000])
         )
-    neutral_max = float(
-        torch.max(torch.abs(actual_actions - expected_actions)).item()
-    )
+    neutral_max = float(torch.max(torch.abs(actual_actions - expected_actions)).item())
     if neutral_max > PRISTINE_PARITY_TOLERANCE:
         raise ValueError(
-            f"Neutral legacy parity failed: {neutral_max} > "
-            f"{PRISTINE_PARITY_TOLERANCE}"
+            f"Neutral legacy parity failed: {neutral_max} > {PRISTINE_PARITY_TOLERANCE}"
         )
 
     _export_onnx_atomic(target, onnx_path)
     model = onnx.load(onnx_path)
     onnx.checker.check_model(model, full_check=True)
     reference = ReferenceEvaluator(model)
-    runtime = ort.InferenceSession(
-        str(onnx_path), providers=["CPUExecutionProvider"]
-    )
+    runtime = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     if runtime.get_providers() != ["CPUExecutionProvider"]:
         raise RuntimeError("ONNX Runtime did not select CPUExecutionProvider only")
     export_model = target.as_onnx(verbose=False).cpu().eval()
@@ -94,9 +97,7 @@ def run_gate(
     onnx_observations = torch.randn(64, 83, generator=generator)
     if not bool(
         torch.all(
-            onnx_observations[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS]
-            .abs()
-            .amax(dim=0)
+            onnx_observations[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS].abs().amax(dim=0)
             > 0.0
         ).item()
     ):
@@ -109,15 +110,11 @@ def run_gate(
             expected = export_model(batch).numpy()
             (reference_actual,) = reference.run(None, {"obs": batch.numpy()})
             (runtime_actual,) = runtime.run(None, {"obs": batch.numpy()})
-            reference_errors.append(
-                float(np.max(np.abs(reference_actual - expected)))
-            )
+            reference_errors.append(float(np.max(np.abs(reference_actual - expected))))
             runtime_errors.append(float(np.max(np.abs(runtime_actual - expected))))
     reference_max = max(reference_errors)
     runtime_max = max(runtime_errors)
-    if reference_max > ONNX_PARITY_TOLERANCE or runtime_max > (
-        ONNX_PARITY_TOLERANCE
-    ):
+    if reference_max > ONNX_PARITY_TOLERANCE or runtime_max > (ONNX_PARITY_TOLERANCE):
         raise ValueError(
             "ONNX parity failed: "
             f"reference={reference_max}, onnxruntime_cpu={runtime_max}"
@@ -163,6 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--deadline-fallback",
+        action="store_true",
+        help="accept only the hash-pinned v1 deadline-fallback checkpoint",
+    )
     return parser
 
 
@@ -177,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint=args.checkpoint,
         expected_sha256=args.expected_sha256,
         onnx_path=args.onnx.expanduser().resolve(),
+        allow_deadline_fallback=args.deadline_fallback,
     )
     if args.output is not None:
         publish_json_atomic(args.output, report)

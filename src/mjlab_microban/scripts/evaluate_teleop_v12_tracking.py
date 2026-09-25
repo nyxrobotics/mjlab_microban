@@ -63,6 +63,10 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     inspect_legacy_velocity_checkpoint,
     sha256_file,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
+    MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
 )
@@ -85,6 +89,7 @@ HMD_HAND_ACTIVATION_CANARY_PROFILE = "hmd_hand_activation_canary_reachable_safet
 FOOT_ACTIVATION_CANARY_PROFILE = "whole_body_foot_activation_canary_reachable_safety_v1"
 WHOLE_BODY_PROFILE = "whole_body_reachable_performance_v2"
 FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2"
+DEADLINE_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
 TRACKING_PROFILES = (
     PRE_ACTIVATION_EXPOSURE_PROFILE,
     EXPANDED_LOCOMOTION_PROFILE,
@@ -93,6 +98,7 @@ TRACKING_PROFILES = (
     FOOT_ACTIVATION_CANARY_PROFILE,
     WHOLE_BODY_PROFILE,
     FINAL_PROFILE,
+    DEADLINE_FALLBACK_PROFILE,
 )
 
 HAND_RMS_MAX_M = 0.03
@@ -109,6 +115,15 @@ TARGET_COLUMN_ABLATION_METHOD = (
     "same_observation_zero_target_position_columns_preserve_hand_active_flags_"
     "before_actor_forward_v2"
 )
+
+
+def hand_tracking_rms_max_m(profile: str) -> float:
+    """Return the profile-specific hand RMS limit; all other limits are fixed."""
+
+    required_tracking_scenario_names(profile)
+    if profile == DEADLINE_FALLBACK_PROFILE:
+        return MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M
+    return HAND_RMS_MAX_M
 
 
 def target_column_ablation_observation_columns(
@@ -163,6 +178,12 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
             "max_keypoints_left",
         ),
         HMD_HAND_PROFILE: (
+            "low_forward",
+            "max_hands_left",
+            "max_hands_right",
+            "max_keypoints_left",
+        ),
+        DEADLINE_FALLBACK_PROFILE: (
             "low_forward",
             "max_hands_left",
             "max_hands_right",
@@ -223,6 +244,7 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
     }
     if profile in (
         HMD_HAND_PROFILE,
+        DEADLINE_FALLBACK_PROFILE,
         FOOT_ACTIVATION_CANARY_PROFILE,
         WHOLE_BODY_PROFILE,
         FINAL_PROFILE,
@@ -237,7 +259,11 @@ def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
     """Return target inputs that this curriculum stage must have learned to use."""
 
     required_tracking_scenario_names(profile)
-    if profile in (HMD_HAND_ACTIVATION_CANARY_PROFILE, HMD_HAND_PROFILE):
+    if profile in (
+        HMD_HAND_ACTIVATION_CANARY_PROFILE,
+        HMD_HAND_PROFILE,
+        DEADLINE_FALLBACK_PROFILE,
+    ):
         return frozenset(("hand",))
     if profile in (
         FOOT_ACTIVATION_CANARY_PROFILE,
@@ -786,6 +812,7 @@ def _acceptance(
     }
     if profile in (
         HMD_HAND_PROFILE,
+        DEADLINE_FALLBACK_PROFILE,
         FOOT_ACTIVATION_CANARY_PROFILE,
         WHOLE_BODY_PROFILE,
         FINAL_PROFILE,
@@ -796,7 +823,8 @@ def _acceptance(
             if item["target_error"]["active_hand"]["sample_count"]
         ]
         checks["hand_tracking_rms"] = bool(active_hand) and all(
-            float(value["rms"]) <= HAND_RMS_MAX_M for value in active_hand
+            float(value["rms"]) <= hand_tracking_rms_max_m(profile)
+            for value in active_hand
         )
         checks["hand_tracking_p95"] = bool(active_hand) and all(
             float(value["p95"]) <= HAND_P95_MAX_M for value in active_hand
@@ -849,6 +877,7 @@ def run_evaluation(
     allow_nondeployable_preview: bool = False,
     allow_legacy_preview_v1: bool = False,
     allow_corner_rescue: bool = False,
+    allow_deadline_fallback: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -864,9 +893,12 @@ def run_evaluation(
         allow_nondeployable_preview=allow_nondeployable_preview,
         allow_legacy_preview_v1=allow_legacy_preview_v1,
         allow_corner_rescue=allow_corner_rescue,
+        allow_deadline_fallback=allow_deadline_fallback,
     )
     completed = iteration + 1
-    if allow_corner_rescue:
+    if allow_deadline_fallback:
+        required = DEADLINE_FALLBACK_PROFILE
+    elif allow_corner_rescue:
         required = HMD_HAND_PROFILE
     elif allow_nondeployable_preview:
         marker = infos.get(TELEOP_V12_PREVIEW_INFO_KEY, {})
@@ -945,7 +977,7 @@ def run_evaluation(
             ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            "hand_rms_m_max": HAND_RMS_MAX_M,
+            "hand_rms_m_max": hand_tracking_rms_max_m(profile),
             "hand_p95_m_max": HAND_P95_MAX_M,
             "foot_rms_m_max": FOOT_RMS_MAX_M,
             "foot_p95_m_max": FOOT_P95_MAX_M,
@@ -977,6 +1009,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="require the authenticated final model9999 corner-rescue checkpoint",
     )
+    parser.add_argument(
+        "--deadline-fallback",
+        action="store_true",
+        help=(
+            "accept only the hash-pinned v1 checkpoint under the explicit "
+            "35mm hand-RMS deadline profile"
+        ),
+    )
     return parser
 
 
@@ -991,6 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
         steps=args.steps,
         settle_steps=args.settle_steps,
         allow_corner_rescue=args.allow_corner_rescue,
+        allow_deadline_fallback=args.deadline_fallback,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

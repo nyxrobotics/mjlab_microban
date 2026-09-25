@@ -168,6 +168,9 @@ class MicrobanTeleopV12RunnerCfg(RslRlOnPolicyRunnerCfg):
     legacy_teleop_probe_receipt_sha256: str | None = None
     save_pristine_checkpoint: bool = False
     simulation_preview_mode: bool = False
+    deadline_fallback_resume: bool = False
+    deadline_fallback_resume_gate: str | None = None
+    deadline_fallback_resume_gate_sha256: str | None = None
 
 
 MicrobanTeleopV12RlCfg = MicrobanTeleopV12RunnerCfg(

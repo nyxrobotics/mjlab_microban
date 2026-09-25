@@ -45,6 +45,11 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    validate_deadline_fallback_canary_payload,
+    validate_deadline_fallback_checkpoint_payload,
+)
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
 )
@@ -99,6 +104,7 @@ def _load_actor(
     allow_nondeployable_preview: bool = False,
     allow_legacy_preview_v1: bool = False,
     allow_corner_rescue: bool = False,
+    allow_deadline_fallback: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
@@ -108,8 +114,18 @@ def _load_actor(
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
         raise ValueError("Checkpoint iteration is invalid")
     expected_step = 0 if iteration == -1 else (iteration + 1) * 24
-    if allow_nondeployable_preview and allow_corner_rescue:
-        raise ValueError("Preview and corner-rescue checkpoint modes are exclusive")
+    if (
+        sum(
+            bool(value)
+            for value in (
+                allow_nondeployable_preview,
+                allow_corner_rescue,
+                allow_deadline_fallback,
+            )
+        )
+        > 1
+    ):
+        raise ValueError("Preview, corner rescue, and deadline fallback are exclusive")
     if allow_nondeployable_preview:
         preview_marker = validate_preview_marker(
             infos,
@@ -127,23 +143,30 @@ def _load_actor(
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     validate_bilateral_site_order_checkpoint(infos)
-    corner_lineage = validate_corner_rescue_canonical_lineage(
-        infos, iteration=iteration
-    )
-    is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-    )
-    if allow_corner_rescue and not is_final_corner_rescue:
-        raise ValueError(
-            "--allow-corner-rescue requires the exact final rescue checkpoint"
-    )
-    if is_final_corner_rescue:
-        assert corner_lineage is not None
-        assert_corner_rescue_foot_adapter_zero(payload)
-        assert_corner_rescue_optimizer_step(
-            payload,
-            expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+    if allow_deadline_fallback:
+        validate_deadline_fallback_checkpoint_payload(
+            payload, checkpoint_sha256=sha256_file(checkpoint)
         )
+    elif infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
+        validate_deadline_fallback_canary_payload(payload, verify_parent_files=True)
+    else:
+        corner_lineage = validate_corner_rescue_canonical_lineage(
+            infos, iteration=iteration
+        )
+        is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+        )
+        if allow_corner_rescue and not is_final_corner_rescue:
+            raise ValueError(
+                "--allow-corner-rescue requires the exact final rescue checkpoint"
+            )
+        if is_final_corner_rescue:
+            assert corner_lineage is not None
+            assert_corner_rescue_foot_adapter_zero(payload)
+            assert_corner_rescue_optimizer_step(
+                payload,
+                expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
+            )
     expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")
@@ -224,6 +247,7 @@ def run_evaluation(
     settle_steps: int,
     allow_nondeployable_preview: bool = False,
     allow_legacy_preview_v1: bool = False,
+    allow_deadline_fallback: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -238,6 +262,7 @@ def run_evaluation(
         device=device,
         allow_nondeployable_preview=allow_nondeployable_preview,
         allow_legacy_preview_v1=allow_legacy_preview_v1,
+        allow_deadline_fallback=allow_deadline_fallback,
     )
 
     source_env = ManagerBasedRlEnv(
@@ -380,6 +405,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--deadline-fallback",
+        action="store_true",
+        help=(
+            "accept only the hash-pinned v1 checkpoint under the explicit "
+            "deadline fallback"
+        ),
+    )
     return parser
 
 
@@ -392,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
+        allow_deadline_fallback=args.deadline_fallback,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

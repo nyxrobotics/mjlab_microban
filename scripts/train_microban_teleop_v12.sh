@@ -62,6 +62,7 @@ completed=0
 target=3000
 mandatory_activation_canary=0
 runner_args=()
+save_interval=100
 if [[ "${mode}" == "start" ]]; then
     [[ "$(sha256sum -- "${SOURCE}" | awk '{print $1}')" == "${SOURCE_SHA}" ]] \
         || fail "Pinned legacy source SHA-256 mismatch."
@@ -99,11 +100,30 @@ else
         || fail "Missing gate; run scripts/evaluate_microban_teleop_v12_stage.sh ${run_name} ${iteration}"
     uv run --locked python -m mjlab_microban.scripts.teleop_v12_stage validate \
         "${gate}" "${checkpoint}" >/dev/null
+    resume_mode="$(uv run --locked python -m \
+        mjlab_microban.scripts.teleop_v12_stage resume-mode \
+        "${gate}" "${checkpoint}" --shell)"
+    case "${resume_mode}" in
+        canonical) ;;
+        deadline_fallback)
+            gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"
+            runner_args+=(
+                --agent.deadline-fallback-resume True
+                --agent.deadline-fallback-resume-gate "${gate}"
+                --agent.deadline-fallback-resume-gate-sha256 "${gate_sha}"
+            )
+            save_interval=15000
+            ;;
+        deadline_fallback_canary_complete)
+            fail "Deadline fallback canary reached 10100; explicit post-canary promotion is required."
+            ;;
+        *) fail "Unknown validated resume mode: ${resume_mode}" ;;
+    esac
     read -r target mandatory_activation_canary < <(
         uv run --locked python -m mjlab_microban.scripts.teleop_v12_stage \
             route "${completed}" --shell
     )
-    runner_args=(
+    runner_args+=(
         --agent.resume True
         --agent.load-run "^${run_name}$"
         --agent.load-checkpoint "^model_${iteration}[.]pt$"
@@ -123,6 +143,6 @@ echo "[INFO] v12 completed=${completed} target=${target} process_updates=${itera
 exec uv run --locked train Mjlab-Teleop-V12-Microban \
     --env.scene.num-envs 2048 --env.seed 42 --agent.seed 42 \
     --agent.num-steps-per-env 24 --agent.max-iterations "${iterations}" \
-    --agent.save-interval 100 --agent.logger tensorboard \
+    --agent.save-interval "${save_interval}" --agent.logger tensorboard \
     --agent.upload-model False --enable-nan-guard True \
     "${runner_args[@]}" "${extra_args[@]}"

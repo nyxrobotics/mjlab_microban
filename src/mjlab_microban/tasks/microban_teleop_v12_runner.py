@@ -37,6 +37,7 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     TeleopV12BootstrapProvenance,
     assert_actor_frozen_against_source,
     bootstrap_legacy_actor,
+    portable_bootstrap_artifact_path,
     serialize_bootstrap_provenance,
     sha256_file,
     validate_bootstrap_provenance,
@@ -49,6 +50,20 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     assert_corner_rescue_optimizer_step,
     validate_corner_rescue_canonical_lineage,
     validate_corner_rescue_lineage_marker,
+)
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
+    deadline_fallback_resume_source,
+    validate_deadline_fallback_canary_payload,
+    validate_deadline_fallback_marker,
+    validate_deadline_fallback_resume_payload,
+    validate_deadline_fallback_resume_source,
+    validate_deadline_fallback_save_endpoint,
+    validate_deadline_fallback_training_request,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
@@ -255,15 +270,34 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         save_pristine = cfg.pop("save_pristine_checkpoint", False)
         consumer_mode = cfg.pop("checkpoint_consumer_mode", False)
         preview_mode = cfg.pop("simulation_preview_mode", False)
+        deadline_resume = cfg.pop("deadline_fallback_resume", False)
+        deadline_gate = cfg.pop("deadline_fallback_resume_gate", None)
+        deadline_gate_sha256 = cfg.pop("deadline_fallback_resume_gate_sha256", None)
         if (
             type(save_pristine) is not bool
             or type(consumer_mode) is not bool
             or type(preview_mode) is not bool
+            or type(deadline_resume) is not bool
         ):
             raise TypeError("Contract-v12 runner flags must be booleans")
         if preview_mode is not self.simulation_preview_capable:
             raise ValueError("V12 preview mode requires the dedicated preview runner")
         resume = bool(cfg.get("resume", False))
+        if deadline_resume:
+            if (
+                not resume
+                or consumer_mode
+                or preview_mode
+                or not isinstance(deadline_gate, str)
+                or not deadline_gate
+                or not isinstance(deadline_gate_sha256, str)
+                or len(deadline_gate_sha256) != 64
+            ):
+                raise ValueError(
+                    "Deadline fallback requires training resume plus a pinned gate"
+                )
+        elif deadline_gate is not None or deadline_gate_sha256 is not None:
+            raise ValueError("Deadline fallback gate options require explicit opt-in")
         source_values = (source_path, source_sha256, probe_path, probe_sha256)
         if any(value is None for value in source_values) and any(
             value is not None for value in source_values
@@ -302,14 +336,25 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             algorithm.get(name) != value for name, value in expected_algorithm.items()
         ):
             raise ValueError("Contract-v12 PPO optimizer recipe drifted")
+        if deadline_resume and cfg.get("save_interval") != 15_000:
+            raise ValueError(
+                "Deadline fallback requires save_interval=15000 so only the "
+                "unconditional final model10099 is written"
+            )
 
         self.checkpoint_consumer_mode = consumer_mode
         self.teleop_v12_training_resume = resume
         self.simulation_preview_mode = preview_mode
+        self.deadline_fallback_resume = deadline_resume
+        self.deadline_fallback_resume_gate = deadline_gate
+        self.deadline_fallback_resume_gate_sha256 = deadline_gate_sha256
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
         self.teleop_v12_sanitization: dict | None = None
         self.teleop_v12_lr_order_migration: dict | None = None
         self.teleop_v12_corner_rescue: dict | None = None
+        self.teleop_v12_deadline_corner_rescue: dict | None = None
+        self.teleop_v12_deadline_fallback: dict | None = None
+        self.teleop_v12_deadline_resume_source: dict | None = None
         self.teleop_v12_preview: dict | None = None
         self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
@@ -400,8 +445,20 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             )
         if self.teleop_v12_corner_rescue is not None:
             result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
-                validate_corner_rescue_lineage_marker(
-                    self.teleop_v12_corner_rescue
+                validate_corner_rescue_lineage_marker(self.teleop_v12_corner_rescue)
+            )
+        if self.teleop_v12_deadline_fallback is not None:
+            if self.teleop_v12_deadline_corner_rescue is None:
+                raise RuntimeError("Deadline fallback v1 corner lineage is missing")
+            result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
+                self.teleop_v12_deadline_corner_rescue
+            )
+            result[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
+                validate_deadline_fallback_marker(self.teleop_v12_deadline_fallback)
+            )
+            result[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
+                validate_deadline_fallback_resume_source(
+                    self.teleop_v12_deadline_resume_source
                 )
             )
         if self.teleop_v12_preview is not None:
@@ -447,8 +504,32 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     ) -> None:
         if self.checkpoint_consumer_mode:
             raise RuntimeError("Contract-v12 consumer mode cannot train")
+        if self.deadline_fallback_resume:
+            validate_deadline_fallback_training_request(
+                current_iteration=self.current_learning_iteration,
+                common_step_counter=int(self.env.unwrapped.common_step_counter),
+                num_learning_iterations=num_learning_iterations,
+                save_interval=int(self.cfg["save_interval"]),
+            )
+            assert_corner_rescue_optimizer_step(
+                {"optimizer_state_dict": self.alg.optimizer.state_dict()},
+                expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
+            )
         self._validate_live_invariants()
-        return super().learn(num_learning_iterations, init_at_random_ep_len)
+        result = super().learn(num_learning_iterations, init_at_random_ep_len)
+        if self.deadline_fallback_resume:
+            if (
+                self.current_learning_iteration
+                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
+                or int(self.env.unwrapped.common_step_counter)
+                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP
+            ):
+                raise RuntimeError("Deadline fallback did not stop at update 10100")
+            assert_corner_rescue_optimizer_step(
+                {"optimizer_state_dict": self.alg.optimizer.state_dict()},
+                expected_step=MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
+            )
+        return result
 
     def _validate_preview_phase1_acceptance(
         self, infos: dict, preview: dict
@@ -544,20 +625,60 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
             raise ValueError("Checkpoint is not contract-v12")
-        corner_rescue = validate_corner_rescue_canonical_lineage(
-            infos, iteration=iteration
-        )
-        if infos.get("microban_teleop_recipe_revision") == (
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-        ):
-            assert corner_rescue is not None
-            assert_corner_rescue_foot_adapter_zero(payload)
-            assert_corner_rescue_optimizer_step(
-                payload,
-                expected_step=(
-                    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
-                ),
+        if self.deadline_fallback_resume:
+            deadline_fallback = validate_deadline_fallback_resume_payload(
+                payload, checkpoint_sha256=before_sha256
             )
+            assert self.deadline_fallback_resume_gate is not None
+            assert self.deadline_fallback_resume_gate_sha256 is not None
+            deadline_gate_path = (
+                Path(self.deadline_fallback_resume_gate).expanduser().resolve()
+            )
+            if sha256_file(deadline_gate_path) != (
+                self.deadline_fallback_resume_gate_sha256
+            ):
+                raise ValueError("Deadline fallback resume gate SHA-256 mismatch")
+            from mjlab_microban.scripts.teleop_v12_stage import validate_gate
+
+            gate = validate_gate(deadline_gate_path, resolved)  # type: ignore[arg-type]
+            if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) != (
+                deadline_fallback
+            ):
+                raise ValueError("Resume gate does not authorize deadline fallback")
+            deadline_resume_source = deadline_fallback_resume_source(
+                checkpoint_path=portable_bootstrap_artifact_path(resolved),
+                gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
+                gate_sha256=self.deadline_fallback_resume_gate_sha256,
+            )
+            corner_rescue = None
+        else:
+            deadline_descendant = (
+                validate_deadline_fallback_canary_payload(
+                    payload, verify_parent_files=True
+                )
+                if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None
+                else None
+            )
+            if deadline_descendant is not None:
+                raise ValueError(
+                    "Deadline-fallback lineage requires explicit gated resume opt-in"
+                )
+            deadline_fallback = None
+            deadline_resume_source = None
+            corner_rescue = validate_corner_rescue_canonical_lineage(
+                infos, iteration=iteration
+            )
+            if infos.get("microban_teleop_recipe_revision") == (
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+            ):
+                assert corner_rescue is not None
+                assert_corner_rescue_foot_adapter_zero(payload)
+                assert_corner_rescue_optimizer_step(
+                    payload,
+                    expected_step=(
+                        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                    ),
+                )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
             infos.get("action_clip", object()) is not None
         ):
@@ -608,10 +729,24 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         )
         if after_sha256 != before_sha256:
             raise ValueError("Checkpoint changed while loading")
+        if self.deadline_fallback_resume:
+            assert deadline_gate_path is not None
+            assert self.deadline_fallback_resume_gate_sha256 is not None
+            if sha256_file(deadline_gate_path) != (
+                self.deadline_fallback_resume_gate_sha256
+            ):
+                raise ValueError("Deadline fallback gate changed while loading")
         self.teleop_v12_bootstrap = provenance
         self.teleop_v12_sanitization = sanitization
         self.teleop_v12_lr_order_migration = deepcopy(lr_order_migration)
         self.teleop_v12_corner_rescue = deepcopy(corner_rescue)
+        self.teleop_v12_deadline_corner_rescue = (
+            deepcopy(infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY))
+            if deadline_fallback is not None
+            else None
+        )
+        self.teleop_v12_deadline_fallback = deepcopy(deadline_fallback)
+        self.teleop_v12_deadline_resume_source = deepcopy(deadline_resume_source)
         self.teleop_v12_preview = preview
         self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)
@@ -708,6 +843,12 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self._validate_live_invariants()
         if self.simulation_preview_mode:
             self._assert_preview_curriculum_active()
+        if self.deadline_fallback_resume:
+            validate_deadline_fallback_save_endpoint(
+                iteration=self.current_learning_iteration,
+                common_step_counter=int(self.env.unwrapped.common_step_counter),
+                filename=Path(path).name,
+            )
         payload = self.alg.save()
         payload["iter"] = self.current_learning_iteration
         payload["infos"] = self._contract_infos(
@@ -718,6 +859,8 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 },
             }
         )
+        if self.deadline_fallback_resume:
+            validate_deadline_fallback_canary_payload(payload, verify_parent_files=True)
         destination = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, destination)
 

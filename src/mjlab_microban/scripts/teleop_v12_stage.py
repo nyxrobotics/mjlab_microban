@@ -26,13 +26,14 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FOOT_P95_MAX_M,
     FOOT_RMS_MAX_M,
     HAND_P95_MAX_M,
-    HAND_RMS_MAX_M,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+    HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
     _aggregate_action_envelopes,
+    hand_tracking_rms_max_m,
     required_tracking_check_names,
     required_tracking_profile,
     required_tracking_scenario_names,
@@ -72,6 +73,19 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
     validate_corner_rescue_canonical_lineage,
+)
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
+    deadline_fallback_marker,
+    validate_deadline_fallback_canary_payload,
+    validate_deadline_fallback_checkpoint_payload,
+    validate_deadline_fallback_descendant,
+    validate_deadline_fallback_marker,
+    validate_deadline_fallback_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
@@ -390,7 +404,7 @@ def _validate_tracking_report(
         ),
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-        "hand_rms_m_max": HAND_RMS_MAX_M,
+        "hand_rms_m_max": hand_tracking_rms_max_m(profile),
         "hand_p95_m_max": HAND_P95_MAX_M,
         "foot_rms_m_max": FOOT_RMS_MAX_M,
         "foot_p95_m_max": FOOT_P95_MAX_M,
@@ -696,7 +710,9 @@ def _validate_onnx_report(
     return onnx_path, onnx_sha
 
 
-def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
+def _checkpoint_identity(
+    path: Path, *, allow_deadline_fallback: bool = False
+) -> tuple[str, int, int, dict[str, Any]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Checkpoint payload is malformed")
@@ -708,9 +724,44 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     iteration = payload.get("iter")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
         raise ValueError("Stage checkpoint iteration is invalid")
-    corner_rescue = validate_corner_rescue_canonical_lineage(
-        infos, iteration=iteration
+    checkpoint_sha = sha256_file(path)
+    deadline_descendant = (
+        validate_deadline_fallback_canary_payload(payload, verify_parent_files=True)
+        if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None
+        else None
     )
+    if allow_deadline_fallback:
+        if deadline_descendant is not None:
+            raise ValueError("Deadline source mode cannot load a descendant")
+        validate_deadline_fallback_checkpoint_payload(
+            payload, checkpoint_sha256=checkpoint_sha
+        )
+        corner_rescue = None
+    elif deadline_descendant is None:
+        corner_rescue = validate_corner_rescue_canonical_lineage(
+            infos, iteration=iteration
+        )
+    else:
+        corner_rescue = None
+        source = validate_deadline_fallback_resume_source(
+            infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
+        )
+        parent_checkpoint = resolve_bootstrap_artifact_path(
+            source["parent_checkpoint_path"]
+        )
+        parent_gate = resolve_bootstrap_artifact_path(source["full_stage_gate_path"])
+        validated_parent_gate = validate_gate(parent_gate, parent_checkpoint)
+        if (
+            validated_parent_gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+            != deadline_descendant
+        ):
+            raise ValueError("Deadline canary parent gate authorization drifted")
+        if (
+            sha256_file(parent_checkpoint)
+            != MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256
+            or sha256_file(parent_gate) != source["full_stage_gate_sha256"]
+        ):
+            raise ValueError("Deadline canary parent changed during gate validation")
     if infos.get("adapter_gradient_schedule_revision") != (
         TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
     ):
@@ -754,7 +805,31 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
             or len(sanitization["parent_checkpoint_sha256"]) != 64
         ):
             raise ValueError("Checkpoint sanitization lineage is malformed")
-    return sha256_file(path), iteration, completed, infos
+    return checkpoint_sha, iteration, completed, infos
+
+
+def _validate_deadline_strict_report(
+    report_path: Path, expected_identity: dict[str, int | str]
+) -> None:
+    if sha256_file(report_path) != (
+        MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256
+    ):
+        raise ValueError("Deadline fallback strict-failure report SHA-256 mismatch")
+    report = _load_json(report_path)
+    _validate_tracking_report(
+        report,
+        expected_identity,
+        profile_override=HMD_HAND_PROFILE,
+        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
+    )
+    checks = report.get("checks")
+    if (
+        report.get("status") != "fail"
+        or not isinstance(checks, dict)
+        or {name for name, passed in checks.items() if passed is not True}
+        != {"hand_tracking_rms"}
+    ):
+        raise ValueError("Pinned strict evidence must fail only hand_tracking_rms")
 
 
 def _checkpoint_kind(completed: int, sanitization: object) -> str:
@@ -792,12 +867,16 @@ def create_gate(
     locomotion_report: Path,
     tracking_report: Path,
     onnx_report: Path,
+    deadline_fallback_strict_report: Path | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     locomotion_report = locomotion_report.resolve()
     tracking_report = tracking_report.resolve()
     onnx_report = onnx_report.resolve()
-    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
+    deadline_source = deadline_fallback_strict_report is not None
+    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(
+        checkpoint, allow_deadline_fallback=deadline_source
+    )
     locomotion = _load_json(locomotion_report)
     tracking = _load_json(tracking_report)
     onnx = _load_json(onnx_report)
@@ -807,7 +886,21 @@ def create_gate(
         "completed_updates": completed,
     }
     _validate_locomotion_report(locomotion, expected_report_identity)
-    _validate_tracking_report(tracking, expected_report_identity)
+    tracking_profile = required_tracking_profile(completed)
+    if deadline_source:
+        assert deadline_fallback_strict_report is not None
+        deadline_fallback_strict_report = deadline_fallback_strict_report.resolve()
+        _validate_deadline_strict_report(
+            deadline_fallback_strict_report, expected_report_identity
+        )
+        tracking_profile = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
+        _validate_tracking_report(
+            tracking,
+            expected_report_identity,
+            profile_override=tracking_profile,
+        )
+    else:
+        _validate_tracking_report(tracking, expected_report_identity)
     onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     sanitization = infos.get("adapter_sanitization")
@@ -821,7 +914,7 @@ def create_gate(
         "completed_updates": completed,
         "canonical_boundary": canonical,
         "checkpoint_kind": _checkpoint_kind(completed, sanitization),
-        "tracking_profile": required_tracking_profile(completed),
+        "tracking_profile": tracking_profile,
         "adapter_sanitization": sanitization,
         "reports": {
             "locomotion": portable_bootstrap_artifact_path(locomotion_report),
@@ -841,6 +934,30 @@ def create_gate(
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
+    deadline_marker = (
+        deadline_fallback_marker()
+        if deadline_source
+        else validate_deadline_fallback_descendant(infos, iteration=iteration)
+    )
+    if deadline_marker is not None:
+        result[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
+            deadline_marker
+        )
+    deadline_resume_source = infos.get(
+        MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY
+    )
+    if deadline_resume_source is not None:
+        result[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
+            validate_deadline_fallback_resume_source(deadline_resume_source)
+        )
+    if deadline_source:
+        assert deadline_fallback_strict_report is not None
+        result["deadline_fallback_strict_report"] = portable_bootstrap_artifact_path(
+            deadline_fallback_strict_report
+        )
+        result["deadline_fallback_strict_report_sha256"] = (
+            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256
+        )
     return result
 
 
@@ -848,7 +965,16 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     gate_path = gate_path.resolve()
     checkpoint = checkpoint.resolve()
     gate = _load_json(gate_path)
-    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
+    deadline_value = gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+    deadline_source = (
+        gate.get("checkpoint_sha256")
+        == MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256
+    )
+    if deadline_source:
+        validate_deadline_fallback_marker(deadline_value)
+    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(
+        checkpoint, allow_deadline_fallback=deadline_source
+    )
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     sanitization = infos.get("adapter_sanitization")
     exact = {
@@ -861,12 +987,32 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "completed_updates": completed,
         "canonical_boundary": canonical,
         "checkpoint_kind": _checkpoint_kind(completed, sanitization),
-        "tracking_profile": required_tracking_profile(completed),
+        "tracking_profile": (
+            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
+            if deadline_source
+            else required_tracking_profile(completed)
+        ),
         "adapter_sanitization": sanitization,
     }
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         exact[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
+    checkpoint_deadline = (
+        deadline_fallback_marker()
+        if deadline_source
+        else validate_deadline_fallback_descendant(infos, iteration=iteration)
+    )
+    if checkpoint_deadline is not None:
+        exact[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
+            checkpoint_deadline
+        )
+    deadline_resume_source = infos.get(
+        MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY
+    )
+    if deadline_resume_source is not None:
+        exact[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
+            validate_deadline_fallback_resume_source(deadline_resume_source)
+        )
     if any(gate.get(name) != value for name, value in exact.items()):
         raise ValueError("V12 stage gate identity mismatch")
     reports = gate.get("reports")
@@ -877,11 +1023,25 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         report = resolve_bootstrap_artifact_path(reports.get(name, ""))
         if not report.is_file() or sha256_file(report) != report_hashes.get(name):
             raise ValueError(f"V12 stage gate {name} report changed")
+    strict_report: Path | None = None
+    if deadline_source:
+        strict_report = resolve_bootstrap_artifact_path(
+            gate.get("deadline_fallback_strict_report", "")
+        )
+        if (
+            not strict_report.is_file()
+            or gate.get("deadline_fallback_strict_report_sha256")
+            != MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256
+            or sha256_file(strict_report)
+            != MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256
+        ):
+            raise ValueError("Deadline fallback strict evidence changed")
     rebuilt = create_gate(
         checkpoint=checkpoint,
         locomotion_report=resolve_bootstrap_artifact_path(reports["locomotion"]),
         tracking_report=resolve_bootstrap_artifact_path(reports["tracking"]),
         onnx_report=resolve_bootstrap_artifact_path(reports["onnx"]),
+        deadline_fallback_strict_report=strict_report,
     )
     if rebuilt != gate:
         raise ValueError("V12 stage gate content is not canonical")
@@ -889,6 +1049,19 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     if not onnx_path.is_file() or sha256_file(onnx_path) != gate["onnx"]["sha256"]:
         raise ValueError("V12 stage ONNX artifact changed")
     return gate
+
+
+def gate_resume_mode(gate_path: Path, checkpoint: Path) -> str:
+    """Validate the full gate and return the only allowed runner resume mode."""
+
+    gate = validate_gate(gate_path, checkpoint)
+    if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
+        if gate.get("checkpoint_sha256") == (
+            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256
+        ):
+            return "deadline_fallback"
+        return "deadline_fallback_canary_complete"
+    return "canonical"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -901,12 +1074,24 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("onnx_report", type=Path)
     create.add_argument("output", type=Path)
     create.add_argument("--force", action="store_true")
+    create_deadline = subparsers.add_parser("create-deadline-fallback")
+    create_deadline.add_argument("checkpoint", type=Path)
+    create_deadline.add_argument("strict_tracking_report", type=Path)
+    create_deadline.add_argument("locomotion_report", type=Path)
+    create_deadline.add_argument("tracking_report", type=Path)
+    create_deadline.add_argument("onnx_report", type=Path)
+    create_deadline.add_argument("output", type=Path)
+    create_deadline.add_argument("--force", action="store_true")
     validate = subparsers.add_parser("validate")
     validate.add_argument("gate", type=Path)
     validate.add_argument("checkpoint", type=Path)
     route = subparsers.add_parser("route")
     route.add_argument("completed_updates", type=int)
     route.add_argument("--shell", action="store_true")
+    resume_mode = subparsers.add_parser("resume-mode")
+    resume_mode.add_argument("gate", type=Path)
+    resume_mode.add_argument("checkpoint", type=Path)
+    resume_mode.add_argument("--shell", action="store_true")
     return parser
 
 
@@ -929,7 +1114,14 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         return 0
-    if args.command == "create":
+    if args.command == "resume-mode":
+        mode = gate_resume_mode(args.gate, args.checkpoint)
+        if args.shell:
+            print(mode, flush=True)
+        else:
+            print(json.dumps({"resume_mode": mode}, sort_keys=True), flush=True)
+        return 0
+    if args.command in ("create", "create-deadline-fallback"):
         if args.output.exists() and not args.force:
             raise FileExistsError("Gate exists (pass --force)")
         gate = create_gate(
@@ -937,6 +1129,11 @@ def main(argv: list[str] | None = None) -> int:
             locomotion_report=args.locomotion_report,
             tracking_report=args.tracking_report,
             onnx_report=args.onnx_report,
+            deadline_fallback_strict_report=(
+                args.strict_tracking_report
+                if args.command == "create-deadline-fallback"
+                else None
+            ),
         )
         publish_json_atomic(args.output, gate)
     else:
