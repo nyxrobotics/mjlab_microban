@@ -14,8 +14,10 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import HMD_HAND_PROFILE
 from mjlab_microban.scripts.teleop_v12_stage import (
     _load_json,
     _validate_tracking_report,
+    validate_gate,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+    resolve_bootstrap_artifact_path,
     sha256_file,
     validate_bootstrap_provenance,
 )
@@ -46,11 +48,6 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 
 CORNER_RESCUE_RECEIPT_SCHEMA_VERSION = 1
 CORNER_RESCUE_RECEIPT_GATE = "microban_teleop_v12_corner_pair_rescue"
-_RESCUABLE_PERFORMANCE_CHECKS = frozenset(
-    ("hand_tracking_rms", "hand_tracking_p95")
-)
-
-
 def _load_checkpoint(path: Path) -> tuple[Path, str, dict[str, Any]]:
     resolved = path.expanduser().resolve(strict=True)
     digest = sha256_file(resolved)
@@ -147,8 +144,10 @@ def validate_rescue_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, An
     return identity, payload
 
 
-def build_receipt(*, checkpoint: Path, tracking_report: Path) -> dict[str, Any]:
-    """Bind deep-validated strict tracking evidence to the rescue checkpoint."""
+def build_receipt(
+    *, checkpoint: Path, tracking_report: Path, stage_gate: Path
+) -> dict[str, Any]:
+    """Bind the unchanged full stage gate to the authenticated rescue endpoint."""
 
     identity, payload = validate_rescue_checkpoint(checkpoint)
     report_path = tracking_report.expanduser().resolve(strict=True)
@@ -161,16 +160,24 @@ def build_receipt(*, checkpoint: Path, tracking_report: Path) -> dict[str, Any]:
             "completed_updates": identity["completed_updates"],
         },
         profile_override=HMD_HAND_PROFILE,
-        allowed_failed_checks=_RESCUABLE_PERFORMANCE_CHECKS,
     )
     checks = report["checks"]
     failed = sorted(name for name, value in checks.items() if value is not True)
-    status = "pass" if not failed else "fail"
+    if failed or report.get("status") != "pass":
+        raise ValueError("Corner rescue promotion requires strict tracking PASS")
+    gate_path = stage_gate.expanduser().resolve(strict=True)
+    gate = validate_gate(gate_path, Path(identity["path"]))
+    gate_tracking_path = gate.get("reports", {}).get("tracking")
+    if (
+        resolve_bootstrap_artifact_path(str(gate_tracking_path)) != report_path
+        or gate.get("report_sha256", {}).get("tracking") != sha256_file(report_path)
+    ):
+        raise ValueError("Full stage gate is not bound to the supplied tracking report")
     infos = payload["infos"]
     return {
         "schema_version": CORNER_RESCUE_RECEIPT_SCHEMA_VERSION,
         "gate": CORNER_RESCUE_RECEIPT_GATE,
-        "status": status,
+        "status": "pass",
         "recipe_revision": MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
         "checkpoint": identity,
         "lineage": infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY],
@@ -182,19 +189,32 @@ def build_receipt(*, checkpoint: Path, tracking_report: Path) -> dict[str, Any]:
             "checks": checks,
             "failed_checks": failed,
         },
+        "full_stage_gate": {
+            "path": str(gate_path),
+            "sha256": sha256_file(gate_path),
+            "schema_version": gate["schema_version"],
+            "status": gate["status"],
+            "report_sha256": gate["report_sha256"],
+        },
         "promotion": {
-            "eligible": status == "pass",
+            "eligible": True,
             "completed_updates": (
                 MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMPLETED_UPDATES
             ),
             "strict_thresholds_relaxed": False,
             "foot_activation_during_rescue": False,
+            "requires_schema_v2_full_stage_gate": True,
         },
     }
 
 
 def create_receipt(
-    *, checkpoint: Path, tracking_report: Path, output: Path, force: bool
+    *,
+    checkpoint: Path,
+    tracking_report: Path,
+    stage_gate: Path,
+    output: Path,
+    force: bool,
 ) -> dict[str, Any]:
     destination = output.expanduser().resolve()
     if destination.exists() and not force:
@@ -202,19 +222,23 @@ def create_receipt(
     if destination.is_symlink():
         raise ValueError("Corner rescue receipt output must not be a symlink")
     receipt = build_receipt(
-        checkpoint=checkpoint, tracking_report=tracking_report
+        checkpoint=checkpoint,
+        tracking_report=tracking_report,
+        stage_gate=stage_gate,
     )
     publish_json_atomic(destination, receipt)
     return receipt
 
 
 def validate_receipt(
-    *, receipt: Path, checkpoint: Path, tracking_report: Path
+    *, receipt: Path, checkpoint: Path, tracking_report: Path, stage_gate: Path
 ) -> dict[str, Any]:
     actual_path = receipt.expanduser().resolve(strict=True)
     actual = _load_json(actual_path)
     expected = build_receipt(
-        checkpoint=checkpoint, tracking_report=tracking_report
+        checkpoint=checkpoint,
+        tracking_report=tracking_report,
+        stage_gate=stage_gate,
     )
     if actual != expected:
         raise ValueError("Corner rescue receipt content/hash binding drifted")
@@ -233,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("receipt", type=Path)
         command.add_argument("checkpoint", type=Path)
         command.add_argument("tracking_report", type=Path)
+        command.add_argument("stage_gate", type=Path)
         if name == "create-receipt":
             command.add_argument("output", type=Path)
             command.add_argument("--force", action="store_true")
@@ -247,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         result = create_receipt(
             checkpoint=args.checkpoint,
             tracking_report=args.tracking_report,
+            stage_gate=args.stage_gate,
             output=args.output,
             force=args.force,
         )
@@ -255,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             receipt=args.receipt,
             checkpoint=args.checkpoint,
             tracking_report=args.tracking_report,
+            stage_gate=args.stage_gate,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if result.get("status") == "pass" else 1

@@ -48,6 +48,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
     validate_corner_rescue_canonical_lineage,
+    validate_corner_rescue_lineage_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
@@ -399,7 +400,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             )
         if self.teleop_v12_corner_rescue is not None:
             result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
-                self.teleop_v12_corner_rescue
+                validate_corner_rescue_lineage_marker(
+                    self.teleop_v12_corner_rescue
+                )
             )
         if self.teleop_v12_preview is not None:
             result["preview_non_deployable"] = True

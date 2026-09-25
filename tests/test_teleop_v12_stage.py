@@ -69,9 +69,18 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
     TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+    corner_rescue_marker,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
@@ -858,6 +867,111 @@ class TeleopV12StageTest(unittest.TestCase):
                     locomotion_path.write_text(json.dumps(locomotion))
                     tracking_path.write_text(json.dumps(tracking))
                     onnx_report_path.write_text(json.dumps(onnx))
+
+    def test_schema2_gate_binds_exact_final_corner_rescue_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model_9999.pt"
+            stored_std = torch.tensor(
+                TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD
+            )
+            mean = torch.zeros(1, 83)
+            var = torch.ones(1, 83)
+            std = torch.ones(1, 83)
+            var[:, 69:81] = stored_std.square()
+            std[:, 69:81] = stored_std
+            weight = torch.ones(512, 83)
+            weight[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS] = 0.0
+            first_moment = torch.ones(512, 83)
+            second_moment = torch.ones(512, 83)
+            first_moment[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS] = 0.0
+            second_moment[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS] = 0.0
+            infos = {
+                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_recipe_revision": (
+                    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+                ),
+                BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+                "adapter_gradient_schedule_revision": (
+                    TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+                ),
+                "active_actor_columns_at_save": list(
+                    MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS
+                ),
+                "env_state": {"common_step_counter": 10_000 * 24},
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: corner_rescue_marker(),
+            }
+            torch.save(
+                {
+                    "iter": 9_999,
+                    "infos": infos,
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": mean,
+                        "obs_normalizer._var": var,
+                        "obs_normalizer._std": std,
+                        "mlp.0.weight": weight,
+                    },
+                    "optimizer_state_dict": {
+                        "state": {
+                            1: {
+                                "step": torch.tensor(
+                                    float(
+                                        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                                    )
+                                ),
+                                "exp_avg": first_moment,
+                                "exp_avg_sq": second_moment,
+                            },
+                            2: {
+                                "step": torch.tensor(
+                                    float(
+                                        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                                    )
+                                ),
+                                "exp_avg": torch.ones(18),
+                                "exp_avg_sq": torch.ones(18),
+                            },
+                        }
+                    },
+                },
+                checkpoint,
+            )
+            identity = {
+                "sha256": sha256_file(checkpoint),
+                "iteration": 9_999,
+                "completed_updates": 10_000,
+            }
+            locomotion_path = root / "locomotion.json"
+            tracking_path = root / "tracking.json"
+            onnx_report_path = root / "onnx.json"
+            onnx_path = root / "policy.onnx"
+            onnx_path.write_bytes(b"unit-test-onnx")
+            locomotion_path.write_text(json.dumps(_locomotion_report(identity)))
+            tracking_path.write_text(json.dumps(_tracking_report(identity)))
+            onnx_report_path.write_text(
+                json.dumps(_onnx_report(identity, onnx_path))
+            )
+            gate = create_gate(
+                checkpoint=checkpoint,
+                locomotion_report=locomotion_path,
+                tracking_report=tracking_path,
+                onnx_report=onnx_report_path,
+            )
+            self.assertEqual(
+                gate[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY],
+                corner_rescue_marker(),
+            )
+            gate_path = root / "gate.json"
+            gate_path.write_text(json.dumps(gate))
+            self.assertEqual(validate_gate(gate_path, checkpoint), gate)
+
+            tampered = deepcopy(gate)
+            tampered[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY][
+                "sampler_probabilities"
+            ]["left_forward_right_backward"] = 0.39
+            gate_path.write_text(json.dumps(tampered))
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                validate_gate(gate_path, checkpoint)
 
 
 if __name__ == "__main__":
