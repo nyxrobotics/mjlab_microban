@@ -536,9 +536,7 @@ def build_v12_deployment_metadata(
         "v12_legacy_probe_steps_per_scenario": str(probe.steps),
         "v12_legacy_probe_settle_steps": str(probe.settle_steps),
         "v12_legacy_probe_seed": str(probe.seed),
-        "v12_bilateral_site_order_revision": (
-            MICROBAN_BILATERAL_SITE_ORDER_REVISION
-        ),
+        "v12_bilateral_site_order_revision": (MICROBAN_BILATERAL_SITE_ORDER_REVISION),
         "v12_lr_order_migration_schema_version": str(
             lr_order_migration["schema_version"]
         ),
@@ -547,9 +545,7 @@ def build_v12_deployment_metadata(
         "v12_lr_order_source_checkpoint_sha256": str(
             lr_order_migration["source_checkpoint_sha256"]
         ),
-        "v12_lr_order_source_checkpoint_iteration": str(
-            lr_source_clock["iteration"]
-        ),
+        "v12_lr_order_source_checkpoint_iteration": str(lr_source_clock["iteration"]),
         "v12_lr_order_source_completed_updates": str(
             lr_source_clock["completed_updates"]
         ),
@@ -562,9 +558,7 @@ def build_v12_deployment_metadata(
         "v12_lr_order_critic_swap_blocks_json": _json(
             lr_order_migration["critic_swap_blocks"]
         ),
-        "v12_lr_order_foot_adapter_at_source": (
-            "inactive_exact_zero_left_untouched"
-        ),
+        "v12_lr_order_foot_adapter_at_source": ("inactive_exact_zero_left_untouched"),
         "v12_lr_order_migration_marker_sha256": _canonical_json_sha256(
             lr_order_migration
         ),
@@ -876,9 +870,15 @@ def _run_microban_runtime_validator(
     runtime_source_identity = _microban_runtime_source_identity(microban_repo)
     reported_runtime_source_identity = report.get("runtime_source_identity")
     walk_fallback = report.get("walk_fallback")
-    walk_smoke = walk_fallback.get("smoke") if isinstance(walk_fallback, Mapping) else None
-    walk_input = walk_fallback.get("input") if isinstance(walk_fallback, Mapping) else None
-    walk_output = walk_fallback.get("output") if isinstance(walk_fallback, Mapping) else None
+    walk_smoke = (
+        walk_fallback.get("smoke") if isinstance(walk_fallback, Mapping) else None
+    )
+    walk_input = (
+        walk_fallback.get("input") if isinstance(walk_fallback, Mapping) else None
+    )
+    walk_output = (
+        walk_fallback.get("output") if isinstance(walk_fallback, Mapping) else None
+    )
     expected_walk_path = str((microban_repo / "src" / "agents" / "walk.onnx").resolve())
     maximum_walk_output = (
         walk_smoke.get("maximum_absolute_output")
@@ -911,10 +911,8 @@ def _run_microban_runtime_validator(
         or walk_fallback.get("sha256")
         != runtime_source_identity["microban_walk_fallback_onnx_sha256"]
         or walk_fallback.get("providers") != ["CPUExecutionProvider"]
-        or walk_input
-        != {"name": "obs", "shape": [1, 63], "type": "tensor(float)"}
-        or walk_output
-        != {"name": "actions", "shape": [1, 18], "type": "tensor(float)"}
+        or walk_input != {"name": "obs", "shape": [1, 63], "type": "tensor(float)"}
+        or walk_output != {"name": "actions", "shape": [1, 18], "type": "tensor(float)"}
         or not isinstance(walk_smoke, Mapping)
         or walk_smoke.get("status") != "pass"
         or walk_smoke.get("sample_count") != 16

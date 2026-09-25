@@ -349,7 +349,9 @@ def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
     ):
         changed = deepcopy(infos)
         mutate(changed)
-        with pytest.raises((TypeError, ValueError), match="bilateral|predates|migration"):
+        with pytest.raises(
+            (TypeError, ValueError), match="bilateral|predates|migration"
+        ):
             deployment._require_deployable_lr_order_lineage(changed)
 
 
@@ -451,9 +453,7 @@ def test_runtime_validator_requires_cpu_only_pass(
     with pytest.raises(RuntimeError, match="complete CPU v12"):
         deployment._run_microban_runtime_validator(policy, microban_repo=repo)
 
-    report["onnxruntime_compatibility_smoke"]["providers"] = [
-        "CPUExecutionProvider"
-    ]
+    report["onnxruntime_compatibility_smoke"]["providers"] = ["CPUExecutionProvider"]
     fallback = report.pop("walk_fallback")
     with pytest.raises(RuntimeError, match="fallback pass"):
         deployment._run_microban_runtime_validator(policy, microban_repo=repo)
