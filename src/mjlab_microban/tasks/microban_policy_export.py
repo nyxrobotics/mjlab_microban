@@ -41,6 +41,11 @@ from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+    MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
+    microban_hand_fk_metadata,
+)
 from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
@@ -1857,7 +1862,7 @@ def _representative_observation_bounds() -> tuple[np.ndarray, np.ndarray]:
         + [-1.0] * 18
         + [-1.0, -1.0, -2.0]
         + [-0.03, -0.03, 0.0] * 2
-        + [-0.08] * 6
+        + [-value for value in MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M] * 2
         + [0.0, 0.0],
         dtype=np.float32,
     )
@@ -1869,7 +1874,7 @@ def _representative_observation_bounds() -> tuple[np.ndarray, np.ndarray]:
         + [1.0] * 18
         + [1.0, 1.0, 2.0]
         + [0.03, 0.03, 0.05] * 2
-        + [0.08] * 6
+        + list(MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M) * 2
         + [1.0, 1.0],
         dtype=np.float32,
     )
@@ -2141,7 +2146,6 @@ def _command_target_bounds(
     """
 
     foot_cfg = env.command_manager.get_term_cfg("foot_target")
-    hand_cfg = env.command_manager.get_term_cfg("hand_target")
 
     foot_xy_lower, foot_xy_upper = map(float, foot_cfg.reach_xy_range)
     foot_z_lower, foot_z_upper = map(float, foot_cfg.lift_height_range)
@@ -2164,10 +2168,10 @@ def _command_target_bounds(
     both_xyz_lower = [both_xy_lower, both_xy_lower, 0.0]
     both_xyz_upper = [both_xy_upper, both_xy_upper, both_z_upper]
 
-    hand_xy_lower, hand_xy_upper = map(float, hand_cfg.reach_xy_range)
-    hand_z_lower, hand_z_upper = map(float, hand_cfg.reach_z_range)
-    hand_xyz_lower = [hand_xy_lower, hand_xy_lower, hand_z_lower]
-    hand_xyz_upper = [hand_xy_upper, hand_xy_upper, hand_z_upper]
+    # Preserve the runtime wire contract independently of the smaller reachable
+    # FK subset used to generate training commands and normalize observations.
+    hand_xyz_lower = [-float(value) for value in MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M]
+    hand_xyz_upper = [float(value) for value in MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M]
 
     return (
         foot_xyz_lower * 2,
@@ -2448,6 +2452,9 @@ def get_microban_teleop_metadata(
         "hand_target_units": "metres",
         "hand_target_lower": hand_target_lower,
         "hand_target_upper": hand_target_upper,
+        "hand_target_fk": json.dumps(
+            microban_hand_fk_metadata(), separators=(",", ":"), sort_keys=True
+        ),
         "action_scale": _as_action_vector(action.scale, len(action_joint_names)),
     }
 

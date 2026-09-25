@@ -685,8 +685,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.commands["hand_target"] = ResetFixedHandTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_active=0.0,
-        reach_xy_range=(-0.08, 0.08),
-        reach_z_range=(-0.08, 0.08),
     )
     # This command is privileged: it is appended only to the critic below and
     # never changes the actor's deployment-stable 83-value observation schema.

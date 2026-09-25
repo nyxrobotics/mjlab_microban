@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,14 +19,17 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
+    MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     validate_microban_teleop_observation_contract,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
     TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     LegacyAdapterPPO,
     LegacyAdapterTeleopActor,
+    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     TeleopV12BootstrapProvenance,
@@ -38,9 +43,13 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
+    preview_hand_tracking_settings,
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     TELEOP_V12_PREVIEW_INFO_KEY,
+    TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY,
+    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
     reject_preview_checkpoint,
     validate_preview_marker,
 )
@@ -143,6 +152,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     """Fresh legacy bootstrap, strict resume, and invariant-checked saves."""
 
     simulation_preview_capable = False
+    allow_missing_preview_phase1_acceptance = False
+    require_immutable_checkpoint_bytes = False
+    consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
+    consumer_requires_live_candidate = True
 
     def __init__(
         self,
@@ -219,6 +232,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
         self.teleop_v12_sanitization: dict | None = None
         self.teleop_v12_preview: dict | None = None
+        self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
         if not isinstance(self.alg, LegacyAdapterPPO):
             raise TypeError("Contract-v12 runner requires LegacyAdapterPPO")
@@ -303,6 +317,20 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if self.teleop_v12_preview is not None:
             result["preview_non_deployable"] = True
             result[TELEOP_V12_PREVIEW_INFO_KEY] = dict(self.teleop_v12_preview)
+            if (
+                self.teleop_v12_preview.get("phase")
+                == TELEOP_V12_PREVIEW_PHASE_FULL_BODY
+            ):
+                from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
+                    validate_embedded_phase1_acceptance,
+                )
+
+                result[TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY] = deepcopy(
+                    self.teleop_v12_preview_phase1_acceptance
+                )
+                validate_embedded_phase1_acceptance(
+                    result, fullbody_marker=self.teleop_v12_preview
+                )
         return result
 
     def _save_pristine(self, path: Path) -> None:
@@ -332,9 +360,29 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self._validate_live_invariants()
         return super().learn(num_learning_iterations, init_at_random_ep_len)
 
+    def _validate_preview_phase1_acceptance(
+        self, infos: dict, preview: dict
+    ) -> dict | None:
+        """Validate phase-1 lineage, except for the explicit legacy trial class."""
+
+        if preview.get("phase") == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
+            if (
+                self.allow_missing_preview_phase1_acceptance
+                and TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY not in infos
+            ):
+                return None
+            from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
+                validate_embedded_phase1_acceptance,
+            )
+
+            return validate_embedded_phase1_acceptance(infos, fullbody_marker=preview)
+        if infos.get(TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY) is not None:
+            raise ValueError("Only a full-body preview may embed phase-1 acceptance")
+        return None
+
     def load(
         self,
-        path: str,
+        path: str | bytes,
         load_cfg: dict | None = None,
         strict: bool = True,
         map_location: str | None = None,
@@ -356,11 +404,30 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         else:
             raise ValueError("Fresh bootstrapped runner cannot load another checkpoint")
 
-        resolved = Path(path).expanduser().resolve()
-        before_sha256 = sha256_file(resolved)
-        payload = torch.load(
-            resolved, map_location=map_location or "cpu", weights_only=False
-        )
+        if self.require_immutable_checkpoint_bytes and not isinstance(path, bytes):
+            raise ValueError(
+                "Simulation preview consumer requires immutable checkpoint bytes"
+            )
+
+        verified_bytes = path if isinstance(path, bytes) else None
+        if verified_bytes is not None:
+            if not consumer:
+                raise ValueError("Verified checkpoint bytes are consumer-only")
+            before_sha256 = hashlib.sha256(verified_bytes).hexdigest()
+            payload = torch.load(
+                BytesIO(verified_bytes),
+                map_location=map_location or "cpu",
+                weights_only=False,
+            )
+            upstream_source: str | BytesIO = BytesIO(verified_bytes)
+            resolved: Path | None = None
+        else:
+            resolved = Path(path).expanduser().resolve()
+            before_sha256 = sha256_file(resolved)
+            payload = torch.load(
+                resolved, map_location=map_location or "cpu", weights_only=False
+            )
+            upstream_source = str(resolved)
         if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
             raise TypeError("Contract-v12 checkpoint payload is malformed")
         infos = payload["infos"]
@@ -368,10 +435,21 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if not isinstance(iteration, int) or isinstance(iteration, bool):
             raise TypeError("Checkpoint iteration is malformed")
         if self.simulation_preview_mode:
-            preview = validate_preview_marker(infos, iteration=iteration)
+            preview = validate_preview_marker(
+                infos,
+                iteration=iteration,
+                required_phase=(
+                    self.consumer_required_preview_phase if consumer else None
+                ),
+                require_live_candidate=(
+                    consumer and self.consumer_requires_live_candidate
+                ),
+            )
+            phase1_acceptance = self._validate_preview_phase1_acceptance(infos, preview)
         else:
             reject_preview_checkpoint(infos)
             preview = None
+            phase1_acceptance = None
         if infos.get("microban_teleop_training_contract_version") != (
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ) or infos.get("microban_teleop_recipe_revision") != (
@@ -394,10 +472,11 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             if not isinstance(sanitization, dict):
                 raise TypeError("Checkpoint adapter sanitization lineage is malformed")
             exact_sanitization = {
-                "schema_version": 1,
+                "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
                 "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
                 "parent_iteration": sanitization.get("completed_updates", 0) - 1,
                 "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+                **teleop_v12_target_normalizer_metadata(),
             }
             if any(
                 sanitization.get(name) != value
@@ -414,16 +493,22 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             int(self.env.unwrapped.common_step_counter) if consumer else None
         )
         loaded_infos = super().load(
-            str(resolved),
+            upstream_source,  # type: ignore[arg-type]
             load_cfg=load_cfg,
             strict=strict,
             map_location=map_location,
         )
-        if sha256_file(resolved) != before_sha256:
+        after_sha256 = (
+            hashlib.sha256(verified_bytes).hexdigest()
+            if verified_bytes is not None
+            else sha256_file(resolved)  # type: ignore[arg-type]
+        )
+        if after_sha256 != before_sha256:
             raise ValueError("Checkpoint changed while loading")
         self.teleop_v12_bootstrap = provenance
         self.teleop_v12_sanitization = sanitization
         self.teleop_v12_preview = preview
+        self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)
         self._actor.bind_frozen_legacy_reference()
         expected_active = list(self._actor.active_adapter_columns())
@@ -460,28 +545,64 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         return loaded_infos
 
     def _assert_preview_curriculum_active(self) -> None:
-        """Prove the lifted preview is actually sampling/rewarding all targets."""
+        """Prove each lifted phase samples/rewards only its declared targets."""
 
         env = self.env.unwrapped
+        marker = self.teleop_v12_preview
+        if not isinstance(marker, dict):
+            raise TypeError("V12 preview marker is not bound")
         hand = env.command_manager.get_term_cfg("hand_target")
         foot = env.command_manager.get_term_cfg("foot_target")
         rewards = env.reward_manager
         hmd = env.event_manager.get_term_cfg("hmd_neck_target_motion")
         hmd_func = hmd.func
+        common_step_counter = int(env.common_step_counter)
+        if common_step_counter % MICROBAN_TELEOP_NUM_STEPS_PER_ENV != 0:
+            raise RuntimeError("V12 preview training clock is not update-aligned")
+        completed_updates = common_step_counter // MICROBAN_TELEOP_NUM_STEPS_PER_ENV
+        hand_settings = preview_hand_tracking_settings(completed_updates)
+        hand_reward = rewards.get_term_cfg("hand_target_tracking")
+        soft_limit_guard = rewards.get_term_cfg("joint_soft_limit_guard")
+        phase = marker.get("phase")
+        if phase == TELEOP_V12_PREVIEW_PHASE_HMD_HAND:
+            expected = (0.7, 0.0, 0.0, 0.0)
+        elif phase == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
+            expected = (0.7, 0.3, 0.05, 2.0)
+        else:
+            raise RuntimeError("V12 preview phase is invalid")
+        actual = (
+            hand.rel_active,
+            foot.rel_single_support_envs,
+            foot.rel_both_feet_envs,
+            rewards.get_term_cfg("foot_target_tracking").weight,
+        )
+        hand_actual = (
+            hand_reward.weight,
+            hand_reward.params.get("std"),
+            soft_limit_guard.weight,
+        )
+        hand_expected = (
+            hand_settings.reward_weight,
+            hand_settings.reward_std_m,
+            hand_settings.joint_soft_limit_guard_weight,
+        )
         if (
-            hand.rel_active != 0.7
-            or foot.rel_single_support_envs != 0.3
-            or foot.rel_both_feet_envs != 0.05
-            or rewards.get_term_cfg("hand_target_tracking").weight != 2.0
-            or rewards.get_term_cfg("foot_target_tracking").weight != 2.0
+            actual != expected
+            or hand_actual != hand_expected
             or getattr(hmd_func, "neutral_probability", None) != 0.2
         ):
-            raise RuntimeError("V12 preview hand/foot/HMD curriculum is not active")
+            raise RuntimeError(
+                f"V12 preview {phase} curriculum drifted: "
+                f"targets={actual} != {expected}; "
+                f"hand={hand_actual} != {hand_expected}"
+            )
 
     def save(self, path: str, infos=None) -> None:
         if self.checkpoint_consumer_mode:
             raise RuntimeError("Contract-v12 consumer mode cannot save")
         self._validate_live_invariants()
+        if self.simulation_preview_mode:
+            self._assert_preview_curriculum_active()
         payload = self.alg.save()
         payload["iter"] = self.current_learning_iteration
         payload["infos"] = self._contract_infos(
@@ -515,6 +636,86 @@ class MicrobanTeleopV12PreviewOnPolicyRunner(MicrobanTeleopV12OnPolicyRunner):
     simulation_preview_capable = True
 
 
+class MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner(
+    MicrobanTeleopV12PreviewOnPolicyRunner
+):
+    """Read-only loader for one explicit, unaccepted simulation observation."""
+
+    allow_missing_preview_phase1_acceptance = True
+    require_immutable_checkpoint_bytes = True
+
+    def __init__(
+        self,
+        env,
+        train_cfg: dict,
+        log_dir: str | None = None,
+        device: str = "cpu",
+    ) -> None:
+        if (
+            train_cfg.get("checkpoint_consumer_mode") is not True
+            or train_cfg.get("simulation_preview_mode") is not True
+            or train_cfg.get("resume") is not False
+            or log_dir is not None
+        ):
+            raise ValueError(
+                "Unaccepted simulation preview is immutable, read-only, and "
+                "consumer-only"
+            )
+        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
+
+    def learn(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Unaccepted simulation preview cannot train")
+
+    def save(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Unaccepted simulation preview cannot save")
+
+    def export_policy_to_onnx(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Unaccepted simulation preview cannot export")
+
+
+class MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(
+    MicrobanTeleopV12PreviewOnPolicyRunner
+):
+    """Read-only phase-1 consumer for controller hands with inactive feet."""
+
+    consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_HMD_HAND
+    consumer_requires_live_candidate = False
+    require_immutable_checkpoint_bytes = True
+
+    def __init__(
+        self,
+        env,
+        train_cfg: dict,
+        log_dir: str | None = None,
+        device: str = "cpu",
+    ) -> None:
+        if (
+            train_cfg.get("checkpoint_consumer_mode") is not True
+            or train_cfg.get("simulation_preview_mode") is not True
+            or train_cfg.get("resume") is not False
+            or log_dir is not None
+        ):
+            raise ValueError(
+                "Controller-only preview is immutable, read-only, and consumer-only"
+            )
+        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
+
+    def learn(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Controller-only preview cannot train")
+
+    def save(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Controller-only preview cannot save")
+
+    def export_policy_to_onnx(self, *args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("Controller-only preview cannot export")
+
+
 def preview_actor_load_cfg() -> dict[str, bool]:
     """Return the only actor-only load mask accepted by a preview consumer."""
 
@@ -542,3 +743,41 @@ def make_teleop_v12_preview_consumer(
     cfg["simulation_preview_mode"] = True
     cfg["resume"] = False
     return MicrobanTeleopV12PreviewOnPolicyRunner(env, cfg, device=device)
+
+
+def make_teleop_v12_unaccepted_simulation_preview_consumer(
+    env, agent_cfg, device: str
+) -> MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner:
+    """Construct the only consumer allowed to omit old phase-1 evidence."""
+
+    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
+        cfg = asdict(agent_cfg)
+    elif isinstance(agent_cfg, dict):
+        cfg = deepcopy(agent_cfg)
+    else:
+        raise TypeError("Preview agent_cfg must be a dataclass instance or dict")
+    cfg["checkpoint_consumer_mode"] = True
+    cfg["simulation_preview_mode"] = True
+    cfg["resume"] = False
+    return MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner(
+        env, cfg, device=device
+    )
+
+
+def make_teleop_v12_controller_only_preview_consumer(
+    env, agent_cfg, device: str
+) -> MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner:
+    """Construct the phase-1 controller-hand, exact-zero-foot consumer."""
+
+    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
+        cfg = asdict(agent_cfg)
+    elif isinstance(agent_cfg, dict):
+        cfg = deepcopy(agent_cfg)
+    else:
+        raise TypeError("Preview agent_cfg must be a dataclass instance or dict")
+    cfg["checkpoint_consumer_mode"] = True
+    cfg["simulation_preview_mode"] = True
+    cfg["resume"] = False
+    return MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(
+        env, cfg, device=device
+    )

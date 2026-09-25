@@ -13,13 +13,98 @@ it. The normal v12 runner, stage gate, ONNX exporter, and physical Microban
 runtime reject the marker. This preview does not shorten or replace the full
 15,000-update training and acceptance path.
 
-## Start
+## Controller-only arm preview (recommended before Motion Tracker setup)
 
-Use a checkpoint produced by the v12 preview training script, then run:
+This dedicated path uses the audited legacy walking actor for balance and all
+leg joints, then replaces only the six arm action columns with the controller
+mapper's bounded, joint-slew-limited IK solution. It is deliberately more direct
+than asking the early learned adapter to approximate the hand target, so visible
+controller motion is not attenuated by the phase-1 policy's tracking error.
+
+The phase-1 checkpoint and its strict or visual PASS receipt are still
+hash-bound and strict-loaded. The runner accepts only the HMD/hand phase marker,
+cannot train/save/export, has no robot output, and remains simulation-only.
+Defense in depth enforces all of the following:
+
+- the live target source is the two PICO controllers, never body tracking;
+- both foot targets are exact numeric zero on every policy step;
+- each commanded arm target is inside the pinned Microban reachable joint box
+  and its simulator soft target limit to `1e-7 rad`;
+- the Cartesian hand command must exactly match independent Microban FK of the
+  supplied joint target;
+- trigger release, stale input, or a contract fault commands arm HOME while the
+  audited zero-twist walking actor continues balancing.
+
+The software HOME origin is intentionally unchanged: left shoulder roll is
+`+10 deg` and right shoulder roll is `-10 deg`. There is no hidden shoulder
+inset. The 45-case dynamic simulation gate separately permits at most `5 deg`
+of measured joint overshoot beyond a soft limit; the accepted run measured
+`2.013383 deg`. The numeric allowance is shared with the canonical v12 measured
+dynamic-state gate. It does not relax the `1e-7 rad` commanded-target limit,
+and this simulation-only receipt by itself remains no evidence for physical
+deployment.
+
+Start it with the real PICO app and simulated Microban:
 
 ```bash
 cd /home/kanade/Git-projects/mjlab_microban_v8j
-scripts/run_pico_v12_preview.sh /absolute/path/to/preview/model_<iteration>.pt
+checkpoint=/absolute/path/to/phase1/model_<iteration>.pt
+receipt=/absolute/path/to/phase1_pass_receipt.json
+overlay_receipt=/absolute/path/to/direct_ik_overlay_acceptance.json
+scripts/run_pico_v12_controller_preview.sh \
+  "${checkpoint}" \
+  "${receipt}" \
+  "$(sha256sum -- "${receipt}" | cut -d ' ' -f 1)" \
+  "${overlay_receipt}" \
+  "$(sha256sum -- "${overlay_receipt}" | cut -d ' ' -f 1)"
+```
+
+This mode fixes controller displacement scale at `0.18`; command-line body,
+hand, and foot scale overrides are rejected. Motion Tracker packets may still
+arrive, but their body and foot targets are ignored by construction.
+
+Reproduce the independent 45-case gate (nine walking scenarios times five arm
+profiles), bind its raw bytes into a simulation-only adjudication receipt, then
+verify both the receipt and its parent report with:
+
+```bash
+cd /home/kanade/Git-projects/mjlab_microban_v8j
+raw=artifacts/direct_ik_arm_overlay_model14999_recheck.json
+overlay_receipt=artifacts/direct_ik_arm_overlay_model14999_5deg_acceptance_recheck.json
+
+uv run --locked python -m \
+  mjlab_microban.scripts.evaluate_direct_ik_arm_overlay \
+  --device cuda:0 \
+  --output "${raw}"
+raw_sha256="$(sha256sum -- "${raw}" | cut -d ' ' -f 1)"
+
+uv run --locked python scripts/adjudicate_direct_ik_overlay.py \
+  "${raw}" "${raw_sha256}" "${overlay_receipt}"
+overlay_sha256="$(sha256sum -- "${overlay_receipt}" | cut -d ' ' -f 1)"
+
+uv run --locked python scripts/adjudicate_direct_ik_overlay.py \
+  --verify-receipt "${overlay_receipt}" "${overlay_sha256}"
+```
+
+Use new output filenames for each reproduction; the adjudicator never
+overwrites an existing receipt. The launcher repeats the final verification
+and refuses to start if the receipt, its raw parent report, any of the 45 cases,
+or either hash differs.
+
+## Start
+
+Use a staged-v2 full-body checkpoint and its final hash-bound PASS receipt. The
+receipt may be the strict full-body acceptance class or the explicitly
+simulation-only visual acceptance class; a phase-1 promotion receipt is not a
+live authority.
+
+```bash
+cd /home/kanade/Git-projects/mjlab_microban_v8j
+receipt=/absolute/path/to/artifacts/final_preview_acceptance.json
+scripts/run_pico_v12_preview.sh \
+  /absolute/path/to/preview/model_<iteration>.pt \
+  "${receipt}" \
+  "$(sha256sum -- "${receipt}" | cut -d ' ' -f 1)"
 ```
 
 The launcher checks the pinned legacy walking checkpoint, provisions the PICO
@@ -27,11 +112,14 @@ app with the owner-only simulation pairing, installs only the `63903` and `8081`
 ADB reverse routes, and opens the MuJoCo viewer. It does not use the physical
 control port `63902`.
 
-If the preview checkpoint is absent, altered, has the wrong recipe/provenance,
-or fails to load, it is not partially accepted. The process reports the error
-and retains the audited legacy joystick actor. An inference or body-tracking
-fault likewise latches legacy walking until the left trigger is released; the
-next activation retries the preview actor.
+Before it creates the policy consumer, the launcher requires a regular,
+non-symlink checkpoint and receipt, verifies the caller-supplied receipt hash,
+and binds the receipt to the checkpoint SHA-256, iteration, staged-v2 full-body
+marker, exact training clock, profile, scenarios, and safety checks. A missing,
+FAIL, phase-1, legacy-v1, altered, or incomplete receipt is rejected; neither a
+targeted precheck nor a phase-1 promotion receipt is sufficient. Once accepted,
+an inference or body-tracking fault still latches audited legacy walking until
+the left trigger is released; the next activation retries the preview actor.
 
 ## Tracker preflight
 
@@ -53,23 +141,26 @@ not hand/foot tracking.
 
 ## Hold controls
 
-1. Hold left `X` to select the preview policy.
-2. With `X` still held, leave the left trigger released and stand still until
-   body-target calibration completes.
-3. Hold the left trigger to enable the selected policy. Releasing it returns the
-   body to the configured initial pose; it is not a toggle.
-4. The left stick commands forward/back/left/right velocity, and the right-stick
+1. Start with the left trigger released and both controllers in a comfortable
+   neutral pose. The first fresh released frame captures one controller origin
+   for the session. Release/re-press does not move that origin; reset, recenter,
+   source change, or reconnect deliberately starts a new one.
+2. Hold the left trigger to enable walking, HMD control, and available limb
+   targets together. Releasing it returns the arms/body targets and neck to HOME;
+   it is not a toggle. The native PICO path is always `pico_teleop`, so there is
+   no `X` mode-selection step.
+3. The left stick commands forward/back/left/right velocity, and the right-stick
    horizontal axis commands yaw.
-5. HMD orientation controls the simulated camera neck. While the right trigger
+4. HMD orientation controls the simulated camera neck. While the right trigger
    is held, neck yaw faces the simulated body's front.
-6. The normal view is PICO passthrough. Hold the left grip (middle-finger button)
+5. The normal view is PICO passthrough. Hold the left grip (middle-finger button)
    to show the simulator's stereo camera; release it to return to passthrough.
-7. Release left `X` to select the audited legacy walking actor. Preview faults
-   also enter this path automatically for the current trigger hold.
 
-Every mode selector uses hold semantics. After stale input, tracker loss,
-calibration failure, or a learned-policy fault, release the left trigger before
-trying to arm again.
+Every operator control uses hold semantics; there are no toggles. After stale
+input, tracker loss, calibration failure, or a learned-policy fault, release the
+left trigger before trying to arm again. In controller-only mode the controller
+origin and fixed `0.18` scale drive only the arms; body and foot tracking are
+ignored and feet remain exact zero.
 
 The simulator camera uses the existing exact synthetic pinhole contract: two
 640×480 eyes in left-first SBS, per-eye tangent bounds, and a 59.016 mm baseline.
@@ -86,8 +177,12 @@ uv run --locked --with pytest python -m pytest -q \
   tests/test_live_pico_teleop_sim.py \
   tests/test_simulation_camera.py \
   tests/test_teleop_v12_actor.py \
-  tests/test_teleop_v12_bootstrap.py
+  tests/test_teleop_v12_bootstrap.py \
+  tests/test_teleop_v12_preview.py \
+  tests/test_teleop_v12_preview_precheck.py \
+  tests/test_teleop_v12_preview_receipts.py
 bash -n scripts/run_pico_v12_preview.sh
+bash -n scripts/run_pico_v12_controller_preview.sh
 ```
 
 These checks do not prove that physical trackers are connected or that a preview

@@ -26,6 +26,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
     transplant_legacy_actor_state_to_teleop83,
@@ -130,9 +131,7 @@ def inspect_legacy_velocity_checkpoint(
         raise ValueError("Expected legacy checkpoint SHA-256 must be lowercase hex")
     digest = sha256_file(path)
     if digest != expected_sha256 or digest != LEGACY_VELOCITY_CHECKPOINT_SHA256:
-        raise ValueError(
-            f"Legacy velocity checkpoint SHA-256 mismatch: {digest}"
-        )
+        raise ValueError(f"Legacy velocity checkpoint SHA-256 mismatch: {digest}")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or payload.get("iter") != (
         LEGACY_VELOCITY_CHECKPOINT_ITERATION
@@ -293,9 +292,7 @@ def bootstrap_legacy_actor(
     probe = validate_legacy_teleop_probe_receipt(
         probe_receipt_path, source, probe_receipt_sha256
     )
-    mapped = transplant_legacy_actor_state_to_teleop83(
-        source_state, actor.state_dict()
-    )
+    mapped = transplant_legacy_actor_state_to_teleop83(source_state, actor.state_dict())
     actor.load_state_dict(mapped, strict=True)
     actor.bind_frozen_legacy_reference()
     return TeleopV12BootstrapProvenance(
@@ -321,12 +318,13 @@ def serialize_bootstrap_provenance(
     return asdict(provenance)
 
 
-def validate_bootstrap_provenance(
+def _validate_bootstrap_provenance(
     value: object,
     *,
     verify_files: bool = True,
+    expected_mapping_version: str,
 ) -> TeleopV12BootstrapProvenance:
-    """Validate serialized checkpoint provenance and optionally rehash inputs."""
+    """Validate one explicitly selected bootstrap mapping revision."""
 
     if not isinstance(value, dict):
         raise TypeError("Contract-v12 checkpoint lacks bootstrap provenance")
@@ -356,7 +354,7 @@ def validate_bootstrap_provenance(
         raise ValueError("Contract-v12 bootstrap provenance is malformed") from exc
     expected_static = {
         "schema_version": TELEOP_V12_BOOTSTRAP_PROVENANCE_SCHEMA_VERSION,
-        "mapping_version": TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
+        "mapping_version": expected_mapping_version,
         "source_to_target_columns": LEGACY_TO_TELEOP_OBSERVATION_INDEX,
         "new_trainable_columns": TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
         "target_actor_topology": TELEOP_V12_ACTOR_TOPOLOGY,
@@ -394,6 +392,36 @@ def validate_bootstrap_provenance(
         if verified_source != source or verified_probe != probe:
             raise ValueError("Contract-v12 bootstrap source files changed")
     return result
+
+
+def validate_bootstrap_provenance(
+    value: object,
+    *,
+    verify_files: bool = True,
+) -> TeleopV12BootstrapProvenance:
+    """Validate current target-scaled provenance and optionally rehash inputs."""
+
+    return _validate_bootstrap_provenance(
+        value,
+        verify_files=verify_files,
+        expected_mapping_version=TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
+    )
+
+
+def validate_identity_normalizer_v1_bootstrap_provenance(
+    value: object,
+    *,
+    verify_files: bool = True,
+) -> TeleopV12BootstrapProvenance:
+    """Authenticate the superseded identity-normalizer mapping for migration."""
+
+    return _validate_bootstrap_provenance(
+        value,
+        verify_files=verify_files,
+        expected_mapping_version=(
+            TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION
+        ),
+    )
 
 
 def assert_actor_frozen_against_source(

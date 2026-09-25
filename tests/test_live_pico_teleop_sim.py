@@ -8,24 +8,40 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import io
+import json
 import math
 import threading
 import unittest
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from tensordict import TensorDict
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_ARM_HOME_JOINT_RAD,
+    MICROBAN_ARM_JOINT_UPPER_RAD,
+    microban_hand_offsets_from_arm_joints,
+)
 from mjlab_microban.scripts.live_pico_teleop_sim import (
     AUDITED_LEGACY_WALK_SHA256,
     FOOT_INACTIVE_Z_MAX_M,
     FOOT_UPPER_M,
     HAND_UPPER_M,
+    UNACCEPTED_SIMULATION_WARNING,
+    ControllerOnlyPreviewMapper,
     LivePicoSimulationPolicy,
     SimulationCommand,
     WebXrSimulationMapper,
     WebXrSimulationSource,
+    _configure_live_environment,
+    _construct_checkpoint_consumer_runner,
     _default_native_config,
     _default_teleop_root,
     _default_walk_checkpoint,
@@ -38,11 +54,18 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     _runtime_task,
     _selected_checkpoint,
     _sha256,
+    _validate_controller_preview_live_authority,
+    _validate_preview_live_authority,
+    _validate_unaccepted_simulation_preview,
     _walk_actor_observation,
     build_parser,
     command_for_simulation,
+    neutral_simulation_command,
     scale_normalized_velocity,
     solve_hmd_neck_target,
+)
+from mjlab_microban.scripts.live_pico_teleop_sim import (
+    run as run_live_simulation,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -50,6 +73,16 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    ResetFixedHandTargetCommand,
+)
+from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    TELEOP_V12_PREVIEW_FULLBODY_STRICT_QUALITY,
+    TELEOP_V12_PREVIEW_FULLBODY_VISUAL_QUALITY,
+    TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY,
+    TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY,
+    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+    staged_preview_info,
 )
 
 
@@ -102,6 +135,162 @@ class SimulationCommandTests(unittest.TestCase):
         self.assertEqual(command.foot_target[0], FOOT_UPPER_M)
         self.assertEqual(command.hand_target[0], HAND_UPPER_M)
         self.assertEqual(command.hand_active, (True, True))
+
+    def test_controller_arm_joint_target_is_independently_bounded(self) -> None:
+        value = _valid_command()
+        value["foot_target"] = {
+            "left": (0.0, 0.0, 0.0),
+            "right": (0.0, 0.0, 0.0),
+        }
+        value["controller_arm_joint_target"] = {
+            side: list(MICROBAN_ARM_HOME_JOINT_RAD[index])
+            for index, side in enumerate(("left", "right"))
+        }
+        command = command_for_simulation(value)
+        self.assertTrue(command.enabled)
+        self.assertEqual(command.arm_joint_target, MICROBAN_ARM_HOME_JOINT_RAD)
+
+        value["controller_arm_joint_target"]["left"][0] = (
+            MICROBAN_ARM_JOINT_UPPER_RAD[0][0] + 1.0e-6
+        )
+        rejected = command_for_simulation(value)
+        self.assertFalse(rejected.enabled)
+        self.assertEqual(rejected.fault, "controller arm joints exceed contract")
+
+
+class ControllerOnlyPreviewTests(unittest.TestCase):
+    def test_mapper_forces_controller_source_and_exact_zero_feet(self) -> None:
+        class Mapper:
+            def map_sample(self, frame):
+                self.frame = frame
+                joints = {
+                    side: list(MICROBAN_ARM_HOME_JOINT_RAD[index])
+                    for index, side in enumerate(("left", "right"))
+                }
+                hands = microban_hand_offsets_from_arm_joints(
+                    torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
+                ).tolist()
+                return {
+                    "locomotion_policy": "pico_teleop",
+                    "body_target_calibrated": True,
+                    "body_target_fresh": True,
+                    "hand_target": {
+                        "left": hands[0],
+                        "right": hands[1],
+                    },
+                    "foot_target": {
+                        "left": [0.01, 0.0, 0.02],
+                        "right": [0.0, 0.0, 0.0],
+                    },
+                    "twist2_body_target_preview": {
+                        "target_source": "controllers",
+                        "controller_only_hand_fallback": True,
+                        "commanded_ik_q_rad": joints,
+                    },
+                }
+
+            def reset(self):
+                self.reset_called = True
+
+            @staticmethod
+            def neutral():
+                return {"locomotion_policy": "pico_teleop"}
+
+        inner = Mapper()
+        mapper = ControllerOnlyPreviewMapper(inner)
+        result = mapper.map_sample(
+            SimpleNamespace(body=object(), body_jumps=("jump",))
+        )
+        self.assertIsNone(inner.frame.body)
+        self.assertEqual(inner.frame.body_jumps, ())
+        self.assertEqual(
+            result["foot_target"],
+            {"left": [0.0, 0.0, 0.0], "right": [0.0, 0.0, 0.0]},
+        )
+        self.assertEqual(
+            result["controller_arm_joint_target"],
+            result["twist2_body_target_preview"]["commanded_ik_q_rad"],
+        )
+
+    def test_direct_overlay_replaces_only_six_arm_actions_and_homes_on_release(
+        self,
+    ) -> None:
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.zero_action = torch.zeros((1, 18))
+        policy.main_action_scale = torch.ones((1, 18))
+        policy.main_action_offset = torch.zeros((1, 18))
+        policy.arm_action_indices = {
+            "left": torch.tensor([1, 4, 7]),
+            "right": torch.tensor([2, 5, 8]),
+        }
+        policy.arm_joint_ids = {
+            "left": torch.tensor([3, 6, 9]),
+            "right": torch.tensor([4, 7, 10]),
+        }
+        limits = torch.empty((1, 21, 2))
+        limits[..., 0] = -2.0
+        limits[..., 1] = 2.0
+        policy.robot = SimpleNamespace(
+            data=SimpleNamespace(soft_joint_pos_limits=limits)
+        )
+        base = torch.arange(18, dtype=torch.float32).unsqueeze(0) / 100.0
+        desired = (
+            MICROBAN_ARM_JOINT_UPPER_RAD[0],
+            MICROBAN_ARM_JOINT_UPPER_RAD[1],
+        )
+        active = SimulationCommand(
+            enabled=True,
+            twist=(0.1, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(True, True),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="pico_teleop",
+            arm_joint_target=desired,
+        )
+        overlaid = policy._apply_controller_arm_overlay(base, active)
+        arm_columns = {1, 2, 4, 5, 7, 8}
+        for column in range(18):
+            if column not in arm_columns:
+                self.assertEqual(overlaid[0, column], base[0, column])
+        self.assertTrue(
+            torch.allclose(overlaid[0, policy.arm_action_indices["left"]], torch.tensor(desired[0]))
+        )
+        self.assertTrue(
+            torch.allclose(overlaid[0, policy.arm_action_indices["right"]], torch.tensor(desired[1]))
+        )
+
+        released = policy._apply_controller_arm_overlay(
+            base, neutral_simulation_command()
+        )
+        self.assertTrue(
+            torch.allclose(
+                released[0, policy.arm_action_indices["left"]],
+                torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD[0]),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                released[0, policy.arm_action_indices["right"]],
+                torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD[1]),
+            )
+        )
+
+    def test_deadman_release_neutralizes_hmd_and_every_body_target(self) -> None:
+        value = _valid_command()
+        value["active_moves"] = []
+        value["head_yaw_front"] = True
+
+        command = command_for_simulation(value)
+
+        self.assertFalse(command.enabled)
+        self.assertEqual(command.twist, (0.0, 0.0, 0.0))
+        self.assertEqual(command.head_orientation, (0.0, 0.0, 0.0))
+        self.assertFalse(command.head_yaw_front)
+        self.assertEqual(command.foot_target, ((0.0, 0.0, 0.0),) * 2)
+        self.assertEqual(command.hand_target, ((0.0, 0.0, 0.0),) * 2)
+        self.assertEqual(command.hand_active, (False, False))
 
     def test_walk_policy_cannot_silently_run_hybrid_checkpoint(self) -> None:
         value = _valid_command()
@@ -321,7 +510,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(command.locomotion_policy, "walk")
         self.assertEqual(command.twist, (0.7, -0.15, 0.75))
 
-    def test_legacy_only_ignores_x_before_native_mapper_body_gate(self) -> None:
+    def test_left_trigger_alone_enables_after_native_mapper_rearm(self) -> None:
         _source_class, mapper_class = _load_native_classes(_default_teleop_root())
         mapper = mapper_class()
 
@@ -333,14 +522,25 @@ class WatchdogTests(unittest.TestCase):
             return SimpleNamespace(
                 sampled_at_ns=sampled_at_ns,
                 head=SimpleNamespace(
-                    pose=SimpleNamespace(orientation=head_orientation)
+                    pose=SimpleNamespace(
+                        position=(0.0, 0.0, 1.6),
+                        orientation=head_orientation,
+                    )
                 ),
                 left_controller=SimpleNamespace(
+                    pose=SimpleNamespace(
+                        position=(0.35, 0.25, 1.25),
+                        orientation=(0.0, 0.0, 0.0, 1.0),
+                    ),
                     axis=(0.0, 1.0),
                     trigger=trigger,
-                    primary_button=True,
+                    primary_button=False,
                 ),
                 right_controller=SimpleNamespace(
+                    pose=SimpleNamespace(
+                        position=(0.35, -0.25, 1.25),
+                        orientation=(0.0, 0.0, 0.0, 1.0),
+                    ),
                     axis=(0.5, 0.0),
                     trigger=0.0,
                 ),
@@ -374,7 +574,10 @@ class WatchdogTests(unittest.TestCase):
         self.assertGreater(command.twist[0], 0.0)
         self.assertLess(command.twist[2], 0.0)
         self.assertTrue(any(abs(value) > 0.0 for value in command.head_orientation))
-        self.assertEqual(mapper.locomotion_policy, "walk")
+        # The native mapper now has one trigger-only hybrid mode; legacy-only
+        # simulation adapts its output to the audited walk actor without
+        # mutating the mapper's policy state.
+        self.assertEqual(mapper.locomotion_policy, "pico_teleop")
 
 
 class ObservationPatchTests(unittest.TestCase):
@@ -542,7 +745,7 @@ class DualActorDispatchTests(unittest.TestCase):
         self.assertTrue(torch.equal(action, torch.full((1, 18), 5.0)))
         self.assertTrue(torch.equal(policy.walk_last_action, torch.ones((1, 18))))
 
-    def test_trigger_release_returns_shared_teleop_initial_pose(self) -> None:
+    def test_trigger_release_uses_zero_twist_audited_standing_actor(self) -> None:
         command = SimulationCommand(
             enabled=False,
             twist=(0.0, 0.0, 0.0),
@@ -554,14 +757,24 @@ class DualActorDispatchTests(unittest.TestCase):
             locomotion_policy="walk",
         )
         policy = self._policy(command)
-        policy.walk_actor = lambda _observation: (_ for _ in ()).throw(
-            AssertionError("walk actor must not run while trigger is released")
-        )
-        policy.walk_last_action.fill_(9.0)
+        seen: list[torch.Tensor] = []
+
+        def walk_actor(observation: TensorDict) -> torch.Tensor:
+            seen.append(observation["actor"].clone())
+            return torch.full((1, 18), 0.25)
+
+        policy.walk_actor = walk_actor
         observations = TensorDict({"actor": torch.zeros((1, 83))}, batch_size=(1,))
         action = policy(observations)
-        self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
-        self.assertTrue(torch.equal(policy.walk_last_action, torch.zeros((1, 18))))
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(torch.equal(seen[0][:, -3:], torch.zeros((1, 3))))
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 3.5)))
+        self.assertTrue(torch.equal(policy.walk_last_action, torch.full((1, 18), 0.25)))
+
+        policy(observations)
+        self.assertTrue(
+            torch.equal(seen[1][:, 42:60], torch.full((1, 18), 0.25))
+        )
 
     def test_native_legacy_dispatch_returns_unmodified_actor_action(self) -> None:
         command = SimulationCommand(
@@ -598,10 +811,55 @@ class DualActorDispatchTests(unittest.TestCase):
         # must execute the actor's original raw action unchanged.
         self.assertTrue(torch.equal(action, torch.full((1, 18), 0.25)))
 
-    def test_episode_reset_transition_disarms_before_held_command_is_used(self) -> None:
+    def test_episode_reset_transition_preserves_held_trigger_command(self) -> None:
         held = SimulationCommand(
             enabled=True,
             twist=(0.2, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.1, -0.2, 0.3),
+            head_yaw_front=False,
+            locomotion_policy="pico_teleop",
+        )
+        policy = self._policy(held)
+        policy.native_legacy_action_semantics = False
+        policy.env.episode_length_buf = torch.tensor([0])
+        policy.env.reset_buf = torch.tensor([False])
+        policy._previous_episode_length = torch.tensor([17])
+        policy._pending_authority_token = object()
+        policy._pending_legacy_command = held
+        policy._legacy_fallback_latched = False
+        policy._legacy_fallback_reason = None
+        policy.mapper = SimpleNamespace(reset=lambda: self.fail("mapper was reset"))
+        policy.legacy_fallback_mapper = SimpleNamespace(
+            reset=lambda: self.fail("fallback mapper was reset")
+        )
+        policy.hmd_joint_ids = torch.tensor([0, 1, 2])
+        policy.robot = SimpleNamespace(
+            data=SimpleNamespace(joint_pos=torch.tensor([[0.1, 0.2, 0.3]]))
+        )
+        policy.hmd_current_target = torch.full((1, 3), 9.0)
+        policy.walk_last_action.fill_(0.75)
+        injected: list[SimulationCommand] = []
+        policy._inject_command = injected.append
+        policy.walk_actor = lambda _observation: torch.full((1, 18), 0.25)
+        policy.actor = lambda _observation: torch.full((1, 18), 0.625)
+        observations = TensorDict({"actor": torch.zeros((1, 83))}, batch_size=(1,))
+        action = policy(observations)
+
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 0.625)))
+        self.assertEqual(injected, [held])
+        self.assertEqual(policy._previous_episode_length.tolist(), [0])
+        self.assertTrue(
+            torch.equal(policy.hmd_current_target, torch.tensor([[0.1, 0.2, 0.3]]))
+        )
+        self.assertTrue(torch.equal(policy.walk_last_action, torch.zeros((1, 18))))
+
+    def test_trigger_release_remains_neutral_after_episode_reset(self) -> None:
+        released = SimulationCommand(
+            enabled=False,
+            twist=(0.0, 0.0, 0.0),
             foot_target=((0.0, 0.0, 0.0),) * 2,
             hand_target=((0.0, 0.0, 0.0),) * 2,
             hand_active=(False, False),
@@ -609,37 +867,29 @@ class DualActorDispatchTests(unittest.TestCase):
             head_yaw_front=False,
             locomotion_policy="walk",
         )
-        policy = self._policy(held)
+        policy = self._policy(released)
         policy.native_legacy_action_semantics = True
         policy.env.episode_length_buf = torch.tensor([0])
-        policy.env.reset_buf = torch.tensor([False])
-        policy._previous_episode_length = torch.tensor([17])
-        reset_count = 0
-
-        def disarm() -> None:
-            nonlocal reset_count
-            reset_count += 1
-            policy._read_command = lambda: SimulationCommand(
-                enabled=False,
-                twist=(0.0, 0.0, 0.0),
-                foot_target=((0.0, 0.0, 0.0),) * 2,
-                hand_target=((0.0, 0.0, 0.0),) * 2,
-                hand_active=(False, False),
-                head_orientation=(0.0, 0.0, 0.0),
-                head_yaw_front=False,
-                locomotion_policy="walk",
-                fault="reset requires trigger release",
-            )
-            policy._previous_episode_length = torch.tensor([0])
-
-        policy.reset = disarm
-        policy.walk_actor = lambda _observation: (_ for _ in ()).throw(
-            AssertionError("held trigger must not run actor immediately after reset")
+        policy.env.reset_buf = torch.tensor([True])
+        policy._previous_episode_length = torch.tensor([12])
+        policy._pending_authority_token = None
+        policy._pending_legacy_command = None
+        policy._legacy_fallback_latched = False
+        policy._legacy_fallback_reason = None
+        policy.mapper = SimpleNamespace(reset=lambda: self.fail("mapper was reset"))
+        policy.legacy_fallback_mapper = None
+        policy.hmd_joint_ids = torch.tensor([0, 1, 2])
+        policy.robot = SimpleNamespace(
+            data=SimpleNamespace(joint_pos=torch.zeros((1, 3)))
         )
+        policy.hmd_current_target = torch.ones((1, 3))
+        policy.walk_actor = lambda _observation: torch.full((1, 18), 0.125)
         observations = TensorDict({"actor": torch.zeros((1, 63))}, batch_size=(1,))
+
         action = policy(observations)
-        self.assertEqual(reset_count, 1)
-        self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
+
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 0.125)))
+        self.assertTrue(torch.equal(policy.hmd_current_target, torch.zeros((1, 3))))
 
     def test_camera_failure_degrades_video_without_disarming_control(self) -> None:
         command = SimulationCommand(
@@ -697,9 +947,7 @@ class DualActorDispatchTests(unittest.TestCase):
         policy._pending_authority_token = object()
         policy._inject_command = injected.append
         policy._write_hmd_target = lambda _command: None
-        policy.walk_actor = lambda _observation: (_ for _ in ()).throw(
-            AssertionError("actor must not run after authority loss")
-        )
+        policy.walk_actor = lambda _observation: torch.full((1, 18), 0.25)
         observations = TensorDict({"actor": torch.zeros((1, 83))}, batch_size=(1,))
         action = policy(observations)
 
@@ -707,10 +955,33 @@ class DualActorDispatchTests(unittest.TestCase):
         self.assertEqual(len(injected), 1)
         self.assertFalse(injected[0].enabled)
         self.assertIn("authority changed", injected[0].fault or "")
-        self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 3.5)))
 
 
 class CliSafetyTests(unittest.TestCase):
+    def test_live_environment_auto_resets_falls_and_keeps_fall_termination(self) -> None:
+        reset_base = SimpleNamespace(
+            mode="reset",
+            params={"pose_range": {"x": (-1.0, 1.0)}, "velocity_range": {"x": (-1.0, 1.0)}},
+        )
+        cfg = SimpleNamespace(
+            scene=SimpleNamespace(num_envs=99),
+            auto_reset=False,
+            observations={"actor": SimpleNamespace(enable_corruption=True)},
+            curriculum={"difficulty": object()},
+            events={
+                "reset_base": reset_base,
+                "push_robot": SimpleNamespace(mode="interval"),
+            },
+            terminations={"time_out": object(), "fell_over": object()},
+        )
+        _configure_live_environment(cfg)
+        self.assertTrue(cfg.auto_reset)
+        self.assertIn("fell_over", cfg.terminations)
+        self.assertNotIn("time_out", cfg.terminations)
+        self.assertEqual(set(cfg.events), {"reset_base"})
+        self.assertEqual(cfg.scene.num_envs, 1)
+
     def test_cli_has_no_robot_destination_or_send_switch(self) -> None:
         parser = build_parser()
         destinations = {action.dest for action in parser._actions}
@@ -738,10 +1009,22 @@ class CliSafetyTests(unittest.TestCase):
 
     def test_v12_preview_requires_dedicated_cli_option_and_task(self) -> None:
         checkpoint = Path("preview.pt")
+        receipt = Path("acceptance.json")
         args = build_parser().parse_args(
-            ["--v12-preview-checkpoint", str(checkpoint), "--input", "pico-app"]
+            [
+                "--v12-preview-checkpoint",
+                str(checkpoint),
+                "--v12-preview-acceptance-receipt",
+                str(receipt),
+                "--v12-preview-acceptance-receipt-sha256",
+                "a" * 64,
+                "--input",
+                "pico-app",
+            ]
         )
         self.assertEqual(_selected_checkpoint(args), checkpoint)
+        self.assertEqual(args.v12_preview_acceptance_receipt, receipt)
+        self.assertEqual(args.v12_preview_acceptance_receipt_sha256, "a" * 64)
         self.assertEqual(
             _runtime_task(args.checkpoint, args.v12_preview_checkpoint),
             "Mjlab-Teleop-V12-Preview-Microban",
@@ -756,6 +1039,498 @@ class CliSafetyTests(unittest.TestCase):
                     str(checkpoint),
                 ]
             )
+
+    def test_controller_preview_has_distinct_checkpoint_and_receipt_options(
+        self,
+    ) -> None:
+        checkpoint = Path("phase1.pt")
+        receipt = Path("phase1_visual.json")
+        args = build_parser().parse_args(
+            [
+                "--v12-controller-preview-checkpoint",
+                str(checkpoint),
+                "--v12-controller-preview-acceptance-receipt",
+                str(receipt),
+                "--v12-controller-preview-acceptance-receipt-sha256",
+                "a" * 64,
+                "--input",
+                "pico-app",
+            ]
+        )
+        self.assertEqual(_selected_checkpoint(args), checkpoint)
+        self.assertEqual(
+            args.v12_controller_preview_acceptance_receipt, receipt
+        )
+        self.assertEqual(
+            _runtime_task(
+                args.checkpoint,
+                args.v12_preview_checkpoint,
+                args.unaccepted_sim_preview_checkpoint,
+                args.v12_controller_preview_checkpoint,
+            ),
+            "Mjlab-Teleop-V12-Preview-Microban",
+        )
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "--v12-controller-preview-checkpoint",
+                    str(checkpoint),
+                    "--v12-preview-checkpoint",
+                    "fullbody.pt",
+                ]
+            )
+
+    def test_unaccepted_preview_is_a_separate_explicit_hash_bound_cli(self) -> None:
+        checkpoint = Path("unaccepted.pt")
+        option = "--unaccepted-simulation-observation-only-v12-preview-checkpoint"
+        sha_option = "--unaccepted-simulation-observation-only-v12-preview-sha256"
+        args = build_parser().parse_args(
+            [option, str(checkpoint), sha_option, "d" * 64, "--input", "pico-app"]
+        )
+        self.assertEqual(_selected_checkpoint(args), checkpoint)
+        self.assertEqual(args.unaccepted_sim_preview_sha256, "d" * 64)
+        self.assertEqual(
+            _runtime_task(
+                args.checkpoint,
+                args.v12_preview_checkpoint,
+                args.unaccepted_sim_preview_checkpoint,
+            ),
+            "Mjlab-Teleop-V12-Preview-Microban",
+        )
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "--v12-preview-checkpoint",
+                    "accepted.pt",
+                    option,
+                    str(checkpoint),
+                ]
+            )
+
+    def test_only_explicit_unaccepted_mode_selects_legacy_evidence_loader(
+        self,
+    ) -> None:
+        module = "mjlab_microban.scripts.live_pico_teleop_sim"
+        with (
+            patch(f"{module}.make_teleop_v12_preview_consumer") as accepted,
+            patch(
+                f"{module}.make_teleop_v12_unaccepted_simulation_preview_consumer"
+            ) as unaccepted,
+        ):
+            accepted.return_value = "accepted"
+            unaccepted.return_value = "unaccepted"
+            self.assertEqual(
+                _construct_checkpoint_consumer_runner(
+                    "env",
+                    "cfg",
+                    "cuda:0",
+                    runtime_task="Mjlab-Teleop-V12-Preview-Microban",
+                ),
+                "accepted",
+            )
+            self.assertEqual(
+                _construct_checkpoint_consumer_runner(
+                    "env",
+                    "cfg",
+                    "cuda:0",
+                    runtime_task="Mjlab-Teleop-V12-Preview-Microban",
+                    unaccepted_preview_mode=True,
+                ),
+                "unaccepted",
+            )
+            accepted.assert_called_once_with("env", "cfg", "cuda:0")
+            unaccepted.assert_called_once_with("env", "cfg", "cuda:0")
+
+        with self.assertRaisesRegex(ValueError, "dedicated preview task"):
+            _construct_checkpoint_consumer_runner(
+                "env",
+                "cfg",
+                "cuda:0",
+                runtime_task="Mjlab-Teleop-Microban",
+                unaccepted_preview_mode=True,
+            )
+
+    def test_unaccepted_preview_requires_exact_hash_marker_and_clock(self) -> None:
+        with TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "model_10100.pt"
+            marker = staged_preview_info(
+                phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+                phase_source_checkpoint_sha256="b" * 64,
+                phase1_acceptance_receipt_sha256="c" * 64,
+                phase1_quality_class=TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY,
+            )
+            torch.save(
+                {
+                    "iter": 10_100,
+                    "infos": {
+                        "preview_non_deployable": True,
+                        "teleop_v12_preview": marker,
+                        "env_state": {"common_step_counter": 10_101 * 24},
+                    },
+                },
+                checkpoint,
+            )
+            digest = _sha256(checkpoint)
+            authority = _validate_unaccepted_simulation_preview(
+                checkpoint=checkpoint,
+                expected_checkpoint_sha256=digest,
+            )
+            self.assertEqual(authority.checkpoint_sha256, digest)
+            self.assertEqual(authority.iteration, 10_100)
+            checkpoint.write_bytes(b"replacement path bytes")
+            immutable_payload = torch.load(
+                BytesIO(authority.checkpoint_bytes),
+                map_location="cpu",
+                weights_only=False,
+            )
+            self.assertEqual(hashlib.sha256(authority.checkpoint_bytes).hexdigest(), digest)
+            self.assertEqual(immutable_payload["iter"], 10_100)
+
+            torch.save(
+                {
+                    "iter": 10_100,
+                    "infos": {
+                        "preview_non_deployable": True,
+                        "teleop_v12_preview": marker,
+                        "env_state": {"common_step_counter": 10_101 * 24},
+                    },
+                },
+                checkpoint,
+            )
+
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                _validate_unaccepted_simulation_preview(
+                    checkpoint=checkpoint,
+                    expected_checkpoint_sha256="0" * 64,
+                )
+            with self.assertRaisesRegex(ValueError, "exact checkpoint SHA-256"):
+                _validate_unaccepted_simulation_preview(
+                    checkpoint=checkpoint,
+                    expected_checkpoint_sha256=None,
+                )
+
+    def test_unaccepted_preview_rejects_acceptance_receipt_options(self) -> None:
+        option = "--unaccepted-simulation-observation-only-v12-preview-checkpoint"
+        sha_option = "--unaccepted-simulation-observation-only-v12-preview-sha256"
+        args = build_parser().parse_args(
+            [
+                option,
+                "unaccepted.pt",
+                sha_option,
+                "d" * 64,
+                "--v12-preview-acceptance-receipt",
+                "must-not-be-used.json",
+                "--v12-preview-acceptance-receipt-sha256",
+                "e" * 64,
+            ]
+        )
+        with (
+            patch(
+                "mjlab_microban.scripts.live_pico_teleop_sim."
+                "configure_torch_backends"
+            ),
+            self.assertRaisesRegex(ValueError, "accepted.*path"),
+        ):
+            run_live_simulation(args)
+
+    def test_unaccepted_preview_status_is_visually_loud(self) -> None:
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.clock_ns = lambda: 2_000_000_000
+        policy.status_period_ns = 1
+        policy._last_status_ns = 0
+        policy._camera_fault = None
+        policy.unaccepted_observation_only = True
+        command = SimulationCommand(
+            enabled=False,
+            twist=(0.0, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="walk",
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            policy._print_status(command)
+        self.assertIn(UNACCEPTED_SIMULATION_WARNING, output.getvalue())
+        self.assertIn("SIMULATION ONLY", output.getvalue())
+
+    def test_status_distinguishes_hand_input_from_measured_arm_response(self) -> None:
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.clock_ns = lambda: 2_000_000_000
+        policy.status_period_ns = 1
+        policy._last_status_ns = 0
+        policy._camera_fault = None
+        policy.unaccepted_observation_only = False
+        policy.robot = SimpleNamespace(
+            data=SimpleNamespace(
+                joint_pos=torch.deg2rad(
+                    torch.tensor([[10.0, -20.0, 30.0, -5.0, 0.0, 5.0]])
+                ),
+                default_joint_pos=torch.zeros((1, 6)),
+            )
+        )
+        policy.arm_joint_ids = {
+            "left": torch.tensor([0, 1, 2]),
+            "right": torch.tensor([3, 4, 5]),
+        }
+        command = SimulationCommand(
+            enabled=True,
+            twist=(0.0, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.12345, -0.2, 0.0), (-0.01111, 0.02222, 0.03333)),
+            hand_active=(True, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="pico_teleop",
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            policy._print_status(command)
+        status = output.getvalue()
+        self.assertIn("hand_cmd_m=L(0.123, -0.2, 0.0)/R(-0.011, 0.022, 0.033)", status)
+        self.assertIn("hand_active=LTrue/RFalse", status)
+        self.assertIn(
+            "arm_delta_deg=L(10.0, -20.0, 30.0)/R(-5.0, 0.0, 5.0)",
+            status,
+        )
+        self.assertIn("hand_actual_m=unavailable", status)
+        self.assertIn("hand_error_m=unavailable", status)
+
+    def test_status_reports_cartesian_hand_tracking_not_only_joint_motion(self) -> None:
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.clock_ns = lambda: 2_000_000_000
+        policy.status_period_ns = 1
+        policy._last_status_ns = 0
+        policy._camera_fault = None
+        policy.unaccepted_observation_only = False
+        policy._measured_arm_joint_deviation_deg = lambda: None
+
+        hand = object.__new__(ResetFixedHandTargetCommand)
+        hand._default_hand_pos_b = torch.tensor(
+            [[[0.1, 0.2, 0.3], [-0.1, -0.2, -0.3]]]
+        )
+        hand.current_hand_pos_b = lambda: torch.tensor(
+            [[[0.13, 0.18, 0.31], [-0.11, -0.16, -0.27]]]
+        )
+        policy.env = SimpleNamespace(
+            command_manager=SimpleNamespace(get_term=lambda name: hand)
+        )
+        command = SimulationCommand(
+            enabled=True,
+            twist=(0.0, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.02, -0.01, 0.0), (-0.02, 0.05, 0.01)),
+            hand_active=(True, True),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="pico_teleop",
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            policy._print_status(command)
+
+        status = output.getvalue()
+        self.assertIn(
+            "hand_actual_m=L(0.03, -0.02, 0.01)/R(-0.01, 0.04, 0.03)",
+            status,
+        )
+        self.assertIn("hand_error_m=L0.017/R0.024", status)
+
+    def test_preview_live_authority_binds_receipt_checkpoint_marker_and_clock(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model_10100.pt"
+            marker = staged_preview_info(
+                phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+                phase_source_checkpoint_sha256="b" * 64,
+                phase1_acceptance_receipt_sha256="c" * 64,
+                phase1_quality_class=TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY,
+            )
+            torch.save(
+                {
+                    "iter": 10_100,
+                    "infos": {
+                        "preview_non_deployable": True,
+                        "teleop_v12_preview": marker,
+                        "env_state": {"common_step_counter": 10_101 * 24},
+                    },
+                },
+                checkpoint,
+            )
+            checkpoint_sha256 = _sha256(checkpoint)
+            receipt = root / "acceptance.json"
+            receipt_payload = {
+                "gate": "microban_teleop_v12_nondeployable_preview_acceptance",
+                "status": "pass",
+                "live_simulation_candidate": True,
+                "quality_class": TELEOP_V12_PREVIEW_FULLBODY_STRICT_QUALITY,
+                "checkpoint": {
+                    "sha256": checkpoint_sha256,
+                    "iteration": 10_100,
+                },
+                "teleop_v12_preview": marker,
+            }
+            receipt.write_text(json.dumps(receipt_payload))
+            receipt_sha256 = _sha256(receipt)
+            with (
+                patch(
+                    "mjlab_microban.scripts.live_pico_teleop_sim."
+                    "validate_embedded_phase1_acceptance",
+                    return_value={},
+                ),
+                patch(
+                    "mjlab_microban.scripts.live_pico_teleop_sim."
+                    "validate_preview_evaluation_report",
+                    return_value=receipt_payload,
+                ) as validate,
+            ):
+                authority = _validate_preview_live_authority(
+                    checkpoint=checkpoint,
+                    acceptance_receipt=receipt,
+                    expected_receipt_sha256=receipt_sha256,
+                )
+            self.assertEqual(authority.checkpoint_sha256, checkpoint_sha256)
+            self.assertEqual(
+                authority.quality_class,
+                TELEOP_V12_PREVIEW_FULLBODY_STRICT_QUALITY,
+            )
+            validate.assert_called_once_with(
+                receipt_payload,
+                checkpoint_sha256=checkpoint_sha256,
+                iteration=10_100,
+                marker=marker,
+            )
+
+            receipt_payload["gate"] = (
+                "microban_teleop_v12_preview_fullbody_visual_acceptance"
+            )
+            receipt_payload["quality_class"] = (
+                TELEOP_V12_PREVIEW_FULLBODY_VISUAL_QUALITY
+            )
+            receipt.write_text(json.dumps(receipt_payload))
+            visual_receipt_sha256 = _sha256(receipt)
+            with (
+                patch(
+                    "mjlab_microban.scripts.live_pico_teleop_sim."
+                    "validate_embedded_phase1_acceptance",
+                    return_value={},
+                ),
+                patch(
+                    "mjlab_microban.scripts.live_pico_teleop_sim."
+                    "validate_visual_promotion_report",
+                    return_value=receipt_payload,
+                ) as validate_visual,
+            ):
+                visual_authority = _validate_preview_live_authority(
+                    checkpoint=checkpoint,
+                    acceptance_receipt=receipt,
+                    expected_receipt_sha256=visual_receipt_sha256,
+                )
+            self.assertEqual(
+                visual_authority.quality_class,
+                TELEOP_V12_PREVIEW_FULLBODY_VISUAL_QUALITY,
+            )
+            validate_visual.assert_called_once_with(
+                receipt_payload,
+                checkpoint_sha256=checkpoint_sha256,
+                iteration=10_100,
+                marker=marker,
+            )
+
+            receipt_payload["checkpoint"]["sha256"] = "d" * 64
+            receipt.write_text(json.dumps(receipt_payload))
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                _validate_preview_live_authority(
+                    checkpoint=checkpoint,
+                    acceptance_receipt=receipt,
+                    expected_receipt_sha256=_sha256(receipt),
+                )
+
+    def test_preview_live_authority_requires_receipt_and_sha(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires its final PASS"):
+            _validate_preview_live_authority(
+                checkpoint=Path("model_10100.pt"),
+                acceptance_receipt=None,
+                expected_receipt_sha256=None,
+            )
+
+    def test_controller_preview_authority_binds_phase1_visual_receipt(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model_7100.pt"
+            marker = staged_preview_info(
+                phase=TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+                phase_source_checkpoint_sha256=(
+                    "ab0dbe0db9cadd6bb937e5eebf3d2b8f6bb3fadcc5e025aa15d28fb87e85d3a2"
+                ),
+            )
+            torch.save(
+                {
+                    "iter": 7_100,
+                    "infos": {
+                        "preview_non_deployable": True,
+                        "teleop_v12_preview": marker,
+                        "env_state": {"common_step_counter": 7_101 * 24},
+                    },
+                },
+                checkpoint,
+            )
+            checkpoint_sha256 = _sha256(checkpoint)
+            receipt_payload = {
+                "gate": "microban_teleop_v12_preview_phase1_visual_promotion",
+                "status": "pass",
+                "simulation_only": True,
+                "canonical_deployment_accepted": False,
+                "quality_class": TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY,
+                "checkpoint": {
+                    "sha256": checkpoint_sha256,
+                    "iteration": 7_100,
+                },
+                "teleop_v12_preview": marker,
+            }
+            receipt = root / "phase1_visual.json"
+            receipt.write_text(json.dumps(receipt_payload))
+            with patch(
+                "mjlab_microban.scripts.live_pico_teleop_sim."
+                "validate_visual_promotion_report",
+                return_value=receipt_payload,
+            ) as validate:
+                authority = _validate_controller_preview_live_authority(
+                    checkpoint=checkpoint,
+                    acceptance_receipt=receipt,
+                    expected_receipt_sha256=_sha256(receipt),
+                )
+            self.assertEqual(authority.checkpoint_sha256, checkpoint_sha256)
+            self.assertEqual(
+                authority.quality_class,
+                TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY,
+            )
+            validate.assert_called_once_with(
+                receipt_payload,
+                checkpoint_sha256=checkpoint_sha256,
+                iteration=7_100,
+                marker=marker,
+            )
+
+            receipt_payload["teleop_v12_preview"] = staged_preview_info(
+                phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+                phase_source_checkpoint_sha256="b" * 64,
+                phase1_acceptance_receipt_sha256="c" * 64,
+                phase1_quality_class=TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY,
+            )
+            receipt.write_text(json.dumps(receipt_payload))
+            with self.assertRaisesRegex(ValueError, "marker does not match"):
+                _validate_controller_preview_live_authority(
+                    checkpoint=checkpoint,
+                    acceptance_receipt=receipt,
+                    expected_receipt_sha256=_sha256(receipt),
+                )
 
     def test_default_legacy_checkpoint_is_the_audited_model_14999(self) -> None:
         checkpoint = _default_walk_checkpoint()

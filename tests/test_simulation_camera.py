@@ -29,6 +29,8 @@ from mjlab_microban.scripts.simulation_camera import (
     PICO_NOMINAL_FOV_DEG,
     TAN_BOUNDS,
     VERTICAL_FOV_DEG,
+    WARNING_OVERLAY_HEIGHT_PX,
+    _apply_warning_overlay,
     _FrameStore,
     _LoopbackHttpServer,
     _point_scene_camera_at_site,
@@ -113,6 +115,21 @@ class CameraGeometryTests(unittest.TestCase):
         self.assertIn(f"eye_height_px = {EYE_HEIGHT_PX}", config)
         self.assertIn("left_eye_first = true", config)
         self.assertIn("calibrated = true", config)
+
+    def test_unaccepted_warning_is_burned_into_both_eye_images(self) -> None:
+        frame = np.zeros(
+            (EYE_HEIGHT_PX, EYE_WIDTH_PX * 2, 3), dtype=np.uint8
+        )
+        rendered = _apply_warning_overlay(
+            frame, "UNACCEPTED | SIM ONLY | NO PHYSICAL OUTPUT"
+        )
+        self.assertEqual(rendered.shape, frame.shape)
+        self.assertEqual(rendered.dtype, np.uint8)
+        self.assertGreater(int(rendered[:WARNING_OVERLAY_HEIGHT_PX, :640].max()), 0)
+        self.assertGreater(int(rendered[:WARNING_OVERLAY_HEIGHT_PX, 640:].max()), 0)
+        self.assertTrue(
+            np.array_equal(rendered[WARNING_OVERLAY_HEIGHT_PX:], frame[WARNING_OVERLAY_HEIGHT_PX:])
+        )
 
 
 class LoopbackMjpegServerTests(unittest.TestCase):

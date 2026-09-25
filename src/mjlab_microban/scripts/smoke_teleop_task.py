@@ -26,6 +26,10 @@ from copy import deepcopy
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
+    microban_hand_fk_metadata,
+)
 from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotation,
     UniformVelocityCommandWithRotationCfg,
@@ -539,14 +543,20 @@ def main() -> None:
                 "Final deployment metadata did not materialize final-stage "
                 "simultaneous-foot support"
             )
-        if metadata["hand_target_lower"] != [-0.08, -0.08, -0.08] * 2:
+        expected_hand_lower = [
+            -value for value in MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M
+        ] * 2
+        expected_hand_upper = list(MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M) * 2
+        if metadata["hand_target_lower"] != expected_hand_lower:
             raise AssertionError(
                 f"Unexpected hand target lower bounds: {metadata['hand_target_lower']}"
             )
-        if metadata["hand_target_upper"] != [0.08, 0.08, 0.08] * 2:
+        if metadata["hand_target_upper"] != expected_hand_upper:
             raise AssertionError(
                 f"Unexpected hand target upper bounds: {metadata['hand_target_upper']}"
             )
+        if json.loads(metadata["hand_target_fk"]) != microban_hand_fk_metadata():
+            raise AssertionError("Hand target FK metadata drifted")
         for target_name in ("foot_target", "hand_target"):
             semantics = metadata[f"{target_name}_semantics"]
             if "episode_reset_reference" not in semantics:

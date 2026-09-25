@@ -30,12 +30,16 @@ import asyncio
 import copy
 import hashlib
 import importlib
+import json
 import math
+import os
+import stat
 import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -46,6 +50,18 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_ARM_HOME_JOINT_RAD,
+    MICROBAN_ARM_JOINT_LOWER_RAD,
+    MICROBAN_ARM_JOINT_UPPER_RAD,
+    microban_hand_offsets_from_arm_joints,
+)
+from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
+    FULLBODY_VISUAL_GATE,
+    PHASE1_VISUAL_GATE,
+    validate_embedded_phase1_acceptance,
+    validate_visual_promotion_report,
+)
 from mjlab_microban.scripts.simulation_camera import (
     EYE_ASPECT,
     EYE_HEIGHT_PX,
@@ -72,9 +88,18 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
+    TELEOP_V12_PREVIEW_INFO_KEY,
+    TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY,
+    TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY,
+    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+    validate_preview_evaluation_report,
+    validate_preview_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    make_teleop_v12_controller_only_preview_consumer,
     make_teleop_v12_preview_consumer,
+    make_teleop_v12_unaccepted_simulation_preview_consumer,
     preview_actor_load_cfg,
 )
 
@@ -87,6 +112,48 @@ AUDITED_LEGACY_WALK_SHA256 = (
 MAX_FRAME_GAP_S = 0.1
 MAX_FRAME_AGE_S = 0.1
 LEFT_TRIGGER_RELEASE_THRESHOLD = 0.45
+ARM_JOINT_NAMES: dict[str, tuple[str, str, str]] = {
+    "left": ("left_shoulder_pitch", "left_shoulder_roll", "left_elbow"),
+    "right": ("right_shoulder_pitch", "right_shoulder_roll", "right_elbow"),
+}
+
+
+@dataclass(frozen=True)
+class PreviewLiveAuthority:
+    """Hash-bound evidence authorizing one non-deployable simulation actor."""
+
+    checkpoint_sha256: str
+    acceptance_receipt: Path
+    acceptance_receipt_sha256: str
+    quality_class: str
+    checkpoint_bytes: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ControllerPreviewLiveAuthority:
+    """Phase-1 authority limited to controller hands and exact-zero feet."""
+
+    checkpoint_sha256: str
+    acceptance_receipt: Path
+    acceptance_receipt_sha256: str
+    quality_class: str
+    checkpoint_bytes: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class UnacceptedSimulationPreviewAuthority:
+    """Exact checkpoint identity for an observation-only simulated trial."""
+
+    checkpoint_sha256: str
+    iteration: int
+    checkpoint_bytes: bytes = field(repr=False)
+
+
+UNACCEPTED_SIMULATION_WARNING = (
+    "!!! UNACCEPTED CHECKPOINT | OBSERVATION-ONLY ROBOT SIMULATION | "
+    "NO PHYSICAL OUTPUT !!!"
+)
+
 
 FORWARD_MAX_M_S = 0.7
 BACKWARD_MAX_M_S = 0.5
@@ -143,8 +210,61 @@ class _FieldOverrideView:
         return getattr(self._value, name)
 
 
+class ControllerOnlyPreviewMapper:
+    """Force PICO controllers as the only limb source and keep feet inactive."""
+
+    def __init__(self, mapper: _Mapper) -> None:
+        self.mapper = mapper
+
+    def map_sample(self, frame: Any) -> dict[str, Any]:
+        # Even if Motion Trackers later connect, this phase-1 checkpoint never
+        # receives their body/foot targets.  The underlying mapper therefore
+        # stays on its controller-hand path for the entire process lifetime.
+        controller_frame = _FieldOverrideView(frame, body=None, body_jumps=())
+        mapped = self.mapper.map_sample(controller_frame)
+        if not isinstance(mapped, Mapping):
+            raise TypeError("controller-only mapper output is not a mapping")
+        result = dict(mapped)
+        if result.get("locomotion_policy") != "pico_teleop":
+            raise ValueError("controller-only preview requires pico_teleop")
+
+        preview = result.get("twist2_body_target_preview")
+        target_source = (
+            preview.get("target_source") if isinstance(preview, Mapping) else None
+        )
+        calibrated = result.get("body_target_calibrated") is True
+        hand_target = result.get("hand_target")
+        foot_target = result.get("foot_target")
+        if calibrated and target_source != "controllers":
+            raise ValueError("controller-only preview rejected a non-controller source")
+        if hand_target is not None:
+            if (
+                not isinstance(preview, Mapping)
+                or preview.get("controller_only_hand_fallback") is not True
+                or target_source != "controllers"
+            ):
+                raise ValueError("controller-only hand provenance is missing")
+            result["foot_target"] = {
+                "left": [0.0, 0.0, 0.0],
+                "right": [0.0, 0.0, 0.0],
+            }
+            arm_target = preview.get("commanded_ik_q_rad")
+            if not isinstance(arm_target, Mapping):
+                raise ValueError("controller-only commanded arm joints are missing")
+            result["controller_arm_joint_target"] = copy.deepcopy(arm_target)
+        elif foot_target is not None:
+            raise ValueError("controller-only preview rejected a foot target")
+        return result
+
+    def reset(self) -> None:
+        self.mapper.reset()
+
+    def neutral(self) -> dict[str, Any]:
+        return self.mapper.neutral()
+
+
 def _legacy_walk_input_frame(frame: Any) -> Any:
-    """Hide the hybrid selector before the native mapper's state machine runs."""
+    """Provide a legacy-compatible controller view to older mapper versions."""
 
     if isinstance(frame, Mapping):
         left = frame.get("left_controller")
@@ -417,6 +537,9 @@ class SimulationCommand:
     head_orientation: tuple[float, float, float]
     head_yaw_front: bool
     locomotion_policy: str
+    arm_joint_target: (
+        tuple[tuple[float, float, float], tuple[float, float, float]] | None
+    ) = None
     fault: str | None = None
 
 
@@ -487,6 +610,32 @@ def _bounded_pair(
         for index, item in enumerate(vector):
             number = _finite_number(item)
             if number is None or not lower[index] <= number <= upper[index]:
+                return None
+            parsed.append(number)
+        result.append((parsed[0], parsed[1], parsed[2]))
+    return result[0], result[1]
+
+
+def _bounded_arm_joint_pair(
+    value: Any,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    if not isinstance(value, Mapping) or set(value) != {"left", "right"}:
+        return None
+    result: list[tuple[float, float, float]] = []
+    for side_index, side in enumerate(("left", "right")):
+        vector = value[side]
+        if (
+            not isinstance(vector, Sequence)
+            or isinstance(vector, (str, bytes, bytearray))
+            or len(vector) != 3
+        ):
+            return None
+        parsed: list[float] = []
+        for joint_index, item in enumerate(vector):
+            number = _finite_number(item)
+            lower = MICROBAN_ARM_JOINT_LOWER_RAD[side_index][joint_index]
+            upper = MICROBAN_ARM_JOINT_UPPER_RAD[side_index][joint_index]
+            if number is None or not lower <= number <= upper:
                 return None
             parsed.append(number)
         result.append((parsed[0], parsed[1], parsed[2]))
@@ -566,7 +715,18 @@ def command_for_simulation(
 
     walking = "walk" in moves
     if not walking:
-        return base
+        # The left trigger is the deadman for every robot joint, including the
+        # HMD-driven neck.  Raw HMD tracking continues to arrive so the PICO
+        # runtime can keep rendering passthrough, but a released deadman must
+        # return the simulated robot to its neutral head pose as well as
+        # clearing limb and velocity targets.
+        return SimulationCommand(
+            **{
+                **asdict(base),
+                "head_orientation": (0.0, 0.0, 0.0),
+                "head_yaw_front": False,
+            }
+        )
 
     velocity = scale_normalized_velocity(command.get("velocity"))
     if velocity is None:
@@ -640,6 +800,16 @@ def command_for_simulation(
             hand_active_value["right"],
         )
 
+    arm_joint_target = None
+    if command.get("controller_arm_joint_target") is not None:
+        arm_joint_target = _bounded_arm_joint_pair(
+            command.get("controller_arm_joint_target")
+        )
+        if arm_joint_target is None:
+            return SimulationCommand(
+                **{**asdict(base), "fault": "controller arm joints exceed contract"}
+            )
+
     return SimulationCommand(
         enabled=True,
         twist=velocity,
@@ -649,6 +819,7 @@ def command_for_simulation(
         head_orientation=orientation,
         head_yaw_front=bool(command.get("head_yaw_front", False)),
         locomotion_policy=str(policy),
+        arm_joint_target=arm_joint_target,
     )
 
 
@@ -873,6 +1044,8 @@ class LivePicoSimulationPolicy:
         camera_publisher: StereoMjpegPublisher | None = None,
         legacy_only: bool = False,
         native_legacy_action_semantics: bool = False,
+        unaccepted_observation_only: bool = False,
+        controller_only_preview: bool = False,
         clock_ns: Any = time.monotonic_ns,
         status_period_s: float = 1.0,
     ) -> None:
@@ -889,6 +1062,8 @@ class LivePicoSimulationPolicy:
         self._pending_legacy_command: SimulationCommand | None = None
         self.legacy_only = legacy_only
         self.native_legacy_action_semantics = native_legacy_action_semantics
+        self.unaccepted_observation_only = unaccepted_observation_only
+        self.controller_only_preview = controller_only_preview
         self.clock_ns = clock_ns
         self.status_period_ns = int(status_period_s * 1.0e9)
         self._last_status_ns = 0
@@ -896,6 +1071,14 @@ class LivePicoSimulationPolicy:
         self._previous_episode_length = env.episode_length_buf.clone()
         self._last_fault: str | None = None
         self._pending_authority_token: Any = None
+        self._last_left_trigger: float | None = None
+        self._last_mapper_target_source: str | None = None
+        self._last_mapper_rejection: str | None = None
+        self._last_mapper_calibrated: bool | None = None
+        self._last_mapper_fresh: bool | None = None
+        self._last_controller_valid: bool | None = None
+        self._last_controller_fresh: bool | None = None
+        self._last_controller_error: str | None = None
 
         self.robot = env.scene["robot"]
         joint_ids, names = self.robot.find_joints(
@@ -913,12 +1096,32 @@ class LivePicoSimulationPolicy:
                 "Legacy walk/main action joint order mismatch: "
                 f"{walk_actor.joint_names} != {main_joint_names}"
             )
+        self.arm_joint_ids: dict[str, torch.Tensor] = {}
+        self.arm_action_indices: dict[str, torch.Tensor] = {}
+        for side, arm_joint_names in ARM_JOINT_NAMES.items():
+            arm_joint_ids, resolved_arm_joint_names = self.robot.find_joints(
+                arm_joint_names, preserve_order=True
+            )
+            if tuple(resolved_arm_joint_names) != arm_joint_names:
+                raise ValueError(
+                    f"Unexpected {side} arm joint order: {resolved_arm_joint_names}"
+                )
+            self.arm_joint_ids[side] = torch.tensor(
+                arm_joint_ids, dtype=torch.long, device=env.device
+            )
+            self.arm_action_indices[side] = torch.tensor(
+                [main_joint_names.index(name) for name in arm_joint_names],
+                dtype=torch.long,
+                device=env.device,
+            )
         main_scale = _action_parameter_tensor(
             main_action.scale, MICROBAN_TELEOP_ACTION_WIDTH, env.device
         )
         main_offset = _action_parameter_tensor(
             main_action.offset, MICROBAN_TELEOP_ACTION_WIDTH, env.device
         )
+        self.main_action_scale = main_scale.clone()
+        self.main_action_offset = main_offset.clone()
         walk_scale = walk_actor.scale.to(device=env.device, dtype=torch.float32)
         walk_offset = walk_actor.offset.to(device=env.device, dtype=torch.float32)
         if native_legacy_action_semantics:
@@ -1008,9 +1211,25 @@ class LivePicoSimulationPolicy:
     def reset(self) -> None:
         self._reset_mappers()
         self._previous_sampled_at_ns = None
+        self._clear_legacy_fallback_latch()
+        self._reset_policy_state_after_environment_reset()
+
+    def _reset_policy_state_after_environment_reset(self) -> None:
+        """Reset simulated episode state without disarming a held deadman.
+
+        MjLab auto-resets the simulated robot after a fall.  That reset is not
+        an operator/source/authentication fault, so it must not reset either
+        mapper: doing so puts the mapper into its release-to-rearm state and
+        turns a continuously held left trigger into a one-frame command.  Keep
+        the mapper calibration/deadman state and the sampling watchdog history,
+        while rebasing state that belongs to the newly reset simulation episode.
+
+        Explicit ``reset()`` calls and every source/authority/watchdog fault still
+        use ``_reset_mappers()`` and therefore remain fail-closed.
+        """
+
         self._pending_authority_token = None
         self._pending_legacy_command = None
-        self._clear_legacy_fallback_latch()
         self.hmd_current_target.copy_(self.robot.data.joint_pos[:, self.hmd_joint_ids])
         self.walk_last_action.zero_()
         self._previous_episode_length = self.env.episode_length_buf.clone()
@@ -1043,6 +1262,44 @@ class LivePicoSimulationPolicy:
             return neutral_simulation_command(
                 fault=f"PICO source read failed: {type(exc).__name__}: {exc}"
             )
+
+        left_controller = (
+            frame.get("left_controller")
+            if isinstance(frame, Mapping)
+            else getattr(frame, "left_controller", None)
+        )
+        raw_left_trigger = (
+            left_controller.get("trigger")
+            if isinstance(left_controller, Mapping)
+            else getattr(left_controller, "trigger", None)
+        )
+        self._last_left_trigger = _finite_number(raw_left_trigger)
+        controller_health = (
+            frame.get("controller_health")
+            if isinstance(frame, Mapping)
+            else getattr(frame, "controller_health", None)
+        )
+        if isinstance(controller_health, Mapping):
+            self._last_controller_valid = bool(
+                controller_health.get("valid", False)
+            )
+            self._last_controller_fresh = bool(
+                controller_health.get("fresh", False)
+            )
+            raw_controller_error = controller_health.get("error")
+        else:
+            self._last_controller_valid = bool(
+                getattr(controller_health, "valid", False)
+            )
+            self._last_controller_fresh = bool(
+                getattr(controller_health, "fresh", False)
+            )
+            raw_controller_error = getattr(controller_health, "error", None)
+        self._last_controller_error = (
+            str(raw_controller_error)
+            if raw_controller_error is not None
+            else None
+        )
 
         sampled_at_ns = getattr(frame, "sampled_at_ns", None)
         if (
@@ -1080,14 +1337,33 @@ class LivePicoSimulationPolicy:
                 else frame
             )
             mapped = self.mapper.map_sample(mapper_frame)
+            if isinstance(mapped, Mapping):
+                preview = mapped.get("twist2_body_target_preview")
+                if isinstance(preview, Mapping):
+                    source = preview.get("target_source")
+                    reason = preview.get("rejection_reason")
+                    self._last_mapper_target_source = (
+                        str(source) if source is not None else None
+                    )
+                    self._last_mapper_rejection = (
+                        str(reason) if reason is not None else None
+                    )
+                else:
+                    self._last_mapper_target_source = None
+                    self._last_mapper_rejection = None
+                self._last_mapper_calibrated = bool(
+                    mapped.get("body_target_calibrated", False)
+                )
+                self._last_mapper_fresh = bool(
+                    mapped.get("body_target_fresh", False)
+                )
             if getattr(self, "legacy_only", False):
                 if not isinstance(mapped, Mapping):
                     return neutral_simulation_command(
                         fault="mapper output is not a mapping"
                     )
-                # Deadline fallback: the audited velocity actor owns locomotion
-                # regardless of the optional X-button hybrid-policy selector.  The
-                # mapper still owns the trigger deadman and all of its rearm rules.
+                # Deadline fallback: the audited velocity actor owns locomotion.
+                # The mapper still owns the trigger deadman and all rearm rules.
                 mapped = {**mapped, "locomotion_policy": "walk"}
                 command = command_for_simulation(
                     mapped, legacy_walk_available=True
@@ -1110,6 +1386,39 @@ class LivePicoSimulationPolicy:
             primary_command = command_for_simulation(
                 mapped, legacy_walk_available=True
             )
+            if getattr(self, "controller_only_preview", False):
+                zero_feet = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                if primary_command.foot_target != zero_feet:
+                    raise ValueError("controller-only preview received nonzero feet")
+                if primary_command.enabled and (
+                    primary_command.locomotion_policy != "pico_teleop"
+                    or self._last_mapper_target_source != "controllers"
+                    or primary_command.arm_joint_target is None
+                ):
+                    raise ValueError(
+                        "controller-only preview lacks authenticated arm targets"
+                    )
+                if primary_command.enabled:
+                    arm_joint_target = torch.tensor(
+                        primary_command.arm_joint_target,
+                        dtype=torch.float64,
+                    )
+                    expected_hands = microban_hand_offsets_from_arm_joints(
+                        arm_joint_target
+                    )
+                    commanded_hands = torch.tensor(
+                        primary_command.hand_target,
+                        dtype=torch.float64,
+                    )
+                    if not torch.allclose(
+                        expected_hands,
+                        commanded_hands,
+                        rtol=0.0,
+                        atol=1.0e-8,
+                    ):
+                        raise ValueError(
+                            "controller arm joints disagree with exact hand FK"
+                        )
 
             explicit_release = _left_trigger_explicitly_released(
                 frame, fallback_mapped
@@ -1145,6 +1454,11 @@ class LivePicoSimulationPolicy:
             )
 
     def _inject_command(self, command: SimulationCommand) -> None:
+        if getattr(self, "controller_only_preview", False) and command.foot_target != (
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ):
+            raise RuntimeError("controller-only preview foot invariant failed")
         twist = self.env.command_manager.get_term("twist")
 
         twist_value = torch.tensor(
@@ -1246,16 +1560,121 @@ class LivePicoSimulationPolicy:
         self._write_hmd_target(neutral)
         return neutral
 
+    def _measured_arm_joint_deviation_deg(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        """Return measured left/right shoulder-pitch, shoulder-roll, elbow deltas."""
+
+        robot = getattr(self, "robot", None)
+        arm_joint_ids = getattr(self, "arm_joint_ids", None)
+        if robot is None or not isinstance(arm_joint_ids, Mapping):
+            return None
+        try:
+            result: list[tuple[float, float, float]] = []
+            for side in ("left", "right"):
+                ids = arm_joint_ids[side]
+                delta = (
+                    robot.data.joint_pos[0, ids] - robot.data.default_joint_pos[0, ids]
+                )
+                if delta.numel() != 3 or not bool(torch.isfinite(delta).all().item()):
+                    return None
+                degrees = tuple(
+                    round(math.degrees(float(value)), 1)
+                    for value in delta.detach().cpu().tolist()
+                )
+                result.append(degrees)
+        except (AttributeError, IndexError, KeyError, RuntimeError, TypeError):
+            return None
+        return result[0], result[1]
+
+    def _measured_hand_tracking_m(
+        self, command: SimulationCommand
+    ) -> tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float]],
+        tuple[float, float],
+    ] | None:
+        """Return measured hand offsets and per-hand target-error norms.
+
+        Joint motion alone cannot show whether the Cartesian controller target
+        is actually being followed.  Report the same episode-fixed hand-site
+        offset used by the training reward, together with its distance from the
+        final command injected into the environment.
+        """
+
+        env = getattr(self, "env", None)
+        manager = getattr(env, "command_manager", None)
+        if manager is None:
+            return None
+        try:
+            hand = manager.get_term("hand_target")
+            if not isinstance(hand, ResetFixedHandTargetCommand):
+                return None
+            actual = hand.current_hand_pos_b() - hand._default_hand_pos_b
+            if actual.shape != (1, 2, 3) or not bool(
+                torch.isfinite(actual).all().item()
+            ):
+                return None
+            desired = torch.tensor(
+                command.hand_target,
+                dtype=actual.dtype,
+                device=actual.device,
+            ).unsqueeze(0)
+            error = torch.linalg.vector_norm(actual - desired, dim=-1)
+            actual_values = actual[0].detach().cpu().tolist()
+            error_values = error[0].detach().cpu().tolist()
+        except (AttributeError, IndexError, KeyError, RuntimeError, TypeError, ValueError):
+            return None
+        offsets = tuple(
+            tuple(round(float(component), 3) for component in hand_offset)
+            for hand_offset in actual_values
+        )
+        errors = tuple(round(float(value), 3) for value in error_values)
+        return (offsets[0], offsets[1]), (errors[0], errors[1])
+
     def _print_status(self, command: SimulationCommand) -> None:
         now_ns = self.clock_ns()
         if now_ns - self._last_status_ns < self.status_period_ns:
             return
         self._last_status_ns = now_ns
         fault = command.fault or "none"
+        hand_left = tuple(round(value, 3) for value in command.hand_target[0])
+        hand_right = tuple(round(value, 3) for value in command.hand_target[1])
+        arm_deviation = self._measured_arm_joint_deviation_deg()
+        arm_deviation_text = (
+            "unavailable"
+            if arm_deviation is None
+            else f"L{arm_deviation[0]}/R{arm_deviation[1]}"
+        )
+        hand_tracking = self._measured_hand_tracking_m(command)
+        if hand_tracking is None:
+            hand_actual_text = "unavailable"
+            hand_error_text = "unavailable"
+        else:
+            actual, error = hand_tracking
+            hand_actual_text = f"L{actual[0]}/R{actual[1]}"
+            hand_error_text = f"L{error[0]}/R{error[1]}"
+        prefix = (
+            f"{UNACCEPTED_SIMULATION_WARNING} | "
+            if self.unaccepted_observation_only
+            else ""
+        )
         print(
-            "SIMULATION ONLY | "
+            prefix + "SIMULATION ONLY | "
             f"policy={command.locomotion_policy} enabled={command.enabled} "
             f"twist={tuple(round(value, 3) for value in command.twist)} "
+            f"hand_cmd_m=L{hand_left}/R{hand_right} "
+            f"hand_active=L{command.hand_active[0]}/R{command.hand_active[1]} "
+            f"hand_actual_m={hand_actual_text} "
+            f"hand_error_m={hand_error_text} "
+            f"arm_delta_deg={arm_deviation_text} "
+            f"left_trigger={getattr(self, '_last_left_trigger', None)} "
+            f"controller_valid={getattr(self, '_last_controller_valid', None)} "
+            f"controller_fresh={getattr(self, '_last_controller_fresh', None)} "
+            f"controller_error={getattr(self, '_last_controller_error', None)} "
+            f"target_source={getattr(self, '_last_mapper_target_source', None)} "
+            f"target_calibrated={getattr(self, '_last_mapper_calibrated', None)} "
+            f"target_fresh={getattr(self, '_last_mapper_fresh', None)} "
+            f"target_rejection={getattr(self, '_last_mapper_rejection', None)!r} "
             f"fault={fault} camera_fault={self._camera_fault or 'none'}",
             flush=True,
         )
@@ -1295,6 +1714,65 @@ class LivePicoSimulationPolicy:
                 f"unsafe {label} output: shape={tuple(action.shape)}, "
                 f"finite={finite}"
             )
+
+    def _apply_controller_arm_overlay(
+        self, action: torch.Tensor, command: SimulationCommand
+    ) -> torch.Tensor:
+        """Replace only six arm targets using the mapper's bounded IK solution."""
+
+        self._require_safe_action(action, "controller overlay base")
+        if command.enabled and command.locomotion_policy == "pico_teleop":
+            if command.arm_joint_target is None:
+                raise RuntimeError("enabled controller preview lacks arm joints")
+            desired = command.arm_joint_target
+        else:
+            desired = MICROBAN_ARM_HOME_JOINT_RAD
+        desired_tensor = torch.tensor(
+            desired, dtype=action.dtype, device=action.device
+        )
+        lower = torch.tensor(
+            MICROBAN_ARM_JOINT_LOWER_RAD,
+            dtype=action.dtype,
+            device=action.device,
+        )
+        upper = torch.tensor(
+            MICROBAN_ARM_JOINT_UPPER_RAD,
+            dtype=action.dtype,
+            device=action.device,
+        )
+        if desired_tensor.shape != (2, 3) or not bool(
+            torch.isfinite(desired_tensor).all().item()
+        ):
+            raise RuntimeError("controller arm target is malformed")
+        if not bool(
+            torch.logical_and(desired_tensor >= lower, desired_tensor <= upper)
+            .all()
+            .item()
+        ):
+            raise RuntimeError("controller arm target left its bounded IK box")
+
+        overlaid = action.clone()
+        for side_index, side in enumerate(("left", "right")):
+            robot_ids = self.arm_joint_ids[side]
+            action_ids = self.arm_action_indices[side]
+            soft = self.robot.data.soft_joint_pos_limits[0, robot_ids]
+            side_target = desired_tensor[side_index]
+            if not bool(
+                torch.logical_and(
+                    side_target >= soft[:, 0], side_target <= soft[:, 1]
+                )
+                .all()
+                .item()
+            ):
+                raise RuntimeError("controller arm target exceeds robot soft limits")
+            scale = self.main_action_scale[0, action_ids]
+            if bool((scale == 0.0).any().item()):
+                raise RuntimeError("controller arm action scale contains zero")
+            overlaid[:, action_ids] = (
+                side_target - self.main_action_offset[0, action_ids]
+            ) / scale
+        self._require_safe_action(overlaid, "controller arm overlay")
+        return overlaid
 
     def _fallback_after_learned_fault(
         self, observations: Any, reason: str
@@ -1337,7 +1815,9 @@ class LivePicoSimulationPolicy:
 
     def __call__(self, observations: Any) -> torch.Tensor:
         # Auto-reset after a simulated fall is visible for one policy call.
-        # Disarm before consuming another frame so a held trigger cannot restart.
+        # Preserve the operator's momentary deadman/tracking state across this
+        # simulation-only episode boundary.  A held trigger must remain held; it
+        # must not require an artificial release/re-press after every fall.
         reset_buf = getattr(self.env, "reset_buf", None)
         episode_length = getattr(self.env, "episode_length_buf", None)
         previous_episode_length = getattr(self, "_previous_episode_length", None)
@@ -1347,7 +1827,11 @@ class LivePicoSimulationPolicy:
             and bool((episode_length < previous_episode_length).any().item())
         )
         if (reset_buf is not None and bool(reset_buf.any().item())) or manual_reset:
-            self.reset()
+            self._reset_policy_state_after_environment_reset()
+            print(
+                "SIMULATION ENVIRONMENT AUTO-RESET | held operator input preserved",
+                flush=True,
+            )
         elif episode_length is not None:
             self._previous_episode_length = episode_length.clone()
 
@@ -1364,13 +1848,28 @@ class LivePicoSimulationPolicy:
                     flush=True,
                 )
         self._print_status(command)
+        if getattr(self, "controller_only_preview", False):
+            base_action = self._legacy_actor_action(observations)
+            try:
+                return self._apply_controller_arm_overlay(base_action, command)
+            except Exception as exc:  # noqa: BLE001 - HOME is the safe overlay
+                reason = (
+                    "controller arm overlay failed; using HOME arms: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._latch_legacy_fallback(reason)
+                safe_command = neutral_simulation_command(fault=reason)
+                self._print_status(safe_command)
+                return self._apply_controller_arm_overlay(base_action, safe_command)
         if not command.enabled:
-            self.walk_last_action.zero_()
-            # Deadman release always returns the shared Microban initial pose:
-            # raw zero in the teleop environment's 0 degree shoulder frame.
-            # The legacy walk actor's own 0 degree HOME is used only while its
-            # policy is actively selected and the trigger is held.
-            return self.zero_action.clone()
+            # Deadman release means zero commanded velocity, not zero actuator
+            # action.  Raw zero in the teleop action space is not a dynamically
+            # stable standing controller and caused an idle Microban to fall.  The
+            # audited legacy actor owns standing balance at zero twist while the
+            # learned body policy remains disabled.  walk_last_action preserves the
+            # legacy actor's own recurrence; reset() clears it exactly once after a
+            # fall/restart.
+            return self._legacy_actor_action(observations)
 
         if (
             bool(getattr(self, "native_legacy_action_semantics", False))
@@ -1443,6 +1942,32 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_regular_nonsymlink_bytes(path: Path, *, label: str) -> bytes:
+    """Read one inode through O_NOFOLLOW so hash and parser see identical bytes."""
+
+    candidate = path.expanduser()
+    if candidate.is_symlink():
+        raise ValueError(f"{label} cannot be a symlink")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} must be a readable regular file") from exc
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(f"{label} must be a regular file")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1467,6 +1992,61 @@ def build_parser() -> argparse.ArgumentParser:
             "explicitly allow a marker-authenticated, non-deployable contract-v12 "
             "full-body preview checkpoint in this simulation-only process; load/"
             "inference/body faults degrade to the audited legacy walking actor"
+        ),
+    )
+    checkpoint_group.add_argument(
+        "--v12-controller-preview-checkpoint",
+        type=Path,
+        help=(
+            "simulation-only phase-1 checkpoint authority for direct controller "
+            "arm IK over the audited legacy walk actor; feet remain exact zero"
+        ),
+    )
+    checkpoint_group.add_argument(
+        "--unaccepted-simulation-observation-only-v12-preview-checkpoint",
+        dest="unaccepted_sim_preview_checkpoint",
+        type=Path,
+        help=(
+            "DANGEROUSLY EXPLICIT simulation-process-only observation trial of "
+            "an unaccepted staged-v2 full-body checkpoint; never authorizes a "
+            "physical robot or accepted preview path"
+        ),
+    )
+    parser.add_argument(
+        "--v12-preview-acceptance-receipt",
+        type=Path,
+        help=(
+            "required with --v12-preview-checkpoint: exact strict or visual-only "
+            "full-body PASS receipt bound to the selected checkpoint"
+        ),
+    )
+    parser.add_argument(
+        "--v12-preview-acceptance-receipt-sha256",
+        help=(
+            "required lowercase SHA-256 of --v12-preview-acceptance-receipt; "
+            "the receipt never authorizes physical deployment"
+        ),
+    )
+    parser.add_argument(
+        "--v12-controller-preview-acceptance-receipt",
+        type=Path,
+        help=(
+            "required with --v12-controller-preview-checkpoint: exact phase-1 "
+            "strict or visual PASS receipt bound to the selected checkpoint"
+        ),
+    )
+    parser.add_argument(
+        "--v12-controller-preview-acceptance-receipt-sha256",
+        help=(
+            "required lowercase SHA-256 of the controller-only phase-1 receipt"
+        ),
+    )
+    parser.add_argument(
+        "--unaccepted-simulation-observation-only-v12-preview-sha256",
+        dest="unaccepted_sim_preview_sha256",
+        help=(
+            "required exact lowercase checkpoint SHA-256 for the explicit "
+            "unaccepted observation-only simulation mode"
         ),
     )
     parser.add_argument(
@@ -1554,6 +2134,14 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("body scale overrides require --input native or pico-app")
     if args.input == "pico-app" and not args.native_config.expanduser().is_file():
         parser.error(f"native pairing config not found: {args.native_config}")
+    if args.v12_controller_preview_checkpoint is not None:
+        if args.input != "pico-app":
+            parser.error("controller-only preview requires --input pico-app")
+        if any(
+            value is not None
+            for value in (args.body_scale, args.hand_scale, args.foot_scale)
+        ):
+            parser.error("controller-only preview uses the pinned mapper scale")
     package = args.teleop_root.resolve() / "src" / "microban_teleop"
     if not package.is_dir():
         parser.error(f"microban_teleop package not found below: {args.teleop_root}")
@@ -1592,6 +2180,10 @@ def _load_webxr_classes(teleop_root: Path) -> tuple[Any, Any]:
 
 def _configure_live_environment(cfg: Any) -> None:
     cfg.scene.num_envs = 1
+    # A fall must restore the simulated robot instead of leaving the viewer on a
+    # terminal/down state.  The policy notices the reset transition, disarms live
+    # input, and resumes the zero-twist audited standing controller.
+    cfg.auto_reset = True
     cfg.observations["actor"].enable_corruption = False
     cfg.curriculum = {}
     # Nominal simulation: keep only deterministic reset events and do not apply
@@ -1673,10 +2265,34 @@ def _load_legacy_walk_actor(checkpoint: Path, device: str) -> LegacyWalkActor:
 
 
 def _construct_checkpoint_consumer_runner(
-    env, agent_cfg, device: str, *, runtime_task: str
+    env,
+    agent_cfg,
+    device: str,
+    *,
+    runtime_task: str,
+    unaccepted_preview_mode: bool = False,
+    controller_only_preview_mode: bool = False,
 ):
     """Construct the explicit actor-load-only runner used by live simulation."""
 
+    if unaccepted_preview_mode and controller_only_preview_mode:
+        raise ValueError("Preview consumer modes are mutually exclusive")
+    if unaccepted_preview_mode:
+        if runtime_task != V12_PREVIEW_TASK:
+            raise ValueError(
+                "Unaccepted preview consumer requires the dedicated preview task"
+            )
+        return make_teleop_v12_unaccepted_simulation_preview_consumer(
+            env, agent_cfg, device
+        )
+    if controller_only_preview_mode:
+        if runtime_task != V12_PREVIEW_TASK:
+            raise ValueError(
+                "Controller-only preview requires the dedicated preview task"
+            )
+        return make_teleop_v12_controller_only_preview_consumer(
+            env, agent_cfg, device
+        )
     if runtime_task == V12_PREVIEW_TASK:
         return make_teleop_v12_preview_consumer(env, agent_cfg, device)
     agent_cfg.checkpoint_consumer_mode = True
@@ -1687,11 +2303,18 @@ def _construct_checkpoint_consumer_runner(
 
 
 def _runtime_task(
-    checkpoint: Path | None, v12_preview_checkpoint: Path | None = None
+    checkpoint: Path | None,
+    v12_preview_checkpoint: Path | None = None,
+    unaccepted_sim_preview_checkpoint: Path | None = None,
+    v12_controller_preview_checkpoint: Path | None = None,
 ) -> str:
     """Select the original velocity task unless a hybrid actor was requested."""
 
-    if v12_preview_checkpoint is not None:
+    if (
+        v12_preview_checkpoint is not None
+        or unaccepted_sim_preview_checkpoint is not None
+        or v12_controller_preview_checkpoint is not None
+    ):
         return V12_PREVIEW_TASK
     return WALK_TASK if checkpoint is None else TASK
 
@@ -1699,7 +2322,300 @@ def _runtime_task(
 def _selected_checkpoint(args: argparse.Namespace) -> Path | None:
     """Return the one checkpoint selected by the mutually exclusive CLI."""
 
-    return args.v12_preview_checkpoint or args.checkpoint
+    return (
+        args.v12_preview_checkpoint
+        or args.v12_controller_preview_checkpoint
+        or args.unaccepted_sim_preview_checkpoint
+        or args.checkpoint
+    )
+
+
+def _validate_unaccepted_simulation_preview(
+    *,
+    checkpoint: Path | None,
+    expected_checkpoint_sha256: str | None,
+) -> UnacceptedSimulationPreviewAuthority:
+    """Bind an unaccepted checkpoint to one simulation-only observation process."""
+
+    if checkpoint is None:
+        raise ValueError("Unaccepted simulation preview requires a checkpoint")
+    if expected_checkpoint_sha256 is None:
+        raise ValueError(
+            "Unaccepted simulation preview requires its exact checkpoint SHA-256"
+        )
+    if len(expected_checkpoint_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in expected_checkpoint_sha256
+    ):
+        raise ValueError(
+            "Unaccepted simulation preview checkpoint SHA-256 must be lowercase hex"
+        )
+
+    checkpoint_bytes = _read_regular_nonsymlink_bytes(
+        checkpoint, label="Unaccepted simulation preview checkpoint"
+    )
+    if _sha256_bytes(checkpoint_bytes) != expected_checkpoint_sha256:
+        raise ValueError("Unaccepted simulation preview checkpoint SHA-256 mismatch")
+
+    # Deserialize the same immutable bytes that were hashed, never a mutable path.
+    # This authority deliberately does not manufacture an acceptance receipt.
+    payload = torch.load(BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
+        raise TypeError("Unaccepted simulation preview checkpoint is malformed")
+    iteration = payload.get("iter")
+    if not isinstance(iteration, int) or isinstance(iteration, bool):
+        raise TypeError("Unaccepted simulation preview iteration is malformed")
+    validate_preview_marker(
+        payload["infos"],
+        iteration=iteration,
+        required_phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+        require_live_candidate=True,
+    )
+    if payload["infos"].get("env_state") != {
+        "common_step_counter": (iteration + 1) * 24
+    }:
+        raise ValueError("Unaccepted simulation preview training clock is not exact")
+    return UnacceptedSimulationPreviewAuthority(
+        checkpoint_sha256=expected_checkpoint_sha256,
+        iteration=iteration,
+        checkpoint_bytes=checkpoint_bytes,
+    )
+
+
+def _validate_preview_live_authority(
+    *,
+    checkpoint: Path | None,
+    acceptance_receipt: Path | None,
+    expected_receipt_sha256: str | None,
+) -> PreviewLiveAuthority:
+    """Authenticate final simulation evidence before loading preview pickle state."""
+
+    if checkpoint is None:
+        raise ValueError("V12 preview live authority requires a checkpoint")
+    if acceptance_receipt is None or expected_receipt_sha256 is None:
+        raise ValueError(
+            "--v12-preview-checkpoint requires its final PASS receipt and SHA-256"
+        )
+    if len(expected_receipt_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in expected_receipt_sha256
+    ):
+        raise ValueError("Preview acceptance receipt SHA-256 must be lowercase hex")
+
+    receipt_bytes = _read_regular_nonsymlink_bytes(
+        acceptance_receipt, label="Preview acceptance receipt"
+    )
+    if _sha256_bytes(receipt_bytes) != expected_receipt_sha256:
+        raise ValueError("Preview acceptance receipt SHA-256 mismatch")
+    try:
+        receipt_payload = json.loads(receipt_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Preview acceptance receipt is not valid JSON") from exc
+    if not isinstance(receipt_payload, dict):
+        raise TypeError("Preview acceptance receipt is malformed")
+    receipt_checkpoint = receipt_payload.get("checkpoint")
+    receipt_marker = receipt_payload.get(TELEOP_V12_PREVIEW_INFO_KEY)
+    quality_class = receipt_payload.get("quality_class")
+    if (
+        not isinstance(receipt_checkpoint, dict)
+        or not isinstance(receipt_marker, dict)
+        or not isinstance(quality_class, str)
+    ):
+        raise TypeError("Preview acceptance receipt identity is incomplete")
+    claimed_checkpoint_sha256 = receipt_checkpoint.get("sha256")
+    claimed_iteration = receipt_checkpoint.get("iteration")
+    if (
+        not isinstance(claimed_checkpoint_sha256, str)
+        or len(claimed_checkpoint_sha256) != 64
+        or any(
+            char not in "0123456789abcdef" for char in claimed_checkpoint_sha256
+        )
+        or not isinstance(claimed_iteration, int)
+        or isinstance(claimed_iteration, bool)
+    ):
+        raise ValueError("Preview acceptance receipt checkpoint identity is malformed")
+
+    checkpoint_bytes = _read_regular_nonsymlink_bytes(
+        checkpoint, label="Preview checkpoint"
+    )
+    checkpoint_sha256 = _sha256_bytes(checkpoint_bytes)
+    if checkpoint_sha256 != claimed_checkpoint_sha256:
+        raise ValueError("Preview checkpoint does not match its acceptance receipt")
+
+    # Deserialize exactly the bytes bound by the externally supplied receipt.
+    payload = torch.load(BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
+        raise TypeError("Preview checkpoint payload is malformed")
+    iteration = payload.get("iter")
+    if iteration != claimed_iteration:
+        raise ValueError("Preview checkpoint iteration does not match its receipt")
+    infos = payload["infos"]
+    marker = validate_preview_marker(
+        infos,
+        iteration=iteration,
+        required_phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
+        require_live_candidate=True,
+    )
+    validate_embedded_phase1_acceptance(infos, fullbody_marker=marker)
+    if marker != receipt_marker:
+        raise ValueError("Preview checkpoint marker does not match its receipt")
+    if infos.get("env_state") != {
+        "common_step_counter": (iteration + 1) * 24
+    }:
+        raise ValueError("Preview checkpoint training clock is not exact")
+
+    gate = receipt_payload.get("gate")
+    if gate == "microban_teleop_v12_nondeployable_preview_acceptance":
+        validated = validate_preview_evaluation_report(
+            receipt_payload,
+            checkpoint_sha256=checkpoint_sha256,
+            iteration=iteration,
+            marker=marker,
+        )
+        if (
+            validated.get("status") != "pass"
+            or validated.get("live_simulation_candidate") is not True
+        ):
+            raise ValueError("Preview strict acceptance receipt did not pass")
+    elif gate == FULLBODY_VISUAL_GATE:
+        validated = validate_visual_promotion_report(
+            receipt_payload,
+            checkpoint_sha256=checkpoint_sha256,
+            iteration=iteration,
+            marker=marker,
+        )
+    else:
+        raise ValueError("Preview receipt gate is not accepted for live simulation")
+    if validated.get("quality_class") != quality_class:
+        raise ValueError("Preview acceptance quality class changed while validating")
+    return PreviewLiveAuthority(
+        checkpoint_sha256=checkpoint_sha256,
+        acceptance_receipt=acceptance_receipt.expanduser().absolute(),
+        acceptance_receipt_sha256=expected_receipt_sha256,
+        quality_class=quality_class,
+        checkpoint_bytes=checkpoint_bytes,
+    )
+
+
+def _validate_controller_preview_live_authority(
+    *,
+    checkpoint: Path | None,
+    acceptance_receipt: Path | None,
+    expected_receipt_sha256: str | None,
+) -> ControllerPreviewLiveAuthority:
+    """Authenticate the exact phase-1 artifact used by direct arm IK preview."""
+
+    if checkpoint is None:
+        raise ValueError("Controller-only preview requires a checkpoint")
+    if acceptance_receipt is None or expected_receipt_sha256 is None:
+        raise ValueError(
+            "--v12-controller-preview-checkpoint requires its phase-1 PASS "
+            "receipt and SHA-256"
+        )
+    if len(expected_receipt_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in expected_receipt_sha256
+    ):
+        raise ValueError(
+            "Controller-only preview receipt SHA-256 must be lowercase hex"
+        )
+
+    receipt_bytes = _read_regular_nonsymlink_bytes(
+        acceptance_receipt, label="Controller-only preview acceptance receipt"
+    )
+    if _sha256_bytes(receipt_bytes) != expected_receipt_sha256:
+        raise ValueError("Controller-only preview receipt SHA-256 mismatch")
+    try:
+        receipt_payload = json.loads(receipt_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "Controller-only preview acceptance receipt is not valid JSON"
+        ) from exc
+    if not isinstance(receipt_payload, dict):
+        raise TypeError("Controller-only preview acceptance receipt is malformed")
+    receipt_checkpoint = receipt_payload.get("checkpoint")
+    receipt_marker = receipt_payload.get(TELEOP_V12_PREVIEW_INFO_KEY)
+    if not isinstance(receipt_checkpoint, dict) or not isinstance(
+        receipt_marker, dict
+    ):
+        raise TypeError("Controller-only preview receipt identity is incomplete")
+    claimed_checkpoint_sha256 = receipt_checkpoint.get("sha256")
+    claimed_iteration = receipt_checkpoint.get("iteration")
+    if (
+        not isinstance(claimed_checkpoint_sha256, str)
+        or len(claimed_checkpoint_sha256) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in claimed_checkpoint_sha256
+        )
+        or not isinstance(claimed_iteration, int)
+        or isinstance(claimed_iteration, bool)
+    ):
+        raise ValueError(
+            "Controller-only preview receipt checkpoint identity is malformed"
+        )
+
+    checkpoint_bytes = _read_regular_nonsymlink_bytes(
+        checkpoint, label="Controller-only preview checkpoint"
+    )
+    checkpoint_sha256 = _sha256_bytes(checkpoint_bytes)
+    if checkpoint_sha256 != claimed_checkpoint_sha256:
+        raise ValueError(
+            "Controller-only preview checkpoint does not match its receipt"
+        )
+    payload = torch.load(BytesIO(checkpoint_bytes), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
+        raise TypeError("Controller-only preview checkpoint payload is malformed")
+    iteration = payload.get("iter")
+    if iteration != claimed_iteration:
+        raise ValueError(
+            "Controller-only preview checkpoint iteration does not match receipt"
+        )
+    infos = payload["infos"]
+    marker = validate_preview_marker(
+        infos,
+        iteration=iteration,
+        required_phase=TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+        require_live_candidate=False,
+    )
+    if marker != receipt_marker:
+        raise ValueError(
+            "Controller-only preview marker does not match its acceptance receipt"
+        )
+    if infos.get("env_state") != {"common_step_counter": (iteration + 1) * 24}:
+        raise ValueError("Controller-only preview training clock is not exact")
+    gate = receipt_payload.get("gate")
+    if gate == "microban_teleop_v12_nondeployable_preview_acceptance":
+        validated = validate_preview_evaluation_report(
+            receipt_payload,
+            checkpoint_sha256=checkpoint_sha256,
+            iteration=iteration,
+            marker=marker,
+        )
+        expected_quality = TELEOP_V12_PREVIEW_PHASE1_STRICT_QUALITY
+    elif gate == PHASE1_VISUAL_GATE:
+        validated = validate_visual_promotion_report(
+            receipt_payload,
+            checkpoint_sha256=checkpoint_sha256,
+            iteration=iteration,
+            marker=marker,
+        )
+        expected_quality = TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY
+    else:
+        raise ValueError(
+            "Controller-only preview requires a strict or visual phase-1 receipt"
+        )
+    if (
+        validated.get("status") != "pass"
+        or validated.get("simulation_only") is not True
+        or validated.get("canonical_deployment_accepted") is not False
+        or validated.get("quality_class") != expected_quality
+    ):
+        raise ValueError("Controller-only phase-1 acceptance receipt did not pass")
+    return ControllerPreviewLiveAuthority(
+        checkpoint_sha256=checkpoint_sha256,
+        acceptance_receipt=acceptance_receipt.expanduser().absolute(),
+        acceptance_receipt_sha256=expected_receipt_sha256,
+        quality_class=expected_quality,
+        checkpoint_bytes=checkpoint_bytes,
+    )
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1707,9 +2623,84 @@ def run(args: argparse.Namespace) -> int:
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
     checkpoint = _selected_checkpoint(args)
-    preview_mode = args.v12_preview_checkpoint is not None
+    accepted_preview_mode = args.v12_preview_checkpoint is not None
+    controller_only_preview_mode = (
+        args.v12_controller_preview_checkpoint is not None
+    )
+    unaccepted_preview_mode = args.unaccepted_sim_preview_checkpoint is not None
+    preview_mode = (
+        accepted_preview_mode
+        or controller_only_preview_mode
+        or unaccepted_preview_mode
+    )
+    receipt_requested = (
+        args.v12_preview_acceptance_receipt is not None
+        or args.v12_preview_acceptance_receipt_sha256 is not None
+    )
+    if not accepted_preview_mode and receipt_requested:
+        raise ValueError(
+            "Preview acceptance receipt options require the accepted "
+            "--v12-preview-checkpoint path"
+        )
+    controller_receipt_requested = (
+        args.v12_controller_preview_acceptance_receipt is not None
+        or args.v12_controller_preview_acceptance_receipt_sha256 is not None
+    )
+    if not controller_only_preview_mode and controller_receipt_requested:
+        raise ValueError(
+            "Controller preview receipt options require the dedicated "
+            "--v12-controller-preview-checkpoint path"
+        )
+    unaccepted_hash_requested = args.unaccepted_sim_preview_sha256 is not None
+    if not unaccepted_preview_mode and unaccepted_hash_requested:
+        raise ValueError(
+            "Unaccepted simulation preview SHA-256 requires its explicit "
+            "observation-only checkpoint option"
+        )
+    if preview_mode and device != "cuda:0":
+        raise ValueError(
+            "Hash-bound v12 preview acceptance and live inference require cuda:0"
+        )
+    preview_authority = (
+        _validate_preview_live_authority(
+            checkpoint=checkpoint,
+            acceptance_receipt=args.v12_preview_acceptance_receipt,
+            expected_receipt_sha256=(
+                args.v12_preview_acceptance_receipt_sha256
+            ),
+        )
+        if accepted_preview_mode
+        else None
+    )
+    controller_preview_authority = (
+        _validate_controller_preview_live_authority(
+            checkpoint=checkpoint,
+            acceptance_receipt=(
+                args.v12_controller_preview_acceptance_receipt
+            ),
+            expected_receipt_sha256=(
+                args.v12_controller_preview_acceptance_receipt_sha256
+            ),
+        )
+        if controller_only_preview_mode
+        else None
+    )
+    unaccepted_preview_authority = (
+        _validate_unaccepted_simulation_preview(
+            checkpoint=checkpoint,
+            expected_checkpoint_sha256=args.unaccepted_sim_preview_sha256,
+        )
+        if unaccepted_preview_mode
+        else None
+    )
+
     legacy_only = checkpoint is None
-    runtime_task = _runtime_task(args.checkpoint, args.v12_preview_checkpoint)
+    runtime_task = _runtime_task(
+        args.checkpoint,
+        args.v12_preview_checkpoint,
+        args.unaccepted_sim_preview_checkpoint,
+        args.v12_controller_preview_checkpoint,
+    )
     env_cfg = load_env_cfg(runtime_task, play=True)
     # Nominalize resets and remove timeout/DR/push events for an operator-owned
     # live session. This deliberately does not change the selected task's action
@@ -1743,14 +2734,26 @@ def run(args: argparse.Namespace) -> int:
         if not legacy_only:
             walk_actor = _load_legacy_walk_actor(args.walk_checkpoint, device)
             try:
+                authority = (
+                    preview_authority
+                    or controller_preview_authority
+                    or unaccepted_preview_authority
+                )
+                load_source: str | bytes = (
+                    authority.checkpoint_bytes
+                    if authority is not None
+                    else str(checkpoint.resolve())
+                )
                 runner = _construct_checkpoint_consumer_runner(
                     wrapped_env,
                     agent_cfg,
                     device,
                     runtime_task=runtime_task,
+                    unaccepted_preview_mode=unaccepted_preview_mode,
+                    controller_only_preview_mode=controller_only_preview_mode,
                 )
                 runner.load(
-                    str(checkpoint.resolve()),
+                    load_source,
                     load_cfg=(
                         preview_actor_load_cfg() if preview_mode else {"actor": True}
                     ),
@@ -1758,7 +2761,11 @@ def run(args: argparse.Namespace) -> int:
                     map_location=device,
                 )
                 actor = runner.get_inference_policy(device=device)
-            except Exception as exc:  # noqa: BLE001 - legacy actor remains usable
+            except Exception as exc:
+                if controller_only_preview_mode:
+                    raise RuntimeError(
+                        "Controller-only phase-1 checkpoint failed strict loading"
+                    ) from exc
                 print(
                     "Learned PICO checkpoint unavailable; legacy joystick "
                     "fallback remains active: "
@@ -1771,6 +2778,11 @@ def run(args: argparse.Namespace) -> int:
                 env,
                 port=args.camera_port,
                 fps=args.camera_fps,
+                warning_overlay=(
+                    UNACCEPTED_SIMULATION_WARNING
+                    if unaccepted_preview_mode
+                    else None
+                ),
             )
 
         if args.input == "native":
@@ -1786,6 +2798,8 @@ def run(args: argparse.Namespace) -> int:
                 hand_scale_override=args.hand_scale,
                 foot_scale_override=args.foot_scale,
             )
+            if controller_only_preview_mode:
+                mapper = ControllerOnlyPreviewMapper(mapper)
             if not legacy_only:
                 legacy_fallback_mapper = mapper_class(
                     body_scale=args.body_scale,
@@ -1806,6 +2820,8 @@ def run(args: argparse.Namespace) -> int:
                 hand_scale_override=args.hand_scale,
                 foot_scale_override=args.foot_scale,
             )
+            if controller_only_preview_mode:
+                mapper = ControllerOnlyPreviewMapper(mapper)
             if not legacy_only:
                 legacy_fallback_mapper = mapper_class(
                     body_scale=args.body_scale,
@@ -1869,24 +2885,63 @@ def run(args: argparse.Namespace) -> int:
             camera_publisher=camera_publisher,
             legacy_only=legacy_only,
             native_legacy_action_semantics=legacy_only,
+            unaccepted_observation_only=unaccepted_preview_mode,
+            controller_only_preview=controller_only_preview_mode,
         )
 
         print("SIMULATION ONLY: no robot UDP socket or motor interface is opened.")
         if checkpoint is None:
             print(
                 "DEADLINE FALLBACK: audited model_14999.pt owns locomotion; "
-                "the X-button hybrid selector is forced to legacy walk."
+                "left trigger remains the momentary deadman."
             )
-        elif preview_mode:
+        elif unaccepted_preview_mode:
+            assert unaccepted_preview_authority is not None
+            print("!" * len(UNACCEPTED_SIMULATION_WARNING))
+            print(UNACCEPTED_SIMULATION_WARNING)
+            print(
+                "THIS CHECKPOINT HAS NO PASS RECEIPT. IT MOVES ONLY THE LOCAL "
+                "SIMULATED ROBOT AND IS NOT AN ACCEPTED PREVIEW OR DEPLOYMENT."
+            )
+            print(
+                "checkpoint_sha256="
+                f"{unaccepted_preview_authority.checkpoint_sha256} "
+                f"iteration={unaccepted_preview_authority.iteration}"
+            )
+            print("!" * len(UNACCEPTED_SIMULATION_WARNING))
+            print(
+                "RESILIENT UNACCEPTED SIMULATION: body/checkpoint/inference faults "
+                "use the audited legacy actor until left-trigger release."
+            )
+        elif accepted_preview_mode:
             print(
                 "NON-DEPLOYABLE V12 PREVIEW: the permanently marked checkpoint "
                 "is accepted only by this simulation runner; it cannot enter the "
                 "canonical ONNX or robot runtime path."
             )
+            assert preview_authority is not None
+            print(
+                "HASH-BOUND PREVIEW ACCEPTANCE: "
+                f"quality_class={preview_authority.quality_class} "
+                f"receipt_sha256={preview_authority.acceptance_receipt_sha256}"
+            )
             print(
                 "RESILIENT PREVIEW: body/checkpoint/inference faults use the "
                 "audited legacy actor until left-trigger release; the next "
                 "activation retries the preview actor."
+            )
+        elif controller_only_preview_mode:
+            assert controller_preview_authority is not None
+            print(
+                "NON-DEPLOYABLE CONTROLLER PREVIEW: audited legacy locomotion "
+                "is combined with bounded direct arm IK in simulation only; "
+                "Motion Tracker and foot targets are disabled."
+            )
+            print(
+                "HASH-BOUND PHASE-1 ACCEPTANCE: "
+                f"quality_class={controller_preview_authority.quality_class} "
+                "receipt_sha256="
+                f"{controller_preview_authority.acceptance_receipt_sha256}"
             )
         else:
             print(
@@ -1906,8 +2961,8 @@ def run(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Hold left X for pico_teleop; release the left trigger once, "
-                    "then hold it to move."
+                    "Release the left trigger once to establish neutral, then "
+                    "hold the left trigger alone to control the robot."
                 )
             print(
                 "WebXR supplies neutral hand/foot targets; Motion Tracker full-body "
@@ -1920,8 +2975,8 @@ def run(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Hold left X with the left trigger released to calibrate body "
-                    "targets, then keep X held."
+                    "Release the left trigger to calibrate targets, then hold the "
+                    "left trigger alone to control the robot."
                 )
             print(
                 "Native XRoboToolkit and PICO Browser are separate foreground apps; "
@@ -1941,8 +2996,8 @@ def run(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Hold left X with the left trigger released to calibrate body "
-                    "targets, then keep X held."
+                    "Release the left trigger to calibrate targets, then hold the "
+                    "left trigger alone to control the robot."
                 )
             print(
                 "Unity receives the synthetic stereo calibration and latest-frame "

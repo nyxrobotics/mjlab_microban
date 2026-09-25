@@ -12,7 +12,13 @@ from tensordict import TensorDict
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_CHECKPOINT_SHA256,
+    LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+    TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
+    TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
@@ -91,6 +97,38 @@ class TeleopV12BootstrapTest(unittest.TestCase):
             int(target.obs_normalizer.count.item()), source_identity.normalizer_count
         )
         self.assertEqual(target.trainable_actor_parameter_names(), ("mlp.0.weight",))
+        state = target.state_dict()
+        target_columns = TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS
+        expected_std = torch.tensor([TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD])
+        torch.testing.assert_close(
+            state["obs_normalizer._std"][:, target_columns],
+            expected_std,
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            state["obs_normalizer._var"][:, target_columns],
+            expected_std.square(),
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            state["obs_normalizer._std"][:, target_columns]
+            + LEGACY_VELOCITY_NORMALIZER_EPS,
+            torch.tensor([TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS]),
+            rtol=0.0,
+            atol=4.0e-9,
+        )
+        identity_columns = (
+            *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+            *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+        )
+        self.assertTrue(
+            torch.equal(
+                state["obs_normalizer._std"][:, identity_columns],
+                torch.ones((1, len(identity_columns))),
+            )
+        )
 
         generator = torch.Generator().manual_seed(20260925)
         teleop = torch.randn(10_000, 83, generator=generator)

@@ -28,6 +28,11 @@ from mjlab.utils.lab_api.math import (
     subtract_frame_transforms,
 )
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_ARM_HOME_JOINT_RAD,
+    sample_microban_reachable_hand_targets,
+)
+
 ############################ COMMANDS #############################
 
 
@@ -520,6 +525,10 @@ class HandTargetCommand(CommandTerm):
     rather than being locked toward a rest position it was never asked to hold.
     ``command`` exposes ``is_active`` (one flag per hand) alongside the offsets so the
     actor can tell "holding position zero" and "not tracking at all" apart.
+
+    Active training targets are never sampled from a Cartesian cube.  A Microban
+    shoulder-pitch/roll/elbow tuple is sampled uniformly inside the audited joint
+    box and converted to an XYZ offset with the exact robot.xml kinematic chain.
     """
 
     cfg: HandTargetCommandCfg
@@ -537,6 +546,15 @@ class HandTargetCommand(CommandTerm):
         self._default_hand_pos_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
         self.is_active = torch.zeros(
             self.num_envs, 2, dtype=torch.bool, device=self.device
+        )
+        self.sampled_arm_joint_pos_rad = (
+            torch.tensor(
+                MICROBAN_ARM_HOME_JOINT_RAD,
+                dtype=self.hand_target_offset_b.dtype,
+                device=self.device,
+            )
+            .expand(self.num_envs, -1, -1)
+            .clone()
         )
 
         self.metrics["error_pos"] = torch.zeros(self.num_envs, device=self.device)
@@ -581,15 +599,10 @@ class HandTargetCommand(CommandTerm):
         r = torch.empty(len(env_ids), 2, device=self.device)
         self.is_active[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_active
 
-        offsets = torch.zeros(len(env_ids), 2, 3, device=self.device)
-        lo_xy, hi_xy = self.cfg.reach_xy_range
-        lo_z, hi_z = self.cfg.reach_z_range
-        r2 = torch.empty(len(env_ids), 2, 3, device=self.device)
-        r2[..., 0].uniform_(lo_xy, hi_xy)
-        r2[..., 1].uniform_(lo_xy, hi_xy)
-        r2[..., 2].uniform_(lo_z, hi_z)
-        active_mask = self.is_active[env_ids].unsqueeze(-1)
-        offsets = torch.where(active_mask, r2, offsets)
+        sampled_joints, offsets = sample_microban_reachable_hand_targets(
+            self.is_active[env_ids], dtype=self.hand_target_offset_b.dtype
+        )
+        self.sampled_arm_joint_pos_rad[env_ids] = sampled_joints
         self.hand_target_offset_b[env_ids] = offsets
 
     def _update_command(self) -> None:
@@ -598,12 +611,10 @@ class HandTargetCommand(CommandTerm):
 
 @dataclass(kw_only=True)
 class HandTargetCommandCfg(CommandTermCfg):
-    """Configuration for HandTargetCommand."""
+    """Configuration for joint-box/FK reachable Microban hand targets."""
 
     entity_name: str = "robot"
     hand_site_names: tuple[str, str] = ("left_hand", "right_hand")
-    reach_xy_range: tuple[float, float] = (-0.08, 0.08)
-    reach_z_range: tuple[float, float] = (-0.08, 0.08)
     rel_active: float = 0.7
     """Per-hand probability of being active at each resample (independent left/right,
     matching each controller's own trigger). Inactive hands contribute nothing to the

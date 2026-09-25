@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import mujoco
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 LEFT_CAMERA_SITE = "camera_left"
 RIGHT_CAMERA_SITE = "camera_right"
@@ -58,6 +58,7 @@ MAX_LATEST_WAIT_MS = 1000
 # View-only sanity bound shared with the Unity camera parser.  Camera age may
 # degrade the headset image, but it must never revoke controller authority.
 MAX_FRAME_AGE_MS = 30_000
+WARNING_OVERLAY_HEIGHT_PX = 82
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,49 @@ def _point_scene_camera_at_site(
         camera.frustum_bottom = -near * VERTICAL_TAN
         camera.frustum_top = near * VERTICAL_TAN
         camera.orthographic = 0
+
+
+def _apply_warning_overlay(frame: np.ndarray, warning: str) -> np.ndarray:
+    """Burn an unmistakable warning into both eyes of one SBS RGB frame."""
+
+    if (
+        frame.shape != (EYE_HEIGHT_PX, EYE_WIDTH_PX * 2, 3)
+        or frame.dtype != np.uint8
+    ):
+        raise ValueError("Warning overlay requires one exact uint8 SBS RGB frame")
+    if not warning or len(warning) > 160 or not warning.isascii():
+        raise ValueError("Warning overlay text must be 1..160 printable ASCII bytes")
+    if any(not character.isprintable() for character in warning):
+        raise ValueError("Warning overlay text contains a control character")
+
+    image = Image.fromarray(frame, mode="RGB")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=27)
+    detail_font = ImageFont.load_default(size=16)
+    for eye in range(2):
+        left = eye * EYE_WIDTH_PX
+        right = left + EYE_WIDTH_PX - 1
+        draw.rectangle(
+            (left, 0, right, WARNING_OVERLAY_HEIGHT_PX - 1),
+            fill=(176, 0, 0),
+            outline=(255, 255, 0),
+            width=5,
+        )
+        draw.text(
+            (left + EYE_WIDTH_PX // 2, 8),
+            "UNACCEPTED CHECKPOINT",
+            font=title_font,
+            fill=(255, 255, 255),
+            anchor="ma",
+        )
+        draw.text(
+            (left + EYE_WIDTH_PX // 2, 48),
+            "SIM ONLY - NO PHYSICAL OUTPUT",
+            font=detail_font,
+            fill=(255, 255, 0),
+            anchor="ma",
+        )
+    return np.asarray(image)
 
 
 class _FrameStore:
@@ -372,6 +416,7 @@ class StereoMjpegPublisher:
         port: int = 8081,
         fps: float = 20.0,
         jpeg_quality: int = 82,
+        warning_overlay: str | None = None,
         clock: Any = time.monotonic,
     ) -> None:
         if not 1 <= port <= 65535:
@@ -380,10 +425,19 @@ class StereoMjpegPublisher:
             raise ValueError("camera fps must be in [1, 30]")
         if not 1 <= jpeg_quality <= 95:
             raise ValueError("JPEG quality must be in [1, 95]")
+        # Validate without allocating a renderer or opening a TCP port.
+        if warning_overlay is not None and (
+                not warning_overlay
+                or len(warning_overlay) > 160
+                or not warning_overlay.isascii()
+                or any(not character.isprintable() for character in warning_overlay)
+        ):
+            raise ValueError("warning overlay must be printable ASCII")
         self.env = env
         self.clock = clock
         self.period_s = 1.0 / fps
         self.jpeg_quality = jpeg_quality
+        self.warning_overlay = warning_overlay
         self._next_capture_s = 0.0
         self._closed = False
 
@@ -434,6 +488,8 @@ class StereoMjpegPublisher:
             _point_scene_camera_at_site(self.renderer.scene, self.data, site_id)
             eyes.append(self.renderer.render().copy())
         sbs = np.concatenate(eyes, axis=1)
+        if self.warning_overlay is not None:
+            sbs = _apply_warning_overlay(sbs, self.warning_overlay)
         output = BytesIO()
         Image.fromarray(sbs, mode="RGB").save(
             output,

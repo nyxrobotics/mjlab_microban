@@ -14,6 +14,12 @@ from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import (
     _indices_by_name,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
+    LEGACY_VELOCITY_NORMALIZER_EPS,
+    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+    TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
+    TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
     transplant_legacy_actor_state_to_teleop83,
 )
 
@@ -153,9 +159,7 @@ class LegacyActorTransplantTest(unittest.TestCase):
 
         teleop_obs = torch.randn(16, 83)
         legacy_obs = teleop_obs[:, list(target_columns)]
-        expected = legacy_model(
-            TensorDict({"actor": legacy_obs}, batch_size=[16])
-        )
+        expected = legacy_model(TensorDict({"actor": legacy_obs}, batch_size=[16]))
         actual = target_model(TensorDict({"actor": teleop_obs}, batch_size=[16]))
         torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-6)
 
@@ -172,10 +176,37 @@ class LegacyActorTransplantTest(unittest.TestCase):
                 torch.zeros((1, 20)),
             )
         )
+        identity_columns = (
+            *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+            *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+        )
+        self.assertEqual(
+            new_columns,
+            sorted(
+                (*identity_columns, *TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS)
+            ),
+        )
+        torch.testing.assert_close(
+            transplanted["obs_normalizer._std"][
+                :, TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS
+            ],
+            torch.tensor([TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD]),
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            transplanted["obs_normalizer._std"][
+                :, TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS
+            ]
+            + LEGACY_VELOCITY_NORMALIZER_EPS,
+            torch.tensor([TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS]),
+            rtol=0.0,
+            atol=4.0e-9,
+        )
         self.assertTrue(
             torch.equal(
-                transplanted["obs_normalizer._std"][:, new_columns],
-                torch.ones((1, 20)),
+                transplanted["obs_normalizer._std"][:, identity_columns],
+                torch.ones((1, len(identity_columns))),
             )
         )
         self.assertEqual(legacy.width, 63)

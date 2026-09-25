@@ -10,6 +10,10 @@ from pathlib import Path
 
 import torch
 
+from mjlab_microban.robot.microban_hand_fk import (
+    microban_hand_fk_metadata,
+    microban_reachable_hand_evaluation_offsets,
+)
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     MINIMUM_SIGNED_RESPONSE,
 )
@@ -20,20 +24,29 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DIRECTIONAL_RESPONSE_MINIMUM,
     EXPANDED_LOCOMOTION_PROFILE,
     FINAL_PROFILE,
+    FOOT_ACTIVATION_CANARY_PROFILE,
     FOOT_P95_MAX_M,
     FOOT_RMS_MAX_M,
     HAND_P95_MAX_M,
     HAND_RMS_MAX_M,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+    HMD_HAND_ACTIVATION_CANARY_PROFILE,
     HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     PRE_ACTIVATION_EXPOSURE_PROFILE,
+    TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
+    TARGET_COLUMN_ABLATION_METHOD,
     WHOLE_BODY_PROFILE,
     _acceptance,
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
     _scenarios,
+    required_target_column_ablation_targets,
+    required_tracking_check_names,
     required_tracking_profile,
+    required_tracking_scenario_names,
+    target_column_ablated_observation,
+    target_column_ablation_observation_columns,
 )
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
@@ -41,6 +54,7 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
     _checkpoint_kind,
+    _validate_tracking_report,
     create_gate,
     next_training_target,
     validate_gate,
@@ -51,12 +65,36 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
+from mjlab_microban.teleop_v12_safety import (
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
+)
+
+
+def _ablation(
+    *, target: str, expected: bool, maximum: float = 0.01
+) -> dict[str, object]:
+    ablated_columns, preserved_columns = target_column_ablation_observation_columns(
+        target
+    )
+    return {
+        "target_expected": expected,
+        "ablated_observation_columns": list(ablated_columns),
+        "preserved_observation_columns": list(preserved_columns),
+        "maximum_absolute_action_delta": maximum if expected else None,
+        "minimum_required_action_delta": (
+            TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN if expected else None
+        ),
+        "passed": (not expected or maximum > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN),
+    }
 
 
 def _result(**overrides):
@@ -74,7 +112,14 @@ def _result(**overrides):
             "active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
             "foot": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
         },
-        "command": {"foot_target": [[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]]},
+        "command": {
+            "foot_target": [[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]],
+            "hand_active": [True, True],
+        },
+        "target_column_ablation": {
+            "hand": _ablation(target="hand", expected=True),
+            "foot": _ablation(target="foot", expected=True),
+        },
     }
     value.update(overrides)
     return value
@@ -147,7 +192,12 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },
-        "thresholds": {"minimum_signed_response": MINIMUM_SIGNED_RESPONSE},
+        "thresholds": {
+            "actual_soft_limit_violation_rad_max": (
+                ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            ),
+            "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+        },
         "checks": checks,
         "results": results,
         "summary": {
@@ -179,7 +229,7 @@ def _zero_action_envelope() -> dict[str, object]:
 
 
 def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
-    profile = PRE_ACTIVATION_EXPOSURE_PROFILE
+    profile = required_tracking_profile(int(identity["completed_updates"]))
     results = []
     for scenario in _scenarios(profile):
         expects_foot = any(
@@ -207,6 +257,28 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
             }
             for name in MICROBAN_HMD_JOINT_NAMES
         }
+
+        def target_error(*, expected: bool, samples: int) -> dict[str, object]:
+            if not expected:
+                return {
+                    "sample_count": 0,
+                    "min": None,
+                    "max": None,
+                    "mean": None,
+                    "rms": None,
+                    "p95": None,
+                    "units": "m",
+                }
+            return {
+                "sample_count": samples,
+                "min": 0.005,
+                "max": 0.02,
+                "mean": 0.008,
+                "rms": 0.01,
+                "p95": 0.015,
+                "units": "m",
+            }
+
         results.append(
             {
                 "name": scenario.name,
@@ -252,16 +324,23 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
                     for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")
                 },
                 "target_error": {
-                    "active_hand": {
-                        "sample_count": 1 if expects_hand else 0,
-                        "rms": 0.01 if expects_hand else None,
-                        "p95": 0.02 if expects_hand else None,
-                    },
-                    "foot": {
-                        "sample_count": 1 if expects_foot else 0,
-                        "rms": 0.01 if expects_foot else None,
-                        "p95": 0.02 if expects_foot else None,
-                    },
+                    "active_hand": target_error(
+                        expected=expects_hand,
+                        samples=250
+                        * sum(bool(value) for value in scenario.hand_active),
+                    ),
+                    "foot": target_error(
+                        expected=expects_foot,
+                        samples=250
+                        * sum(
+                            any(abs(value) > 0.0 for value in target)
+                            for target in scenario.foot_target
+                        ),
+                    ),
+                },
+                "target_column_ablation": {
+                    "hand": _ablation(target="hand", expected=expects_hand),
+                    "foot": _ablation(target="foot", expected=expects_foot),
                 },
                 "raw_action_envelope": _zero_action_envelope(),
             }
@@ -279,12 +358,16 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
             "steps": 300,
             "settle_steps": 50,
             "moving_hmd": "forced_non_neutral",
-            "perturbation": False,
+            "perturbation": profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE),
             "action_clip": None,
             "previous_action": "raw_actor_output",
+            "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
+            "reachable_hand_target_fk": microban_hand_fk_metadata(),
         },
         "thresholds": {
-            "actual_soft_limit_violation_rad_max": 1.0e-7,
+            "actual_soft_limit_violation_rad_max": (
+                ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
             "hand_rms_m_max": HAND_RMS_MAX_M,
@@ -292,6 +375,9 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
             "foot_rms_m_max": FOOT_RMS_MAX_M,
             "foot_p95_m_max": FOOT_P95_MAX_M,
             "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+            "target_column_ablation_action_delta_min": (
+                TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+            ),
             "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
         },
         "checks": checks,
@@ -331,6 +417,26 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
 
 
 class TeleopV12StageTest(unittest.TestCase):
+    def test_tracking_scenarios_use_fk_reachable_hand_targets(self) -> None:
+        poses = dict(microban_reachable_hand_evaluation_offsets())
+        scenarios = {scenario.name: scenario for scenario in _scenarios(FINAL_PROFILE)}
+        self.assertEqual(
+            scenarios["max_hands_left"].hand_target,
+            (poses["F"][0], poses["B"][1]),
+        )
+        self.assertEqual(
+            scenarios["max_hands_right"].hand_target,
+            (poses["B"][0], poses["F"][1]),
+        )
+        self.assertEqual(
+            scenarios["mixed_forward_left"].hand_target,
+            (poses["f"][0], poses["b"][1]),
+        )
+        self.assertEqual(
+            scenarios["mixed_backward_right"].hand_target,
+            (poses["b"][0], poses["f"][1]),
+        )
+
     def test_route_covers_recovery_boundaries_and_activation_canaries(self) -> None:
         expected = {
             601: (3_000, False),
@@ -364,10 +470,61 @@ class TeleopV12StageTest(unittest.TestCase):
         )
         self.assertEqual(required_tracking_profile(3_001), EXPANDED_LOCOMOTION_PROFILE)
         self.assertEqual(required_tracking_profile(7_000), EXPANDED_LOCOMOTION_PROFILE)
-        self.assertEqual(required_tracking_profile(7_001), HMD_HAND_PROFILE)
+        self.assertEqual(
+            required_tracking_profile(7_001), HMD_HAND_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertEqual(
+            required_tracking_profile(7_100), HMD_HAND_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertEqual(required_tracking_profile(7_101), HMD_HAND_PROFILE)
         self.assertEqual(required_tracking_profile(10_000), HMD_HAND_PROFILE)
-        self.assertEqual(required_tracking_profile(10_001), WHOLE_BODY_PROFILE)
+        self.assertEqual(
+            required_tracking_profile(10_001), FOOT_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertEqual(
+            required_tracking_profile(10_100), FOOT_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertEqual(required_tracking_profile(10_101), WHOLE_BODY_PROFILE)
         self.assertEqual(required_tracking_profile(15_000), FINAL_PROFILE)
+
+    def test_activation_canaries_require_causality_before_final_quality(self) -> None:
+        hand_canary_checks = required_tracking_check_names(
+            HMD_HAND_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertNotIn("hand_tracking_rms", hand_canary_checks)
+        self.assertNotIn("hand_tracking_p95", hand_canary_checks)
+        self.assertEqual(
+            required_tracking_scenario_names(HMD_HAND_ACTIVATION_CANARY_PROFILE),
+            ("low_forward", "max_hands_left", "max_hands_right"),
+        )
+        self.assertFalse(
+            any(
+                any(
+                    abs(value) > 0.0
+                    for target in scenario.foot_target
+                    for value in target
+                )
+                for scenario in _scenarios(HMD_HAND_ACTIVATION_CANARY_PROFILE)
+            )
+        )
+
+        foot_canary_checks = required_tracking_check_names(
+            FOOT_ACTIVATION_CANARY_PROFILE
+        )
+        self.assertIn("hand_tracking_rms", foot_canary_checks)
+        self.assertIn("hand_tracking_p95", foot_canary_checks)
+        self.assertNotIn("foot_tracking_rms", foot_canary_checks)
+        self.assertNotIn("foot_tracking_p95", foot_canary_checks)
+        self.assertTrue(
+            any(
+                any(
+                    abs(value) > 0.0
+                    for target in scenario.foot_target
+                    for value in target
+                )
+                for scenario in _scenarios(FOOT_ACTIVATION_CANARY_PROFILE)
+            )
+        )
 
     def test_tracking_acceptance_rejects_done_coverage_direction_and_active_error(
         self,
@@ -379,7 +536,11 @@ class TeleopV12StageTest(unittest.TestCase):
             {"completed": False, "termination_names": ["out_of_terrain_bounds"]},
             {"observation_coverage": {"passed": False}},
             {"twist_directional_response_passed": False},
-            {"maximum_actual_soft_limit_violation_rad": 0.01},
+            {
+                "maximum_actual_soft_limit_violation_rad": (
+                    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD + 1.0e-9
+                )
+            },
         ):
             with self.subTest(mutation=mutation):
                 failed, failed_status = _acceptance(
@@ -387,6 +548,178 @@ class TeleopV12StageTest(unittest.TestCase):
                 )
                 self.assertEqual(failed_status, "fail")
                 self.assertFalse(all(failed.values()))
+
+        allowed, allowed_status = _acceptance(
+            [
+                _result(
+                    maximum_actual_soft_limit_violation_rad=(
+                        ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+                    )
+                )
+            ],
+            WHOLE_BODY_PROFILE,
+        )
+        self.assertEqual(allowed_status, "pass")
+        self.assertTrue(allowed["actual_soft_limits"])
+
+    def test_target_column_ablation_acceptance_follows_activation_schedule(
+        self,
+    ) -> None:
+        self.assertEqual(
+            target_column_ablation_observation_columns("hand"),
+            (tuple(range(75, 81)), tuple(range(81, 83))),
+        )
+        self.assertEqual(
+            target_column_ablation_observation_columns("foot"),
+            (tuple(range(69, 75)), ()),
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            target_column_ablation_observation_columns("head")
+        observation = torch.arange(83, dtype=torch.float32).unsqueeze(0)
+        hand_ablated = target_column_ablated_observation(observation, "hand")
+        torch.testing.assert_close(
+            hand_ablated[:, 75:81], torch.zeros((1, 6)), rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            hand_ablated[:, 81:83], observation[:, 81:83], rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            hand_ablated[:, :75], observation[:, :75], rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            observation,
+            torch.arange(83, dtype=torch.float32).unsqueeze(0),
+            rtol=0.0,
+            atol=0.0,
+        )
+        with self.assertRaisesRegex(ValueError, r"\[batch, 83\]"):
+            target_column_ablated_observation(torch.zeros((1, 82)), "hand")
+        self.assertEqual(
+            required_target_column_ablation_targets(PRE_ACTIVATION_EXPOSURE_PROFILE),
+            frozenset(),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(EXPANDED_LOCOMOTION_PROFILE),
+            frozenset(),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(HMD_HAND_ACTIVATION_CANARY_PROFILE),
+            frozenset(("hand",)),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(HMD_HAND_PROFILE),
+            frozenset(("hand",)),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(FOOT_ACTIVATION_CANARY_PROFILE),
+            frozenset(("hand", "foot")),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(WHOLE_BODY_PROFILE),
+            frozenset(("hand", "foot")),
+        )
+
+        unresponsive = _result(
+            target_column_ablation={
+                "hand": _ablation(
+                    target="hand",
+                    expected=True,
+                    maximum=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
+                ),
+                "foot": _ablation(
+                    target="foot",
+                    expected=True,
+                    maximum=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
+                ),
+            }
+        )
+        for profile in (
+            PRE_ACTIVATION_EXPOSURE_PROFILE,
+            EXPANDED_LOCOMOTION_PROFILE,
+        ):
+            with self.subTest(profile=profile):
+                checks, status = _acceptance([unresponsive], profile)
+                self.assertEqual(status, "pass")
+                self.assertTrue(checks["target_column_ablation_response"])
+
+        hand_only = deepcopy(unresponsive)
+        hand_only["target_column_ablation"]["hand"] = _ablation(
+            target="hand", expected=True
+        )
+        for profile in (HMD_HAND_ACTIVATION_CANARY_PROFILE, HMD_HAND_PROFILE):
+            checks, status = _acceptance([hand_only], profile)
+            self.assertEqual(status, "pass")
+            self.assertTrue(checks["target_column_ablation_response"])
+        for profile in (
+            FOOT_ACTIVATION_CANARY_PROFILE,
+            WHOLE_BODY_PROFILE,
+            FINAL_PROFILE,
+        ):
+            with self.subTest(profile=profile):
+                checks, status = _acceptance([hand_only], profile)
+                self.assertEqual(status, "fail")
+                self.assertFalse(checks["target_column_ablation_response"])
+
+    def test_tracking_ablation_evidence_is_exact_and_fail_closed(self) -> None:
+        identity = {
+            "sha256": "a" * 64,
+            "iteration": 10_000,
+            "completed_updates": 10_001,
+        }
+        report = _tracking_report(identity)
+        self.assertEqual(
+            set(report["checks"]),
+            set(required_tracking_check_names(FOOT_ACTIVATION_CANARY_PROFILE)),
+        )
+        self.assertIn("hand_tracking_rms", report["checks"])
+        self.assertNotIn("foot_tracking_rms", report["checks"])
+        _validate_tracking_report(report, identity)
+        active_index = next(
+            index
+            for index, result in enumerate(report["results"])
+            if result["target_column_ablation"]["hand"]["target_expected"]
+        )
+
+        def active_hand(candidate: dict[str, object]) -> dict[str, object]:
+            return candidate["results"][active_index]["target_column_ablation"]["hand"]
+
+        mutations = (
+            lambda candidate: active_hand(candidate).update(target_expected=False),
+            lambda candidate: active_hand(candidate).update(
+                ablated_observation_columns=list(range(75, 83))
+            ),
+            lambda candidate: active_hand(candidate).update(
+                preserved_observation_columns=[]
+            ),
+            lambda candidate: active_hand(candidate).update(
+                maximum_absolute_action_delta=-1.0
+            ),
+            lambda candidate: active_hand(candidate).update(
+                maximum_absolute_action_delta=float("nan")
+            ),
+            lambda candidate: active_hand(candidate).update(
+                minimum_required_action_delta=0.0
+            ),
+            lambda candidate: active_hand(candidate).update(passed=False),
+            lambda candidate: active_hand(candidate).update(untrusted=True),
+            lambda candidate: active_hand(candidate).pop(
+                "maximum_absolute_action_delta"
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                corrupted = deepcopy(report)
+                mutate(corrupted)
+                with self.assertRaises(ValueError):
+                    _validate_tracking_report(corrupted, identity)
+
+        below_floor = deepcopy(report)
+        active_hand(below_floor).update(
+            maximum_absolute_action_delta=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
+            passed=False,
+        )
+        with self.assertRaisesRegex(ValueError, "checks do not match"):
+            _validate_tracking_report(below_floor, identity)
 
     def test_active_foot_metric_excludes_inactive_foot(self) -> None:
         default = torch.zeros(1, 2, 3)
@@ -409,12 +742,13 @@ class TeleopV12StageTest(unittest.TestCase):
                 "active_actor_columns_at_save": [],
                 "env_state": {"common_step_counter": 601 * 24},
                 "adapter_sanitization": {
-                    "schema_version": 1,
-                    "revision": "zero_pre7000_extra_w0_and_adam_v1",
+                    "schema_version": (TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION),
+                    "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
                     "parent_checkpoint_sha256": "a" * 64,
                     "parent_iteration": 600,
                     "completed_updates": 601,
                     "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+                    **teleop_v12_target_normalizer_metadata(),
                 },
             }
             torch.save({"iter": 600, "infos": infos}, checkpoint)
@@ -471,6 +805,34 @@ class TeleopV12StageTest(unittest.TestCase):
                     onnx,
                     ("onnx", "onnxruntime_cpu_maximum_absolute_error"),
                     ONNX_PARITY_TOLERANCE * 2.0,
+                ),
+                (
+                    onnx_report_path,
+                    onnx,
+                    ("neutral_legacy_parity", "maximum_absolute_error"),
+                    -1.0,
+                ),
+                (
+                    onnx_report_path,
+                    onnx,
+                    ("onnx", "reference_evaluator_maximum_absolute_error"),
+                    -1.0,
+                ),
+                (
+                    tracking_path,
+                    tracking,
+                    (
+                        "results",
+                        next(
+                            index
+                            for index, result in enumerate(tracking["results"])
+                            if result["target_error"]["active_hand"]["sample_count"] > 0
+                        ),
+                        "target_error",
+                        "active_hand",
+                        "rms",
+                    ),
+                    -1.0,
                 ),
             )
             for path, original, keys, replacement in corruptions:

@@ -31,6 +31,7 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MicrobanTeleopV12PreviewRlCfg,
     MicrobanTeleopV12RlCfg,
     make_microban_teleop_v12_env_cfg,
+    make_microban_teleop_v12_preview_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
@@ -101,8 +102,8 @@ register_mjlab_task(
 
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
-    env_cfg=make_microban_teleop_v12_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
+    env_cfg=make_microban_teleop_v12_preview_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_preview_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12PreviewRlCfg,
     runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
 )

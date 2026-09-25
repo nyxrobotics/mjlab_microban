@@ -12,7 +12,9 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
+    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_OBSERVATION_COLUMNS,
+    TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     FrozenEmpiricalNormalization,
@@ -84,6 +86,19 @@ def _transplanted_pair() -> tuple[MLPModel, LegacyAdapterTeleopActor]:
 
 
 class TeleopV12ActorTest(unittest.TestCase):
+    def test_hand_observation_columns_split_position_from_active_flags(self) -> None:
+        self.assertEqual(
+            TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS, tuple(range(75, 81))
+        )
+        self.assertEqual(TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS, (81, 82))
+        self.assertEqual(
+            TELEOP_V12_HAND_OBSERVATION_COLUMNS,
+            (
+                *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+                *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+            ),
+        )
+
     def test_semantic_mapping_has_expected_shared_and_extra_columns(self) -> None:
         self.assertEqual(
             LEGACY_TO_TELEOP_OBSERVATION_INDEX,

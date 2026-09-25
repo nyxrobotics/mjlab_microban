@@ -14,6 +14,7 @@ import json
 import math
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
+from mjlab_microban.robot.microban_hand_fk import (
+    microban_hand_fk_metadata,
+    microban_reachable_hand_evaluation_offsets,
+)
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
@@ -44,11 +49,15 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_TELEOP_OBSERVATION_WIDTH,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import HmdNeckTargetMotion
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_CHECKPOINT_SHA256,
+    TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
+    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+    TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     inspect_legacy_velocity_checkpoint,
@@ -57,19 +66,31 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    TELEOP_V12_PREVIEW_INFO_KEY,
+    TELEOP_V12_PREVIEW_LEGACY_REVISION,
+    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     validate_teleop_v12_environment_contract,
 )
+from mjlab_microban.teleop_v12_safety import (
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
+)
 
-PRE_ACTIVATION_EXPOSURE_PROFILE = "pre_hmd_hand_foot_exposure_safety_v1"
-EXPANDED_LOCOMOTION_PROFILE = "expanded_locomotion_pre_hmd_exposure_safety_v1"
-HMD_HAND_PROFILE = "hmd_hand_performance_foot_exposure_v1"
-WHOLE_BODY_PROFILE = "whole_body_performance_v1"
-FINAL_PROFILE = "full_body_performance_perturbation_v1"
+PRE_ACTIVATION_EXPOSURE_PROFILE = "pre_hmd_hand_foot_exposure_reachable_safety_v2"
+EXPANDED_LOCOMOTION_PROFILE = "expanded_locomotion_pre_hmd_exposure_reachable_safety_v2"
+HMD_HAND_PROFILE = "hmd_hand_reachable_performance_foot_exposure_v2"
+HMD_HAND_ACTIVATION_CANARY_PROFILE = "hmd_hand_activation_canary_reachable_safety_v1"
+FOOT_ACTIVATION_CANARY_PROFILE = "whole_body_foot_activation_canary_reachable_safety_v1"
+WHOLE_BODY_PROFILE = "whole_body_reachable_performance_v2"
+FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2"
 TRACKING_PROFILES = (
     PRE_ACTIVATION_EXPOSURE_PROFILE,
     EXPANDED_LOCOMOTION_PROFILE,
+    HMD_HAND_ACTIVATION_CANARY_PROFILE,
     HMD_HAND_PROFILE,
+    FOOT_ACTIVATION_CANARY_PROFILE,
     WHOLE_BODY_PROFILE,
     FINAL_PROFILE,
 )
@@ -83,6 +104,46 @@ DIRECTIONAL_RESPONSE_MINIMUM = {
     "vy_m_s": 0.02,
     "yaw_rad_s": 0.20,
 }
+TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN = 1.0e-4
+TARGET_COLUMN_ABLATION_METHOD = (
+    "same_observation_zero_target_position_columns_preserve_hand_active_flags_"
+    "before_actor_forward_v2"
+)
+
+
+def target_column_ablation_observation_columns(
+    target: str,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return zeroed and explicitly preserved actor columns for one target."""
+
+    if target == "hand":
+        return (
+            TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+            TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+        )
+    if target == "foot":
+        return TELEOP_V12_FOOT_OBSERVATION_COLUMNS, ()
+    raise ValueError(f"Unknown target-column ablation target: {target!r}")
+
+
+def target_column_ablated_observation(
+    actor_observation: torch.Tensor, target: str
+) -> torch.Tensor:
+    """Zero only target-position columns while preserving all other inputs."""
+
+    if actor_observation.ndim != 2 or actor_observation.shape[1] != (
+        MICROBAN_TELEOP_OBSERVATION_WIDTH
+    ):
+        raise ValueError("Target-column ablation requires a [batch, 83] observation")
+    ablated_columns, preserved_columns = target_column_ablation_observation_columns(
+        target
+    )
+    result = actor_observation.clone()
+    preserved = result[:, preserved_columns].clone()
+    result[:, ablated_columns] = 0.0
+    if preserved_columns and not torch.equal(result[:, preserved_columns], preserved):
+        raise RuntimeError("Target-column ablation modified preserved columns")
+    return result
 
 
 def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
@@ -106,6 +167,19 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
             "max_hands_left",
             "max_hands_right",
             "max_keypoints_left",
+        ),
+        HMD_HAND_ACTIVATION_CANARY_PROFILE: (
+            "low_forward",
+            "max_hands_left",
+            "max_hands_right",
+        ),
+        FOOT_ACTIVATION_CANARY_PROFILE: (
+            "low_forward",
+            "max_hands_left",
+            "max_hands_right",
+            "max_keypoints_left",
+            "max_keypoints_right",
+            "bounded_both_feet",
         ),
         WHOLE_BODY_PROFILE: (
             "low_forward",
@@ -144,13 +218,34 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
         "raw_action_recurrence",
         "forced_hmd_motion",
         "nonzero_observation_coverage",
+        "target_column_ablation_response",
         "twist_directional_response",
     }
-    if profile in (HMD_HAND_PROFILE, WHOLE_BODY_PROFILE, FINAL_PROFILE):
+    if profile in (
+        HMD_HAND_PROFILE,
+        FOOT_ACTIVATION_CANARY_PROFILE,
+        WHOLE_BODY_PROFILE,
+        FINAL_PROFILE,
+    ):
         names.update(("hand_tracking_rms", "hand_tracking_p95"))
     if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE):
         names.update(("foot_tracking_rms", "foot_tracking_p95"))
     return frozenset(names)
+
+
+def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
+    """Return target inputs that this curriculum stage must have learned to use."""
+
+    required_tracking_scenario_names(profile)
+    if profile in (HMD_HAND_ACTIVATION_CANARY_PROFILE, HMD_HAND_PROFILE):
+        return frozenset(("hand",))
+    if profile in (
+        FOOT_ACTIVATION_CANARY_PROFILE,
+        WHOLE_BODY_PROFILE,
+        FINAL_PROFILE,
+    ):
+        return frozenset(("hand", "foot"))
+    return frozenset()
 
 
 def required_tracking_profile(completed_updates: int) -> str:
@@ -160,8 +255,12 @@ def required_tracking_profile(completed_updates: int) -> str:
         return PRE_ACTIVATION_EXPOSURE_PROFILE
     if completed_updates <= 7_000:
         return EXPANDED_LOCOMOTION_PROFILE
+    if completed_updates <= 7_100:
+        return HMD_HAND_ACTIVATION_CANARY_PROFILE
     if completed_updates <= 10_000:
         return HMD_HAND_PROFILE
+    if completed_updates <= 10_100:
+        return FOOT_ACTIVATION_CANARY_PROFILE
     if completed_updates < 15_000:
         return WHOLE_BODY_PROFILE
     if completed_updates == 15_000:
@@ -171,6 +270,21 @@ def required_tracking_profile(completed_updates: int) -> str:
 
 def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
     by_name = {scenario.name: scenario for scenario in default_scenarios()}
+    reachable = dict(microban_reachable_hand_evaluation_offsets())
+    forward = reachable["F"]
+    backward = reachable["B"]
+    forward_moderate = reachable["f"]
+    backward_moderate = reachable["b"]
+    hand_overrides = {
+        "max_hands_left": (forward[0], backward[1]),
+        "max_hands_right": (backward[0], forward[1]),
+        "max_keypoints_left": (forward[0], backward[1]),
+        "max_keypoints_right": (backward[0], forward[1]),
+        "mixed_forward_left": (forward_moderate[0], backward_moderate[1]),
+        "mixed_backward_right": (backward_moderate[0], forward_moderate[1]),
+    }
+    for name, hand_target in hand_overrides.items():
+        by_name[name] = replace(by_name[name], hand_target=hand_target)
     names = required_tracking_scenario_names(profile)
     return tuple(by_name[name] for name in names)
 
@@ -215,6 +329,144 @@ def _active_foot_tracking_error(
     return per_foot[active]
 
 
+def _target_column_ablation_evidence(
+    maximum_by_target: dict[str, float | None],
+    expected_by_target: dict[str, bool],
+) -> dict[str, dict[str, Any]]:
+    """Report actor sensitivity to target positions with hand flags preserved."""
+
+    if set(maximum_by_target) != {"hand", "foot"} or set(expected_by_target) != {
+        "hand",
+        "foot",
+    }:
+        raise ValueError("Target-column ablation keys drifted")
+    result: dict[str, dict[str, Any]] = {}
+    for target in ("hand", "foot"):
+        expected = expected_by_target[target]
+        maximum = maximum_by_target[target]
+        ablated_columns, preserved_columns = target_column_ablation_observation_columns(
+            target
+        )
+        if type(expected) is not bool:
+            raise TypeError("Target-column ablation expectation must be boolean")
+        if maximum is not None and (
+            isinstance(maximum, bool)
+            or not isinstance(maximum, (int, float))
+            or not math.isfinite(float(maximum))
+            or float(maximum) < 0.0
+        ):
+            raise ValueError("Target-column ablation maximum is invalid")
+        if not expected and maximum is not None:
+            raise ValueError("Inactive target-column ablation maximum must be absent")
+        result[target] = {
+            "target_expected": expected,
+            "ablated_observation_columns": list(ablated_columns),
+            "preserved_observation_columns": list(preserved_columns),
+            "maximum_absolute_action_delta": maximum,
+            "minimum_required_action_delta": (
+                TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN if expected else None
+            ),
+            "passed": (
+                not expected
+                or (
+                    maximum is not None
+                    and maximum > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+                )
+            ),
+        }
+    return result
+
+
+def _target_column_ablation_response_passes(
+    results: list[dict[str, Any]], profile: str
+) -> bool:
+    """Validate exact evidence and enforce responses only after target activation."""
+
+    required_targets = required_target_column_ablation_targets(profile)
+    observed_required_targets: set[str] = set()
+    evidence_fields = {
+        "target_expected",
+        "ablated_observation_columns",
+        "preserved_observation_columns",
+        "maximum_absolute_action_delta",
+        "minimum_required_action_delta",
+        "passed",
+    }
+    try:
+        for result in results:
+            command = result["command"]
+            hand_active = command["hand_active"]
+            foot_target = command["foot_target"]
+            if (
+                not isinstance(hand_active, (list, tuple))
+                or len(hand_active) != 2
+                or any(type(value) is not bool for value in hand_active)
+                or not isinstance(foot_target, (list, tuple))
+                or len(foot_target) != 2
+                or any(
+                    not isinstance(xyz, (list, tuple))
+                    or len(xyz) != 3
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in xyz
+                    )
+                    for xyz in foot_target
+                )
+            ):
+                return False
+            expected_by_target = {
+                "hand": any(hand_active),
+                "foot": any(
+                    float(value) != 0.0 for xyz in foot_target for value in xyz
+                ),
+            }
+            ablation = result["target_column_ablation"]
+            if not isinstance(ablation, dict) or set(ablation) != {"hand", "foot"}:
+                return False
+            for target, expected in expected_by_target.items():
+                evidence = ablation[target]
+                if not isinstance(evidence, dict) or set(evidence) != evidence_fields:
+                    return False
+                ablated_columns, preserved_columns = (
+                    target_column_ablation_observation_columns(target)
+                )
+                if evidence["target_expected"] is not expected:
+                    return False
+                if evidence["ablated_observation_columns"] != list(ablated_columns):
+                    return False
+                if evidence["preserved_observation_columns"] != list(preserved_columns):
+                    return False
+                maximum = evidence["maximum_absolute_action_delta"]
+                if expected:
+                    if (
+                        isinstance(maximum, bool)
+                        or not isinstance(maximum, (int, float))
+                        or not math.isfinite(float(maximum))
+                        or float(maximum) < 0.0
+                        or evidence["minimum_required_action_delta"]
+                        != TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+                    ):
+                        return False
+                    response = float(maximum) > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+                    if evidence["passed"] is not response:
+                        return False
+                    if target in required_targets:
+                        observed_required_targets.add(target)
+                        if not response:
+                            return False
+                elif (
+                    maximum is not None
+                    or evidence["minimum_required_action_delta"] is not None
+                    or evidence["passed"] is not True
+                ):
+                    return False
+    except (KeyError, TypeError):
+        return False
+    return observed_required_targets == set(required_targets)
+
+
 def _evaluate_scenario(
     *,
     env: ManagerBasedRlEnv,
@@ -235,6 +487,10 @@ def _evaluate_scenario(
         raise ValueError("V12 tracking gate requires raw, unclipped actions")
     foot = env.command_manager.get_term("foot_target")
     hand = env.command_manager.get_term("hand_target")
+    expects_foot = any(
+        abs(value) > 0.0 for xyz in scenario.foot_target for value in xyz
+    )
+    expects_hand = any(scenario.hand_active)
     hmd_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
     hmd = hmd_cfg.func
     if not isinstance(hmd, HmdNeckTargetMotion):
@@ -272,6 +528,10 @@ def _evaluate_scenario(
     foot_observation_nonzero_steps = 0
     hand_observation_nonzero_steps = 0
     hmd_observation_nonzero_steps = 0
+    target_ablation_maximum: dict[str, float | None] = {
+        "hand": None,
+        "foot": None,
+    }
     termination_names: list[str] = []
     fall_height = float(
         env.termination_manager.get_term_cfg("fell_over").params["minimum_height"]
@@ -305,13 +565,30 @@ def _evaluate_scenario(
             source_actions = source_policy(
                 TensorDict({"actor": legacy_obs}, batch_size=[1])
             )
+            ablated_actions: dict[str, torch.Tensor] = {}
+            for target, expected in (
+                ("hand", expects_hand),
+                ("foot", expects_foot),
+            ):
+                if not expected:
+                    continue
+                ablated_obs = target_column_ablated_observation(actor_obs, target)
+                ablated_actions[target] = policy(
+                    TensorDict({"actor": ablated_obs}, batch_size=[1])
+                )
         delta = actions - source_actions
         if not all(
             bool(torch.isfinite(value).all().item())
-            for value in (actions, source_actions, delta)
+            for value in (actions, source_actions, delta, *ablated_actions.values())
         ):
             nonfinite = {"step": step, "phase": "policy"}
             break
+        for target, ablated in ablated_actions.items():
+            value = float(torch.max(torch.abs(actions - ablated)).item())
+            previous = target_ablation_maximum[target]
+            target_ablation_maximum[target] = (
+                value if previous is None else max(previous, value)
+            )
         for index, value in enumerate((actions, source_actions, delta)):
             action_min[index] = torch.minimum(action_min[index], value[0])
             action_max[index] = torch.maximum(action_max[index], value[0])
@@ -422,10 +699,10 @@ def _evaluate_scenario(
     directional_response_passed = all(
         value["passed"] is True for value in directional_response.values()
     )
-    expects_foot = any(
-        abs(value) > 0.0 for xyz in scenario.foot_target for value in xyz
+    target_column_ablation = _target_column_ablation_evidence(
+        target_ablation_maximum,
+        {"hand": expects_hand, "foot": expects_foot},
     )
-    expects_hand = any(scenario.hand_active)
     return {
         "name": scenario.name,
         "command": {
@@ -465,6 +742,7 @@ def _evaluate_scenario(
             "foot": foot_error.report(units="m"),
             "active_hand": hand_error.report(units="m"),
         },
+        "target_column_ablation": target_column_ablation,
         "raw_action_envelope": {
             "joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
             "v12": _summary(torch.stack((action_min[0], action_max[0]))),
@@ -484,7 +762,9 @@ def _acceptance(
         "no_falls": not any(item["fell"] for item in results),
         "finite": all(item["nonfinite"] is None for item in results),
         "actual_soft_limits": all(
-            float(item["maximum_actual_soft_limit_violation_rad"]) <= 1.0e-7
+            0.0
+            <= float(item["maximum_actual_soft_limit_violation_rad"])
+            <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             for item in results
         ),
         "raw_action_recurrence": all(
@@ -497,11 +777,19 @@ def _acceptance(
         "nonzero_observation_coverage": all(
             item["observation_coverage"]["passed"] for item in results
         ),
+        "target_column_ablation_response": (
+            _target_column_ablation_response_passes(results, profile)
+        ),
         "twist_directional_response": all(
             item["twist_directional_response_passed"] for item in results
         ),
     }
-    if profile in (HMD_HAND_PROFILE, WHOLE_BODY_PROFILE, FINAL_PROFILE):
+    if profile in (
+        HMD_HAND_PROFILE,
+        FOOT_ACTIVATION_CANARY_PROFILE,
+        WHOLE_BODY_PROFILE,
+        FINAL_PROFILE,
+    ):
         active_hand = [
             item["target_error"]["active_hand"]
             for item in results
@@ -558,6 +846,8 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
+    allow_nondeployable_preview: bool = False,
+    allow_legacy_preview_v1: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -567,9 +857,24 @@ def run_evaluation(
         raise ValueError("Canonical tracking gate requires seed42/300/settle50")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
-    policy, iteration, _infos = _load_actor(checkpoint, device=device)
+    policy, iteration, infos = _load_actor(
+        checkpoint,
+        device=device,
+        allow_nondeployable_preview=allow_nondeployable_preview,
+        allow_legacy_preview_v1=allow_legacy_preview_v1,
+    )
     completed = iteration + 1
-    required = required_tracking_profile(completed)
+    if allow_nondeployable_preview:
+        marker = infos.get(TELEOP_V12_PREVIEW_INFO_KEY, {})
+        required = (
+            HMD_HAND_PROFILE
+            if marker.get("phase") == TELEOP_V12_PREVIEW_PHASE_HMD_HAND
+            else FINAL_PROFILE
+        )
+        if marker.get("revision") == TELEOP_V12_PREVIEW_LEGACY_REVISION:
+            required = FINAL_PROFILE
+    else:
+        required = required_tracking_profile(completed)
     if profile is not None and profile != required:
         raise ValueError(f"Checkpoint requires tracking profile {required}")
     profile = required
@@ -627,9 +932,13 @@ def run_evaluation(
             "perturbation": perturbation,
             "action_clip": None,
             "previous_action": "raw_actor_output",
+            "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
+            "reachable_hand_target_fk": microban_hand_fk_metadata(),
         },
         "thresholds": {
-            "actual_soft_limit_violation_rad_max": 1.0e-7,
+            "actual_soft_limit_violation_rad_max": (
+                ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
             "hand_rms_m_max": HAND_RMS_MAX_M,
@@ -637,6 +946,9 @@ def run_evaluation(
             "foot_rms_m_max": FOOT_RMS_MAX_M,
             "foot_p95_m_max": FOOT_P95_MAX_M,
             "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+            "target_column_ablation_action_delta_min": (
+                TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+            ),
             "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
         },
         "checks": checks,

@@ -23,6 +23,10 @@ from rsl_rl.models import MLPModel
 from rsl_rl.modules import EmpiricalNormalization
 from rsl_rl.modules.distribution import GaussianDistribution
 
+from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+    microban_hand_fk_metadata,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -38,8 +42,11 @@ LEGACY_VELOCITY_CHECKPOINT_SHA256 = (
 LEGACY_VELOCITY_CHECKPOINT_ITERATION = 14_999
 LEGACY_VELOCITY_ACTOR_TOPOLOGY = (63, 512, 256, 128, 18)
 TELEOP_V12_ACTOR_TOPOLOGY = (83, 512, 256, 128, 18)
-TELEOP_V12_BOOTSTRAP_MAPPING_VERSION = (
+TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION = (
     "normalized_legacy_velocity_63_to_teleop83_masked_extra_columns_v1"
+)
+TELEOP_V12_BOOTSTRAP_MAPPING_VERSION = (
+    "normalized_legacy_velocity_63_to_teleop83_reachable_fk_elbow_minus10_v4"
 )
 
 LEGACY_VELOCITY_ACTOR_STATE_KEYS: frozenset[str] = frozenset(
@@ -149,11 +156,78 @@ if len(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS) != 20:
 
 TELEOP_V12_HMD_OBSERVATION_COLUMNS = (6, 7, 8, 27, 28, 29)
 TELEOP_V12_FOOT_OBSERVATION_COLUMNS = tuple(range(69, 75))
-TELEOP_V12_HAND_OBSERVATION_COLUMNS = tuple(range(75, 83))
+TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS = tuple(range(75, 81))
+TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS = tuple(range(81, 83))
+TELEOP_V12_HAND_OBSERVATION_COLUMNS = (
+    *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+    *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
+)
+TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS = (
+    *TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
+    *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+)
+# EmpiricalNormalization divides by ``stored_std + eps``.  Position commands
+# are already bounded in metres, so scale them by their physical per-axis
+# maximum instead of leaving centimetre-sized signals near zero.  The active
+# flags and the six HMD columns deliberately retain their existing identity
+# normalizer state.
+TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS = (
+    0.03,
+    0.03,
+    0.05,
+    0.03,
+    0.03,
+    0.05,
+    *MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+    *MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+)
+TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD = tuple(
+    denominator - LEGACY_VELOCITY_NORMALIZER_EPS
+    for denominator in TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS
+)
+if any(value <= 0.0 for value in TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD):
+    raise RuntimeError("Target-position normalizer denominator must exceed epsilon")
+TELEOP_V12_UNCHANGED_EXTRA_NORMALIZER_COLUMNS = tuple(
+    column
+    for column in TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
+    if column not in set(TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS)
+)
 TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION = (
     "freeze_extra_to7000_then_hmd_hand_to10000_then_all_v1"
 )
-TELEOP_V12_ADAPTER_SANITIZATION_REVISION = "zero_pre7000_extra_w0_and_adam_v1"
+TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION = 4
+TELEOP_V12_ADAPTER_SANITIZATION_REVISION = (
+    "zero_pre7000_extra_w0_adam_and_reachable_fk_elbow_minus10_v4"
+)
+
+
+def teleop_v12_target_normalizer_metadata() -> dict[str, object]:
+    """Return the exact JSON-safe target-normalizer migration contract."""
+
+    return {
+        "source_bootstrap_mapping_version": (
+            TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION
+        ),
+        "target_bootstrap_mapping_version": TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
+        "authenticated_source_extra_normalizer": "identity_mean0_var1_std1",
+        "normalized_target_position_columns": list(
+            TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS
+        ),
+        "target_position_denominators": list(
+            TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS
+        ),
+        "target_position_stored_std": list(
+            TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD
+        ),
+        "target_position_stored_var": [
+            value * value for value in TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD
+        ],
+        "normalizer_eps": LEGACY_VELOCITY_NORMALIZER_EPS,
+        "unchanged_identity_normalizer_columns": list(
+            TELEOP_V12_UNCHANGED_EXTRA_NORMALIZER_COLUMNS
+        ),
+        "hand_target_fk": microban_hand_fk_metadata(),
+    }
 
 
 def teleop_v12_active_adapter_columns(common_step_counter: int) -> tuple[int, ...]:
@@ -168,7 +242,10 @@ def teleop_v12_active_adapter_columns(common_step_counter: int) -> tuple[int, ..
     if common_step_counter <= 7_000 * 24:
         return ()
     if common_step_counter <= 10_000 * 24:
-        return (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_HAND_OBSERVATION_COLUMNS)
+        return (
+            *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+            *TELEOP_V12_HAND_OBSERVATION_COLUMNS,
+        )
     return TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
 
 
@@ -182,9 +259,11 @@ def transplant_legacy_actor_state_to_teleop83(
     """Map the pinned normalized 63-input actor into the 83-input actor.
 
     The 63 shared normalization statistics and first-layer columns are copied by
-    semantic scalar name.  The 20 teleoperation-only columns use identity
-    normalization and exact-zero first-layer weights.  All downstream tensors,
-    including the scalar Gaussian standard deviation, are copied verbatim.
+    semantic scalar name.  The 12 bounded foot/hand position columns use their
+    physical maximum as the effective normalization denominator; the remaining
+    eight teleoperation-only columns retain identity normalization.  All 20 new
+    first-layer weights are exact zero.  All downstream tensors, including the
+    scalar Gaussian standard deviation, are copied verbatim.
     """
 
     if set(source_state) != LEGACY_VELOCITY_ACTOR_STATE_KEYS:
@@ -237,9 +316,7 @@ def transplant_legacy_actor_state_to_teleop83(
         if tuple(target_template[name].shape) != shape:
             raise ValueError(f"Teleop target tensor {name!r} shape drifted")
 
-    result = {
-        name: value.detach().clone() for name, value in target_template.items()
-    }
+    result = {name: value.detach().clone() for name, value in target_template.items()}
     source_columns = torch.tensor(
         [source for source, _target in pairs], dtype=torch.long
     )
@@ -256,13 +333,24 @@ def transplant_legacy_actor_state_to_teleop83(
             device=target.device, dtype=target.dtype
         )[:, source_columns.to(target.device)]
 
+    target_position_columns = torch.tensor(
+        TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS, dtype=torch.long
+    )
+    stored_std = (
+        result["obs_normalizer._std"]
+        .new_tensor(TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD)
+        .unsqueeze(0)
+    )
+    position_indices = target_position_columns.to(stored_std.device)
+    result["obs_normalizer._mean"][:, position_indices] = 0.0
+    result["obs_normalizer._std"][:, position_indices] = stored_std
+    result["obs_normalizer._var"][:, position_indices] = stored_std.square()
+
     first = result["mlp.0.weight"]
     first.zero_()
-    first[:, target_columns_tensor.to(first.device)] = source_state[
-        "mlp.0.weight"
-    ].to(device=first.device, dtype=first.dtype)[
-        :, source_columns.to(first.device)
-    ]
+    first[:, target_columns_tensor.to(first.device)] = source_state["mlp.0.weight"].to(
+        device=first.device, dtype=first.dtype
+    )[:, source_columns.to(first.device)]
     for name in LEGACY_VELOCITY_ACTOR_STATE_KEYS - {
         "obs_normalizer._mean",
         "obs_normalizer._var",
@@ -270,9 +358,7 @@ def transplant_legacy_actor_state_to_teleop83(
         "mlp.0.weight",
     }:
         result[name].copy_(
-            source_state[name].to(
-                device=result[name].device, dtype=result[name].dtype
-            )
+            source_state[name].to(device=result[name].device, dtype=result[name].dtype)
         )
     return result
 

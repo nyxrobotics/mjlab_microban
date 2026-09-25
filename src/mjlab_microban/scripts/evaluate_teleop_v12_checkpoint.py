@@ -40,10 +40,15 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
     reject_preview_checkpoint,
+    validate_preview_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
+)
+from mjlab_microban.teleop_v12_safety import (
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
 
 MINIMUM_SIGNED_RESPONSE = {
@@ -79,13 +84,33 @@ def _actor(device: str) -> LegacyAdapterTeleopActor:
 
 
 def _load_actor(
-    checkpoint: Path, *, device: str
+    checkpoint: Path,
+    *,
+    device: str,
+    allow_nondeployable_preview: bool = False,
+    allow_legacy_preview_v1: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Contract-v12 checkpoint payload is malformed")
     infos = payload["infos"]
-    reject_preview_checkpoint(infos)
+    iteration = payload.get("iter")
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
+        raise ValueError("Checkpoint iteration is invalid")
+    if allow_nondeployable_preview:
+        preview_marker = validate_preview_marker(
+            infos,
+            iteration=iteration,
+            allow_legacy_v1=allow_legacy_preview_v1,
+        )
+        if preview_marker.get("phase") == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
+            from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
+                validate_embedded_phase1_acceptance,
+            )
+
+            validate_embedded_phase1_acceptance(infos, fullbody_marker=preview_marker)
+    else:
+        reject_preview_checkpoint(infos)
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     if infos.get("microban_teleop_recipe_revision") != (
@@ -103,9 +128,6 @@ def _load_actor(
     provenance = validate_bootstrap_provenance(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
-    iteration = payload.get("iter")
-    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
-        raise ValueError("Checkpoint iteration is invalid")
     env_state = infos.get("env_state")
     expected_step = 0 if iteration == -1 else (iteration + 1) * 24
     if (
@@ -139,7 +161,9 @@ def _acceptance(results: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
         "no_falls": not any(result["fell"] for result in results),
         "finite": all(result["nonfinite"] is None for result in results),
         "actual_soft_limits": all(
-            float(result["maximum_actual_soft_limit_violation_rad"]) <= 1.0e-7
+            0.0
+            <= float(result["maximum_actual_soft_limit_violation_rad"])
+            <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             for result in results
         ),
         "raw_action_recurrence": all(
@@ -173,6 +197,8 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
+    allow_nondeployable_preview: bool = False,
+    allow_legacy_preview_v1: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -182,7 +208,12 @@ def run_evaluation(
         raise ValueError("Canonical v12 gate requires seed42, 300 steps, settle50")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
-    policy, iteration, _infos = _load_actor(checkpoint, device=device)
+    policy, iteration, _infos = _load_actor(
+        checkpoint,
+        device=device,
+        allow_nondeployable_preview=allow_nondeployable_preview,
+        allow_legacy_preview_v1=allow_legacy_preview_v1,
+    )
 
     source_env = ManagerBasedRlEnv(
         cfg=_source_cfg(seed=seed, steps=steps), device=device
@@ -280,7 +311,12 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },
-        "thresholds": {"minimum_signed_response": MINIMUM_SIGNED_RESPONSE},
+        "thresholds": {
+            "actual_soft_limit_violation_rad_max": (
+                ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            ),
+            "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+        },
         "checks": checks,
         "results": results,
         "summary": {

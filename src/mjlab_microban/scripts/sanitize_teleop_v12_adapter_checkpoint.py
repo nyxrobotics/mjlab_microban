@@ -12,23 +12,29 @@ import argparse
 import copy
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
-from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _actor
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
     TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
+    TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
+    TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
+    teleop_v12_target_normalizer_metadata,
+    transplant_legacy_actor_state_to_teleop83,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    assert_actor_frozen_against_source,
+    inspect_legacy_velocity_checkpoint,
+    serialize_bootstrap_provenance,
     sha256_file,
-    validate_bootstrap_provenance,
+    validate_identity_normalizer_v1_bootstrap_provenance,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
@@ -57,7 +63,9 @@ def _zero_extra_columns_in_place(tensor: torch.Tensor) -> None:
     tensor.index_fill_(1, columns, 0.0)
 
 
-def _require_tensor_state(payload: dict[str, Any], name: str) -> dict[str, torch.Tensor]:
+def _require_tensor_state(
+    payload: dict[str, Any], name: str
+) -> dict[str, torch.Tensor]:
     value = payload.get(name)
     if not isinstance(value, dict) or not all(
         isinstance(key, str) and isinstance(tensor, torch.Tensor)
@@ -65,6 +73,48 @@ def _require_tensor_state(payload: dict[str, Any], name: str) -> dict[str, torch
     ):
         raise TypeError(f"Checkpoint {name} is malformed")
     return value
+
+
+def _authenticate_identity_normalizer_v1_actor(
+    actor_state: dict[str, torch.Tensor], provenance: Any
+) -> dict[str, torch.Tensor]:
+    """Authenticate old v1 state and return the exact current scaled state."""
+
+    source, source_state = inspect_legacy_velocity_checkpoint(
+        provenance.source.path, provenance.source.sha256
+    )
+    if source != provenance.source:
+        raise ValueError("Legacy source identity no longer matches v1 provenance")
+    scaled_expected = transplant_legacy_actor_state_to_teleop83(
+        source_state, actor_state
+    )
+    identity_expected = {
+        name: value.detach().clone() for name, value in scaled_expected.items()
+    }
+    extra = torch.tensor(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS, dtype=torch.long)
+    for name, fill in (
+        ("obs_normalizer._mean", 0.0),
+        ("obs_normalizer._var", 1.0),
+        ("obs_normalizer._std", 1.0),
+    ):
+        tensor = identity_expected[name]
+        tensor[:, extra.to(tensor.device)] = fill
+
+    for name, expected in identity_expected.items():
+        candidate = actor_state[name].detach().to(device=expected.device)
+        if name == "mlp.0.weight":
+            candidate = candidate[:, TELEOP_V12_SHARED_OBSERVATION_COLUMNS]
+            expected = expected[:, TELEOP_V12_SHARED_OBSERVATION_COLUMNS]
+        if not torch.equal(candidate, expected):
+            if name.startswith("obs_normalizer."):
+                raise ValueError(
+                    "Unsafe v1 source does not have the authenticated identity "
+                    f"normalizer: {name}"
+                )
+            raise ValueError(
+                f"Unsafe v1 actor differs from pinned legacy state: {name}"
+            )
+    return scaled_expected
 
 
 def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
@@ -81,15 +131,17 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
     infos = original["infos"]
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Source checkpoint is not contract-v12")
-    if infos.get("microban_teleop_recipe_revision") != (
-        UNSAFE_PRE_SCHEDULE_RECIPE_REVISION
-    ) or "adapter_gradient_schedule_revision" in infos:
+    if (
+        infos.get("microban_teleop_recipe_revision")
+        != (UNSAFE_PRE_SCHEDULE_RECIPE_REVISION)
+        or "adapter_gradient_schedule_revision" in infos
+    ):
         raise ValueError("Source is not an authenticated pre-schedule v12 checkpoint")
     if infos.get("previous_action_semantics") != "raw_actor_output" or (
         infos.get("action_clip", object()) is not None
     ):
         raise ValueError("Source checkpoint is not raw-action contract-v12")
-    provenance = validate_bootstrap_provenance(
+    provenance = validate_identity_normalizer_v1_bootstrap_provenance(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
     iteration = original.get("iter")
@@ -99,18 +151,19 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
     if completed >= 7_000:
         raise ValueError("Sanitizer is only valid before adapter activation at 7000")
     env_state = infos.get("env_state")
-    if not isinstance(env_state, dict) or env_state.get(
-        "common_step_counter"
-    ) != completed * 24:
+    if (
+        not isinstance(env_state, dict)
+        or env_state.get("common_step_counter") != completed * 24
+    ):
         raise ValueError("Source checkpoint iteration/common-step relation drifted")
 
     actor_state = _require_tensor_state(original, "actor_state_dict")
     critic_state = _require_tensor_state(original, "critic_state_dict")
     if any(not bool(value.isfinite().all().item()) for value in critic_state.values()):
         raise ValueError("Source critic state is non-finite")
-    actor = _actor("cpu")
-    actor.load_state_dict(actor_state, strict=True)
-    assert_actor_frozen_against_source(actor, provenance)
+    scaled_expected_actor = _authenticate_identity_normalizer_v1_actor(
+        actor_state, provenance
+    )
     first = actor_state.get("mlp.0.weight")
     if not isinstance(first, torch.Tensor) or tuple(first.shape) != (512, 83):
         raise ValueError("Source actor W0 shape drifted")
@@ -124,6 +177,20 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
         migrated_first[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS].abs().max().item()
     )
     _zero_extra_columns_in_place(migrated_first)
+    target_position_columns = torch.tensor(
+        TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS, dtype=torch.long
+    )
+    for name in (
+        "obs_normalizer._mean",
+        "obs_normalizer._var",
+        "obs_normalizer._std",
+    ):
+        destination_tensor = migrated_actor[name]
+        source_tensor = scaled_expected_actor[name]
+        indices = target_position_columns.to(destination_tensor.device)
+        destination_tensor[:, indices] = source_tensor.to(
+            device=destination_tensor.device, dtype=destination_tensor.dtype
+        )[:, indices]
 
     optimizer = migrated.get("optimizer_state_dict")
     if not isinstance(optimizer, dict) or not isinstance(optimizer.get("state"), dict):
@@ -194,9 +261,12 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
     migrated_infos["microban_teleop_recipe_revision"] = (
         MICROBAN_TELEOP_V12_RECIPE_REVISION
     )
+    migrated_infos[TELEOP_V12_BOOTSTRAP_INFO_KEY] = serialize_bootstrap_provenance(
+        replace(provenance, mapping_version=TELEOP_V12_BOOTSTRAP_MAPPING_VERSION)
+    )
     migrated_infos["active_actor_columns_at_save"] = []
     migrated_infos["adapter_sanitization"] = {
-        "schema_version": 1,
+        "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
         "revision": SANITIZATION_REVISION,
         "parent_checkpoint_filename": source.name,
         "parent_checkpoint_sha256": source_sha256,
@@ -206,6 +276,7 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
         "zeroed_optimizer_parameter_id": actor_parameter_id,
         "zeroed_optimizer_moments": zeroed_moments,
         "maximum_absolute_extra_w0_before": maximum_before,
+        **teleop_v12_target_normalizer_metadata(),
     }
 
     # Explicitly prove all other model tensors were preserved by the clone.
@@ -214,6 +285,12 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
         if name == "mlp.0.weight":
             value = value[:, TELEOP_V12_SHARED_OBSERVATION_COLUMNS]
             candidate = candidate[:, TELEOP_V12_SHARED_OBSERVATION_COLUMNS]
+        elif name in {
+            "obs_normalizer._mean",
+            "obs_normalizer._var",
+            "obs_normalizer._std",
+        }:
+            value = scaled_expected_actor[name]
         if not torch.equal(value, candidate):
             raise RuntimeError(f"Sanitizer changed protected actor tensor {name}")
     migrated_critic = _require_tensor_state(migrated, "critic_state_dict")
@@ -235,8 +312,17 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
     ):
         destination.unlink(missing_ok=True)
         raise RuntimeError("Sanitized checkpoint did not retain zero adapter weights")
+    verified_actor = _require_tensor_state(verified, "actor_state_dict")
+    for name in (
+        "obs_normalizer._mean",
+        "obs_normalizer._var",
+        "obs_normalizer._std",
+    ):
+        if not torch.equal(verified_actor[name], scaled_expected_actor[name]):
+            destination.unlink(missing_ok=True)
+            raise RuntimeError("Sanitized target-position normalizer did not persist")
     return {
-        "schema_version": 1,
+        "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
         "sanitizer": SANITIZATION_REVISION,
         "status": "pass",
         "source": {
@@ -256,8 +342,11 @@ def sanitize_checkpoint(source: Path, destination: Path) -> dict[str, Any]:
             "critic_unchanged": True,
             "extra_w0_zero": True,
             "extra_adam_moments_zero": True,
+            "old_identity_normalizer_authenticated": True,
+            "target_position_normalizer_scaled": True,
             "source_not_overwritten": True,
         },
+        "normalizer_migration": teleop_v12_target_normalizer_metadata(),
         "maximum_absolute_extra_w0_before": maximum_before,
     }
 

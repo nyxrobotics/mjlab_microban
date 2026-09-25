@@ -1,4 +1,4 @@
-"""Create a non-deployable full-body preview by clock-lifting sanitized601."""
+"""Create staged-v2 HMD/hand preview seed by clock-lifting sanitized601."""
 
 from __future__ import annotations
 
@@ -14,19 +14,22 @@ import torch
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    TELEOP_V12_PREVIEW_HMD_HAND_COLUMNS,
     TELEOP_V12_PREVIEW_INFO_KEY,
-    TELEOP_V12_PREVIEW_LIFTED_COMPLETED_UPDATES,
-    TELEOP_V12_PREVIEW_LIFTED_ITERATION,
+    TELEOP_V12_PREVIEW_PHASE1_LIFTED_COMPLETED_UPDATES,
+    TELEOP_V12_PREVIEW_PHASE1_LIFTED_ITERATION,
+    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
     TELEOP_V12_PREVIEW_SOURCE_COMPLETED_UPDATES,
     TELEOP_V12_PREVIEW_SOURCE_ITERATION,
     TELEOP_V12_PREVIEW_SOURCE_SHA256,
-    canonical_preview_info,
+    staged_preview_info,
     validate_preview_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import _atomic_torch_save
@@ -64,16 +67,21 @@ def create_preview_checkpoint(source: Path, destination: Path) -> dict[str, Any]
         raise ValueError("Preview source adapter is not exact zero")
 
     lifted = copy.deepcopy(payload)
-    lifted["iter"] = TELEOP_V12_PREVIEW_LIFTED_ITERATION
+    lifted["iter"] = TELEOP_V12_PREVIEW_PHASE1_LIFTED_ITERATION
     lifted_infos = lifted["infos"]
     lifted_infos["env_state"] = {
-        "common_step_counter": TELEOP_V12_PREVIEW_LIFTED_COMPLETED_UPDATES * 24
+        "common_step_counter": (
+            TELEOP_V12_PREVIEW_PHASE1_LIFTED_COMPLETED_UPDATES * 24
+        )
     }
     lifted_infos["active_actor_columns_at_save"] = list(
-        TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
+        TELEOP_V12_PREVIEW_HMD_HAND_COLUMNS
     )
     lifted_infos["preview_non_deployable"] = True
-    lifted_infos[TELEOP_V12_PREVIEW_INFO_KEY] = canonical_preview_info()
+    lifted_infos[TELEOP_V12_PREVIEW_INFO_KEY] = staged_preview_info(
+        phase=TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
+        phase_source_checkpoint_sha256=source_sha,
+    )
 
     # The preview starts from the exact sanitized policy/critic/optimizer; only
     # its explicit clock and non-deployable lineage may differ.
@@ -88,7 +96,7 @@ def create_preview_checkpoint(source: Path, destination: Path) -> dict[str, Any]
     validate_preview_marker(verified.get("infos"), iteration=verified.get("iter", -1))
     return {
         "schema_version": 1,
-        "creator": "microban_teleop_v12_fullbody_preview_clock_lift",
+        "creator": "microban_teleop_v12_hmd_hand_preview_clock_lift_v2",
         "status": "pass",
         "preview_non_deployable": True,
         "source": {
@@ -100,15 +108,23 @@ def create_preview_checkpoint(source: Path, destination: Path) -> dict[str, Any]
         "output": {
             "path": str(destination),
             "sha256": sha256_file(destination),
-            "iteration": TELEOP_V12_PREVIEW_LIFTED_ITERATION,
-            "completed_updates": TELEOP_V12_PREVIEW_LIFTED_COMPLETED_UPDATES,
+            "iteration": TELEOP_V12_PREVIEW_PHASE1_LIFTED_ITERATION,
+            "completed_updates": (
+                TELEOP_V12_PREVIEW_PHASE1_LIFTED_COMPLETED_UPDATES
+            ),
         },
         "checks": {
             "source_unchanged": True,
             "actor_unchanged": True,
             "critic_unchanged": True,
             "optimizer_unchanged": True,
-            "full20_adapter_active_after_resume": True,
+            "hmd_hand14_adapter_active_after_resume": True,
+            "foot6_adapter_locked_zero": bool(
+                torch.equal(
+                    first[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS],
+                    torch.zeros_like(first[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]),
+                )
+            ),
             "canonical_deployment_forbidden": True,
         },
     }

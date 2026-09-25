@@ -28,10 +28,13 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     HAND_RMS_MAX_M,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+    TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
+    TARGET_COLUMN_ABLATION_METHOD,
     _aggregate_action_envelopes,
     required_tracking_check_names,
     required_tracking_profile,
     required_tracking_scenario_names,
+    target_column_ablation_observation_columns,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _acceptance as _tracking_acceptance,
@@ -49,7 +52,11 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
+    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
+    TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     teleop_v12_active_adapter_columns,
+    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     portable_bootstrap_artifact_path,
@@ -62,6 +69,9 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     reject_preview_checkpoint,
+)
+from mjlab_microban.teleop_v12_safety import (
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
 
 _VELOCITY_AXES = ("vx_m_s", "vy_m_s", "yaw_rad_s")
@@ -165,7 +175,12 @@ def _validate_locomotion_report(
         },
         "Locomotion",
     )
-    if report.get("thresholds") != {"minimum_signed_response": MINIMUM_SIGNED_RESPONSE}:
+    if report.get("thresholds") != {
+        "actual_soft_limit_violation_rad_max": (
+            ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+        ),
+        "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+    }:
         raise ValueError("Locomotion report thresholds drifted")
     results = report.get("results")
     expected_names = ("neutral", *MINIMUM_SIGNED_RESPONSE)
@@ -201,7 +216,9 @@ def _validate_locomotion_report(
             or result.get("raw_action_recurrence_verified_steps") != 300
             or result.get("neutral_foot_hand_target_verified_steps") != 300
             or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
-            or float(result["maximum_actual_soft_limit_violation_rad"]) > 1.0e-7
+            or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
+            or float(result["maximum_actual_soft_limit_violation_rad"])
+            > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
         ):
             raise ValueError("Locomotion report scenario evidence failed")
         nonzero = [index for index, value in enumerate(command) if value != 0.0]
@@ -337,11 +354,17 @@ def _validate_tracking_report(
             "perturbation": profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE),
             "action_clip": None,
             "previous_action": "raw_actor_output",
+            "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
+            "reachable_hand_target_fk": teleop_v12_target_normalizer_metadata()[
+                "hand_target_fk"
+            ],
         },
         "Tracking",
     )
     expected_thresholds = {
-        "actual_soft_limit_violation_rad_max": 1.0e-7,
+        "actual_soft_limit_violation_rad_max": (
+            ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+        ),
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
         "hand_rms_m_max": HAND_RMS_MAX_M,
@@ -349,6 +372,9 @@ def _validate_tracking_report(
         "foot_rms_m_max": FOOT_RMS_MAX_M,
         "foot_p95_m_max": FOOT_P95_MAX_M,
         "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+        "target_column_ablation_action_delta_min": (
+            TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+        ),
         "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
     }
     if report.get("thresholds") != expected_thresholds:
@@ -386,7 +412,9 @@ def _validate_tracking_report(
             or result.get("termination_names") != []
             or result.get("raw_action_recurrence_verified_steps") != 300
             or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
-            or float(result["maximum_actual_soft_limit_violation_rad"]) > 1.0e-7
+            or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
+            or float(result["maximum_actual_soft_limit_violation_rad"])
+            > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             or result.get("hmd_motion_evidence_passed") is not True
             or result.get("twist_directional_response_passed") is not True
             or not isinstance(coverage, dict)
@@ -399,6 +427,94 @@ def _validate_tracking_report(
             or (expects_hand and coverage.get("hand_nonzero_steps") != 300)
         ):
             raise ValueError("Tracking report scenario evidence failed")
+        target_error = result.get("target_error")
+        if not isinstance(target_error, dict) or set(target_error) != {
+            "foot",
+            "active_hand",
+        }:
+            raise ValueError("Tracking target-error evidence is malformed")
+        active_foot_count = sum(
+            any(abs(value) > 0.0 for value in target) for target in scenario.foot_target
+        )
+        active_hand_count = sum(bool(value) for value in scenario.hand_active)
+        for target, expected, expected_samples in (
+            ("foot", expects_foot, 250 * active_foot_count),
+            ("active_hand", expects_hand, 250 * active_hand_count),
+        ):
+            values = target_error[target]
+            if not isinstance(values, dict) or values.get("units") != "m":
+                raise ValueError("Tracking target-error stats are malformed")
+            metrics = ("min", "max", "mean", "rms", "p95")
+            if expected:
+                if (
+                    values.get("sample_count") != expected_samples
+                    or not all(_finite_number(values.get(name)) for name in metrics)
+                    or not (
+                        0.0
+                        <= float(values["min"])
+                        <= float(values["mean"])
+                        <= float(values["rms"])
+                        <= float(values["max"])
+                    )
+                    or not (
+                        float(values["min"])
+                        <= float(values["p95"])
+                        <= float(values["max"])
+                    )
+                ):
+                    raise ValueError("Tracking active target-error stats failed")
+            elif values.get("sample_count") != 0 or any(
+                values.get(name) is not None for name in metrics
+            ):
+                raise ValueError("Tracking inactive target-error stats drifted")
+        ablation = result.get("target_column_ablation")
+        if not isinstance(ablation, dict) or set(ablation) != {"hand", "foot"}:
+            raise ValueError("Tracking target-column ablation evidence is malformed")
+        fields = {
+            "target_expected",
+            "ablated_observation_columns",
+            "preserved_observation_columns",
+            "maximum_absolute_action_delta",
+            "minimum_required_action_delta",
+            "passed",
+        }
+        for target, expected in (("hand", expects_hand), ("foot", expects_foot)):
+            evidence = ablation[target]
+            ablated_columns, preserved_columns = (
+                target_column_ablation_observation_columns(target)
+            )
+            if (
+                not isinstance(evidence, dict)
+                or set(evidence) != fields
+                or evidence.get("target_expected") is not expected
+                or evidence.get("ablated_observation_columns") != list(ablated_columns)
+                or evidence.get("preserved_observation_columns")
+                != list(preserved_columns)
+            ):
+                raise ValueError("Tracking target-column ablation target drifted")
+            maximum = evidence.get("maximum_absolute_action_delta")
+            if expected:
+                response = (
+                    _finite_number(maximum)
+                    and float(maximum) >= 0.0
+                    and float(maximum) > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+                )
+                if (
+                    not _finite_number(maximum)
+                    or float(maximum) < 0.0
+                    or evidence.get("minimum_required_action_delta")
+                    != TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
+                    or evidence.get("passed") is not response
+                ):
+                    raise ValueError(
+                        "Tracking target-column ablation evidence is inconsistent"
+                    )
+            elif (
+                maximum is not None
+                or evidence.get("minimum_required_action_delta") is not None
+                or evidence.get("passed") is not True
+            ):
+                raise ValueError("Tracking inactive target-column ablation drifted")
         hmd = result.get("hmd_motion")
         per_axis = hmd.get("per_axis") if isinstance(hmd, dict) else None
         if (
@@ -505,6 +621,7 @@ def _validate_onnx_report(
         or neutral.get("teleop_only_columns") != "exact_zero"
         or neutral.get("tolerance") != PRISTINE_PARITY_TOLERANCE
         or not _finite_number(neutral.get("maximum_absolute_error"))
+        or float(neutral["maximum_absolute_error"]) < 0.0
         or float(neutral["maximum_absolute_error"]) > PRISTINE_PARITY_TOLERANCE
     ):
         raise ValueError("ONNX neutral legacy parity evidence failed")
@@ -527,8 +644,10 @@ def _validate_onnx_report(
         "reference_evaluator_maximum_absolute_error",
         "onnxruntime_cpu_maximum_absolute_error",
     ):
-        if not _finite_number(onnx.get(name)) or float(onnx[name]) > (
-            ONNX_PARITY_TOLERANCE
+        if (
+            not _finite_number(onnx.get(name))
+            or float(onnx[name]) < 0.0
+            or float(onnx[name]) > ONNX_PARITY_TOLERANCE
         ):
             raise ValueError(f"ONNX parity evidence failed: {name}")
     onnx_path = resolve_bootstrap_artifact_path(onnx.get("path", ""))
@@ -571,15 +690,25 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     if infos.get("active_actor_columns_at_save") != expected_active:
         raise ValueError("Checkpoint active adapter columns drifted from its clock")
     sanitization = infos.get("adapter_sanitization")
-    if sanitization is not None and (
-        not isinstance(sanitization, dict)
-        or sanitization.get("schema_version") != 1
-        or sanitization.get("completed_updates")
-        != sanitization.get("parent_iteration", -2) + 1
-        or not isinstance(sanitization.get("parent_checkpoint_sha256"), str)
-        or len(sanitization["parent_checkpoint_sha256"]) != 64
-    ):
-        raise ValueError("Checkpoint sanitization lineage is malformed")
+    if sanitization is not None:
+        if not isinstance(sanitization, dict):
+            raise ValueError("Checkpoint sanitization lineage is malformed")
+        expected_sanitization = {
+            "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
+            "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
+            "completed_updates": sanitization.get("parent_iteration", -2) + 1,
+            "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+            **teleop_v12_target_normalizer_metadata(),
+        }
+        if (
+            any(
+                sanitization.get(name) != value
+                for name, value in expected_sanitization.items()
+            )
+            or not isinstance(sanitization.get("parent_checkpoint_sha256"), str)
+            or len(sanitization["parent_checkpoint_sha256"]) != 64
+        ):
+            raise ValueError("Checkpoint sanitization lineage is malformed")
     return sha256_file(path), iteration, completed, infos
 
 
