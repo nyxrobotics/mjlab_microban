@@ -26,6 +26,14 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
+    MicrobanTeleopV12CornerRescueRlCfg,
+    make_microban_teleop_v12_corner_rescue_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
+    MicrobanTeleopV12CornerRescueOnPolicyRunner,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TASK_ID,
     MicrobanTeleopV12PreviewRlCfg,
@@ -106,4 +114,12 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v12_preview_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12PreviewRlCfg,
     runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
+    env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV12CornerRescueRlCfg,
+    runner_cls=MicrobanTeleopV12CornerRescueOnPolicyRunner,
 )

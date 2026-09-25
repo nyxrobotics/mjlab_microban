@@ -30,6 +30,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
+    TRACKING_PROFILES,
     _aggregate_action_envelopes,
     required_tracking_check_names,
     required_tracking_profile,
@@ -335,15 +336,26 @@ def _require_action_envelope(
 
 
 def _validate_tracking_report(
-    report: dict[str, Any], expected_identity: dict[str, int | str]
+    report: dict[str, Any],
+    expected_identity: dict[str, int | str],
+    *,
+    profile_override: str | None = None,
+    allowed_failed_checks: frozenset[str] = frozenset(),
 ) -> None:
     completed = int(expected_identity["completed_updates"])
-    profile = required_tracking_profile(completed)
+    profile = (
+        required_tracking_profile(completed)
+        if profile_override is None
+        else profile_override
+    )
+    if profile_override is not None and profile_override not in TRACKING_PROFILES:
+        raise ValueError("Tracking report profile override is invalid")
+    expected_statuses = {"pass"} if not allowed_failed_checks else {"pass", "fail"}
     if (
         report.get("schema_version") != 1
         or report.get("gate") != "microban_teleop_v12_tracking"
         or report.get("profile") != profile
-        or report.get("status") != "pass"
+        or report.get("status") not in expected_statuses
     ):
         raise ValueError("Tracking report schema/profile/status drifted")
     _require_report_identity(report, expected_identity, "Tracking")
@@ -590,10 +602,21 @@ def _validate_tracking_report(
         recomputed, status = _tracking_acceptance(results, profile)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Tracking result evidence is malformed") from exc
-    checks = _require_exact_true_checks(
-        report, required_tracking_check_names(profile), "Tracking"
-    )
-    if status != "pass" or recomputed != checks:
+    required_checks = required_tracking_check_names(profile)
+    if not allowed_failed_checks:
+        checks = _require_exact_true_checks(report, required_checks, "Tracking")
+    else:
+        checks = report.get("checks")
+        if (
+            not isinstance(checks, dict)
+            or set(checks) != set(required_checks)
+            or any(type(value) is not bool for value in checks.values())
+        ):
+            raise ValueError("Tracking report check set is incomplete or drifted")
+        failed = {name for name, value in checks.items() if not value}
+        if not failed.issubset(allowed_failed_checks):
+            raise ValueError("Tracking report contains a non-rescuable failing check")
+    if report.get("status") != status or recomputed != checks:
         raise ValueError("Tracking checks do not match result evidence")
     envelope = _require_action_envelope(
         report.get("raw_action_envelope"),
