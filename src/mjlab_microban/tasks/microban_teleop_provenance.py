@@ -32,8 +32,14 @@ from typing import Any
 import numpy as np
 import torch
 
-MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 2
-MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v10_stage"
+# Schema 3 deliberately separates the current fresh actor-only bootstrap recipe
+# from the historical v9 -> v10 full-state migration ledger.  In particular, a
+# v10 manifest cannot be relabelled as v11 merely because its tensor shapes are
+# compatible.
+MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION = 3
+MICROBAN_TELEOP_CANONICAL_STAGE_MODE = "canonical_v11_stage"
+# Retained only so the byte-pinned v10 migration source remains auditable.  It
+# is not accepted by collect_training_provenance as a current canonical mode.
 MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE = "canonical_v10_migration_stage"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY = "microban_teleop_training_provenance"
 MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
@@ -42,6 +48,7 @@ MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY = (
 
 _SHA256_HEX_LENGTH = 64
 MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES = (
+    0,
     3000,
     7000,
     10000,
@@ -72,6 +79,10 @@ MICROBAN_TELEOP_V10_LEGACY_SAFE_VELOCITY_ACCEPTANCE_RECEIPT_SHA256 = (
 MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE = 7.593750000000002e-05
 MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE = 1.0e-5
 MICROBAN_TELEOP_V10_MIGRATION_SOURCE_SCHEMA_VERSION = 1
+MICROBAN_TELEOP_V10_TRAINING_PROVENANCE_SCHEMA_VERSION = 2
+MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE = 1.0e-4
+MICROBAN_TELEOP_V11_ENTROPY_COEF = 0.005
+MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS = 5
 MICROBAN_TELEOP_V9_CANONICAL_STAGE_MODE = "canonical_v9_stage"
 MICROBAN_TELEOP_V9_TRAINING_PROVENANCE_SCHEMA_VERSION = 1
 MICROBAN_TELEOP_V9_TRAINING_CONTRACT_VERSION = "9"
@@ -338,7 +349,7 @@ def inherit_v10_migration_source_identity(
             raise TypeError(f"{label.title()} training provenance must be a dictionary")
         if (
             value.get("schema_version")
-            != MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
+            != MICROBAN_TELEOP_V10_TRAINING_PROVENANCE_SCHEMA_VERSION
             or value.get("canonical_stage") is not True
         ):
             raise ValueError(
@@ -393,13 +404,13 @@ def inherit_initial_stage_safe_velocity_identity(
             )
         if (
             invocation.get("stage_start_boundary") != 0
-            or invocation.get("stage_target_boundary") != 1500
+            or invocation.get("stage_target_boundary") != 3000
             or invocation.get("parent_checkpoint_sha256") is not None
             or invocation.get("parent_gate_sha256") is not None
         ):
             raise ValueError(
                 "Safe-source inheritance is valid only within canonical stage "
-                "0->1500 with null parents"
+                "0->3000 with null parents"
             )
         resolved = value.get("resolved_config")
         critical = resolved.get("critical") if isinstance(resolved, dict) else None
@@ -472,9 +483,11 @@ def collect_training_source_manifest(project_root: str | Path | None = None) -> 
             "scripts/train_microban_teleop.sh",
             "scripts/train_microban_teleop_v9.sh",
             "scripts/train_microban_teleop_v10.sh",
+            "scripts/train_microban_teleop_v11.sh",
             "scripts/evaluate_microban_teleop_v8_stage.sh",
             "scripts/evaluate_microban_teleop_v9_stage.sh",
             "scripts/evaluate_microban_teleop_v10_stage.sh",
+            "scripts/evaluate_microban_teleop_v11_stage.sh",
         )
     )
     files = {
@@ -553,23 +566,19 @@ def _validate_canonical_stage_lineage(
         or not isinstance(target_boundary, int)
     ):
         raise TypeError("Canonical stage boundaries must be integers")
-    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE:
-        allowed_intervals = {
-            (
-                MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY,
-                MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY,
-            )
-        }
-    elif mode == MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
-        allowed_intervals = set(pairwise(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES))
-    else:
+    if mode != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
         raise ValueError("Canonical stage mode is unsupported")
+    allowed_intervals = set(pairwise(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES))
     if (start_boundary, target_boundary) not in allowed_intervals:
         raise ValueError(
-            "Canonical stage interval is not one adjacent contract-v10 boundary pair: "
+            "Canonical stage interval is not one adjacent contract-v11 boundary pair: "
             f"{start_boundary}->{target_boundary}"
         )
     parents = (parent_checkpoint_sha256, parent_gate_sha256)
+    if start_boundary == 0:
+        if parents != (None, None):
+            raise ValueError("Canonical v11 fresh stage must have null parents")
+        return
     for name, value in zip(("parent checkpoint", "parent gate"), parents, strict=True):
         if (
             not isinstance(value, str)
@@ -577,13 +586,6 @@ def _validate_canonical_stage_lineage(
             or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ValueError(f"Canonical stage {name} must be one lowercase SHA-256")
-    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE and parents != (
-        MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
-        MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256,
-    ):
-        raise ValueError(
-            "Canonical v10 migration requires the pinned legacy checkpoint/gate"
-        )
 
 
 def collect_training_provenance(
@@ -598,15 +600,11 @@ def collect_training_provenance(
     """Collect the resolved config/source manifest and its canonical digest."""
 
     mode = os.environ.get("MICROBAN_TELEOP_PROVENANCE_MODE", "generic")
-    canonical_modes = (
-        MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-        MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-    )
+    canonical_modes = (MICROBAN_TELEOP_CANONICAL_STAGE_MODE,)
     canonical_stage = mode in canonical_modes
     if mode not in ("generic", *canonical_modes):
         raise ValueError(
             "MICROBAN_TELEOP_PROVENANCE_MODE must be 'generic', "
-            f"'{MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE}', or "
             f"'{MICROBAN_TELEOP_CANONICAL_STAGE_MODE}'"
         )
     for name in _CANONICAL_STAGE_ENV_NAMES:
@@ -653,10 +651,6 @@ def collect_training_provenance(
         raise ValueError("Canonical resume source checkpoint SHA-256 mismatch")
     if canonical_stage:
         assert start_boundary is not None and target_boundary is not None
-        if any(value is None for value in resume_source_values):
-            raise ValueError(
-                "Canonical contract-v10 stages require an exact resume source"
-            )
         _validate_canonical_stage_lineage(
             mode=mode,
             start_boundary=start_boundary,
@@ -664,6 +658,14 @@ def collect_training_provenance(
             parent_checkpoint_sha256=parent_checkpoint_sha256,
             parent_gate_sha256=parent_gate_sha256,
         )
+        resume = bool(runner_cfg.get("resume", False))
+        if start_boundary == 0 and not resume:
+            if any(value is not None for value in resume_source_values):
+                raise ValueError(
+                    "Canonical v11 fresh stage cannot claim a resume source"
+                )
+        elif any(value is None for value in resume_source_values):
+            raise ValueError("Canonical v11 resume requires an exact resume source")
 
     unwrapped = getattr(env, "unwrapped", env)
     env_cfg = getattr(unwrapped, "cfg", None)
@@ -700,35 +702,6 @@ def collect_training_provenance(
             runner_cfg.get("save_pristine_checkpoint", False)
         ),
     }
-    migration_source = None
-    if mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE:
-        assert resume_source_checkpoint_path is not None
-        if (
-            resume_source_checkpoint_iteration
-            == MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_ITERATION
-        ):
-            if (
-                resume_source_checkpoint_sha256
-                != MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
-            ):
-                raise ValueError(
-                    "Canonical v10 migration source is not the pinned model_1499"
-                )
-            migration_source = _v10_migration_source_identity(
-                resume_source_checkpoint_path
-            )
-            validate_v10_migration_source_identity(migration_source)
-        elif (
-            resume_source_checkpoint_iteration is None
-            or resume_source_checkpoint_iteration
-            < MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY
-            or resume_source_checkpoint_iteration
-            >= MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY - 1
-        ):
-            raise ValueError(
-                "Interrupted v10 migration source iteration is outside 1500->3000"
-            )
-
     manifest = {
         "schema_version": MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
         "canonical_stage": canonical_stage,
@@ -741,7 +714,9 @@ def collect_training_provenance(
             "runner": resolved_runner,
         },
         "source": collect_training_source_manifest(project_root),
-        "migration_source": migration_source,
+        # Kept as an explicit null field so schema-3 validators can reject any
+        # attempt to smuggle the retired v10 full-state migration into v11.
+        "migration_source": None,
         "invocation": {
             "mode": mode,
             "stage_start_boundary": start_boundary,
@@ -867,7 +842,6 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         "upload_model": False,
         "wrapper_clip_actions": None,
         "checkpoint_consumer_mode": False,
-        "save_pristine_checkpoint": False,
     }
     mismatches = [
         f"{key}={critical.get(key)!r} (expected {value!r})"
@@ -878,9 +852,9 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         manifest.get("schema_version")
         != MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION
     ):
-        mismatches.append("training provenance schema is not contract-v10 schema 2")
-    if manifest.get("training_contract_version") != "10":
-        mismatches.append("training contract version is not 10")
+        mismatches.append("training provenance schema is not contract-v11 schema 3")
+    if manifest.get("training_contract_version") != "11":
+        mismatches.append("training contract version is not 11")
 
     mode = invocation.get("mode")
     start_boundary = invocation.get("stage_start_boundary")
@@ -888,23 +862,36 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
     safe_path = critical.get("safe_velocity_checkpoint")
     safe_sha256 = critical.get("safe_velocity_checkpoint_sha256")
     safe_receipt = critical.get("safe_velocity_acceptance_receipt")
-    if any(value is not None for value in (safe_path, safe_sha256, safe_receipt)):
-        mismatches.append(
-            "contract-v10 stages inherit safe-source identity from migration_source"
-        )
+    safe_values = (safe_path, safe_sha256, safe_receipt)
+    if any(value is None for value in safe_values) != all(
+        value is None for value in safe_values
+    ):
+        mismatches.append("safe-velocity source identity must be complete or absent")
 
     runner = resolved.get("runner") if isinstance(resolved, dict) else None
     algorithm = runner.get("algorithm") if isinstance(runner, dict) else None
     if not isinstance(algorithm, dict):
         mismatches.append("resolved runner algorithm config is malformed")
     else:
-        if algorithm.get("learning_rate") != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE:
+        if algorithm.get("learning_rate") != MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE:
             mismatches.append(
                 "algorithm learning_rate must be fixed at "
-                f"{MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE!r}"
+                f"{MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE!r}"
             )
         if algorithm.get("schedule") != "fixed":
             mismatches.append("algorithm schedule must be 'fixed'")
+        if algorithm.get("entropy_coef") != MICROBAN_TELEOP_V11_ENTROPY_COEF:
+            mismatches.append(
+                f"algorithm entropy_coef must be {MICROBAN_TELEOP_V11_ENTROPY_COEF!r}"
+            )
+        if (
+            algorithm.get("num_learning_epochs")
+            != MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS
+        ):
+            mismatches.append(
+                "algorithm num_learning_epochs must be "
+                f"{MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS}"
+            )
     resume_source_path = invocation.get("resume_source_checkpoint_path")
     resume_source_sha256 = invocation.get("resume_source_checkpoint_sha256")
     resume_source_iteration = invocation.get("resume_source_checkpoint_iteration")
@@ -916,8 +903,36 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
     resume = critical.get("resume")
     if not isinstance(resume, bool):
         mismatches.append("resume must be boolean")
-    if resume is not True:
-        mismatches.append("all canonical contract-v10 stages must resume full state")
+    if isinstance(start_boundary, int) and start_boundary > 0 and resume is not True:
+        mismatches.append("noninitial canonical v11 stages must resume full state")
+    if resume is False and start_boundary == 0:
+        if any(value is None for value in safe_values):
+            mismatches.append(
+                "fresh canonical v11 stage requires the complete safe-velocity source"
+            )
+        if critical.get("save_pristine_checkpoint") not in (True, False):
+            mismatches.append("save_pristine_checkpoint must be boolean")
+    elif critical.get("save_pristine_checkpoint") is not False:
+        mismatches.append("only a fresh v11 stage may save a pristine checkpoint")
+    if (
+        resume is True
+        and start_boundary == 0
+        and any(value is None for value in safe_values)
+    ):
+        # The current invocation omits mutable safe-source arguments. The runner
+        # fills these three values from the authenticated checkpoint before this
+        # validator is called.
+        mismatches.append(
+            "interrupted initial-stage resume did not inherit safe-source identity"
+        )
+    if (
+        isinstance(start_boundary, int)
+        and start_boundary > 0
+        and any(value is not None for value in safe_values)
+    ):
+        mismatches.append(
+            "post-3000 stages must carry safe-source identity in checkpoint infos only"
+        )
     if resume is True:
         if (
             not isinstance(resume_source_path, str)
@@ -965,6 +980,15 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
         or max_iterations <= 0
     ):
         mismatches.append("max_iterations_for_process must be a positive integer")
+    elif resume is False and start_boundary == 0 and isinstance(target_boundary, int):
+        allowed_iterations = {target_boundary}
+        if target_boundary > 100:
+            allowed_iterations.add(100)
+        if max_iterations not in allowed_iterations:
+            mismatches.append(
+                "fresh max_iterations_for_process must be the complete initial "
+                "stage or the canonical 100-update canary"
+            )
     elif (
         isinstance(target_boundary, int)
         and isinstance(resume_source_iteration, int)
@@ -987,10 +1011,7 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
                 "stage or the canonical 100-update canary"
             )
 
-    if mode not in (
-        MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-        MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-    ):
+    if mode != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
         mismatches.append(f"mode={mode!r}")
     try:
         _validate_canonical_stage_lineage(
@@ -1003,12 +1024,9 @@ def validate_canonical_stage_critical_config(manifest: Mapping[str, Any]) -> Non
     except (TypeError, ValueError) as exc:
         mismatches.append(str(exc))
 
-    migration_source = manifest.get("migration_source")
-    try:
-        validate_v10_migration_source_identity(migration_source)
-    except (TypeError, ValueError) as exc:
-        mismatches.append(str(exc))
+    if manifest.get("migration_source") is not None:
+        mismatches.append("contract-v11 forbids the retired v10 migration_source")
     if mismatches:
         raise ValueError(
-            "Checkpoint is not a canonical v10 stage config: " + "; ".join(mismatches)
+            "Checkpoint is not a canonical v11 stage config: " + "; ".join(mismatches)
         )

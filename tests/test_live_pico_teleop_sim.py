@@ -18,6 +18,7 @@ import torch
 from tensordict import TensorDict
 
 from mjlab_microban.scripts.live_pico_teleop_sim import (
+    AUDITED_LEGACY_WALK_SHA256,
     FOOT_INACTIVE_Z_MAX_M,
     FOOT_UPPER_M,
     HAND_UPPER_M,
@@ -26,10 +27,16 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     WebXrSimulationMapper,
     WebXrSimulationSource,
     _default_native_config,
+    _default_teleop_root,
+    _default_walk_checkpoint,
     _legacy_body_joint_indices,
     _legacy_walk_adapters,
+    _load_native_classes,
     _NativeServerThread,
     _patch_command_observation,
+    _patch_native_walk_observation,
+    _runtime_task,
+    _sha256,
     _walk_actor_observation,
     build_parser,
     command_for_simulation,
@@ -305,6 +312,69 @@ class WatchdogTests(unittest.TestCase):
         self.assertTrue(policy._read_command().enabled)
         self.assertEqual(policy.mapper.reset_count, 0)
 
+    def test_legacy_only_forces_hybrid_selector_to_audited_walk_path(self) -> None:
+        policy = self._policy(1_000_000_000, 1_010_000_000)
+        policy.legacy_only = True
+        command = policy._read_command()
+        self.assertTrue(command.enabled)
+        self.assertEqual(command.locomotion_policy, "walk")
+        self.assertEqual(command.twist, (0.7, -0.15, 0.75))
+
+    def test_legacy_only_ignores_x_before_native_mapper_body_gate(self) -> None:
+        _source_class, mapper_class = _load_native_classes(_default_teleop_root())
+        mapper = mapper_class()
+
+        def frame(
+            sampled_at_ns: int, trigger: float, head_orientation: tuple[float, ...]
+        ) -> SimpleNamespace:
+            controller_health = SimpleNamespace(fresh=True, valid=True)
+            stale_body_health = SimpleNamespace(fresh=False, valid=False)
+            return SimpleNamespace(
+                sampled_at_ns=sampled_at_ns,
+                head=SimpleNamespace(
+                    pose=SimpleNamespace(orientation=head_orientation)
+                ),
+                left_controller=SimpleNamespace(
+                    axis=(0.0, 1.0),
+                    trigger=trigger,
+                    primary_button=True,
+                ),
+                right_controller=SimpleNamespace(
+                    axis=(0.5, 0.0),
+                    trigger=0.0,
+                ),
+                controller_health=controller_health,
+                body_health=stale_body_health,
+                body=None,
+                body_jumps=(),
+            )
+
+        frames = iter(
+            (
+                frame(1_000_000_000, 0.0, (0.0, 0.0, 0.0, 1.0)),
+                frame(
+                    1_020_000_000,
+                    1.0,
+                    (0.0, 0.0, math.sin(0.1), math.cos(0.1)),
+                ),
+            )
+        )
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.source = SimpleNamespace(read=lambda: next(frames))
+        policy.mapper = mapper
+        policy.clock_ns = lambda: 1_020_000_000
+        policy._previous_sampled_at_ns = None
+        policy.legacy_only = True
+
+        self.assertFalse(policy._read_command().enabled)  # release-to-rearm
+        command = policy._read_command()
+        self.assertTrue(command.enabled)
+        self.assertEqual(command.locomotion_policy, "walk")
+        self.assertGreater(command.twist[0], 0.0)
+        self.assertLess(command.twist[2], 0.0)
+        self.assertTrue(any(abs(value) > 0.0 for value in command.head_orientation))
+        self.assertEqual(mapper.locomotion_policy, "walk")
+
 
 class ObservationPatchTests(unittest.TestCase):
     def test_only_live_command_slices_are_replaced(self) -> None:
@@ -334,6 +404,25 @@ class ObservationPatchTests(unittest.TestCase):
                     torch.equal(actual, original[:, offset : offset + width])
                 )
             offset += width
+
+    def test_native_walk_patch_preserves_original_63_wide_recurrence(self) -> None:
+        original = torch.arange(63, dtype=torch.float32).unsqueeze(0)
+        command = torch.tensor([[0.2, -0.1, 0.5]])
+        env = SimpleNamespace(
+            num_envs=1,
+            command_manager=SimpleNamespace(
+                get_term=lambda name: SimpleNamespace(command=command)
+            ),
+        )
+        observations = TensorDict({"actor": original}, batch_size=(1,))
+        patched = _patch_native_walk_observation(observations, env)["actor"]
+        self.assertTrue(torch.equal(patched[:, :-3], original[:, :-3]))
+        self.assertTrue(torch.equal(patched[:, -3:], command))
+        self.assertTrue(
+            torch.equal(
+                original, torch.arange(63, dtype=torch.float32).unsqueeze(0)
+            )
+        )
 
     def test_legacy_walk_projection_excludes_three_hmd_joints(self) -> None:
         original = torch.arange(83, dtype=torch.float32).unsqueeze(0)
@@ -473,6 +562,111 @@ class DualActorDispatchTests(unittest.TestCase):
         self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
         self.assertTrue(torch.equal(policy.walk_last_action, torch.zeros((1, 18))))
 
+    def test_native_legacy_dispatch_returns_unmodified_actor_action(self) -> None:
+        command = SimulationCommand(
+            enabled=True,
+            twist=(0.2, -0.1, 0.5),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="walk",
+        )
+        policy = self._policy(command)
+        policy.native_legacy_action_semantics = True
+        policy.env.command_manager = SimpleNamespace(
+            get_term=lambda name: SimpleNamespace(
+                command=torch.tensor([[0.2, -0.1, 0.5]])
+            )
+        )
+        seen: list[torch.Tensor] = []
+
+        def walk_actor(observation: TensorDict) -> torch.Tensor:
+            seen.append(observation["actor"].clone())
+            return torch.full((1, 18), 0.25)
+
+        policy.walk_actor = walk_actor
+        observations = TensorDict({"actor": torch.zeros((1, 63))}, batch_size=(1,))
+        action = policy(observations)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(
+            torch.equal(seen[0][:, -3:], torch.tensor([[0.2, -0.1, 0.5]]))
+        )
+        # The old teleop adapter would return 3.5 here. Native velocity semantics
+        # must execute the actor's original raw action unchanged.
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 0.25)))
+
+    def test_episode_reset_transition_disarms_before_held_command_is_used(self) -> None:
+        held = SimulationCommand(
+            enabled=True,
+            twist=(0.2, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="walk",
+        )
+        policy = self._policy(held)
+        policy.native_legacy_action_semantics = True
+        policy.env.episode_length_buf = torch.tensor([0])
+        policy.env.reset_buf = torch.tensor([False])
+        policy._previous_episode_length = torch.tensor([17])
+        reset_count = 0
+
+        def disarm() -> None:
+            nonlocal reset_count
+            reset_count += 1
+            policy._read_command = lambda: SimulationCommand(
+                enabled=False,
+                twist=(0.0, 0.0, 0.0),
+                foot_target=((0.0, 0.0, 0.0),) * 2,
+                hand_target=((0.0, 0.0, 0.0),) * 2,
+                hand_active=(False, False),
+                head_orientation=(0.0, 0.0, 0.0),
+                head_yaw_front=False,
+                locomotion_policy="walk",
+                fault="reset requires trigger release",
+            )
+            policy._previous_episode_length = torch.tensor([0])
+
+        policy.reset = disarm
+        policy.walk_actor = lambda _observation: (_ for _ in ()).throw(
+            AssertionError("held trigger must not run actor immediately after reset")
+        )
+        observations = TensorDict({"actor": torch.zeros((1, 63))}, batch_size=(1,))
+        action = policy(observations)
+        self.assertEqual(reset_count, 1)
+        self.assertTrue(torch.equal(action, torch.zeros((1, 18))))
+
+    def test_camera_failure_degrades_video_without_disarming_control(self) -> None:
+        command = SimulationCommand(
+            enabled=True,
+            twist=(0.2, 0.0, 0.0),
+            foot_target=((0.0, 0.0, 0.0),) * 2,
+            hand_target=((0.0, 0.0, 0.0),) * 2,
+            hand_active=(False, False),
+            head_orientation=(0.0, 0.0, 0.0),
+            head_yaw_front=False,
+            locomotion_policy="walk",
+        )
+        policy = self._policy(command)
+        policy._camera_fault = None
+
+        class BrokenCamera:
+            @staticmethod
+            def capture_if_due() -> bool:
+                raise RuntimeError("synthetic camera loss")
+
+        policy.camera_publisher = BrokenCamera()
+        policy.walk_actor = lambda _observation: torch.full((1, 18), 0.25)
+        observations = TensorDict({"actor": torch.zeros((1, 83))}, batch_size=(1,))
+        action = policy(observations)
+        self.assertTrue(torch.equal(action, torch.full((1, 18), 3.5)))
+        self.assertIsNone(policy.camera_publisher)
+        self.assertIn("synthetic camera loss", policy._camera_fault or "")
+
     def test_authority_change_between_map_and_injection_forces_neutral(self) -> None:
         command = SimulationCommand(
             enabled=True,
@@ -529,9 +723,22 @@ class CliSafetyTests(unittest.TestCase):
         self.assertNotIn("--send", option_strings)
 
     def test_default_teleop_root_points_to_sibling_repository(self) -> None:
-        args = build_parser().parse_args(["--checkpoint", str(Path("model_14999.pt"))])
+        args = build_parser().parse_args([])
         self.assertEqual(args.teleop_root.name, "microban_teleop")
         self.assertEqual(args.input, "webxr")
+        self.assertIsNone(args.checkpoint)
+        self.assertEqual(_runtime_task(args.checkpoint), "Mjlab-Velocity-Microban")
+
+    def test_hybrid_checkpoint_keeps_the_teleop_task(self) -> None:
+        self.assertEqual(
+            _runtime_task(Path("hybrid.pt")),
+            "Mjlab-Teleop-Microban",
+        )
+
+    def test_default_legacy_checkpoint_is_the_audited_model_14999(self) -> None:
+        checkpoint = _default_walk_checkpoint()
+        self.assertEqual(checkpoint.name, "model_14999.pt")
+        self.assertEqual(_sha256(checkpoint), AUDITED_LEGACY_WALK_SHA256)
 
     def test_authenticated_pico_app_is_a_distinct_input_backend(self) -> None:
         args = build_parser().parse_args(

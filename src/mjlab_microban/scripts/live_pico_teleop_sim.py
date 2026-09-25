@@ -15,8 +15,10 @@
 This entry point is deliberately simulation-only.  It has no robot address,
 UDP sender, motor controller, or deployment option.  Legacy XRoboToolkit or
 authenticated Microban Unity frames pass through ``microban_teleop``'s
-validated native mapper, then drive the same 83-observation/18-action task used
-to train the Microban PICO policy.
+validated native mapper. Without a hybrid checkpoint, the audited legacy actor
+runs in its original 63-observation ``Mjlab-Velocity-Microban`` environment and
+its raw 18 actions are executed unchanged. Supplying a hybrid checkpoint keeps
+the separate 83-observation teleoperation environment.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import importlib
 import math
 import sys
@@ -68,6 +71,9 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 
 TASK = "Mjlab-Teleop-Microban"
 WALK_TASK = "Mjlab-Velocity-Microban"
+AUDITED_LEGACY_WALK_SHA256 = (
+    "b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141"
+)
 MAX_FRAME_GAP_S = 0.1
 MAX_FRAME_AGE_S = 0.1
 
@@ -106,6 +112,37 @@ class _Mapper(Protocol):
 
     @staticmethod
     def neutral() -> dict[str, Any]: ...
+
+
+class _FieldOverrideView:
+    """Read-only field view used to sanitize one mapper input without mutation."""
+
+    def __init__(self, value: Any, /, **overrides: Any) -> None:
+        self._value = value
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._overrides:
+            return self._overrides[name]
+        if isinstance(self._value, Mapping):
+            try:
+                return self._value[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+        return getattr(self._value, name)
+
+
+def _legacy_walk_input_frame(frame: Any) -> Any:
+    """Hide the hybrid selector before the native mapper's state machine runs."""
+
+    if isinstance(frame, Mapping):
+        left = frame.get("left_controller")
+    else:
+        left = getattr(frame, "left_controller", None)
+    if left is None:
+        return frame
+    legacy_left = _FieldOverrideView(left, primary_button=False)
+    return _FieldOverrideView(frame, left_controller=legacy_left)
 
 
 @dataclass(frozen=True)
@@ -619,6 +656,25 @@ def _patch_command_observation(observations: Any, env: ManagerBasedRlEnv) -> Any
     return patched
 
 
+def _patch_native_walk_observation(
+    observations: Any, env: ManagerBasedRlEnv
+) -> Any:
+    """Patch only the live twist in the original 63-wide velocity observation."""
+
+    patched = observations.clone()
+    actor = patched["actor"].clone()
+    if tuple(actor.shape) != (env.num_envs, 63):
+        raise ValueError(
+            f"Unexpected native legacy observation shape: {tuple(actor.shape)}"
+        )
+    command = env.command_manager.get_term("twist").command
+    if tuple(command.shape) != (env.num_envs, 3):
+        raise ValueError(f"Unexpected native legacy command shape: {tuple(command.shape)}")
+    actor[:, -3:] = command
+    patched["actor"] = actor
+    return patched
+
+
 def _action_parameter_tensor(value: Any, width: int, device: Any) -> torch.Tensor:
     tensor = torch.as_tensor(value, dtype=torch.float32, device=device)
     if tensor.numel() == 1:
@@ -734,6 +790,8 @@ class LivePicoSimulationPolicy:
         source: _Source,
         mapper: _Mapper,
         camera_publisher: StereoMjpegPublisher | None = None,
+        legacy_only: bool = False,
+        native_legacy_action_semantics: bool = False,
         clock_ns: Any = time.monotonic_ns,
         status_period_s: float = 1.0,
     ) -> None:
@@ -743,10 +801,14 @@ class LivePicoSimulationPolicy:
         self.source = source
         self.mapper = mapper
         self.camera_publisher = camera_publisher
+        self._camera_fault: str | None = None
+        self.legacy_only = legacy_only
+        self.native_legacy_action_semantics = native_legacy_action_semantics
         self.clock_ns = clock_ns
         self.status_period_ns = int(status_period_s * 1.0e9)
         self._last_status_ns = 0
         self._previous_sampled_at_ns: int | None = None
+        self._previous_episode_length = env.episode_length_buf.clone()
         self._last_fault: str | None = None
         self._pending_authority_token: Any = None
 
@@ -766,12 +828,6 @@ class LivePicoSimulationPolicy:
                 "Legacy walk/main action joint order mismatch: "
                 f"{walk_actor.joint_names} != {main_joint_names}"
             )
-        body_joint_ids = _legacy_body_joint_indices(
-            self.robot.joint_names, main_joint_names
-        )
-        self.body_joint_observation_indices = torch.tensor(
-            body_joint_ids, dtype=torch.long, device=env.device
-        )
         main_scale = _action_parameter_tensor(
             main_action.scale, MICROBAN_TELEOP_ACTION_WIDTH, env.device
         )
@@ -780,11 +836,46 @@ class LivePicoSimulationPolicy:
         )
         walk_scale = walk_actor.scale.to(device=env.device, dtype=torch.float32)
         walk_offset = walk_actor.offset.to(device=env.device, dtype=torch.float32)
-        (
-            self.walk_position_offset,
-            self.walk_output_scale,
-            self.walk_output_offset,
-        ) = _legacy_walk_adapters(main_scale, main_offset, walk_scale, walk_offset)
+        if native_legacy_action_semantics:
+            if main_action.cfg.clip is not None:
+                raise ValueError(
+                    "Original velocity runtime must not clip absolute action targets"
+                )
+            if not bool(getattr(main_action.cfg, "use_default_offset", False)):
+                raise ValueError(
+                    "Original velocity runtime must use the HOME/default action offset"
+                )
+            if not torch.equal(main_scale, walk_scale) or not torch.equal(
+                main_offset, walk_offset
+            ):
+                raise ValueError(
+                    "Native legacy actor/environment action parameters disagree"
+                )
+            default = self.robot.data.default_joint_pos[:, main_action.target_ids]
+            if not torch.equal(main_offset, default):
+                raise ValueError(
+                    "Raw zero does not map exactly to the original velocity HOME pose"
+                )
+            self.body_joint_observation_indices = torch.empty(
+                0, dtype=torch.long, device=env.device
+            )
+            self.walk_position_offset = torch.zeros_like(main_scale)
+            self.walk_output_scale = torch.ones_like(main_scale)
+            self.walk_output_offset = torch.zeros_like(main_offset)
+        else:
+            body_joint_ids = _legacy_body_joint_indices(
+                self.robot.joint_names, main_joint_names
+            )
+            self.body_joint_observation_indices = torch.tensor(
+                body_joint_ids, dtype=torch.long, device=env.device
+            )
+            (
+                self.walk_position_offset,
+                self.walk_output_scale,
+                self.walk_output_offset,
+            ) = _legacy_walk_adapters(
+                main_scale, main_offset, walk_scale, walk_offset
+            )
         self.walk_last_action = torch.zeros(
             (env.num_envs, MICROBAN_TELEOP_ACTION_WIDTH), device=env.device
         )
@@ -814,10 +905,16 @@ class LivePicoSimulationPolicy:
 
     def _validate_command_terms(self) -> None:
         twist = self.env.command_manager.get_term("twist")
-        foot = self.env.command_manager.get_term("foot_target")
-        hand = self.env.command_manager.get_term("hand_target")
         if not isinstance(twist, UniformVelocityCommandWithRotation):
             raise TypeError(f"Unexpected twist command type: {type(twist).__name__}")
+        if self.native_legacy_action_semantics:
+            if set(self.env.command_manager.active_terms) != {"twist"}:
+                raise ValueError(
+                    "Original velocity runtime must contain only the twist command"
+                )
+            return
+        foot = self.env.command_manager.get_term("foot_target")
+        hand = self.env.command_manager.get_term("hand_target")
         if not isinstance(foot, ResetFixedFootTargetCommand):
             raise TypeError(f"Unexpected foot command type: {type(foot).__name__}")
         if not isinstance(hand, ResetFixedHandTargetCommand):
@@ -829,6 +926,7 @@ class LivePicoSimulationPolicy:
         self._pending_authority_token = None
         self.hmd_current_target.copy_(self.robot.data.joint_pos[:, self.hmd_joint_ids])
         self.walk_last_action.zero_()
+        self._previous_episode_length = self.env.episode_length_buf.clone()
 
     def _read_command(self) -> SimulationCommand:
         try:
@@ -875,9 +973,22 @@ class LivePicoSimulationPolicy:
             )
 
         try:
-            return command_for_simulation(
-                self.mapper.map_sample(frame), legacy_walk_available=True
+            mapper_frame = (
+                _legacy_walk_input_frame(frame)
+                if getattr(self, "legacy_only", False)
+                else frame
             )
+            mapped = self.mapper.map_sample(mapper_frame)
+            if getattr(self, "legacy_only", False):
+                if not isinstance(mapped, Mapping):
+                    return neutral_simulation_command(
+                        fault="mapper output is not a mapping"
+                    )
+                # Deadline fallback: the audited velocity actor owns locomotion
+                # regardless of the optional X-button hybrid-policy selector.  The
+                # mapper still owns the trigger deadman and all of its rearm rules.
+                mapped = {**mapped, "locomotion_policy": "walk"}
+            return command_for_simulation(mapped, legacy_walk_available=True)
         except Exception as exc:  # noqa: BLE001 - mapper faults must fail closed
             self.mapper.reset()
             return neutral_simulation_command(
@@ -886,8 +997,6 @@ class LivePicoSimulationPolicy:
 
     def _inject_command(self, command: SimulationCommand) -> None:
         twist = self.env.command_manager.get_term("twist")
-        foot = self.env.command_manager.get_term("foot_target")
-        hand = self.env.command_manager.get_term("hand_target")
 
         twist_value = torch.tensor(
             command.twist, dtype=torch.float32, device=self.env.device
@@ -903,6 +1012,12 @@ class LivePicoSimulationPolicy:
         ):
             getattr(twist, flag_name).fill_(False)
         twist.time_left.fill_(float("inf"))
+
+        if getattr(self, "native_legacy_action_semantics", False):
+            return
+
+        foot = self.env.command_manager.get_term("foot_target")
+        hand = self.env.command_manager.get_term("hand_target")
 
         foot_value = torch.tensor(
             command.foot_target, dtype=torch.float32, device=self.env.device
@@ -992,7 +1107,7 @@ class LivePicoSimulationPolicy:
             "SIMULATION ONLY | "
             f"policy={command.locomotion_policy} enabled={command.enabled} "
             f"twist={tuple(round(value, 3) for value in command.twist)} "
-            f"fault={fault}",
+            f"fault={fault} camera_fault={self._camera_fault or 'none'}",
             flush=True,
         )
 
@@ -1000,12 +1115,30 @@ class LivePicoSimulationPolicy:
         # Auto-reset after a simulated fall is visible for one policy call.
         # Disarm before consuming another frame so a held trigger cannot restart.
         reset_buf = getattr(self.env, "reset_buf", None)
-        if reset_buf is not None and bool(reset_buf.any().item()):
+        episode_length = getattr(self.env, "episode_length_buf", None)
+        previous_episode_length = getattr(self, "_previous_episode_length", None)
+        manual_reset = (
+            episode_length is not None
+            and previous_episode_length is not None
+            and bool((episode_length < previous_episode_length).any().item())
+        )
+        if (reset_buf is not None and bool(reset_buf.any().item())) or manual_reset:
             self.reset()
+        elif episode_length is not None:
+            self._previous_episode_length = episode_length.clone()
 
         command = self._inject_with_authority(self._read_command())
         if self.camera_publisher is not None:
-            self.camera_publisher.capture_if_due()
+            try:
+                self.camera_publisher.capture_if_due()
+            except Exception as exc:  # noqa: BLE001 - video faults must not stop control.
+                self._camera_fault = f"{type(exc).__name__}: {exc}"
+                self.camera_publisher = None
+                print(
+                    "Simulation camera degraded; control remains active and the "
+                    f"PICO should use passthrough/last-frame: {self._camera_fault}",
+                    flush=True,
+                )
         self._print_status(command)
         if not command.enabled:
             self.walk_last_action.zero_()
@@ -1015,8 +1148,15 @@ class LivePicoSimulationPolicy:
             # policy is actively selected and the trigger is held.
             return self.zero_action.clone()
 
-        patched = _patch_command_observation(observations, self.env)
-        if command.locomotion_policy == "walk":
+        native_legacy = bool(
+            getattr(self, "native_legacy_action_semantics", False)
+        )
+        if native_legacy:
+            actor_observation = _patch_native_walk_observation(observations, self.env)
+            action = self.walk_actor(actor_observation)
+        else:
+            patched = _patch_command_observation(observations, self.env)
+        if not native_legacy and command.locomotion_policy == "walk":
             actor_observation = _walk_actor_observation(
                 patched,
                 self.body_joint_observation_indices,
@@ -1026,8 +1166,10 @@ class LivePicoSimulationPolicy:
             walk_action = self.walk_actor(actor_observation)
             self.walk_last_action.copy_(walk_action)
             action = walk_action * self.walk_output_scale + self.walk_output_offset
-        else:
+        elif not native_legacy:
             self.walk_last_action.zero_()
+            if self.actor is None:
+                raise RuntimeError("Hybrid policy was selected without a checkpoint")
             action = self.actor(patched)
         if action.shape != self.zero_action.shape or not bool(
             torch.isfinite(action).all().item()
@@ -1073,22 +1215,46 @@ def _default_native_config() -> Path:
 
 
 def _default_walk_checkpoint() -> Path:
-    return Path(__file__).resolve().parents[1] / "agents" / "velocity.pt"
+    return (
+        Path(__file__).resolve().parents[3]
+        / "checkpoints"
+        / "xc330_velocity"
+        / "model_14999.pt"
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Simulation-only PICO 4 Ultra controller for the Microban hybrid policy; "
-            "this command has no robot UDP or motor path"
+            "Simulation-only PICO 4 Ultra controller for Microban; without "
+            "--checkpoint it uses the audited legacy walking actor exclusively and "
+            "has no robot UDP or motor path"
         )
     )
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help=(
+            "optional hybrid-policy checkpoint; omit it for the deadline-safe "
+            "legacy walking path"
+        ),
+    )
     parser.add_argument(
         "--walk-checkpoint",
         type=Path,
         default=_default_walk_checkpoint(),
-        help="legacy walk checkpoint selected while left X is released",
+        help=(
+            "audited legacy walk checkpoint (the default is the exact 15,000-update "
+            "model_14999.pt used by the deadline fallback)"
+        ),
     )
     parser.add_argument(
         "--teleop-root",
@@ -1143,10 +1309,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if not args.checkpoint.is_file():
+    if args.checkpoint is not None and not args.checkpoint.is_file():
         parser.error(f"checkpoint not found: {args.checkpoint}")
     if not args.walk_checkpoint.is_file():
         parser.error(f"walk checkpoint not found: {args.walk_checkpoint}")
+    walk_sha256 = _sha256(args.walk_checkpoint)
+    if walk_sha256 != AUDITED_LEGACY_WALK_SHA256:
+        parser.error(
+            "walk checkpoint is not the audited model_14999.pt: "
+            f"expected {AUDITED_LEGACY_WALK_SHA256}, got {walk_sha256}"
+        )
     if not 0.05 <= args.stale_s < 0.3:
         parser.error("--stale-s must be at least 0.05 and below 0.3 seconds")
     if not 1.0 <= args.camera_fps <= 30.0:
@@ -1222,41 +1394,59 @@ def _configure_live_environment(cfg: Any) -> None:
     cfg.terminations.pop("time_out", None)
 
 
+def _load_walk_actor_in_environment(
+    *,
+    raw_env: ManagerBasedRlEnv,
+    wrapped_env: RslRlVecEnvWrapper,
+    agent_cfg: Any,
+    checkpoint: Path,
+    device: str,
+) -> LegacyWalkActor:
+    """Strict-load the legacy actor against the environment that will execute it."""
+
+    runner_class = load_runner_cls(WALK_TASK)
+    if runner_class is None:
+        raise RuntimeError(f"No runner is registered for {WALK_TASK}")
+    runner = runner_class(wrapped_env, asdict(agent_cfg), device=device)
+    runner.load(
+        str(checkpoint.resolve()),
+        load_cfg={"actor": True},
+        strict=True,
+        map_location=device,
+    )
+    action = raw_env.action_manager.get_term("joint_pos")
+    if action.action_dim != MICROBAN_TELEOP_ACTION_WIDTH:
+        raise ValueError(
+            f"Legacy walk action width is {action.action_dim}, expected "
+            f"{MICROBAN_TELEOP_ACTION_WIDTH}"
+        )
+    return LegacyWalkActor(
+        policy=runner.get_inference_policy(device=device),
+        joint_names=tuple(action.target_names),
+        scale=_action_parameter_tensor(
+            action.scale, MICROBAN_TELEOP_ACTION_WIDTH, device
+        ).clone(),
+        offset=_action_parameter_tensor(
+            action.offset, MICROBAN_TELEOP_ACTION_WIDTH, device
+        ).clone(),
+    )
+
+
 def _load_legacy_walk_actor(checkpoint: Path, device: str) -> LegacyWalkActor:
     """Load the separately trained legacy walk actor, then release its env."""
 
     env_cfg = load_env_cfg(WALK_TASK, play=True)
     env_cfg.scene.num_envs = 1
-    env_cfg.observations["actor"].enable_corruption = False
     agent_cfg = load_rl_cfg(WALK_TASK)
     raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     wrapped_env = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
     try:
-        runner_class = load_runner_cls(WALK_TASK)
-        if runner_class is None:
-            raise RuntimeError(f"No runner is registered for {WALK_TASK}")
-        runner = runner_class(wrapped_env, asdict(agent_cfg), device=device)
-        runner.load(
-            str(checkpoint.resolve()),
-            load_cfg={"actor": True},
-            strict=True,
-            map_location=device,
-        )
-        action = raw_env.action_manager.get_term("joint_pos")
-        if action.action_dim != MICROBAN_TELEOP_ACTION_WIDTH:
-            raise ValueError(
-                f"Legacy walk action width is {action.action_dim}, expected "
-                f"{MICROBAN_TELEOP_ACTION_WIDTH}"
-            )
-        return LegacyWalkActor(
-            policy=runner.get_inference_policy(device=device),
-            joint_names=tuple(action.target_names),
-            scale=_action_parameter_tensor(
-                action.scale, MICROBAN_TELEOP_ACTION_WIDTH, device
-            ).clone(),
-            offset=_action_parameter_tensor(
-                action.offset, MICROBAN_TELEOP_ACTION_WIDTH, device
-            ).clone(),
+        return _load_walk_actor_in_environment(
+            raw_env=raw_env,
+            wrapped_env=wrapped_env,
+            agent_cfg=agent_cfg,
+            checkpoint=checkpoint,
+            device=device,
         )
     finally:
         wrapped_env.close()
@@ -1272,13 +1462,25 @@ def _construct_checkpoint_consumer_runner(env, agent_cfg, device: str):
     return runner_class(env, asdict(agent_cfg), device=device)
 
 
+def _runtime_task(checkpoint: Path | None) -> str:
+    """Select the original velocity task unless a hybrid actor was requested."""
+
+    return WALK_TASK if checkpoint is None else TASK
+
+
 def run(args: argparse.Namespace) -> int:
     configure_torch_backends()
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    env_cfg = load_env_cfg(TASK, play=True)
+    legacy_only = args.checkpoint is None
+    runtime_task = _runtime_task(args.checkpoint)
+    env_cfg = load_env_cfg(runtime_task, play=True)
+    # Nominalize resets and remove timeout/DR/push events for an operator-owned
+    # live session. This deliberately does not change the selected task's action
+    # or observation contract: legacy-only still keeps the original velocity
+    # task's unclipped raw actions and 63-wide actor observation.
     _configure_live_environment(env_cfg)
-    agent_cfg = load_rl_cfg(TASK)
+    agent_cfg = load_rl_cfg(runtime_task)
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     wrapped_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     source: _Source | None = None
@@ -1286,18 +1488,33 @@ def run(args: argparse.Namespace) -> int:
     web_server: _WebServerThread | None = None
     native_server_thread: _NativeServerThread | None = None
     try:
-        validate_microban_teleop_observation_contract(env)
-        runner = _construct_checkpoint_consumer_runner(
-            wrapped_env, agent_cfg, device
-        )
-        runner.load(
-            str(args.checkpoint.resolve()),
-            load_cfg={"actor": True},
-            strict=True,
-            map_location=device,
-        )
-        actor = runner.get_inference_policy(device=device)
-        walk_actor = _load_legacy_walk_actor(args.walk_checkpoint, device)
+        if legacy_only:
+            if wrapped_env.clip_actions is not None:
+                raise ValueError(
+                    "Original velocity runtime unexpectedly clips actor outputs"
+                )
+            walk_actor = _load_walk_actor_in_environment(
+                raw_env=env,
+                wrapped_env=wrapped_env,
+                agent_cfg=agent_cfg,
+                checkpoint=args.walk_checkpoint,
+                device=device,
+            )
+        else:
+            validate_microban_teleop_observation_contract(env)
+        actor = None
+        if not legacy_only:
+            runner = _construct_checkpoint_consumer_runner(
+                wrapped_env, agent_cfg, device
+            )
+            runner.load(
+                str(args.checkpoint.resolve()),
+                load_cfg={"actor": True},
+                strict=True,
+                map_location=device,
+            )
+            actor = runner.get_inference_policy(device=device)
+            walk_actor = _load_legacy_walk_actor(args.walk_checkpoint, device)
 
         if not args.no_camera:
             camera_publisher = StereoMjpegPublisher(
@@ -1381,27 +1598,45 @@ def run(args: argparse.Namespace) -> int:
             source=source,
             mapper=mapper,
             camera_publisher=camera_publisher,
+            legacy_only=legacy_only,
+            native_legacy_action_semantics=legacy_only,
         )
 
         print("SIMULATION ONLY: no robot UDP socket or motor interface is opened.")
+        if args.checkpoint is None:
+            print(
+                "DEADLINE FALLBACK: audited model_14999.pt owns locomotion; "
+                "the X-button hybrid selector is forced to legacy walk."
+            )
         if args.input == "webxr":
             print(
                 f"PICO Browser: http://localhost:{args.web_port}/ "
                 f"(run: adb reverse tcp:{args.web_port} tcp:{args.web_port})"
             )
-            print(
-                "Hold left X for pico_teleop; release the left trigger once, then "
-                "hold it to move."
-            )
+            if legacy_only:
+                print(
+                    "Legacy-only mode ignores left X; release the left trigger "
+                    "once, then hold it to move."
+                )
+            else:
+                print(
+                    "Hold left X for pico_teleop; release the left trigger once, "
+                    "then hold it to move."
+                )
             print(
                 "WebXR supplies neutral hand/foot targets; Motion Tracker full-body "
                 "targets require --input native."
             )
         elif args.input == "native":
-            print(
-                "Hold left X with the left trigger released to calibrate body targets, "
-                "then keep X held."
-            )
+            if legacy_only:
+                print(
+                    "Legacy-only mode ignores left X and Motion Tracker body targets."
+                )
+            else:
+                print(
+                    "Hold left X with the left trigger released to calibrate body "
+                    "targets, then keep X held."
+                )
             print(
                 "Native XRoboToolkit and PICO Browser are separate foreground apps; "
                 "the MJPEG endpoint below is diagnostic only in native mode."
@@ -1414,13 +1649,18 @@ def run(args: argparse.Namespace) -> int:
                 if address is not None
                 else "Authenticated Microban PICO app input did not expose an address."
             )
+            if legacy_only:
+                print(
+                    "Legacy-only mode ignores left X and Motion Tracker body targets."
+                )
+            else:
+                print(
+                    "Hold left X with the left trigger released to calibrate body "
+                    "targets, then keep X held."
+                )
             print(
-                "Hold left X with the left trigger released to calibrate body targets, "
-                "then keep X held."
-            )
-            print(
-                "The current MJPEG endpoint is diagnostic until the calibrated Unity "
-                "stereo renderer is enabled."
+                "Unity receives the synthetic stereo calibration and latest-frame "
+                "endpoints on the camera port."
             )
         print("Hold left trigger to move; hold right trigger to center head yaw.")
         if camera_publisher is not None:

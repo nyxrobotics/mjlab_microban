@@ -116,6 +116,16 @@ itself. In this executable, any non-zero stick command while armed fails closed
 and disarms instead of being silently ignored. Motion Tracker body poses are the
 only body-motion command on this path.
 
+This also means `live_pico_tracking_sim.py` is **not** the deadline fallback:
+it does not switch to the legacy velocity actor when a tracker disappears, and
+a body-tracking fault currently returns the neck to HOME as well. The simulator
+camera publisher remains independent. Use `scripts/run_pico_legacy_fallback.sh`
+for controller walking, HMD neck control and the simulator camera when body
+tracking is unavailable; that launcher deliberately ignores Motion Tracker
+body targets. An automatic same-process tracking-to-walk handoff still requires
+a reviewed hybrid/supervisory runtime and must not be inferred from these two
+separate executables.
+
 Stick locomotion requires a separately trained hybrid actor (tracking reference
 plus a 3-value velocity command) or a reviewed supervisory blend with the
 velocity actor. That work must retain the same deadman and soft-limit boundary;
@@ -169,48 +179,41 @@ calibration and hold semantics, the fall/release latch, frozen HOME reset,
 duplicate/regressed/gapped timestamps, final endpoint IK/speed/soft-limit
 rejection, the exact 42-value tensor patch, and output target projection.
 
-## Current PICO connection check (2026-09-25)
+## Current PICO and checkpoint acceptance (2026-09-25)
 
-The development checkpoint
-`2026-09-25_07-37-18_v8k_bounded_progress_4096_oneupdate_preflight/model_0.pt`
-was strict-loaded into the current CPU tracking environment for an integration
-smoke. It consumed the runtime `[1, 99]` actor observation and returned one
-finite `[1, 18]` action. This checks checkpoint/API compatibility only; it does
-not make that iteration an accepted motion policy.
+The USB-connected PICO 4 Ultra is visible to ADB as model `A9210`, and
+`com.microban.teleop` is installed and foreground. The headset OS nevertheless
+reports `MotionTracker Connect num: 0` repeatedly. Therefore no physical
+three-tracker/24-joint acceptance has occurred yet; power, assign and calibrate
+the waist and two ankle trackers in the HMD before expecting body frames.
 
-The PC side is ready: `adb devices -l` sees the USB-connected PICO 4 Ultra as
-model `A9210`, `com.microban.teleop` version `0.1.0` is installed, and the PC
-pairing store exists with owner-only mode `0600`. USB control forwarding was
-restored after the latest reconnect with:
+Neither available tracking checkpoint is adopted:
+
+- v8k
+  `2026-09-25_07-37-18_v8k_bounded_progress_4096_oneupdate_preflight/model_0.pt`
+  no longer strict-loads into the current actor because the checkpoint contains
+  unexpected actor `obs_normalizer` state keys. The older compatibility claim
+  is stale.
+- v8l
+  `2026-09-25_07-43-48_v8l_rawactor_startclean_4096_51canary/model_50.pt`
+  strict-loads and starts on the isolated `127.0.0.1:63903` simulation route,
+  but its recorded checkpoint gate is `status: fail`. With the current physical
+  tracker state it receives an invalid body frame, emits the neutral body
+  action, then the simulated root falls to about 0.036 m and the fall latch
+  engages. This is startup/failure evidence, not an accepted policy.
+
+The isolation check intentionally did not bind the physical control port
+`63902` or contact the robot. Reproduce the non-destructive state checks with:
 
 ```bash
-adb reverse tcp:63902 tcp:63902
-adb reverse tcp:8081 tcp:8081
-adb reverse --list
+adb devices -l
+adb shell pidof com.microban.teleop
+adb logcat -d -v threadtime | \
+  rg 'MotionTracker Connect num|tracker num'
 ```
 
-An authenticated native-server probe was then started on
-`127.0.0.1:63902`, followed by:
-
-```bash
-adb shell am start \
-  -n com.microban.teleop/com.unity3d.player.UnityPlayerActivity
-adb shell dumpsys activity activities | \
-  rg 'EntitlementDialogWithGoLogin|com.microban.teleop'
-```
-
-No owner/controller/body frame arrived within 30 seconds. Android showed
-`com.bytedance.pico.matrix/.entitlement.ui.EntitlementDialogWithGoLogin`, opened
-the PICO user-center login activity, and stopped the Microban app process. This
-blocks an end-to-end real-PICO frame test; it is a PICO OS account/entitlement
-gate, not a bridge schema or socket failure. In addition, the three bound Motion
-Trackers currently report zero connected trackers, so they must be powered,
-connected, assigned to waist/feet, and calibrated in the HMD before body frames
-can arrive. Unity Hub login on the PC does not satisfy the separate PICO account
-login in the headset.
-
-After completing the PICO account login in the HMD, rerun the `adb reverse`
-command and the simulation command above. A successful connection changes the
-console from `calibrated=false` to `calibrated=true` only after a fresh,
-coherent 24-joint stream and the released-trigger calibration window have both
-passed.
+Run the tracking-only process again only after a checkpoint receipt passes and
+the OS reports all three trackers. A successful physical connection must change
+the console from `calibrated=false` to `calibrated=true` after a fresh coherent
+24-joint stream and the released-trigger calibration window. Until then, use
+the legacy fallback launcher for the runnable PICO-to-simulator path.

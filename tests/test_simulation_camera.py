@@ -24,15 +24,16 @@ from mjlab_microban.scripts.simulation_camera import (
     EYE_HEIGHT_PX,
     EYE_WIDTH_PX,
     HORIZONTAL_FOV_DEG,
+    MAX_FRAME_AGE_MS,
     MJPEG_BOUNDARY,
     PICO_NOMINAL_FOV_DEG,
     TAN_BOUNDS,
     VERTICAL_FOV_DEG,
     _FrameStore,
     _LoopbackHttpServer,
-    camera_geometry_sha256,
     _point_scene_camera_at_site,
     camera_geometry_dict,
+    camera_geometry_sha256,
     validate_simulation_camera_model,
     webxr_camera_toml,
 )
@@ -157,7 +158,8 @@ class LoopbackMjpegServerTests(unittest.TestCase):
             calibration["geometry_sha256"], camera_geometry_sha256()
         )
         self.assertEqual(calibration["latest_frame_path"], "/frame.jpg")
-        self.assertEqual(calibration["max_frame_age_ms"], 250)
+        self.assertEqual(MAX_FRAME_AGE_MS, 30_000)
+        self.assertEqual(calibration["max_frame_age_ms"], MAX_FRAME_AGE_MS)
 
     def test_latest_frame_endpoint_is_one_slot_and_freshness_annotated(self) -> None:
         first = b"\xff\xd8first\xff\xd9"

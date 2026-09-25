@@ -55,6 +55,9 @@ MJPEG_BOUNDARY = "microban-sim-frame"
 CAMERA_SCHEMA = "microban_sim_stereo_camera_v1"
 LATEST_FRAME_PATH = "/frame.jpg"
 MAX_LATEST_WAIT_MS = 1000
+# View-only sanity bound shared with the Unity camera parser.  Camera age may
+# degrade the headset image, but it must never revoke controller authority.
+MAX_FRAME_AGE_MS = 30_000
 
 
 @dataclass(frozen=True)
@@ -248,7 +251,7 @@ class _MjpegHandler(BaseHTTPRequestHandler):
                     "geometry": camera_geometry_dict(),
                     "geometry_sha256": camera_geometry_sha256(),
                     "latest_frame_path": LATEST_FRAME_PATH,
-                    "max_frame_age_ms": 250,
+                    "max_frame_age_ms": MAX_FRAME_AGE_MS,
                 }
             )
         else:
@@ -261,7 +264,8 @@ class _MjpegHandler(BaseHTTPRequestHandler):
         one slot, so a slow client skips intermediate frames instead of draining
         an old socket backlog.  ``X-Microban-Frame-Age-Ns`` is measured on the
         PC immediately before the response; the headset must add its own whole
-        request/decode elapsed time before applying the 250 ms display gate.
+        request/decode elapsed time before applying the 30 second, view-only
+        sanity bound.  Camera staleness never stops the control transport.
         """
 
         try:

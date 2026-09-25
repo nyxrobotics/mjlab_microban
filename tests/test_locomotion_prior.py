@@ -50,10 +50,17 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
+    MICROBAN_TELEOP_FORWARD_ONLY_WIDE_PROBABILITIES,
+    MICROBAN_TELEOP_FORWARD_ONLY_WIDE_RANGES,
     MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES,
     MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_LOW_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_PLANAR_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_PLANAR_AXIS_RANGES,
     MICROBAN_TELEOP_PRIOR_INITIAL_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_SAGITTAL_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_SAGITTAL_AXIS_RANGES,
     make_microban_teleop_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
@@ -601,7 +608,7 @@ class LocomotionPriorConfigurationTest(unittest.TestCase):
         self.assertEqual(set(train.rewards), set(play.rewards))
         self.assertEqual(set(train.terminations), set(play.terminations))
 
-    def test_initial_and_internal_curriculum_stages_match_audit(self) -> None:
+    def test_v11_acquisition_curriculum_stages_match_audit(self) -> None:
         cfg = make_microban_teleop_env_cfg(play=False)
         twist = cfg.commands["twist"]
         self.assertEqual(
@@ -614,7 +621,8 @@ class LocomotionPriorConfigurationTest(unittest.TestCase):
         self.assertEqual(sum(twist.signed_axis_probabilities.values()), 1.0)
         stages = cfg.curriculum["staged_curriculum"].params["stages"]
         self.assertEqual(
-            [stage["step"] // 24 for stage in stages[:3]], [500, 1500, 3000]
+            [stage["step"] // 24 for stage in stages[:5]],
+            [400, 900, 1500, 2200, 3000],
         )
         self.assertEqual(
             MICROBAN_TELEOP_PRIOR_SIGNED_AXIS_RANGES["forward"], (0.06, 0.11)
@@ -622,6 +630,23 @@ class LocomotionPriorConfigurationTest(unittest.TestCase):
         self.assertEqual(
             MICROBAN_TELEOP_INITIAL_SIGNED_AXIS_RANGES["forward"], (0.25, 0.40)
         )
+        self.assertEqual(
+            MICROBAN_TELEOP_FORWARD_ONLY_WIDE_RANGES["forward"], (0.08, 0.16)
+        )
+        self.assertEqual(
+            MICROBAN_TELEOP_FORWARD_ONLY_WIDE_PROBABILITIES["forward"], 0.90
+        )
+        self.assertEqual(
+            MICROBAN_TELEOP_SAGITTAL_AXIS_RANGES["backward"], (-0.15, -0.04)
+        )
+        self.assertEqual(MICROBAN_TELEOP_SAGITTAL_AXIS_PROBABILITIES["backward"], 0.30)
+        self.assertEqual(
+            MICROBAN_TELEOP_PLANAR_AXIS_RANGES["lateral_left"], (0.06, 0.15)
+        )
+        self.assertEqual(
+            MICROBAN_TELEOP_PLANAR_AXIS_PROBABILITIES["lateral_left"], 0.15
+        )
+        self.assertEqual(MICROBAN_TELEOP_LOW_SIGNED_AXIS_RANGES["yaw_left"], (0.4, 1.2))
         self.assertEqual(MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES["forward"], 0.15)
 
 

@@ -42,7 +42,6 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 from onnx.reference import ReferenceEvaluator
 
 from mjlab_microban.tasks.microban_teleop_provenance import (
-    MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
     MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SCHEMA_VERSION,
@@ -51,7 +50,7 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_V9_CANONICAL_STAGE_MODE,
     MICROBAN_TELEOP_V9_RECIPE_REVISION,
     MICROBAN_TELEOP_V9_TRAINING_CONTRACT_VERSION,
-    MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE,  # noqa: F401 - historical API
     MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_ITERATION,
     MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V10_LEGACY_COMMON_STEP_COUNTER,
@@ -62,14 +61,15 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_V10_LEGACY_SOURCE_TREE_SHA256,
     MICROBAN_TELEOP_V10_LEGACY_TRAINING_PROVENANCE_SHA256,
     MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY,
-    MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY,
+    MICROBAN_TELEOP_V11_ENTROPY_COEF,
+    MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS,
     canonical_json_sha256,
     collect_training_provenance,
-    inherit_v10_migration_source_identity,
+    inherit_initial_stage_safe_velocity_identity,
     validate_canonical_stage_critical_config,
     validate_resume_source_checkpoint_file,
     validate_training_provenance,
-    validate_v10_migration_source_identity,
 )
 
 # Entity.find_joints_by_actuator_names resolves in the model's natural joint
@@ -119,11 +119,13 @@ MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
 )
 MICROBAN_TELEOP_ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "10"
+MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION = "11"
 MICROBAN_TELEOP_NUM_STEPS_PER_ENV = 24
-MICROBAN_TELEOP_ACTOR_INITIALIZATION = "full_state_v9_model1499_to_v10_fixed_lr_v1"
+MICROBAN_TELEOP_ACTOR_INITIALIZATION = (
+    "bounded_safe_velocity_model500_actor_distribution_only_to_v11_fresh_ppo_v1"
+)
 MICROBAN_TELEOP_RECIPE_REVISION = (
-    "v10_v9_model1499_full_state_migration_fixed_lr_pico_curriculum_v1"
+    "v11_safe_velocity_actor_only_fresh_ppo_locomotion_acquisition_v1"
 )
 MICROBAN_TELEOP_OBSERVATION_SCHEMA_VERSION = "2"
 MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS = (
@@ -308,14 +310,10 @@ class TeleopTrainingProvenanceIdentity:
             self.resume_source_checkpoint_iteration,
         )
         if self.canonical_stage:
-            if self.mode not in (
-                MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-                MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-            ):
+            if self.mode != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
                 raise ValueError("Canonical ONNX training mode is inconsistent")
-            migration_source = validate_v10_migration_source_identity(
-                self.migration_source
-            )
+            if self.migration_source is not None:
+                raise ValueError("Canonical v11 ONNX cannot carry v10 migration data")
             for digest in (
                 self.parent_checkpoint_sha256,
                 self.parent_gate_sha256,
@@ -354,31 +352,8 @@ class TeleopTrainingProvenanceIdentity:
             ),
         }
         if self.canonical_stage:
-            metadata.update(
-                {
-                    "migration_source_checkpoint_sha256": str(
-                        migration_source["source_checkpoint_sha256"]
-                    ),
-                    "migration_source_checkpoint_iteration": str(
-                        migration_source["source_checkpoint_iteration"]
-                    ),
-                    "migration_source_training_provenance_sha256": str(
-                        migration_source["source_training_provenance_sha256"]
-                    ),
-                    "migration_source_tree_sha256": str(
-                        migration_source["source_training_source_tree_sha256"]
-                    ),
-                    "migration_source_gate_sha256": str(
-                        migration_source["source_parent_gate_sha256"]
-                    ),
-                    "migration_state_transfer": str(migration_source["state_transfer"]),
-                    "migration_source_optimizer_learning_rate": str(
-                        migration_source["source_optimizer_learning_rate"]
-                    ),
-                    "training_fixed_learning_rate": str(
-                        migration_source["destination_optimizer_learning_rate"]
-                    ),
-                }
+            metadata["training_fixed_learning_rate"] = str(
+                MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE
             )
         return metadata
 
@@ -686,11 +661,7 @@ def _validated_training_provenance_identity(
     if not isinstance(invocation, dict):
         raise TypeError("Checkpoint training provenance invocation is malformed")
     mode = invocation.get("mode")
-    if mode not in (
-        "generic",
-        MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-        MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-    ):
+    if mode not in ("generic", MICROBAN_TELEOP_CANONICAL_STAGE_MODE):
         raise ValueError("Checkpoint training provenance mode is unsupported")
     lineage = {
         "stage_start_boundary": invocation.get("stage_start_boundary"),
@@ -708,10 +679,7 @@ def _validated_training_provenance_identity(
         ),
     }
     if canonical_stage:
-        if mode not in (
-            MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-            MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
-        ):
+        if mode != MICROBAN_TELEOP_CANONICAL_STAGE_MODE:
             raise ValueError(
                 "Canonical checkpoint training provenance has a noncanonical mode"
             )
@@ -719,7 +687,8 @@ def _validated_training_provenance_identity(
         # and the adjacent stage/parent lineage before ONNX may claim canonical.
         validate_canonical_stage_critical_config(validated)
         migration_source = deepcopy(validated.get("migration_source"))
-        validate_v10_migration_source_identity(migration_source)
+        if migration_source is not None:
+            raise ValueError("Canonical v11 provenance cannot carry v10 migration data")
     else:
         if mode != "generic":
             raise ValueError(
@@ -1243,7 +1212,7 @@ def validate_safe_velocity_actor_bootstrap_info(
     if set(info) != expected_keys:
         raise ValueError(
             "Checkpoint safe-velocity bootstrap provenance key set differs from "
-            "contract v9: "
+            "the current actor-only mapping contract: "
             f"missing={sorted(expected_keys - set(info))}, "
             f"unexpected={sorted(set(info) - expected_keys)}"
         )
@@ -1251,7 +1220,7 @@ def validate_safe_velocity_actor_bootstrap_info(
         if info.get(key) != expected:
             raise ValueError(
                 "Checkpoint safe-velocity bootstrap provenance does not match "
-                f"contract v9 for {key!r}"
+                f"the current actor-only mapping contract for {key!r}"
             )
 
     source_path = info.get("source_checkpoint_path")
@@ -1340,9 +1309,9 @@ def _safe_velocity_bootstrap_identity(
 
 
 def validate_velocity_actor_bootstrap_info(info: object) -> None:
-    """Reject retired provenance through the current mandatory v9 validator.
+    """Reject retired provenance through the current safe-source validator.
 
-    The name remains importable for older audit code, but only the v9
+    The name remains importable for older audit code, but only the bounded/raw
     ``safe_velocity_actor_bootstrap`` schema can pass.
     """
 
@@ -1542,9 +1511,10 @@ def validate_teleop_checkpoint_contract(
     Older checkpoints can have the same tensor widths as the current contract,
     so PyTorch can load them without an error and an exporter could otherwise
     attach current metadata to incompatible training semantics. Validation
-    happens before any actor state is loaded. Contract v10 accepts only schema-2
-    checkpoints descended from the one authenticated v9 migration source.  That
-    exact v9 source remains readable only when explicitly requested for audit.
+    happens before any actor state is loaded. Contract v11 accepts only schema-3
+    checkpoints carrying the authenticated safe-velocity source identity.  The
+    exact v9 migration source remains readable only when explicitly requested
+    for historical audit.
     """
 
     checkpoint = Path(checkpoint_path).resolve()
@@ -1587,10 +1557,10 @@ def validate_teleop_checkpoint_contract(
         )
     pristine_pre_update = infos.get("pristine_pre_update")
     if expected_iteration == -1:
-        raise ValueError(
-            "Contract-v10 has no model_pristine.pt; it starts from a full-state "
-            "contract-v9 migration"
-        )
+        if pristine_pre_update is not True or common_step_counter != 0:
+            raise ValueError(
+                "model_pristine.pt must be explicitly marked before update zero"
+            )
     elif pristine_pre_update not in (None, False):
         raise ValueError(
             "Only model_pristine.pt may carry the pristine_pre_update marker"
@@ -1610,8 +1580,8 @@ def validate_teleop_checkpoint_contract(
     if version != MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION:
         raise ValueError(
             "Checkpoint is not the current Microban teleop training contract; "
-            "v1-v9 and legacy velocity checkpoints are not deployable under "
-            "contract v10"
+            "v1-v10 and legacy velocity checkpoints are not deployable under "
+            "contract v11"
         )
     if semantics != MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS:
         raise ValueError(
@@ -1634,7 +1604,7 @@ def validate_teleop_checkpoint_contract(
     )
     if training_provenance is None or training_provenance_sha256 is None:
         raise ValueError(
-            "Contract-v10 checkpoint requires training provenance and its SHA-256"
+            "Contract-v11 checkpoint requires training provenance and its SHA-256"
         )
     training_provenance_identity = _validated_training_provenance_identity(
         training_provenance,
@@ -1647,56 +1617,68 @@ def validate_teleop_checkpoint_contract(
         ) * MICROBAN_TELEOP_NUM_STEPS_PER_ENV
         if common_step_counter != expected_common_step_counter:
             raise ValueError(
-                "Contract-v10 checkpoint common_step_counter must equal "
+                "Contract-v11 checkpoint common_step_counter must equal "
                 f"(iteration + 1) * {MICROBAN_TELEOP_NUM_STEPS_PER_ENV} "
                 f"({common_step_counter} != {expected_common_step_counter})"
             )
     if "velocity_actor_bootstrap" in infos:
         raise ValueError(
-            "Contract v10 rejects the retired legacy velocity_actor_bootstrap field"
+            "Contract v11 rejects the retired legacy velocity_actor_bootstrap field"
         )
-    learning_rates = _checkpoint_optimizer_learning_rates(loaded)
-    if any(
-        learning_rate != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
-        for learning_rate in learning_rates
-    ):
-        raise ValueError(
-            "Contract-v10 checkpoint optimizer learning rate is not the fixed "
-            f"{MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE!r}"
-        )
+    if expected_iteration >= 0:
+        learning_rates = _checkpoint_optimizer_learning_rates(loaded)
+        if any(
+            learning_rate != MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE
+            for learning_rate in learning_rates
+        ):
+            raise ValueError(
+                "Contract-v11 checkpoint optimizer learning rate is not the fixed "
+                f"{MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE!r}"
+            )
     critic_state = loaded.get("critic_state_dict")
     actor_state = loaded.get("actor_state_dict")
     if not isinstance(actor_state, Mapping) or not actor_state:
-        raise ValueError("Contract-v10 checkpoint is missing actor_state_dict")
+        raise ValueError("Contract-v11 checkpoint is missing actor_state_dict")
     validate_finite_actor_state(actor_state, context="Checkpoint actor_state_dict")
     if not isinstance(critic_state, Mapping) or not critic_state:
-        raise ValueError("Contract-v10 checkpoint is missing critic_state_dict")
+        raise ValueError("Contract-v11 checkpoint is missing critic_state_dict")
     validate_finite_actor_state(critic_state, context="Checkpoint critic_state_dict")
     bootstrap_info = validate_safe_velocity_actor_bootstrap_info(
         infos.get("safe_velocity_actor_bootstrap"),
         verify_source_checkpoint=True,
     )
     if canonical_training_stage:
-        migration_source = training_provenance_identity.migration_source
-        if not isinstance(migration_source, dict):
-            raise TypeError(
-                "Canonical contract-v10 checkpoint is missing migration_source"
-            )
-        safe_source_mismatches = [
-            name
-            for name, bootstrap_key in (
-                ("safe_velocity_checkpoint_sha256", "source_checkpoint_sha256"),
-                (
-                    "safe_velocity_acceptance_receipt_sha256",
-                    "source_acceptance_receipt_sha256",
-                ),
-            )
-            if migration_source.get(name) != bootstrap_info.get(bootstrap_key)
-        ]
-        if safe_source_mismatches:
+        if training_provenance_identity.migration_source is not None:
             raise ValueError(
-                "Canonical contract-v10 safe-source identity disagrees with its "
-                "migration ledger: " + ", ".join(safe_source_mismatches)
+                "Canonical contract-v11 checkpoint contains migration data"
+            )
+        resolved = training_provenance.get("resolved_config")
+        critical = resolved.get("critical") if isinstance(resolved, dict) else None
+        if not isinstance(critical, dict):
+            raise TypeError("Canonical contract-v11 critical config is malformed")
+        configured_safe_source = {
+            "safe_velocity_checkpoint": bootstrap_info.get("source_checkpoint_path"),
+            "safe_velocity_checkpoint_sha256": bootstrap_info.get(
+                "source_checkpoint_sha256"
+            ),
+            "safe_velocity_acceptance_receipt": bootstrap_info.get(
+                "source_acceptance_receipt_path"
+            ),
+        }
+        recorded_safe_source = {
+            name: critical.get(name) for name in configured_safe_source
+        }
+        if any(value is not None for value in recorded_safe_source.values()) and (
+            recorded_safe_source != configured_safe_source
+        ):
+            mismatches = [
+                name
+                for name in configured_safe_source
+                if recorded_safe_source[name] != configured_safe_source[name]
+            ]
+            raise ValueError(
+                "Canonical contract-v11 safe-source provenance disagrees with its "
+                "validated bootstrap record: " + ", ".join(mismatches)
             )
     return TeleopCheckpointContract(
         version=version,
@@ -2530,7 +2512,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         log_dir: str | None = None,
         device: str = "cpu",
     ) -> None:
-        """Construct a contract-v10 migration/resume or actor-only audit runner."""
+        """Construct a contract-v11 fresh bootstrap, resume, or audit runner."""
 
         if not hasattr(env, "clip_actions") or env.clip_actions is not None:
             raise ValueError(
@@ -2546,7 +2528,8 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         retired_sha256 = runner_cfg.pop("bootstrap_velocity_checkpoint_sha256", None)
         if retired_path is not None or retired_sha256 is not None:
             raise ValueError(
-                "Contract v10 rejects legacy bootstrap_velocity_checkpoint options"
+                "Contract v11 rejects legacy bootstrap_velocity_checkpoint options; "
+                "use the dedicated safe_velocity_checkpoint triplet"
             )
         safe_source_path = runner_cfg.pop("safe_velocity_checkpoint", None)
         safe_source_sha256 = runner_cfg.pop("safe_velocity_checkpoint_sha256", None)
@@ -2559,15 +2542,17 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         save_pristine_checkpoint = bool(
             runner_cfg.pop("save_pristine_checkpoint", False)
         )
-        safe_source_values = (
+        fresh_source_values = (
             safe_source_path,
             safe_source_sha256,
             safe_acceptance_receipt,
         )
-        if any(value is not None for value in safe_source_values):
+        if any(value is None for value in fresh_source_values) and any(
+            value is not None for value in fresh_source_values
+        ):
             raise ValueError(
-                "Contract-v10 cannot bootstrap a fresh actor; it inherits the "
-                "safe-source chain through the pinned full-state v9 migration"
+                "Safe-velocity bootstrap requires checkpoint path, SHA-256, and "
+                "a passing acceptance receipt together"
             )
         resume = bool(runner_cfg.get("resume", False))
         if checkpoint_consumer_mode and resume:
@@ -2580,33 +2565,46 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             )
         if checkpoint_consumer_mode and log_dir is not None:
             raise ValueError("Checkpoint consumer mode cannot have a training log_dir")
-        if not resume and not checkpoint_consumer_mode:
+        if checkpoint_consumer_mode and safe_source_path is not None:
             raise ValueError(
-                "Contract-v10 training has no fresh-run path; migrate the pinned "
-                "contract-v9 model_1499 or resume a canonical v10 checkpoint"
+                "Checkpoint consumer mode cannot accept fresh safe-velocity options"
+            )
+        if resume and safe_source_path is not None:
+            raise ValueError(
+                "Safe-velocity source options are fresh-run only; v11 resume reads "
+                "the pinned source identity from the teleop checkpoint"
+            )
+        if not resume and not checkpoint_consumer_mode and safe_source_path is None:
+            raise ValueError(
+                "A fresh contract-v11 run requires safe_velocity_checkpoint, "
+                "safe_velocity_checkpoint_sha256, and "
+                "safe_velocity_acceptance_receipt"
             )
         if resume and save_pristine_checkpoint:
             raise ValueError(
-                "Contract-v10 does not create pristine bootstrap checkpoints"
+                "A pristine checkpoint can only be saved by a fresh v11 bootstrap"
             )
         if save_pristine_checkpoint and log_dir is None:
             raise ValueError("A pristine teleop checkpoint requires a runner log_dir")
 
         algorithm_cfg = runner_cfg.get("algorithm")
         if not isinstance(algorithm_cfg, dict):
-            raise TypeError("Contract-v10 runner algorithm config must be a dictionary")
+            raise TypeError("Contract-v11 runner algorithm config must be a dictionary")
         if (
             algorithm_cfg.get("learning_rate")
-            != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
+            != MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE
             or algorithm_cfg.get("schedule") != "fixed"
+            or algorithm_cfg.get("entropy_coef") != MICROBAN_TELEOP_V11_ENTROPY_COEF
+            or algorithm_cfg.get("num_learning_epochs")
+            != MICROBAN_TELEOP_V11_NUM_LEARNING_EPOCHS
         ):
             raise ValueError(
-                "Contract-v10 requires learning_rate=1e-5 with schedule='fixed'"
+                "Contract-v11 requires learning_rate=1e-4, schedule='fixed', "
+                "entropy_coef=0.005, and num_learning_epochs=5"
             )
 
         self.checkpoint_consumer_mode = checkpoint_consumer_mode
         self.teleop_training_resume = resume
-        self.teleop_migration_resume = False
         if checkpoint_consumer_mode:
             self.teleop_training_provenance = None
             self.teleop_training_provenance_sha256 = None
@@ -2625,15 +2623,16 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                 "canonical_stage", False
             ):
                 raise ValueError(
-                    "Contract-v10 training resume requires the canonical stage "
+                    "Contract-v11 training resume requires the canonical stage "
                     "wrapper and parent gate lineage"
                 )
-            invocation = self.teleop_training_provenance.get("invocation")
-            if not isinstance(invocation, dict):
-                raise TypeError("Contract-v10 training invocation is malformed")
-            self.teleop_migration_resume = (
-                invocation.get("mode") == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE
-            )
+            if (
+                not resume
+                and self.teleop_training_provenance.get("canonical_stage") is True
+            ):
+                validate_canonical_stage_critical_config(
+                    self.teleop_training_provenance
+                )
         super().__init__(env, runner_cfg, log_dir=log_dir, device=device)
         self.loaded_checkpoint_contract = None
         self.safe_velocity_bootstrap_provenance = None
@@ -2643,13 +2642,119 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         )
         if resume or checkpoint_consumer_mode:
             return
-        raise AssertionError("Unreachable contract-v10 runner construction")
+
+        assert safe_source_path is not None and safe_source_sha256 is not None
+        assert safe_acceptance_receipt is not None
+        expected_joint_names = (
+            *MICROBAN_HMD_JOINT_NAMES,
+            *MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+        )
+        joint_names = tuple(self.env.unwrapped.scene["robot"].joint_names)
+        if joint_names != expected_joint_names:
+            raise ValueError(
+                "Safe-velocity bootstrap requires teleop natural joint order "
+                f"{expected_joint_names}, got {joint_names}"
+            )
+
+        from mjlab_microban.tasks.microban_teleop_bootstrap import (
+            load_safe_velocity_actor_bootstrap,
+            serialize_safe_velocity_actor_bootstrap_provenance,
+        )
+
+        self.safe_velocity_bootstrap_provenance = load_safe_velocity_actor_bootstrap(
+            self.alg.get_policy(),
+            safe_source_path,
+            safe_source_sha256,
+            safe_acceptance_receipt,
+        )
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Bootstrapped actor state_dict"
+        )
+        bootstrap = self.safe_velocity_bootstrap_provenance
+        source = bootstrap.source
+        self.safe_velocity_actor_bootstrap_info = (
+            serialize_safe_velocity_actor_bootstrap_provenance(bootstrap)
+        )
+        validate_safe_velocity_actor_bootstrap_info(
+            self.safe_velocity_actor_bootstrap_info,
+            verify_source_checkpoint=True,
+        )
+        validated_training = validate_training_provenance(
+            self.teleop_training_provenance,
+            self.teleop_training_provenance_sha256,
+            expected_contract_version=MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
+            expected_recipe_revision=MICROBAN_TELEOP_RECIPE_REVISION,
+            expected_actor_initialization=MICROBAN_TELEOP_ACTOR_INITIALIZATION,
+        )
+        if validated_training.get("canonical_stage") is True:
+            validate_canonical_stage_critical_config(validated_training)
+        print(
+            "Initialized contract-v11 teleop actor from bounded safe-velocity "
+            f"checkpoint {source.path} (sha256={source.sha256}; actor MLP and "
+            "learned bounded distribution/std copied; fresh critic, Adam, "
+            "iteration, and common_step_counter)"
+        )
+        if save_pristine_checkpoint and self.gpu_global_rank == 0:
+            assert log_dir is not None
+            self._save_pristine_checkpoint(Path(log_dir) / "model_pristine.pt")
 
     def _save_pristine_checkpoint(self, path: Path) -> None:
-        """Reject the retired actor-only bootstrap checkpoint path."""
+        """Atomically save the mapped actor before the first PPO rollout/update."""
 
-        del path
-        raise RuntimeError("Contract-v10 has no pristine actor-only checkpoint")
+        if self.safe_velocity_actor_bootstrap_info is None:
+            raise RuntimeError("Pristine checkpoint requires safe-velocity bootstrap")
+        validate_safe_velocity_actor_bootstrap_info(
+            self.safe_velocity_actor_bootstrap_info,
+            verify_source_checkpoint=True,
+        )
+        if self.env.unwrapped.common_step_counter != 0:
+            raise ValueError("Pristine checkpoint requires common_step_counter == 0")
+        path = path.resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise FileExistsError(f"Refusing to replace pristine checkpoint: {path}")
+        validate_finite_actor_state(
+            self.alg.get_policy().state_dict(), context="Pristine actor state_dict"
+        )
+        payload = self.alg.save()
+        payload["iter"] = -1
+        payload["infos"] = {
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: deepcopy(
+                self.teleop_training_provenance
+            ),
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: (
+                self.teleop_training_provenance_sha256
+            ),
+            "safe_velocity_actor_bootstrap": deepcopy(
+                self.safe_velocity_actor_bootstrap_info
+            ),
+            "env_state": {"common_step_counter": 0},
+            "pristine_pre_update": True,
+        }
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            torch.save(payload, temporary)
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(f"[INFO] Saved pristine pre-update checkpoint: {path}")
 
     def _require_nonlegacy_deployment_contract(self) -> None:
         """Prevent diagnostic weights from being saved or exported."""
@@ -2680,18 +2785,17 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         default loader resumes *at* that index, repeating one PPO update.  This
         task treats a checkpoint named ``model_N.pt`` as ``N + 1`` completed
         iterations and starts at ``N + 1`` instead. Training resumes always load
-        actor, critic, Adam moments, iteration, and common step.  The one v9
-        migration rewrites only the optimizer learning-rate scalar after the
-        complete source state has been restored.
+        actor, critic, Adam moments, iteration, and common step. Fresh v11
+        bootstrap is the only actor-only training initialization path.
         """
 
         if getattr(self, "safe_velocity_bootstrap_provenance", None) is not None:
             raise ValueError(
-                "A safe-velocity-bootstrapped runner cannot enter contract-v10"
+                "A fresh safe-velocity-bootstrapped runner cannot also load a "
+                "teleop checkpoint"
             )
         consumer_mode = getattr(self, "checkpoint_consumer_mode", False)
         training_resume = getattr(self, "teleop_training_resume", False)
-        migration_mode = getattr(self, "teleop_migration_resume", False)
         if consumer_mode:
             actor_only = (
                 load_cfg is not None
@@ -2708,7 +2812,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         elif training_resume:
             if load_cfg is not None or strict is not True:
                 raise ValueError(
-                    "Contract-v10 training resume requires strict full-state load "
+                    "Contract-v11 training resume requires strict full-state load "
                     "with load_cfg=None"
                 )
             if allow_legacy_teleop_contract:
@@ -2720,25 +2824,13 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
 
         resolved_path = Path(path).resolve()
         source_sha256 = _sha256_file(resolved_path)
-        is_initial_legacy_migration = (
-            migration_mode
-            and source_sha256 == MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
+        contract = validate_teleop_checkpoint_contract(
+            resolved_path,
+            map_location=map_location or "cpu",
+            allow_legacy_diagnostic=(allow_legacy_teleop_contract and consumer_mode),
         )
-        if is_initial_legacy_migration:
-            contract = validate_v9_migration_source_checkpoint(
-                resolved_path,
-                map_location=map_location or "cpu",
-            )
-        else:
-            contract = validate_teleop_checkpoint_contract(
-                resolved_path,
-                map_location=map_location or "cpu",
-                allow_legacy_diagnostic=(
-                    allow_legacy_teleop_contract and consumer_mode
-                ),
-            )
         if training_resume:
-            self._inherit_v10_migration_source(contract)
+            self._inherit_interrupted_initial_stage_safe_source(contract)
             self._validate_canonical_resume_lineage(resolved_path, contract)
         if contract.pristine_pre_update:
             actor_only = (
@@ -2787,9 +2879,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             raise RuntimeError(
                 "Full-state loader did not restore the checkpoint iteration"
             )
-        self._enforce_fixed_learning_rate_after_load(
-            migrated_from_v9=is_initial_legacy_migration
-        )
+        self._enforce_fixed_learning_rate_after_load()
         self.current_learning_iteration += 1
         env = self.env.unwrapped
         if (
@@ -2816,38 +2906,38 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             raise RuntimeError("Environment reset changed the restored global step")
         return infos
 
-    def _inherit_v10_migration_source(
+    def _inherit_interrupted_initial_stage_safe_source(
         self,
         contract: TeleopCheckpointContract,
     ) -> None:
-        """Bind a normal/interrupted v10 invocation to the migration ledger."""
+        """Bind a 0->3000 resume manifest to its authenticated safe source."""
 
         current = self.teleop_training_provenance
         invocation = current.get("invocation") if isinstance(current, dict) else None
         if not isinstance(invocation, dict):
             raise TypeError("Current canonical resume invocation is malformed")
-        if current.get("migration_source") is not None:
-            validate_v10_migration_source_identity(current["migration_source"])
+        if invocation.get("stage_start_boundary") != 0:
             return
-        if contract.training_provenance is None:
+        if (
+            contract.training_provenance is None
+            or contract.safe_velocity_bootstrap_info is None
+        ):
             raise ValueError(
-                "Contract-v10 resume checkpoint is missing migration provenance"
+                "Interrupted initial-stage checkpoint is missing pinned safe-source "
+                "provenance"
             )
         (
             self.teleop_training_provenance,
             self.teleop_training_provenance_sha256,
-        ) = inherit_v10_migration_source_identity(
+        ) = inherit_initial_stage_safe_velocity_identity(
             current,
             contract.training_provenance,
+            contract.safe_velocity_bootstrap_info,
         )
         validate_canonical_stage_critical_config(self.teleop_training_provenance)
 
-    def _enforce_fixed_learning_rate_after_load(
-        self,
-        *,
-        migrated_from_v9: bool,
-    ) -> None:
-        """Verify restored optimizer state, then apply the sole migration rewrite."""
+    def _enforce_fixed_learning_rate_after_load(self) -> None:
+        """Verify that a resumed v11 optimizer kept the resolved fixed rate."""
 
         algorithm_learning_rate = getattr(self.alg, "learning_rate", None)
         optimizer = getattr(self.alg, "optimizer", None)
@@ -2855,29 +2945,17 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if not isinstance(groups, list) or not groups:
             raise TypeError("Loaded PPO optimizer param_groups are unavailable")
         if len(groups) != 1:
-            raise ValueError("Contract-v10 requires exactly one optimizer param_group")
-        expected_loaded = (
-            MICROBAN_TELEOP_V10_LEGACY_OPTIMIZER_LEARNING_RATE
-            if migrated_from_v9
-            else MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
-        )
+            raise ValueError("Contract-v11 requires exactly one optimizer param_group")
         observed = tuple(group.get("lr") for group in groups)
-        if any(value != expected_loaded for value in observed):
+        if any(value != MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE for value in observed):
             raise ValueError(
                 "Loaded optimizer learning-rate invariant failed: "
-                f"{observed!r} != {expected_loaded!r}"
+                f"{observed!r} != {MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE!r}"
             )
-        if algorithm_learning_rate != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE:
+        if algorithm_learning_rate != MICROBAN_TELEOP_V11_FIXED_LEARNING_RATE:
             raise ValueError(
-                "Destination PPO algorithm learning_rate is not fixed at 1e-5"
+                "Destination PPO algorithm learning_rate is not fixed at 1e-4"
             )
-        if migrated_from_v9:
-            for group in groups:
-                group["lr"] = MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
-            self.alg.learning_rate = MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE
-        final = tuple(group.get("lr") for group in groups)
-        if any(value != MICROBAN_TELEOP_V10_FIXED_LEARNING_RATE for value in final):
-            raise RuntimeError("Failed to establish fixed v10 optimizer learning rate")
 
     def _validate_canonical_resume_lineage(
         self,
@@ -2893,7 +2971,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         loaded = contract.training_provenance_identity
         if not current.canonical_stage:
             raise ValueError(
-                "A v10 training resume requires canonical stage provenance"
+                "A v11 training resume requires canonical stage provenance"
             )
         resolved_checkpoint = Path(checkpoint_path).resolve()
         observed_checkpoint_sha256 = _sha256_file(resolved_checkpoint)
@@ -2914,26 +2992,8 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         completed = contract.iteration + 1
         if start is None or target is None:
             raise ValueError("Canonical resume stage boundaries are missing")
-        if contract.legacy_v9_migration_source:
-            if (
-                current.mode != MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE
-                or start != MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY
-                or target != MICROBAN_TELEOP_V10_MIGRATION_TARGET_BOUNDARY
-                or completed != MICROBAN_TELEOP_V10_MIGRATION_START_BOUNDARY
-                or current.parent_checkpoint_sha256
-                != MICROBAN_TELEOP_V10_LEGACY_CHECKPOINT_SHA256
-                or current.parent_gate_sha256 != MICROBAN_TELEOP_V10_LEGACY_GATE_SHA256
-            ):
-                raise ValueError("Legacy checkpoint is not the canonical v10 migration")
-            migration_source = validate_v10_migration_source_identity(
-                current.migration_source
-            )
-            if migration_source["source_checkpoint_path"] != str(resolved_checkpoint):
-                raise ValueError("Migration ledger source path mismatch")
-            self._validate_v10_migration_parent_gate(resolved_checkpoint)
-            return
         if loaded is None or not loaded.canonical_stage:
-            raise ValueError("A v10 resume source lacks canonical schema-2 provenance")
+            raise ValueError("A v11 resume source lacks canonical schema-3 provenance")
         if completed == start:
             if current.parent_checkpoint_sha256 != observed_checkpoint_sha256:
                 raise ValueError(
@@ -2968,19 +3028,11 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                     + ", ".join(mismatches)
                 )
             if start > 0:
-                if current.mode == MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE:
-                    migration_source = validate_v10_migration_source_identity(
-                        current.migration_source
-                    )
-                    self._validate_v10_migration_parent_gate(
-                        Path(str(migration_source["source_checkpoint_path"]))
-                    )
-                else:
-                    self._validate_canonical_parent_gate(
-                        boundary=start,
-                        parent_checkpoint_sha256=current.parent_checkpoint_sha256,
-                        parent_gate_sha256=current.parent_gate_sha256,
-                    )
+                self._validate_canonical_parent_gate(
+                    boundary=start,
+                    parent_checkpoint_sha256=current.parent_checkpoint_sha256,
+                    parent_gate_sha256=current.parent_gate_sha256,
+                )
             return
         raise ValueError(
             "Loaded checkpoint iteration is outside the canonical resume stage"
@@ -3064,7 +3116,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Canonical resume parent SHA-256 values are missing")
         from mjlab_microban.scripts import evaluate_teleop_checkpoint as evaluator
 
-        gate_root = Path(__file__).resolve().parents[3] / "artifacts/teleop_v10_gates"
+        gate_root = Path(__file__).resolve().parents[3] / "artifacts/teleop_v11_gates"
         matches: list[Path] = []
         for candidate in gate_root.glob(f"*_boundary_{boundary}_gate.json"):
             if not candidate.is_file() or _sha256_file(candidate) != parent_gate_sha256:
@@ -3143,7 +3195,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if getattr(self, "checkpoint_consumer_mode", False):
             raise RuntimeError("Checkpoint consumer mode cannot save checkpoints")
         self._require_nonlegacy_deployment_contract()
-        self._enforce_fixed_learning_rate_after_load(migrated_from_v9=False)
+        self._enforce_fixed_learning_rate_after_load()
         validate_finite_actor_state(
             self.alg.get_policy().state_dict(), context="Actor state_dict before save"
         )
