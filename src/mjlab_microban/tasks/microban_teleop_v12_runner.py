@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
@@ -15,6 +16,7 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
+from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -45,6 +47,12 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
     preview_hand_tracking_settings,
 )
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    BILATERAL_SITE_ORDER_INFO_KEY,
+    MIGRATION_INFO_KEY,
+    validate_bilateral_site_order_checkpoint,
+    validate_lr_order_migration_marker,
+)
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     TELEOP_V12_PREVIEW_INFO_KEY,
     TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY,
@@ -57,12 +65,72 @@ from mjlab_microban.tasks.microban_teleop_v12_preview import (
 TELEOP_V12_BOOTSTRAP_INFO_KEY = "legacy_velocity_actor_bootstrap_v12"
 TELEOP_V12_SANITIZATION_INFO_KEY = "adapter_sanitization"
 
+TELEOP_V12_OBSERVATION_TERM_LAYOUTS = {
+    "actor": (
+        ("base_ang_vel", 3),
+        ("projected_gravity", 3),
+        ("joint_pos", 21),
+        ("joint_vel", 21),
+        ("actions", 18),
+        ("command", 3),
+        ("foot_target", 6),
+        ("hand_target", 8),
+    ),
+    "critic": (
+        ("base_lin_vel", 3),
+        ("base_ang_vel", 3),
+        ("projected_gravity", 3),
+        ("joint_pos", 21),
+        ("joint_vel", 21),
+        ("actions", 18),
+        ("command", 3),
+        ("foot_height", 2),
+        ("foot_air_time", 2),
+        ("foot_contact", 2),
+        ("foot_contact_forces", 6),
+        ("foot_target", 6),
+        ("hand_target", 8),
+        ("locomotion_prior", 39),
+    ),
+}
+
+
+def teleop_v12_observation_term_slices(manager) -> dict[str, dict[str, slice]]:
+    """Resolve and authenticate every actor/critic term slice."""
+
+    result: dict[str, dict[str, slice]] = {}
+    for group, expected_layout in TELEOP_V12_OBSERVATION_TERM_LAYOUTS.items():
+        names = tuple(manager.active_terms.get(group, ()))
+        dimensions = tuple(manager.group_obs_term_dim.get(group, ()))
+        widths = tuple(math.prod(value) for value in dimensions)
+        actual_layout = tuple(zip(names, widths, strict=True))
+        if actual_layout != expected_layout:
+            raise ValueError(
+                f"Contract-v12 {group} observation layout drifted: {actual_layout}"
+            )
+        offset = 0
+        slices: dict[str, slice] = {}
+        for name, width in actual_layout:
+            slices[name] = slice(offset, offset + width)
+            offset += width
+        result[group] = slices
+    if result["actor"]["foot_target"] != slice(69, 75) or result["actor"][
+        "hand_target"
+    ] != slice(75, 83):
+        raise RuntimeError("Contract-v12 actor bilateral target slices drifted")
+    if result["critic"]["foot_target"] != slice(84, 90) or result["critic"][
+        "hand_target"
+    ] != slice(90, 98):
+        raise RuntimeError("Contract-v12 critic bilateral target slices drifted")
+    return result
+
 
 def validate_teleop_v12_environment_contract(env) -> None:
     """Reject same-width observation/action reorder and clipped recurrence."""
 
     raw_env = env.unwrapped
     validate_microban_teleop_observation_contract(raw_env)
+    teleop_v12_observation_term_slices(raw_env.observation_manager)
     expected_observation_joints = (
         *MICROBAN_HMD_JOINT_NAMES,
         *MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -231,6 +299,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self.simulation_preview_mode = preview_mode
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
         self.teleop_v12_sanitization: dict | None = None
+        self.teleop_v12_lr_order_migration: dict | None = None
         self.teleop_v12_preview: dict | None = None
         self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
@@ -306,6 +375,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
             ),
             "active_actor_columns_at_save": list(self._actor.active_adapter_columns()),
+            BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
             TELEOP_V12_BOOTSTRAP_INFO_KEY: serialize_bootstrap_provenance(
                 self.teleop_v12_bootstrap
             ),
@@ -313,6 +383,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if self.teleop_v12_sanitization is not None:
             result[TELEOP_V12_SANITIZATION_INFO_KEY] = dict(
                 self.teleop_v12_sanitization
+            )
+        if self.teleop_v12_lr_order_migration is not None:
+            result[MIGRATION_INFO_KEY] = deepcopy(
+                validate_lr_order_migration_marker(self.teleop_v12_lr_order_migration)
             )
         if self.teleop_v12_preview is not None:
             result["preview_non_deployable"] = True
@@ -488,6 +562,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 raise ValueError("Checkpoint sanitizer parent SHA-256 is malformed")
         if resume and (iteration < 0 or infos.get("pristine_pre_update") is True):
             raise ValueError("Pristine checkpoint cannot resume training")
+        lr_order_migration = validate_bilateral_site_order_checkpoint(infos)
 
         consumer_common_step = (
             int(self.env.unwrapped.common_step_counter) if consumer else None
@@ -507,6 +582,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Checkpoint changed while loading")
         self.teleop_v12_bootstrap = provenance
         self.teleop_v12_sanitization = sanitization
+        self.teleop_v12_lr_order_migration = deepcopy(lr_order_migration)
         self.teleop_v12_preview = preview
         self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)
@@ -778,6 +854,4 @@ def make_teleop_v12_controller_only_preview_consumer(
     cfg["checkpoint_consumer_mode"] = True
     cfg["simulation_preview_mode"] = True
     cfg["resume"] = False
-    return MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(
-        env, cfg, device=device
-    )
+    return MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(env, cfg, device=device)

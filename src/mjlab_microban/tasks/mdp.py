@@ -54,6 +54,41 @@ _SIGNED_AXIS_RANGE_KEYS = (
     "yaw_left",
     "yaw_right",
 )
+MICROBAN_BILATERAL_SITE_ORDER_REVISION = "preserve_requested_left_right_sites_v1"
+
+
+def _resolve_ordered_site_cfg(
+    scene: object,
+    *,
+    entity_name: str,
+    site_names: tuple[str, str],
+    label: str,
+) -> SceneEntityCfg:
+    """Resolve one bilateral site pair without losing semantic L/R order.
+
+    ``Entity.find_sites`` follows model order unless ``preserve_order`` is set.
+    Microban's XML stores the right site before the left site, while every
+    teleoperation command tensor is explicitly ``(left, right)``.  Silently
+    accepting model order therefore crosses the two targets.  Keep the
+    requested order and fail during environment construction if the resolver
+    ever returns anything else.
+    """
+
+    expected = tuple(site_names)
+    if len(expected) != 2 or len(set(expected)) != 2:
+        raise ValueError(f"{label} site names must be one unique bilateral pair")
+    asset_cfg = SceneEntityCfg(
+        entity_name,
+        site_names=expected,
+        preserve_order=True,
+    )
+    asset_cfg.resolve(scene)  # type: ignore[arg-type]
+    resolved = tuple(asset_cfg.site_names or ())
+    if resolved != expected:
+        raise RuntimeError(
+            f"{label} site order drifted: expected {expected}, resolved {resolved}"
+        )
+    return asset_cfg
 
 
 def _validate_signed_axis_sampler_cfg(
@@ -406,10 +441,12 @@ class FootTargetCommand(CommandTerm):
         super().__init__(cfg, env)
         self.robot: Entity = env.scene[cfg.entity_name]
 
-        self._foot_asset_cfg = SceneEntityCfg(
-            cfg.entity_name, site_names=cfg.foot_site_names
+        self._foot_asset_cfg = _resolve_ordered_site_cfg(
+            env.scene,
+            entity_name=cfg.entity_name,
+            site_names=cfg.foot_site_names,
+            label="FootTargetCommand",
         )
-        self._foot_asset_cfg.resolve(env.scene)
 
         # Offset target (dx, dy, dz) per env, per foot (left, right), in the trunk frame.
         self.foot_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
@@ -537,10 +574,12 @@ class HandTargetCommand(CommandTerm):
         super().__init__(cfg, env)
         self.robot: Entity = env.scene[cfg.entity_name]
 
-        self._hand_asset_cfg = SceneEntityCfg(
-            cfg.entity_name, site_names=cfg.hand_site_names
+        self._hand_asset_cfg = _resolve_ordered_site_cfg(
+            env.scene,
+            entity_name=cfg.entity_name,
+            site_names=cfg.hand_site_names,
+            label="HandTargetCommand",
         )
-        self._hand_asset_cfg.resolve(env.scene)
 
         self.hand_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
         self._default_hand_pos_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
