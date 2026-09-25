@@ -32,6 +32,27 @@ validator report by SHA-256. An existing ONNX or receipt is not replaced unless
 `--force` is explicit. `--force` only permits atomic replacement and does not
 relax a gate.
 
+## Archived full training chain
+
+The accepted release also versions the exact 3,000, 7,000, 10,000 and 15,000
+update checkpoints, every required 100-update activation canary, and each
+stage's locomotion, tracking/safety and ONNX evidence. Verify all tracked paths,
+SHA-256 bindings and the final physical-runtime receipt with:
+
+```bash
+uv run --locked python scripts/verify_microban_teleop_v12_release_chain.py \
+  --paths-only
+```
+
+For the complete audit, omit `--paths-only`. The verifier creates disposable
+detached worktrees and reruns each gate with the evaluator commit recorded in
+`artifacts/teleop_v12_releases/microban_teleop_v12_full_chain_manifest.json`.
+This pin is intentional: the 3,000/7,000 stages predate the authenticated
+bilateral-site-order migration and are checked with their historical evaluator;
+the migrated 10,000/15,000 stages use the later evaluator. A current evaluator
+rejecting a pre-migration checkpoint is therefore not misreported as a failed
+historical gate, and no pre-migration checkpoint is deployable.
+
 The active 10,100-to-15,000 run created on 2026-09-26 will write the exact
 final checkpoint path:
 

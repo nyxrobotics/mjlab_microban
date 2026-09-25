@@ -1,0 +1,93 @@
+{
+  "schema": "microban_teleop_v12_release_chain_v1",
+  "status": "pass",
+  "training_contract_version": "12",
+  "stages": [
+    {
+      "kind": "canonical_boundary",
+      "completed_updates": 3000,
+      "iteration": 2999,
+      "canonical_boundary": true,
+      "validator_commit": "4d9600b1f28972fcf66693aa854b9fac343912f4",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-25_20-17-50_v12_canonical_601_to3000_model_2999_gate.json",
+      "gate_sha256": "a3fc8602a61d00396785421829614fd817de40c6a51273cc67d341dbbf5d3431",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_20-17-50_v12_canonical_601_to3000/model_2999.pt",
+      "checkpoint_sha256": "602109f58244fc3f39ec8b9e7b02aaf1b46bdb3ffc59305ee95937af4bc49e46"
+    },
+    {
+      "kind": "activation_canary",
+      "completed_updates": 3100,
+      "iteration": 3099,
+      "canonical_boundary": false,
+      "validator_commit": "4d9600b1f28972fcf66693aa854b9fac343912f4",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-25_20-59-53_v12_canonical_3000_to3100_model_3099_gate.json",
+      "gate_sha256": "649532a6bd2ee068e0b66919db5858b330fe65e217f3a0eb63065ce14ac2b806",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_20-59-53_v12_canonical_3000_to3100/model_3099.pt",
+      "checkpoint_sha256": "33c621086498ca3202e032557e0727e782919858edeb13950805c363b81435d1"
+    },
+    {
+      "kind": "canonical_boundary",
+      "completed_updates": 7000,
+      "iteration": 6999,
+      "canonical_boundary": true,
+      "validator_commit": "4d9600b1f28972fcf66693aa854b9fac343912f4",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-25_21-04-21_v12_canonical_3100_to7000_model_6999_gate.json",
+      "gate_sha256": "d7e92304faa16dd56e1c4a2979e120a7474016f5bb8963765339e886202b5bc1",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_21-04-21_v12_canonical_3100_to7000/model_6999.pt",
+      "checkpoint_sha256": "5e9924fbdd54204f7c8f9879ff2dd2010ec6dae24d0ba2a3200f2390e2a6fec3"
+    },
+    {
+      "kind": "activation_canary",
+      "completed_updates": 7100,
+      "iteration": 7099,
+      "canonical_boundary": false,
+      "validator_commit": "4d9600b1f28972fcf66693aa854b9fac343912f4",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-25_22-14-43_v12_canonical_7000_to7100_model_7099_gate.json",
+      "gate_sha256": "f7965b9008f57947c1503d502b47988e6981120c38ffee1e1eb4c55e6f42b1be",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-14-43_v12_canonical_7000_to7100/model_7099.pt",
+      "checkpoint_sha256": "3f03c9c8e42ad4ee30595a2d54b4cad98eed2d9c0251d1762f3fc3e1a7855d68"
+    },
+    {
+      "kind": "canonical_boundary",
+      "completed_updates": 10000,
+      "iteration": 9999,
+      "canonical_boundary": true,
+      "validator_commit": "0e5652853e8559584c046b9b9f8be6589ec96b49",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_gate.json",
+      "gate_sha256": "ca809e2f1a525f5e49eba99a4a48229853cf518d7dd321a36b0c60237c207446",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000/model_9999.pt",
+      "checkpoint_sha256": "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
+    },
+    {
+      "kind": "activation_canary",
+      "completed_updates": 10100,
+      "iteration": 10099,
+      "canonical_boundary": false,
+      "validator_commit": "0e5652853e8559584c046b9b9f8be6589ec96b49",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_gate.json",
+      "gate_sha256": "24caf0d3eb70d1bc816efe5396027ef9ed62d310f7a73d9fb3c9ed173e04f871",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926/model_10099.pt",
+      "checkpoint_sha256": "86a81f45f34d91036ab138963c835a3e78db98224f523d3484e1d3ed335082ff"
+    },
+    {
+      "kind": "canonical_boundary",
+      "completed_updates": 15000,
+      "iteration": 14999,
+      "canonical_boundary": true,
+      "validator_commit": "0e5652853e8559584c046b9b9f8be6589ec96b49",
+      "gate": "repo://artifacts/teleop_v12_gates/2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926_model_14999_gate.json",
+      "gate_sha256": "f11e274bd4b2c7657d9b9f6d06d01dfb4c43316e638b8b1b02b949a517bb1433",
+      "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926/model_14999.pt",
+      "checkpoint_sha256": "343b5ed4afdfef5f534eb0893798cd4b699661a619c49e6d5f8983c6d2ce0187"
+    }
+  ],
+  "deployment": {
+    "receipt": "repo://artifacts/teleop_v12_releases/2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926_model_14999_deployment_receipt.json",
+    "receipt_sha256": "6c60208b4e22253b98c4ea27d910e67fb4c5db7115252a2e5c457551b8888d2b",
+    "packaged_policy_sha256": "2e531e6a3d04569980b79fdedbdca373e12edc9ca62172b997879e1e55bee65c",
+    "input_shape": [1, 83],
+    "output_shape": [1, 18],
+    "runtime_provider": "CPUExecutionProvider",
+    "runtime_samples": 16
+  }
+}

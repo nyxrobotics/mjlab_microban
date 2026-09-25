@@ -1,0 +1,101 @@
+{
+  "checkpoint": {
+    "completed_updates": 10000,
+    "iteration": 9999,
+    "path": "/home/kanade/Git-projects/mjlab_microban_v12_deferred/logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000/model_9999.pt",
+    "sha256": "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
+  },
+  "fallback_tracking_report": {
+    "checks": {
+      "actual_soft_limits": true,
+      "all_scenarios_completed": true,
+      "finite": true,
+      "forced_hmd_motion": true,
+      "hand_tracking_p95": true,
+      "hand_tracking_rms": true,
+      "no_falls": true,
+      "nonzero_observation_coverage": true,
+      "raw_action_recurrence": true,
+      "target_column_ablation_response": true,
+      "twist_directional_response": true
+    },
+    "path": "/home/kanade/Git-projects/mjlab_microban_v12_deferred/artifacts/teleop_v12_gates/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_deadline_tracking.json",
+    "profile": "deadline_hmd_hand_rms35mm_p95_50mm_safety_unchanged_v1",
+    "sha256": "98e8f9c8c9f50d7e143416a47eca1c1aeaa45fc9e701b08fd74a877c8b8bd594",
+    "status": "pass"
+  },
+  "full_stage_gate": {
+    "path": "/home/kanade/Git-projects/mjlab_microban_v12_deferred/artifacts/teleop_v12_gates/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_gate.json",
+    "report_sha256": {
+      "locomotion": "e57bedff8a9784e73d3b737fbf6428b16ddd42c28f5a39d9e38faf904155fa7f",
+      "onnx": "7f72a7dfbe5d1fb3a5709f6f3f0eeeb6e0799eb68e72d090badfb6cead0afd20",
+      "tracking": "98e8f9c8c9f50d7e143416a47eca1c1aeaa45fc9e701b08fd74a877c8b8bd594"
+    },
+    "schema_version": 2,
+    "sha256": "ca809e2f1a525f5e49eba99a4a48229853cf518d7dd321a36b0c60237c207446",
+    "status": "pass"
+  },
+  "gate": "microban_teleop_v12_deadline_fallback",
+  "lineage": {
+    "acceptance_profile": "deadline_hmd_hand_rms35mm_p95_50mm_safety_unchanged_v1",
+    "explicitly_rejected_v2": {
+      "checkpoint_sha256": "c6171ded2cffda43d04f0a1e85332975d459d9e02fda38546287332ca230b3a1",
+      "reason": "0.000163m_worst_rms_gain_did_not_justify_0.00152m_opposite_pair_rms_and_0.00192m_p95_regressions",
+      "strict_tracking_report_sha256": "3c11b34e788e52b08cbfc35797a4128022224f459215117b7a8816b0c1c4f3eb"
+    },
+    "operator_authorization": "user_explicitly_requested_relaxed_acceptance_to_finish_deadline",
+    "promotion_requires": "full_9x300_locomotion_tracking_onnx_schema_v2_gate",
+    "revision": "selected_v1_rms35mm_p95_50mm_safety_unchanged_v1",
+    "schema_version": 1,
+    "selected_checkpoint": {
+      "completed_updates": 10000,
+      "corner_marker_sha256": "17d36dc2afc6063087b3a8adda64989304aa9d5a83ad0faf31f17b44ba7d166c",
+      "iteration": 9999,
+      "recipe_revision": "model9900_targeted_bilateral_corner_pair_replay_to10000_v1",
+      "sha256": "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
+    },
+    "selected_strict_tracking_report_sha256": "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7",
+    "selection_metrics_m": {
+      "rejected_v2": {
+        "left_backward_right_forward_rms": 0.02510417169703905,
+        "left_forward_right_backward_rms": 0.03332012060274224,
+        "maximum_p95": 0.039579783566296094
+      },
+      "selected_v1": {
+        "left_backward_right_forward_rms": 0.0235841066736868,
+        "left_forward_right_backward_rms": 0.03348252665362493,
+        "maximum_p95": 0.03766489420086145
+      }
+    },
+    "threshold_change": {
+      "all_safety_checks_changed": false,
+      "canonical_hand_rms_m_max": 0.03,
+      "hand_p95_changed": false,
+      "hand_p95_m_max": 0.05,
+      "hand_rms_m_max": 0.035,
+      "locomotion_gate_changed": false,
+      "onnx_gate_changed": false
+    }
+  },
+  "promotion": {
+    "completed_updates": 10000,
+    "eligible": true,
+    "hand_p95_m_max": 0.05,
+    "locomotion_gate_changed": false,
+    "only_threshold_change": "hand_rms_m_max_0.030_to_0.035",
+    "onnx_gate_changed": false,
+    "requires_schema_v2_full_stage_gate": true,
+    "safety_thresholds_changed": false
+  },
+  "revision": "selected_v1_rms35mm_p95_50mm_safety_unchanged_v1",
+  "schema_version": 1,
+  "status": "pass",
+  "strict_failure_report": {
+    "failed_checks": [
+      "hand_tracking_rms"
+    ],
+    "path": "/home/kanade/Git-projects/mjlab_microban_v12_deferred/artifacts/teleop_v12_corner_rescue/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_tracking.json",
+    "sha256": "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7",
+    "status": "fail"
+  }
+}

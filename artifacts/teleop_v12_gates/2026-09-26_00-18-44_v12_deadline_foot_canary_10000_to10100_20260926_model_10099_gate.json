@@ -1,0 +1,509 @@
+{
+  "adapter_sanitization": {
+    "authenticated_source_extra_normalizer": "identity_mean0_var1_std1",
+    "completed_updates": 601,
+    "hand_target_fk": {
+      "bound_grid_points_per_axis": 401,
+      "evaluation_joint_degrees": [
+        [
+          "F",
+          [
+            -25.0,
+            25.0,
+            -50.0
+          ]
+        ],
+        [
+          "B",
+          [
+            25.0,
+            20.0,
+            -10.0
+          ]
+        ],
+        [
+          "f",
+          [
+            -12.0,
+            18.0,
+            -32.0
+          ]
+        ],
+        [
+          "b",
+          [
+            12.0,
+            18.0,
+            -32.0
+          ]
+        ]
+      ],
+      "evaluation_offsets_m": [
+        [
+          "F",
+          [
+            [
+              0.05965182377803401,
+              0.02001299541823158,
+              0.05695429454214103
+            ],
+            [
+              0.059651823778034005,
+              -0.02001299541823158,
+              0.056954294542141
+            ]
+          ]
+        ],
+        [
+          "B",
+          [
+            [
+              -0.05889031574552025,
+              0.020262900077370374,
+              0.00788636819595702
+            ],
+            [
+              -0.058890315745520276,
+              -0.020262900077370388,
+              0.007886368195956998
+            ]
+          ]
+        ],
+        [
+          "f",
+          [
+            [
+              0.03317253316144149,
+              0.013564446512561182,
+              0.01946788065760361
+            ],
+            [
+              0.0331725331614415,
+              -0.013564446512561182,
+              0.019467880657603583
+            ]
+          ]
+        ],
+        [
+          "b",
+          [
+            [
+              -0.009540835008328632,
+              0.013564446512561182,
+              0.004701156748151122
+            ],
+            [
+              -0.009540835008328644,
+              -0.013564446512561182,
+              0.0047011567481511154
+            ]
+          ]
+        ]
+      ],
+      "home_joint_deg": [
+        [
+          0.0,
+          10.0,
+          -20.0
+        ],
+        [
+          0.0,
+          -10.0,
+          -20.0
+        ]
+      ],
+      "joint_lower_deg": [
+        [
+          -25.0,
+          10.0,
+          -50.0
+        ],
+        [
+          -25.0,
+          -30.0,
+          -50.0
+        ]
+      ],
+      "joint_order": [
+        "shoulder_pitch",
+        "shoulder_roll",
+        "elbow"
+      ],
+      "joint_upper_deg": [
+        [
+          25.0,
+          30.0,
+          -10.0
+        ],
+        [
+          25.0,
+          -10.0,
+          -10.0
+        ]
+      ],
+      "normalizer_abs_bound_m": [
+        0.063,
+        0.0388,
+        0.0605
+      ],
+      "offset_aabb_max_m": [
+        [
+          0.06289464331528255,
+          0.0387512193701912,
+          0.060477220857479266
+        ],
+        [
+          0.06289464331528258,
+          0.0034550417440758485,
+          0.060477220857479225
+        ]
+      ],
+      "offset_aabb_min_m": [
+        [
+          -0.06120170602356862,
+          -0.0034550417440758485,
+          -0.0035619649312883805
+        ],
+        [
+          -0.06120170602356864,
+          -0.0387512193701912,
+          -0.0035619649312883944
+        ]
+      ],
+      "revision": "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_v2",
+      "runtime_validated_abs_limit_m": [
+        0.064,
+        0.064,
+        0.064
+      ],
+      "sampling": "uniform_independent_joint_box_then_exact_fk_offset_from_home",
+      "side_order": [
+        "left",
+        "right"
+      ],
+      "source": "src/mjlab_microban/robot/microban/robot.xml",
+      "wire_abs_bound_m": [
+        0.08,
+        0.08,
+        0.08
+      ]
+    },
+    "maximum_absolute_extra_w0_before": 1.1781387329101562,
+    "normalized_target_position_columns": [
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80
+    ],
+    "normalizer_eps": 0.01,
+    "parent_checkpoint_filename": "model_600.pt",
+    "parent_checkpoint_sha256": "514b5a786d0e9c7ad7af3544650f06ead59fa1b60ccc4ad4b4792e71cf67c3de",
+    "parent_iteration": 600,
+    "revision": "zero_pre7000_extra_w0_adam_and_reachable_fk_elbow_minus10_v4",
+    "schema_version": 4,
+    "source_bootstrap_mapping_version": "normalized_legacy_velocity_63_to_teleop83_masked_extra_columns_v1",
+    "target_bootstrap_mapping_version": "normalized_legacy_velocity_63_to_teleop83_reachable_fk_elbow_minus10_v4",
+    "target_position_denominators": [
+      0.03,
+      0.03,
+      0.05,
+      0.03,
+      0.03,
+      0.05,
+      0.063,
+      0.0388,
+      0.0605,
+      0.063,
+      0.0388,
+      0.0605
+    ],
+    "target_position_stored_std": [
+      0.019999999999999997,
+      0.019999999999999997,
+      0.04,
+      0.019999999999999997,
+      0.019999999999999997,
+      0.04,
+      0.053,
+      0.0288,
+      0.050499999999999996,
+      0.053,
+      0.0288,
+      0.050499999999999996
+    ],
+    "target_position_stored_var": [
+      0.00039999999999999986,
+      0.00039999999999999986,
+      0.0016,
+      0.00039999999999999986,
+      0.00039999999999999986,
+      0.0016,
+      0.002809,
+      0.00082944,
+      0.0025502499999999996,
+      0.002809,
+      0.00082944,
+      0.0025502499999999996
+    ],
+    "unchanged_identity_normalizer_columns": [
+      6,
+      7,
+      8,
+      27,
+      28,
+      29,
+      81,
+      82
+    ],
+    "zeroed_actor_columns": [
+      6,
+      7,
+      8,
+      27,
+      28,
+      29,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82
+    ],
+    "zeroed_optimizer_moments": [
+      "exp_avg",
+      "exp_avg_sq"
+    ],
+    "zeroed_optimizer_parameter_id": 1
+  },
+  "canonical_boundary": false,
+  "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926/model_10099.pt",
+  "checkpoint_kind": "activation_canary",
+  "checkpoint_sha256": "86a81f45f34d91036ab138963c835a3e78db98224f523d3484e1d3ed335082ff",
+  "completed_updates": 10100,
+  "deadline_canary_strict_report": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_tracking.json",
+  "deadline_canary_strict_report_sha256": "e8230cff4cd25e8af1d9931d1fcd459db112e5a34c88a20470e22c2019ec5161",
+  "gate": "microban_teleop_v12_stage",
+  "iteration": 10099,
+  "microban_teleop_v12_corner_pair_rescue": {
+    "active_actor_columns": [
+      6,
+      7,
+      8,
+      27,
+      28,
+      29,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82
+    ],
+    "adapter_gradient_schedule_revision": "freeze_extra_to7000_then_hmd_hand_to10000_then_all_v1",
+    "corner_joint_tuples_deg": {
+      "left_backward_right_forward": [
+        [
+          25.0,
+          20.0,
+          -10.0
+        ],
+        [
+          -25.0,
+          -25.0,
+          -50.0
+        ]
+      ],
+      "left_forward_right_backward": [
+        [
+          -25.0,
+          25.0,
+          -50.0
+        ],
+        [
+          25.0,
+          -20.0,
+          -10.0
+        ]
+      ]
+    },
+    "foot_activation": "held_inactive_through_completed_update_10000",
+    "foot_command_state_at_save": {
+      "both_feet_active_count": 0,
+      "shape": [
+        2048,
+        2,
+        3
+      ],
+      "single_support_active_count": 0,
+      "target_offset_exact_zero": true
+    },
+    "foot_observation_columns": [
+      69,
+      70,
+      71,
+      72,
+      73,
+      74
+    ],
+    "optimizer_step": {
+      "parent": 198020,
+      "target": 200000
+    },
+    "parent_checkpoint_sha256": "063a8f65ebf9007d63395e9a5b98420eb025bd39416dab5727f9f4c06fc6e877",
+    "parent_common_step_counter": 237624,
+    "parent_completed_updates": 9901,
+    "parent_iteration": 9900,
+    "parent_strict_tracking_report_sha256": "399db0cee55c137d3d0226ebcb54b0fa3bb84c95496c5c206af55f2fb25837f4",
+    "process_updates": 99,
+    "rescue_recipe_revision": "model9900_targeted_bilateral_corner_pair_replay_to10000_v1",
+    "revision": "pinned_model9900_uniform40_lf_rb40_lb_rf20_99_updates_v1",
+    "sampler_probabilities": {
+      "left_backward_right_forward": 0.2,
+      "left_forward_right_backward": 0.4,
+      "ordinary_uniform_independent": 0.4
+    },
+    "sampler_revision": "uniform_joint_box40pct_lf_rb40pct_lb_rf20pct_v1",
+    "schema_version": 1,
+    "source_recipe_revision": "legacy_velocity_model14999_staged_mask_reachable_fk_elbow_minus10_raw_actions_v5",
+    "target_common_step_counter": 240000,
+    "target_completed_updates": 10000,
+    "target_iteration": 9999,
+    "training": {
+      "agent_seed": 42,
+      "environment_seed": 42,
+      "num_envs": 2048,
+      "num_steps_per_env": 24
+    },
+    "unchanged_contract": {
+      "action_clip": null,
+      "action_semantics": "raw_actor_output",
+      "hand_reward_std_m": 0.05,
+      "hand_reward_weight": 2.0,
+      "learning_rate": 0.0001,
+      "legacy_actor_tensors": "frozen",
+      "normalizer": "unchanged_from_parent"
+    }
+  },
+  "microban_teleop_v12_deadline_fallback": {
+    "acceptance_profile": "deadline_hmd_hand_rms35mm_p95_50mm_safety_unchanged_v1",
+    "explicitly_rejected_v2": {
+      "checkpoint_sha256": "c6171ded2cffda43d04f0a1e85332975d459d9e02fda38546287332ca230b3a1",
+      "reason": "0.000163m_worst_rms_gain_did_not_justify_0.00152m_opposite_pair_rms_and_0.00192m_p95_regressions",
+      "strict_tracking_report_sha256": "3c11b34e788e52b08cbfc35797a4128022224f459215117b7a8816b0c1c4f3eb"
+    },
+    "operator_authorization": "user_explicitly_requested_relaxed_acceptance_to_finish_deadline",
+    "promotion_requires": "full_9x300_locomotion_tracking_onnx_schema_v2_gate",
+    "revision": "selected_v1_rms35mm_p95_50mm_safety_unchanged_v1",
+    "schema_version": 1,
+    "selected_checkpoint": {
+      "completed_updates": 10000,
+      "corner_marker_sha256": "17d36dc2afc6063087b3a8adda64989304aa9d5a83ad0faf31f17b44ba7d166c",
+      "iteration": 9999,
+      "recipe_revision": "model9900_targeted_bilateral_corner_pair_replay_to10000_v1",
+      "sha256": "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
+    },
+    "selected_strict_tracking_report_sha256": "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7",
+    "selection_metrics_m": {
+      "rejected_v2": {
+        "left_backward_right_forward_rms": 0.02510417169703905,
+        "left_forward_right_backward_rms": 0.03332012060274224,
+        "maximum_p95": 0.039579783566296094
+      },
+      "selected_v1": {
+        "left_backward_right_forward_rms": 0.0235841066736868,
+        "left_forward_right_backward_rms": 0.03348252665362493,
+        "maximum_p95": 0.03766489420086145
+      }
+    },
+    "threshold_change": {
+      "all_safety_checks_changed": false,
+      "canonical_hand_rms_m_max": 0.03,
+      "hand_p95_changed": false,
+      "hand_p95_m_max": 0.05,
+      "hand_rms_m_max": 0.035,
+      "locomotion_gate_changed": false,
+      "onnx_gate_changed": false
+    }
+  },
+  "microban_teleop_v12_deadline_post_canary": {
+    "canonical_failed_checks": [
+      "hand_tracking_rms"
+    ],
+    "canonical_strict_profile": "whole_body_foot_activation_canary_reachable_safety_v1",
+    "canonical_strict_tracking_report_sha256": "e8230cff4cd25e8af1d9931d1fcd459db112e5a34c88a20470e22c2019ec5161",
+    "fallback_profile": "deadline_whole_body_foot_activation_canary_hand_rms35mm_v1",
+    "measured_hand_tracking_m": {
+      "maximum_p95": 0.03992060273885726,
+      "maximum_rms": 0.03237772842406263
+    },
+    "next_endpoint": {
+      "completed_updates": 15000,
+      "iteration": 14999
+    },
+    "parent_checkpoint": {
+      "common_step_counter": 242400,
+      "completed_updates": 10100,
+      "iteration": 10099,
+      "optimizer_step": 202000,
+      "sha256": "86a81f45f34d91036ab138963c835a3e78db98224f523d3484e1d3ed335082ff"
+    },
+    "promotion_requires": "full_9x300_locomotion_foot_activation_tracking_onnx_schema_v2_gate",
+    "revision": "pinned_model10099_foot_activation_rms35mm_safety_unchanged_v1",
+    "schema_version": 1,
+    "threshold_change": {
+      "all_safety_checks_changed": false,
+      "canonical_hand_rms_m_max": 0.03,
+      "foot_activation_checks_changed": false,
+      "hand_p95_changed": false,
+      "hand_p95_m_max": 0.05,
+      "hand_rms_m_max": 0.035,
+      "locomotion_gate_changed": false,
+      "onnx_gate_changed": false
+    }
+  },
+  "microban_teleop_v12_deadline_resume_source": {
+    "full_stage_gate_path": "repo://artifacts/teleop_v12_gates/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_gate.json",
+    "full_stage_gate_sha256": "ca809e2f1a525f5e49eba99a4a48229853cf518d7dd321a36b0c60237c207446",
+    "parent_checkpoint_path": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000/model_9999.pt",
+    "parent_checkpoint_sha256": "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7",
+    "parent_completed_updates": 10000,
+    "parent_iteration": 9999,
+    "revision": "selected_v1_full_gate_resume_source_v1",
+    "schema_version": 1
+  },
+  "onnx": {
+    "path": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099.onnx",
+    "sha256": "e1cad83ab3c51f29d2d4aa955ab650c0d48baacf153ad65536008e40e61cd25c"
+  },
+  "report_sha256": {
+    "locomotion": "dc4ae4c411e335f04d9f2c0ba9fda4298ce4a6e26fe06b1074c2b518f5d050c4",
+    "onnx": "f93922bacb0b5381ab15b1506a7784c325b7bb4b930bc8aa2d98eaf32c5af307",
+    "tracking": "7d306c8a1b23628343b8d11a383b46e8a2ff824ae101cde2857f70cb2900c26c"
+  },
+  "reports": {
+    "locomotion": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_9x300.json",
+    "onnx": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_onnx.json",
+    "tracking": "repo://artifacts/teleop_v12_gates/2026-09-26_00-18-44_v12_deadline_foot_canary_10000_to10100_20260926_model_10099_deadline_canary_tracking.json"
+  },
+  "schema_version": 2,
+  "status": "pass",
+  "tracking_profile": "deadline_whole_body_foot_activation_canary_hand_rms35mm_v1"
+}
