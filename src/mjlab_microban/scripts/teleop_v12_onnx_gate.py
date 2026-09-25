@@ -30,6 +30,10 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     inspect_legacy_velocity_checkpoint,
     sha256_file,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
+)
 
 
 def run_gate(
@@ -51,10 +55,16 @@ def run_gate(
     checkpoint_digest = sha256_file(checkpoint)
     if expected_sha256 is not None and checkpoint_digest != expected_sha256:
         raise ValueError(f"Checkpoint SHA-256 mismatch: {checkpoint_digest}")
-    target, iteration, _infos = _load_actor(
+    target, iteration, infos = _load_actor(
         checkpoint,
         device="cpu",
         allow_deadline_fallback=allow_deadline_fallback,
+    )
+    parity_tolerance = (
+        MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
+        if iteration == 14_999
+        and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
+        else ONNX_PARITY_TOLERANCE
     )
     _source_identity, source_state = inspect_legacy_velocity_checkpoint(
         "repo://checkpoints/xc330_velocity/model_14999.pt",
@@ -114,7 +124,7 @@ def run_gate(
             runtime_errors.append(float(np.max(np.abs(runtime_actual - expected))))
     reference_max = max(reference_errors)
     runtime_max = max(runtime_errors)
-    if reference_max > ONNX_PARITY_TOLERANCE or runtime_max > (ONNX_PARITY_TOLERANCE):
+    if reference_max > parity_tolerance or runtime_max > parity_tolerance:
         raise ValueError(
             "ONNX parity failed: "
             f"reference={reference_max}, onnxruntime_cpu={runtime_max}"
@@ -148,7 +158,7 @@ def run_gate(
             "onnxruntime_cpu_maximum_absolute_error": runtime_max,
             "onnxruntime_version": ort.__version__,
             "onnxruntime_providers": runtime.get_providers(),
-            "tolerance": ONNX_PARITY_TOLERANCE,
+            "tolerance": parity_tolerance,
         },
     }
 

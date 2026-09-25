@@ -32,8 +32,10 @@ Defense in depth enforces all of the following:
   and its simulator soft target limit to `1e-7 rad`;
 - the Cartesian hand command must exactly match independent Microban FK of the
   supplied joint target;
-- trigger release, stale input, or a contract fault commands arm HOME while the
-  audited zero-twist walking actor continues balancing.
+- right-trigger release, transport loss, a tracking hold older than 500 ms, or
+  a contract fault commands exact PICO arm HOME;
+- a shorter invalid-controller interval holds only the last validated arm joint
+  target while locomotion is neutral, then resumes without a trigger cycle.
 
 The software HOME origin is intentionally unchanged: left shoulder roll is
 `+10 deg` and right shoulder roll is `-10 deg`. There is no hidden shoulder
@@ -107,6 +109,10 @@ scripts/run_pico_v12_preview.sh \
   "$(sha256sum -- "${receipt}" | cut -d ' ' -f 1)"
 ```
 
+If the viewer or preview process is currently stopped, rerun this exact command.
+The controls need no new launcher option, and a stopped process retains no
+trigger or held-target state.
+
 The launcher checks the pinned legacy walking checkpoint, provisions the PICO
 app with the owner-only simulation pairing, installs only the `63903` and `8081`
 ADB reverse routes, and opens the MuJoCo viewer. It does not use the physical
@@ -141,26 +147,35 @@ not hand/foot tracking.
 
 ## Hold controls
 
-1. Start with the left trigger released and both controllers in a comfortable
-   neutral pose. The first fresh released frame captures one controller origin
-   for the session. Release/re-press does not move that origin; reset, recenter,
-   source change, or reconnect deliberately starts a new one.
-2. Hold the left trigger to enable walking, HMD control, and available limb
-   targets together. Releasing it returns the arms/body targets and neck to HOME;
-   it is not a toggle. The native PICO path is always `pico_teleop`, so there is
-   no `X` mode-selection step.
-3. The left stick commands forward/back/left/right velocity, and the right-stick
-   horizontal axis commands yaw.
-4. HMD orientation controls the simulated camera neck. While the right trigger
-   is held, neck yaw faces the simulated body's front.
+1. Start with both triggers released and both controllers in a comfortable
+   neutral pose. Stand still for at least 0.5 seconds. Fresh released frames
+   establish the body and controller origins; reset, recenter, source change, or
+   reconnect deliberately starts a new session origin.
+2. Hold the left trigger for locomotion/full-body policy control. Release it to
+   neutralize locomotion. The left stick commands forward/back/left/right, and
+   the right-stick horizontal axis commands yaw.
+3. Hold the right trigger for direct controller-arm tracking. It works with the
+   left trigger either released (stationary, exact-zero locomotion) or held
+   (walking). Release the right trigger and all six arm joints return immediately
+   to the exact PICO HOME pose: shoulder pitch `0 deg`, shoulder roll
+   left/right `+10/-10 deg`, and elbow `-20 deg`.
+4. Hold the right grip separately to request neck-yaw-front; release it for the
+   normal HMD-yaw behavior. Arm tracking remains governed only by the right
+   trigger.
 5. The normal view is PICO passthrough. Hold the left grip (middle-finger button)
    to show the simulator's stereo camera; release it to return to passthrough.
 
-Every operator control uses hold semantics; there are no toggles. After stale
-input, tracker loss, calibration failure, or a learned-policy fault, release the
-left trigger before trying to arm again. In controller-only mode the controller
-origin and fixed `0.18` scale drive only the arms; body and foot tracking are
-ignored and feet remain exact zero.
+Every operator control is momentary; there are no toggles. If controller
+tracking is invalid for at most 500 ms while the right trigger was last known
+held, the arms hold the last validated target and locomotion becomes neutral.
+Fresh tracking resumes automatically without releasing and pressing the right
+trigger. A disconnect, authority loss, or interval beyond 500 ms clears that
+hold and returns the arms to exact PICO HOME; after reconnect, establish a fresh
+released neutral frame before arming again. Body-tracker/calibration or learned-
+policy faults still follow the left-trigger locomotion fallback/rearm rules.
+
+In controller-only mode the controller origin and fixed `0.18` scale drive only
+the arms; body and foot tracking are ignored and feet remain exact zero.
 
 The simulator camera uses the existing exact synthetic pinhole contract: two
 640×480 eyes in left-first SBS, per-eye tangent bounds, and a 59.016 mm baseline.

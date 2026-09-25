@@ -53,8 +53,6 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
-    MICROBAN_ARM_JOINT_LOWER_RAD,
-    MICROBAN_ARM_JOINT_UPPER_RAD,
     microban_hand_offsets_from_arm_joints,
 )
 from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
@@ -129,10 +127,33 @@ AUDITED_LEGACY_WALK_SHA256 = (
 MAX_FRAME_GAP_S = 0.1
 MAX_FRAME_AGE_S = 0.1
 LEFT_TRIGGER_RELEASE_THRESHOLD = 0.45
+ARM_TRACKING_HOLD_MAX_S = 0.5
 ARM_JOINT_NAMES: dict[str, tuple[str, str, str]] = {
     "left": ("left_shoulder_pitch", "left_shoulder_roll", "left_elbow"),
     "right": ("right_shoulder_pitch", "right_shoulder_roll", "right_elbow"),
 }
+# This box is only for the six post-policy arm columns driven by the current
+# HMD-to-controller absolute retargeter.  The learned locomotion policy keeps
+# the narrower MICROBAN_ARM_JOINT_{LOWER,UPPER}_RAD hand-target contract.
+MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION = (
+    "microban_hmd_absolute_arm_fk_live_box_pitch100_roll120_elbow110_v1"
+)
+MICROBAN_DIRECT_ARM_JOINT_LOWER_DEG = (
+    (-100.0, 10.0, -110.0),
+    (-100.0, -120.0, -110.0),
+)
+MICROBAN_DIRECT_ARM_JOINT_UPPER_DEG = (
+    (100.0, 120.0, 0.0),
+    (100.0, -10.0, 0.0),
+)
+MICROBAN_DIRECT_ARM_JOINT_LOWER_RAD = tuple(
+    tuple(math.radians(value) for value in side)
+    for side in MICROBAN_DIRECT_ARM_JOINT_LOWER_DEG
+)
+MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD = tuple(
+    tuple(math.radians(value) for value in side)
+    for side in MICROBAN_DIRECT_ARM_JOINT_UPPER_DEG
+)
 
 
 @dataclass(frozen=True)
@@ -200,6 +221,10 @@ SIMULTANEOUS_FEET_UPPER_M = tuple(
 FOOT_INACTIVE_Z_MAX_M = MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
 HAND_LOWER_M = tuple(value * TARGET_SAFETY_MARGIN for value in (-0.08, -0.08, -0.08))
 HAND_UPPER_M = tuple(value * TARGET_SAFETY_MARGIN for value in (0.08, 0.08, 0.08))
+# Diagnostic-only component bound for the mapper's raw, absolute controller
+# positions in the current HMD frame.  It matches the mapper's 2.5 m norm
+# rejection threshold and never participates in actuator command validation.
+CONTROLLER_HMD_DIAGNOSTIC_ABS_MAX_M = 2.5
 
 
 class _Source(Protocol):
@@ -564,6 +589,7 @@ class SimulationCommand:
     head_orientation: tuple[float, float, float]
     head_yaw_front: bool
     locomotion_policy: str
+    arm_tracking_enabled: bool = False
     arm_joint_target: (
         tuple[tuple[float, float, float], tuple[float, float, float]] | None
     ) = None
@@ -660,8 +686,8 @@ def _bounded_arm_joint_pair(
         parsed: list[float] = []
         for joint_index, item in enumerate(vector):
             number = _finite_number(item)
-            lower = MICROBAN_ARM_JOINT_LOWER_RAD[side_index][joint_index]
-            upper = MICROBAN_ARM_JOINT_UPPER_RAD[side_index][joint_index]
+            lower = MICROBAN_DIRECT_ARM_JOINT_LOWER_RAD[side_index][joint_index]
+            upper = MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD[side_index][joint_index]
             if number is None or not lower <= number <= upper:
                 return None
             parsed.append(number)
@@ -709,9 +735,35 @@ def command_for_simulation(
     if policy not in {"walk", "pico_teleop"}:
         return neutral_simulation_command(fault="unknown locomotion policy")
 
+    arm_tracking_requested = command.get("arm_tracking_enabled", False)
+    if not isinstance(arm_tracking_requested, bool):
+        return neutral_simulation_command(fault="arm tracking gate is malformed")
+    if arm_tracking_requested:
+        preview = command.get("twist2_body_target_preview")
+        revision = (
+            preview.get("absolute_arm_target_contract_revision")
+            if isinstance(preview, Mapping)
+            else None
+        )
+        if revision != MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION:
+            return neutral_simulation_command(
+                fault="absolute arm target contract revision mismatch"
+            )
+
     moves = command.get("active_moves", ())
     if not isinstance(moves, Sequence) or isinstance(moves, (str, bytes, bytearray)):
         return neutral_simulation_command(fault="active_moves is malformed")
+
+    arm_joint_target = None
+    raw_arm_joint_target = command.get(
+        "arm_joint_target", command.get("controller_arm_joint_target")
+    )
+    if raw_arm_joint_target is not None:
+        arm_joint_target = _bounded_arm_joint_pair(raw_arm_joint_target)
+        if arm_joint_target is None:
+            return neutral_simulation_command(
+                fault="controller arm joints exceed contract"
+            )
 
     orientation_value = command.get("head_orientation")
     orientation = (0.0, 0.0, 0.0)
@@ -740,26 +792,76 @@ def command_for_simulation(
         }
     )
 
+    def body_fault(message: str) -> SimulationCommand:
+        return SimulationCommand(
+            **{
+                **asdict(base),
+                "arm_tracking_enabled": (
+                    policy == "pico_teleop"
+                    and arm_tracking_requested
+                    and arm_joint_target is not None
+                ),
+                "arm_joint_target": arm_joint_target,
+                "fault": message,
+            }
+        )
+
+    parsed_hands = _bounded_pair(
+        command.get("hand_target"), HAND_LOWER_M, HAND_UPPER_M
+    )
+    hand_active_value = command.get("hand_active")
+    hand_active = (True, True)
+    if hand_active_value is not None:
+        if (
+            not isinstance(hand_active_value, Mapping)
+            or set(hand_active_value) != {"left", "right"}
+            or not all(
+                isinstance(hand_active_value[side], bool)
+                for side in ("left", "right")
+            )
+        ):
+            return body_fault("hand_active is malformed")
+        hand_active = (
+            hand_active_value["left"],
+            hand_active_value["right"],
+        )
+
     walking = "walk" in moves
     if not walking:
-        # The left trigger is the deadman for every robot joint, including the
-        # HMD-driven neck.  Raw HMD tracking continues to arrive so the PICO
-        # runtime can keep rendering passthrough, but a released deadman must
-        # return the simulated robot to its neutral head pose as well as
-        # clearing limb and velocity targets.
-        return SimulationCommand(
+        # The left trigger owns locomotion and the HMD-driven neck. Raw HMD
+        # tracking continues for rendering, but releasing it neutralizes those
+        # channels. The independently gated right-trigger arm layer may remain
+        # active while the audited standing actor owns balance.
+        released = SimulationCommand(
             **{
                 **asdict(base),
                 "head_orientation": (0.0, 0.0, 0.0),
                 "head_yaw_front": False,
             }
         )
+        # During a bounded one-frame controller dropout, locomotion is
+        # neutralized while the independently authenticated arm mapper holds
+        # the last joint target.  This is a position hold, not renewed motion.
+        if (
+            policy == "pico_teleop"
+            and arm_tracking_requested
+            and arm_joint_target is not None
+            and parsed_hands is not None
+        ):
+            return SimulationCommand(
+                **{
+                    **asdict(released),
+                    "hand_target": parsed_hands,
+                    "hand_active": hand_active,
+                    "arm_tracking_enabled": True,
+                    "arm_joint_target": arm_joint_target,
+                }
+            )
+        return released
 
     velocity = scale_normalized_velocity(command.get("velocity"))
     if velocity is None:
-        return SimulationCommand(
-            **{**asdict(base), "fault": "live velocity exceeds the simulation contract"}
-        )
+        return body_fault("live velocity exceeds the simulation contract")
     if policy == "walk":
         if not legacy_walk_available:
             return SimulationCommand(
@@ -777,18 +879,14 @@ def command_for_simulation(
         )
 
     if command.get("body_target_calibrated") is not True:
-        return SimulationCommand(
-            **{**asdict(base), "fault": "body targets are not calibrated"}
-        )
+        return body_fault("body targets are not calibrated")
     if command.get("body_target_fresh") is not True:
-        return SimulationCommand(**{**asdict(base), "fault": "body targets are stale"})
+        return body_fault("body targets are stale")
 
     feet = _bounded_pair(command.get("foot_target"), FOOT_LOWER_M, FOOT_UPPER_M)
-    hands = _bounded_pair(command.get("hand_target"), HAND_LOWER_M, HAND_UPPER_M)
+    hands = parsed_hands
     if velocity is None or feet is None or hands is None:
-        return SimulationCommand(
-            **{**asdict(base), "fault": "live command exceeds the simulation contract"}
-        )
+        return body_fault("live command exceeds the simulation contract")
 
     projected_feet = tuple(
         (0.0, 0.0, 0.0) if foot[2] <= FOOT_INACTIVE_Z_MAX_M else foot for foot in feet
@@ -801,40 +899,9 @@ def command_for_simulation(
             SIMULTANEOUS_FEET_UPPER_M,
         )
         if both_feet_bounded is None or not _twist_is_exactly_zero(velocity):
-            return SimulationCommand(
-                **{
-                    **asdict(base),
-                    "fault": "simultaneous both-feet targets require conservative "
-                    "bounds and zero twist",
-                }
-            )
-
-    hand_active_value = command.get("hand_active")
-    hand_active = (True, True)
-    if hand_active_value is not None:
-        if (
-            not isinstance(hand_active_value, Mapping)
-            or set(hand_active_value) != {"left", "right"}
-            or not all(
-                isinstance(hand_active_value[side], bool) for side in ("left", "right")
-            )
-        ):
-            return SimulationCommand(
-                **{**asdict(base), "fault": "hand_active is malformed"}
-            )
-        hand_active = (
-            hand_active_value["left"],
-            hand_active_value["right"],
-        )
-
-    arm_joint_target = None
-    if command.get("controller_arm_joint_target") is not None:
-        arm_joint_target = _bounded_arm_joint_pair(
-            command.get("controller_arm_joint_target")
-        )
-        if arm_joint_target is None:
-            return SimulationCommand(
-                **{**asdict(base), "fault": "controller arm joints exceed contract"}
+            return body_fault(
+                "simultaneous both-feet targets require conservative bounds and "
+                "zero twist"
             )
 
     return SimulationCommand(
@@ -846,6 +913,9 @@ def command_for_simulation(
         head_orientation=orientation,
         head_yaw_front=bool(command.get("head_yaw_front", False)),
         locomotion_policy=str(policy),
+        arm_tracking_enabled=(
+            arm_tracking_requested and arm_joint_target is not None
+        ),
         arm_joint_target=arm_joint_target,
     )
 
@@ -1073,6 +1143,7 @@ class LivePicoSimulationPolicy:
         native_legacy_action_semantics: bool = False,
         unaccepted_observation_only: bool = False,
         controller_only_preview: bool = False,
+        controller_arm_overlay: bool = False,
         clock_ns: Any = time.monotonic_ns,
         status_period_s: float = 1.0,
     ) -> None:
@@ -1091,6 +1162,7 @@ class LivePicoSimulationPolicy:
         self.native_legacy_action_semantics = native_legacy_action_semantics
         self.unaccepted_observation_only = unaccepted_observation_only
         self.controller_only_preview = controller_only_preview
+        self.controller_arm_overlay = controller_arm_overlay
         self.clock_ns = clock_ns
         self.status_period_ns = int(status_period_s * 1.0e9)
         self._last_status_ns = 0
@@ -1099,13 +1171,27 @@ class LivePicoSimulationPolicy:
         self._last_fault: str | None = None
         self._pending_authority_token: Any = None
         self._last_left_trigger: float | None = None
+        self._last_right_trigger: float | None = None
+        self._last_right_grip: float | None = None
         self._last_mapper_target_source: str | None = None
         self._last_mapper_rejection: str | None = None
         self._last_mapper_calibrated: bool | None = None
         self._last_mapper_fresh: bool | None = None
+        self._last_controller_hand_hmd_m: (
+            tuple[tuple[float, float, float], tuple[float, float, float]] | None
+        ) = None
+        self._last_absolute_arm_target_source: str | None = None
+        self._last_absolute_arm_rejection: str | None = None
         self._last_controller_valid: bool | None = None
         self._last_controller_fresh: bool | None = None
         self._last_controller_error: str | None = None
+        self._held_arm_joint_target: (
+            tuple[tuple[float, float, float], tuple[float, float, float]] | None
+        ) = None
+        self._held_arm_hand_target: (
+            tuple[tuple[float, float, float], tuple[float, float, float]] | None
+        ) = None
+        self._held_arm_observed_at_ns: int | None = None
 
         self.robot = env.scene["robot"]
         joint_ids, names = self.robot.find_joints(
@@ -1266,6 +1352,7 @@ class LivePicoSimulationPolicy:
         fallback_mapper = getattr(self, "legacy_fallback_mapper", None)
         if fallback_mapper is not None and fallback_mapper is not self.mapper:
             fallback_mapper.reset()
+        self._clear_arm_tracking_hold()
 
     def _latch_legacy_fallback(self, reason: str) -> None:
         self._legacy_fallback_latched = True
@@ -1274,6 +1361,123 @@ class LivePicoSimulationPolicy:
     def _clear_legacy_fallback_latch(self) -> None:
         self._legacy_fallback_latched = False
         self._legacy_fallback_reason = None
+
+    def _clear_arm_tracking_hold(self) -> None:
+        self._held_arm_joint_target = None
+        self._held_arm_hand_target = None
+        self._held_arm_observed_at_ns = None
+
+    @staticmethod
+    def _frame_controller(frame: Any, side: str) -> Any:
+        name = f"{side}_controller"
+        return frame.get(name) if isinstance(frame, Mapping) else getattr(frame, name, None)
+
+    def _arm_controls_explicitly_released(self, frame: Any) -> bool:
+        """Accept release only from one fresh, valid controller snapshot."""
+
+        if not (
+            getattr(self, "_last_controller_valid", False)
+            and getattr(self, "_last_controller_fresh", False)
+        ):
+            return False
+        controller = self._frame_controller(frame, "right")
+        trigger = (
+            controller.get("trigger")
+            if isinstance(controller, Mapping)
+            else getattr(controller, "trigger", None)
+        )
+        value = _finite_number(trigger)
+        return value is not None and value <= LEFT_TRIGGER_RELEASE_THRESHOLD
+
+    def _apply_arm_tracking_continuity(
+        self,
+        frame: Any,
+        primary: SimulationCommand,
+        selected: SimulationCommand,
+    ) -> SimulationCommand:
+        """Hold bounded arm joints briefly without renewing stale authority."""
+
+        if not (
+            getattr(self, "controller_arm_overlay", False)
+            or getattr(self, "controller_only_preview", False)
+        ):
+            return selected
+
+        controller_error = getattr(self, "_last_controller_error", None)
+        if controller_error is not None and "disconnected" in controller_error.lower():
+            self._clear_arm_tracking_hold()
+            return SimulationCommand(
+                **{
+                    **asdict(selected),
+                    "arm_tracking_enabled": False,
+                    "arm_joint_target": None,
+                }
+            )
+        if self._arm_controls_explicitly_released(frame):
+            self._clear_arm_tracking_hold()
+            return SimulationCommand(
+                **{
+                    **asdict(selected),
+                    "arm_tracking_enabled": False,
+                    "arm_joint_target": None,
+                }
+            )
+
+        sampled_at_ns = getattr(frame, "sampled_at_ns", None)
+        controller_valid = bool(getattr(self, "_last_controller_valid", False))
+        controller_fresh = bool(getattr(self, "_last_controller_fresh", False))
+        if (
+            controller_valid
+            and controller_fresh
+            and primary.arm_tracking_enabled
+            and primary.arm_joint_target is not None
+            and isinstance(sampled_at_ns, int)
+            and not isinstance(sampled_at_ns, bool)
+        ):
+            self._held_arm_joint_target = primary.arm_joint_target
+            self._held_arm_hand_target = primary.hand_target
+            self._held_arm_observed_at_ns = sampled_at_ns
+            return SimulationCommand(
+                **{
+                    **asdict(selected),
+                    "arm_tracking_enabled": True,
+                    "arm_joint_target": primary.arm_joint_target,
+                    "hand_target": primary.hand_target,
+                    "hand_active": primary.hand_active,
+                }
+            )
+
+        held_at_ns = getattr(self, "_held_arm_observed_at_ns", None)
+        held_target = getattr(self, "_held_arm_joint_target", None)
+        invalid_controller_sample = not (controller_valid and controller_fresh)
+        within_hold = (
+            invalid_controller_sample
+            and held_target is not None
+            and isinstance(held_at_ns, int)
+            and isinstance(sampled_at_ns, int)
+            and not isinstance(sampled_at_ns, bool)
+            and 0 <= sampled_at_ns - held_at_ns <= int(ARM_TRACKING_HOLD_MAX_S * 1e9)
+        )
+        if within_hold:
+            held_hands = getattr(self, "_held_arm_hand_target", None)
+            return SimulationCommand(
+                **{
+                    **asdict(selected),
+                    "arm_tracking_enabled": True,
+                    "arm_joint_target": held_target,
+                    "hand_target": held_hands or selected.hand_target,
+                    "hand_active": (True, True),
+                }
+            )
+        if invalid_controller_sample and held_target is not None:
+            self._clear_arm_tracking_hold()
+        return SimulationCommand(
+            **{
+                **asdict(selected),
+                "arm_tracking_enabled": False,
+                "arm_joint_target": None,
+            }
+        )
 
     def _read_command(self) -> SimulationCommand:
         try:
@@ -1301,6 +1505,23 @@ class LivePicoSimulationPolicy:
             else getattr(left_controller, "trigger", None)
         )
         self._last_left_trigger = _finite_number(raw_left_trigger)
+        right_controller = (
+            frame.get("right_controller")
+            if isinstance(frame, Mapping)
+            else getattr(frame, "right_controller", None)
+        )
+        raw_right_trigger = (
+            right_controller.get("trigger")
+            if isinstance(right_controller, Mapping)
+            else getattr(right_controller, "trigger", None)
+        )
+        self._last_right_trigger = _finite_number(raw_right_trigger)
+        raw_right_grip = (
+            right_controller.get("grip")
+            if isinstance(right_controller, Mapping)
+            else getattr(right_controller, "grip", None)
+        )
+        self._last_right_grip = _finite_number(raw_right_grip)
         controller_health = (
             frame.get("controller_health")
             if isinstance(frame, Mapping)
@@ -1375,9 +1596,28 @@ class LivePicoSimulationPolicy:
                     self._last_mapper_rejection = (
                         str(reason) if reason is not None else None
                     )
+                    absolute_source = preview.get("absolute_arm_target_source")
+                    absolute_reason = preview.get("absolute_arm_rejection_reason")
+                    self._last_absolute_arm_target_source = (
+                        str(absolute_source) if absolute_source is not None else None
+                    )
+                    self._last_absolute_arm_rejection = (
+                        str(absolute_reason) if absolute_reason is not None else None
+                    )
+                    # This is the unscaled, uncalibrated controller position in
+                    # the current HMD axes. Invalid diagnostics never affect
+                    # control; target validation remains independently bounded.
+                    self._last_controller_hand_hmd_m = _bounded_pair(
+                        preview.get("controller_hand_hmd_m"),
+                        (-CONTROLLER_HMD_DIAGNOSTIC_ABS_MAX_M,) * 3,
+                        (CONTROLLER_HMD_DIAGNOSTIC_ABS_MAX_M,) * 3,
+                    )
                 else:
                     self._last_mapper_target_source = None
                     self._last_mapper_rejection = None
+                    self._last_absolute_arm_target_source = None
+                    self._last_absolute_arm_rejection = None
+                    self._last_controller_hand_hmd_m = None
                 self._last_mapper_calibrated = bool(
                     mapped.get("body_target_calibrated", False)
                 )
@@ -1417,7 +1657,7 @@ class LivePicoSimulationPolicy:
                 zero_feet = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
                 if primary_command.foot_target != zero_feet:
                     raise ValueError("controller-only preview received nonzero feet")
-                if primary_command.enabled and (
+                if primary_command.arm_tracking_enabled and (
                     primary_command.locomotion_policy != "pico_teleop"
                     or self._last_mapper_target_source != "controllers"
                     or primary_command.arm_joint_target is None
@@ -1425,7 +1665,7 @@ class LivePicoSimulationPolicy:
                     raise ValueError(
                         "controller-only preview lacks authenticated arm targets"
                     )
-                if primary_command.enabled:
+                if primary_command.arm_tracking_enabled:
                     arm_joint_target = torch.tensor(
                         primary_command.arm_joint_target,
                         dtype=torch.float64,
@@ -1453,10 +1693,13 @@ class LivePicoSimulationPolicy:
             if explicit_release:
                 self._clear_legacy_fallback_latch()
             elif getattr(self, "_legacy_fallback_latched", False):
-                return _command_with_fault(
+                selected_command = _command_with_fault(
                     fallback_command,
                     self._legacy_fallback_reason
                     or "legacy fallback latched until trigger release",
+                )
+                return self._apply_arm_tracking_continuity(
+                    frame, primary_command, selected_command
                 )
 
             if (
@@ -1472,8 +1715,12 @@ class LivePicoSimulationPolicy:
                     "until trigger release"
                 )
                 self._latch_legacy_fallback(reason)
-                return _command_with_fault(fallback_command, reason)
-            return primary_command
+                selected_command = _command_with_fault(fallback_command, reason)
+            else:
+                selected_command = primary_command
+            return self._apply_arm_tracking_continuity(
+                frame, primary_command, selected_command
+            )
         except Exception as exc:  # noqa: BLE001 - mapper faults must fail closed
             self._reset_mappers()
             return neutral_simulation_command(
@@ -1614,6 +1861,46 @@ class LivePicoSimulationPolicy:
             return None
         return result[0], result[1]
 
+    def _measured_arm_joint_absolute_deg(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        """Return measured absolute arm angles in mapper joint/side order."""
+
+        robot = getattr(self, "robot", None)
+        arm_joint_ids = getattr(self, "arm_joint_ids", None)
+        if robot is None or not isinstance(arm_joint_ids, Mapping):
+            return None
+        try:
+            result: list[tuple[float, float, float]] = []
+            for side in ("left", "right"):
+                values = robot.data.joint_pos[0, arm_joint_ids[side]]
+                if values.numel() != 3 or not bool(torch.isfinite(values).all().item()):
+                    return None
+                result.append(
+                    tuple(
+                        round(math.degrees(float(value)), 1)
+                        for value in values.detach().cpu().tolist()
+                    )
+                )
+        except (AttributeError, IndexError, KeyError, RuntimeError, TypeError):
+            return None
+        return result[0], result[1]
+
+    @staticmethod
+    def _effective_arm_target_deg(
+        command: SimulationCommand,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Return the absolute target that the direct overlay will execute."""
+
+        target = (
+            command.arm_joint_target
+            if command.arm_tracking_enabled and command.arm_joint_target is not None
+            else MICROBAN_ARM_HOME_JOINT_RAD
+        )
+        return tuple(
+            tuple(round(math.degrees(value), 1) for value in side) for side in target
+        )  # type: ignore[return-value]
+
     def _measured_hand_tracking_m(
         self, command: SimulationCommand
     ) -> tuple[
@@ -1672,6 +1959,21 @@ class LivePicoSimulationPolicy:
             if arm_deviation is None
             else f"L{arm_deviation[0]}/R{arm_deviation[1]}"
         )
+        arm_target = self._effective_arm_target_deg(command)
+        arm_target_text = f"L{arm_target[0]}/R{arm_target[1]}"
+        arm_actual = self._measured_arm_joint_absolute_deg()
+        arm_actual_text = (
+            "unavailable"
+            if arm_actual is None
+            else f"L{arm_actual[0]}/R{arm_actual[1]}"
+        )
+        controller_hmd = getattr(self, "_last_controller_hand_hmd_m", None)
+        controller_hmd_text = (
+            "unavailable"
+            if controller_hmd is None
+            else f"L{tuple(round(value, 3) for value in controller_hmd[0])}/"
+            f"R{tuple(round(value, 3) for value in controller_hmd[1])}"
+        )
         hand_tracking = self._measured_hand_tracking_m(command)
         if hand_tracking is None:
             hand_actual_text = "unavailable"
@@ -1693,12 +1995,22 @@ class LivePicoSimulationPolicy:
             f"hand_active=L{command.hand_active[0]}/R{command.hand_active[1]} "
             f"hand_actual_m={hand_actual_text} "
             f"hand_error_m={hand_error_text} "
+            f"controller_hmd_abs_m={controller_hmd_text} "
+            f"arm_target_abs_deg={arm_target_text} "
+            f"arm_actual_abs_deg={arm_actual_text} "
             f"arm_delta_deg={arm_deviation_text} "
             f"left_trigger={getattr(self, '_last_left_trigger', None)} "
+            f"right_trigger={getattr(self, '_last_right_trigger', None)} "
+            f"right_grip={getattr(self, '_last_right_grip', None)} "
+            f"arm_tracking={command.arm_tracking_enabled} "
             f"controller_valid={getattr(self, '_last_controller_valid', None)} "
             f"controller_fresh={getattr(self, '_last_controller_fresh', None)} "
             f"controller_error={getattr(self, '_last_controller_error', None)} "
             f"target_source={getattr(self, '_last_mapper_target_source', None)} "
+            "absolute_arm_source="
+            f"{getattr(self, '_last_absolute_arm_target_source', None)} "
+            "absolute_arm_rejection="
+            f"{getattr(self, '_last_absolute_arm_rejection', None)!r} "
             f"target_calibrated={getattr(self, '_last_mapper_calibrated', None)} "
             f"target_fresh={getattr(self, '_last_mapper_fresh', None)} "
             f"target_rejection={getattr(self, '_last_mapper_rejection', None)!r} "
@@ -1748,9 +2060,9 @@ class LivePicoSimulationPolicy:
         """Replace only six arm targets using the mapper's bounded IK solution."""
 
         self._require_safe_action(action, "controller overlay base")
-        if command.enabled and command.locomotion_policy == "pico_teleop":
+        if command.arm_tracking_enabled:
             if command.arm_joint_target is None:
-                raise RuntimeError("enabled controller preview lacks arm joints")
+                raise RuntimeError("enabled arm tracking lacks bounded arm joints")
             desired = command.arm_joint_target
         else:
             desired = MICROBAN_ARM_HOME_JOINT_RAD
@@ -1758,12 +2070,12 @@ class LivePicoSimulationPolicy:
             desired, dtype=action.dtype, device=action.device
         )
         lower = torch.tensor(
-            MICROBAN_ARM_JOINT_LOWER_RAD,
+            MICROBAN_DIRECT_ARM_JOINT_LOWER_RAD,
             dtype=action.dtype,
             device=action.device,
         )
         upper = torch.tensor(
-            MICROBAN_ARM_JOINT_UPPER_RAD,
+            MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD,
             dtype=action.dtype,
             device=action.device,
         )
@@ -1800,6 +2112,34 @@ class LivePicoSimulationPolicy:
             ) / scale
         self._require_safe_action(overlaid, "controller arm overlay")
         return overlaid
+
+    def _overlay_controller_arms_or_home(
+        self, action: torch.Tensor, command: SimulationCommand
+    ) -> torch.Tensor:
+        """Apply the independent right-trigger arm layer without stopping gait."""
+
+        if not (
+            getattr(self, "controller_arm_overlay", False)
+            or getattr(self, "controller_only_preview", False)
+        ):
+            return action
+        try:
+            return self._apply_controller_arm_overlay(action, command)
+        except Exception as exc:  # noqa: BLE001 - gait continues with HOME arms
+            reason = (
+                "controller arm overlay failed; using HOME arms: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            safe_command = SimulationCommand(
+                **{
+                    **asdict(command),
+                    "arm_tracking_enabled": False,
+                    "arm_joint_target": None,
+                    "fault": reason,
+                }
+            )
+            self._print_status(safe_command)
+            return self._apply_controller_arm_overlay(action, safe_command)
 
     def _fallback_after_learned_fault(
         self, observations: Any, reason: str
@@ -1877,17 +2217,7 @@ class LivePicoSimulationPolicy:
         self._print_status(command)
         if getattr(self, "controller_only_preview", False):
             base_action = self._legacy_actor_action(observations)
-            try:
-                return self._apply_controller_arm_overlay(base_action, command)
-            except Exception as exc:  # noqa: BLE001 - HOME is the safe overlay
-                reason = (
-                    "controller arm overlay failed; using HOME arms: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                self._latch_legacy_fallback(reason)
-                safe_command = neutral_simulation_command(fault=reason)
-                self._print_status(safe_command)
-                return self._apply_controller_arm_overlay(base_action, safe_command)
+            return self._overlay_controller_arms_or_home(base_action, command)
         if not command.enabled:
             # Deadman release means zero commanded velocity, not zero actuator
             # action.  Raw zero in the teleop action space is not a dynamically
@@ -1896,13 +2226,15 @@ class LivePicoSimulationPolicy:
             # learned body policy remains disabled.  walk_last_action preserves the
             # legacy actor's own recurrence; reset() clears it exactly once after a
             # fall/restart.
-            return self._legacy_actor_action(observations)
+            base_action = self._legacy_actor_action(observations)
+            return self._overlay_controller_arms_or_home(base_action, command)
 
         if (
             bool(getattr(self, "native_legacy_action_semantics", False))
             or command.locomotion_policy == "walk"
         ):
-            return self._legacy_actor_action(observations)
+            base_action = self._legacy_actor_action(observations)
+            return self._overlay_controller_arms_or_home(base_action, command)
 
         self.walk_last_action.zero_()
         patched = _patch_command_observation(observations, self.env)
@@ -1911,13 +2243,18 @@ class LivePicoSimulationPolicy:
                 raise RuntimeError("learned PICO actor is unavailable")
             action = self.actor(patched)
             self._require_safe_action(action, "learned PICO actor")
-            return action
+            return self._overlay_controller_arms_or_home(action, command)
         except Exception as exc:  # noqa: BLE001 - same-cycle legacy degradation
             reason = (
                 "learned PICO actor failed; using legacy joystick until trigger "
                 f"release: {type(exc).__name__}: {exc}"
             )
-            return self._fallback_after_learned_fault(observations, reason)
+            fallback_action = self._fallback_after_learned_fault(
+                observations, reason
+            )
+            return self._overlay_controller_arms_or_home(
+                fallback_action, command
+            )
 
 
 def _positive_float(value: str) -> float:
@@ -2227,6 +2564,17 @@ def _load_webxr_classes(teleop_root: Path) -> tuple[Any, Any]:
 
 def _configure_live_environment(cfg: Any) -> None:
     cfg.scene.num_envs = 1
+    # The training viewer is framed from 3 m away, which makes a roughly
+    # desktop-sized Microban and its arm motion almost impossible to inspect.
+    # Live teleoperation uses a close three-quarter view so controller-driven
+    # shoulder/elbow motion is visually unambiguous to the operator.
+    viewer = getattr(cfg, "viewer", None)
+    if viewer is not None:
+        viewer.body_name = "trunk"
+        viewer.distance = 0.8
+        viewer.fovy = 45.0
+        viewer.elevation = -12.0
+        viewer.azimuth = 135.0
     # A fall must restore the simulated robot instead of leaving the viewer on a
     # terminal/down state.  The policy notices the reset transition, disarms live
     # input, and resumes the zero-twist audited standing controller.
@@ -3093,6 +3441,9 @@ def run(args: argparse.Namespace) -> int:
             native_legacy_action_semantics=legacy_only,
             unaccepted_observation_only=unaccepted_preview_mode,
             controller_only_preview=controller_only_preview_mode,
+            controller_arm_overlay=(
+                not legacy_only and args.input in {"native", "pico-app"}
+            ),
         )
 
         print("SIMULATION ONLY: no robot UDP socket or motor interface is opened.")
@@ -3225,7 +3576,10 @@ def run(args: argparse.Namespace) -> int:
                 "Unity receives the synthetic stereo calibration and latest-frame "
                 "endpoints on the camera port."
             )
-        print("Hold left trigger to move; hold right trigger to center head yaw.")
+        print(
+            "Hold left trigger for locomotion; hold right trigger for arm "
+            "tracking; hold right grip to center head yaw."
+        )
         if camera_publisher is not None:
             print(
                 f"Simulation SBS MJPEG: http://127.0.0.1:{camera_publisher.port}/stream"

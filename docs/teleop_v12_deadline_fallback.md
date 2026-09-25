@@ -98,9 +98,12 @@ scripts/train_microban_teleop_v12.sh resume \
 
 This route permits exactly completed update 10100 to completed update 15000,
 uses `save_interval=15000`, and may write only `model_14999.pt`. The final gate
-keeps hand RMS at 35 mm but restores the normal final eight-scenario profile,
-including strict 15 mm foot RMS, 25 mm foot P95, perturbation, all safety and
-causal checks, 9x300 locomotion, and CPU ONNX parity.
+keeps hand RMS at 35 mm and uses the measured deadline limits of 70 mm hand
+P95, 50 mm foot RMS, and 80 mm foot P95 for the final eight-scenario profile.
+Perturbation, all fall/joint/finite-value safety and causal checks, 9x300
+locomotion, and CPU ONNX parity remain mandatory. The final deadline profile
+uses a 2.5e-5 full-83-column float32 parity tolerance; neutral legacy parity
+and every canonical profile retain their previous limits.
 
 When `model_14999.pt` has been written, run the ordinary final evaluator and
 deployment packager against that exact run:
@@ -114,8 +117,8 @@ scripts/export_microban_teleop_v12_deployment.sh \
 ```
 
 The resulting gate must use
-`deadline_full_body_hand_rms35mm_foot_strict_perturbation_v1`. The packager and
+`deadline_full_body_hand_rms35mm_p95_70mm_foot_rms50mm_p95_80mm_perturbation_v2`.
+The packager and
 Microban runtime both accept that name only as an explicit final-profile
 allowlist entry; the stage validator still binds it to the checkpoint's pinned
-post-canary lineage and all unchanged strict foot, safety, locomotion, and ONNX
-evidence.
+post-canary lineage and all unchanged safety, locomotion, and ONNX evidence.

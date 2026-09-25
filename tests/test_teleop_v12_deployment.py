@@ -153,6 +153,12 @@ def _microban_identity() -> dict[str, str]:
         "microban_runtime_selector_source_sha256": "7" * 64,
         "microban_walk_runtime_source_sha256": "8" * 64,
         "microban_walk_config_source_sha256": "9" * 64,
+        "microban_arm_runtime_source_sha256": "c" * 64,
+        "microban_arm_contract_source_sha256": "d" * 64,
+        "microban_network_input_source_sha256": "e" * 64,
+        "microban_input_contract_source_sha256": "f" * 64,
+        "microban_runtime_entrypoint_source_sha256": "0" * 64,
+        "microban_scheduler_source_sha256": "1" * 64,
         "microban_runtime_lock_sha256": "a" * 64,
         "microban_walk_fallback_onnx_sha256": "b" * 64,
     }
@@ -332,7 +338,7 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         microban_source_identity=_microban_identity(),
     )
     assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
-    assert json.loads(metadata["runtime_raw_action_guard_absmax_json"]) == [8.0] * 18
+    assert json.loads(metadata["runtime_raw_action_guard_absmax_json"]) == [24.0] * 18
     assert metadata["v12_stage_gate_sha256"] == _sha(gate_path)
     assert metadata["deployment_accepted"] == "true"
     assert metadata["v12_bilateral_site_order_revision"] == (
@@ -436,6 +442,12 @@ def test_runtime_validator_requires_cpu_only_pass(
         repo / "src" / "moves" / "policy_selector.py",
         repo / "src" / "moves" / "walk.py",
         repo / "src" / "constants.py",
+        repo / "src" / "moves" / "pico_arms.py",
+        repo / "src" / "pico_arm_contract.py",
+        repo / "src" / "input" / "network_input.py",
+        repo / "src" / "input" / "input_source.py",
+        repo / "src" / "main.py",
+        repo / "src" / "scheduler.py",
         repo / "uv.lock",
         repo / "src" / "agents" / "walk.onnx",
     )
@@ -551,6 +563,25 @@ def test_runtime_rejection_preserves_last_known_good_output(
     (microban_repo / "src" / "constants.py").write_text(
         "# constants\n", encoding="utf-8"
     )
+    (microban_repo / "src" / "moves" / "pico_arms.py").write_text(
+        "# arm runtime\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "pico_arm_contract.py").write_text(
+        "# arm contract\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "input").mkdir(parents=True)
+    (microban_repo / "src" / "input" / "network_input.py").write_text(
+        "# network input\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "input" / "input_source.py").write_text(
+        "# input contract\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "main.py").write_text(
+        "# runtime entrypoint\n", encoding="utf-8"
+    )
+    (microban_repo / "src" / "scheduler.py").write_text(
+        "# scheduler\n", encoding="utf-8"
+    )
     (microban_repo / "src" / "agents").mkdir(parents=True)
     (microban_repo / "src" / "agents" / "walk.onnx").write_bytes(b"walk")
     (microban_repo / "uv.lock").write_text("# lock\n", encoding="utf-8")
@@ -578,7 +609,7 @@ def test_runtime_rejection_preserves_last_known_good_output(
     monkeypatch.setattr(
         deployment,
         "_validate_final_parity",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "reference_maximum_absolute_error": 1.0e-6,
             "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
         },

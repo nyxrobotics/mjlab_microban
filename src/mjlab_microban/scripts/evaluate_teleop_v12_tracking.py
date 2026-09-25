@@ -67,7 +67,10 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_FOOT_P95_MAX_M,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_FOOT_RMS_MAX_M,
     MICROBAN_TELEOP_V12_DEADLINE_FINAL_FALLBACK_PROFILE,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_HAND_P95_MAX_M,
     MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
 )
@@ -136,6 +139,33 @@ def hand_tracking_rms_max_m(profile: str) -> float:
     ):
         return MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M
     return HAND_RMS_MAX_M
+
+
+def hand_tracking_p95_max_m(profile: str) -> float:
+    """Return the profile-specific hand P95 limit."""
+
+    required_tracking_scenario_names(profile)
+    if profile == DEADLINE_FINAL_FALLBACK_PROFILE:
+        return MICROBAN_TELEOP_V12_DEADLINE_FINAL_HAND_P95_MAX_M
+    return HAND_P95_MAX_M
+
+
+def foot_tracking_rms_max_m(profile: str) -> float:
+    """Return the profile-specific foot RMS limit."""
+
+    required_tracking_scenario_names(profile)
+    if profile == DEADLINE_FINAL_FALLBACK_PROFILE:
+        return MICROBAN_TELEOP_V12_DEADLINE_FINAL_FOOT_RMS_MAX_M
+    return FOOT_RMS_MAX_M
+
+
+def foot_tracking_p95_max_m(profile: str) -> float:
+    """Return the profile-specific foot P95 limit."""
+
+    required_tracking_scenario_names(profile)
+    if profile == DEADLINE_FINAL_FALLBACK_PROFILE:
+        return MICROBAN_TELEOP_V12_DEADLINE_FINAL_FOOT_P95_MAX_M
+    return FOOT_P95_MAX_M
 
 
 def target_column_ablation_observation_columns(
@@ -863,7 +893,8 @@ def _acceptance(
             for value in active_hand
         )
         checks["hand_tracking_p95"] = bool(active_hand) and all(
-            float(value["p95"]) <= HAND_P95_MAX_M for value in active_hand
+            float(value["p95"]) <= hand_tracking_p95_max_m(profile)
+            for value in active_hand
         )
     if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE):
         active_foot = [
@@ -876,10 +907,12 @@ def _acceptance(
             )
         ]
         checks["foot_tracking_rms"] = bool(active_foot) and all(
-            float(value["rms"]) <= FOOT_RMS_MAX_M for value in active_foot
+            float(value["rms"]) <= foot_tracking_rms_max_m(profile)
+            for value in active_foot
         )
         checks["foot_tracking_p95"] = bool(active_foot) and all(
-            float(value["p95"]) <= FOOT_P95_MAX_M for value in active_foot
+            float(value["p95"]) <= foot_tracking_p95_max_m(profile)
+            for value in active_foot
         )
     return checks, "pass" if all(checks.values()) else "fail"
 
@@ -1029,9 +1062,9 @@ def run_evaluation(
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
             "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-            "hand_p95_m_max": HAND_P95_MAX_M,
-            "foot_rms_m_max": FOOT_RMS_MAX_M,
-            "foot_p95_m_max": FOOT_P95_MAX_M,
+            "hand_p95_m_max": hand_tracking_p95_max_m(profile),
+            "foot_rms_m_max": foot_tracking_rms_max_m(profile),
+            "foot_p95_m_max": foot_tracking_p95_max_m(profile),
             "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN

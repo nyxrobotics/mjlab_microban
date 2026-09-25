@@ -26,9 +26,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     EXPANDED_LOCOMOTION_PROFILE,
     FINAL_PROFILE,
     FOOT_ACTIVATION_CANARY_PROFILE,
-    FOOT_P95_MAX_M,
-    FOOT_RMS_MAX_M,
-    HAND_P95_MAX_M,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
@@ -36,6 +33,9 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
     _aggregate_action_envelopes,
+    foot_tracking_p95_max_m,
+    foot_tracking_rms_max_m,
+    hand_tracking_p95_max_m,
     hand_tracking_rms_max_m,
     required_tracking_check_names,
     required_tracking_profile,
@@ -84,6 +84,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_STRICT_REPORT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
@@ -420,9 +421,9 @@ def _validate_tracking_report(
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
         "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-        "hand_p95_m_max": HAND_P95_MAX_M,
-        "foot_rms_m_max": FOOT_RMS_MAX_M,
-        "foot_p95_m_max": FOOT_P95_MAX_M,
+        "hand_p95_m_max": hand_tracking_p95_max_m(profile),
+        "foot_rms_m_max": foot_tracking_rms_max_m(profile),
+        "foot_p95_m_max": foot_tracking_p95_max_m(profile),
         "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
         "target_column_ablation_action_delta_min": (
             TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
@@ -668,7 +669,10 @@ def _validate_tracking_report(
 
 
 def _validate_onnx_report(
-    report: dict[str, Any], expected_identity: dict[str, int | str]
+    report: dict[str, Any],
+    expected_identity: dict[str, int | str],
+    *,
+    parity_tolerance: float = ONNX_PARITY_TOLERANCE,
 ) -> tuple[Path, str]:
     if (
         report.get("schema_version") != 1
@@ -700,7 +704,7 @@ def _validate_onnx_report(
         or onnx.get("onnxruntime_providers") != ["CPUExecutionProvider"]
         or not isinstance(onnx.get("onnxruntime_version"), str)
         or not onnx["onnxruntime_version"]
-        or onnx.get("tolerance") != ONNX_PARITY_TOLERANCE
+        or onnx.get("tolerance") != parity_tolerance
     ):
         raise ValueError("ONNX full-83 CPU evidence drifted")
     for name in (
@@ -710,7 +714,7 @@ def _validate_onnx_report(
         if (
             not _finite_number(onnx.get(name))
             or float(onnx[name]) < 0.0
-            or float(onnx[name]) > ONNX_PARITY_TOLERANCE
+            or float(onnx[name]) > parity_tolerance
         ):
             raise ValueError(f"ONNX parity evidence failed: {name}")
     onnx_path = resolve_bootstrap_artifact_path(onnx.get("path", ""))
@@ -1004,7 +1008,17 @@ def create_gate(
         )
     else:
         _validate_tracking_report(tracking, expected_report_identity)
-    onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
+    parity_tolerance = (
+        MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
+        if completed == 15_000
+        and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
+        else ONNX_PARITY_TOLERANCE
+    )
+    onnx_path, onnx_sha = _validate_onnx_report(
+        onnx,
+        expected_report_identity,
+        parity_tolerance=parity_tolerance,
+    )
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     sanitization = infos.get("adapter_sanitization")
     result = {

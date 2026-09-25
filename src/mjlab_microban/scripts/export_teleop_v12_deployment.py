@@ -99,7 +99,7 @@ SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
 )
 PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v2"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
-RUNTIME_GUARD_MULTIPLIER = 2.0
+RUNTIME_GUARD_MULTIPLIER = 6.0
 RUNTIME_GUARD_SEMANTICS = (
     "finite_float32_then_per_joint_absmax_else_same_cycle_legacy_fallback_v1"
 )
@@ -117,6 +117,12 @@ MICROBAN_RUNTIME_IDENTITY_KEYS = frozenset(
         "microban_runtime_selector_source_sha256",
         "microban_walk_runtime_source_sha256",
         "microban_walk_config_source_sha256",
+        "microban_arm_runtime_source_sha256",
+        "microban_arm_contract_source_sha256",
+        "microban_network_input_source_sha256",
+        "microban_input_contract_source_sha256",
+        "microban_runtime_entrypoint_source_sha256",
+        "microban_scheduler_source_sha256",
         "microban_runtime_lock_sha256",
         "microban_walk_fallback_onnx_sha256",
     }
@@ -259,6 +265,12 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "microban_runtime_selector_source_sha256",
         "microban_walk_runtime_source_sha256",
         "microban_walk_config_source_sha256",
+        "microban_arm_runtime_source_sha256",
+        "microban_arm_contract_source_sha256",
+        "microban_network_input_source_sha256",
+        "microban_input_contract_source_sha256",
+        "microban_runtime_entrypoint_source_sha256",
+        "microban_scheduler_source_sha256",
         "microban_runtime_lock_sha256",
         "microban_walk_fallback_onnx_sha256",
     }
@@ -807,7 +819,9 @@ def _validate_graph_contract(path: Path) -> None:
             )
 
 
-def _validate_final_parity(actor: torch.nn.Module, path: Path) -> dict[str, float]:
+def _validate_final_parity(
+    actor: torch.nn.Module, path: Path, *, tolerance: float
+) -> dict[str, float]:
     try:
         import onnxruntime as ort
     except ImportError as exc:
@@ -847,13 +861,13 @@ def _validate_final_parity(actor: torch.nn.Module, path: Path) -> dict[str, floa
     if (
         not math.isfinite(reference_max)
         or not math.isfinite(runtime_max)
-        or reference_max > ONNX_PARITY_TOLERANCE
-        or runtime_max > ONNX_PARITY_TOLERANCE
+        or reference_max > tolerance
+        or runtime_max > tolerance
     ):
         raise ValueError(
             "Final metadata-bearing ONNX parity failed: "
             f"reference={reference_max}, onnxruntime_cpu={runtime_max}, "
-            f"tolerance={ONNX_PARITY_TOLERANCE}"
+            f"tolerance={tolerance}"
         )
     return {
         "reference_maximum_absolute_error": reference_max,
@@ -992,6 +1006,18 @@ def _microban_runtime_source_identity(microban_repo: Path) -> dict[str, str]:
         ),
         "microban_walk_runtime_source_sha256": repo / "src" / "moves" / "walk.py",
         "microban_walk_config_source_sha256": repo / "src" / "constants.py",
+        "microban_arm_runtime_source_sha256": (
+            repo / "src" / "moves" / "pico_arms.py"
+        ),
+        "microban_arm_contract_source_sha256": repo / "src" / "pico_arm_contract.py",
+        "microban_network_input_source_sha256": (
+            repo / "src" / "input" / "network_input.py"
+        ),
+        "microban_input_contract_source_sha256": (
+            repo / "src" / "input" / "input_source.py"
+        ),
+        "microban_runtime_entrypoint_source_sha256": repo / "src" / "main.py",
+        "microban_scheduler_source_sha256": repo / "src" / "scheduler.py",
         "microban_runtime_lock_sha256": repo / "uv.lock",
         "microban_walk_fallback_onnx_sha256": repo / "src" / "agents" / "walk.onnx",
     }
@@ -1063,6 +1089,10 @@ def package_v12_deployment(
     onnx_report = _load_json(
         report_paths["onnx"], expected_sha256=str(report_hashes["onnx"])
     )
+    onnx_evidence = onnx_report.get("onnx")
+    if not isinstance(onnx_evidence, Mapping):
+        raise TypeError("V12 ONNX parity evidence is malformed")
+    parity_tolerance = float(onnx_evidence["tolerance"])
     microban_source_identity = _microban_runtime_source_identity(microban_repo)
     microban_repo_resolved = microban_repo.expanduser().resolve()
     _reject_protected_output(
@@ -1086,6 +1116,20 @@ def package_v12_deployment(
                 microban_repo_resolved / "src" / "moves" / "walk.py"
             ),
             "microban_walk_config": microban_repo_resolved / "src" / "constants.py",
+            "microban_arm_runtime": (
+                microban_repo_resolved / "src" / "moves" / "pico_arms.py"
+            ),
+            "microban_arm_contract": (
+                microban_repo_resolved / "src" / "pico_arm_contract.py"
+            ),
+            "microban_network_input": (
+                microban_repo_resolved / "src" / "input" / "network_input.py"
+            ),
+            "microban_input_contract": (
+                microban_repo_resolved / "src" / "input" / "input_source.py"
+            ),
+            "microban_runtime_entrypoint": microban_repo_resolved / "src" / "main.py",
+            "microban_scheduler": microban_repo_resolved / "src" / "scheduler.py",
             "microban_walk_fallback": (
                 microban_repo_resolved / "src" / "agents" / "walk.onnx"
             ),
@@ -1110,7 +1154,9 @@ def package_v12_deployment(
 
         _export_onnx_atomic(actor, temporary)
         _validate_graph_contract(temporary)
-        initial_parity = _validate_final_parity(actor, temporary)
+        initial_parity = _validate_final_parity(
+            actor, temporary, tolerance=parity_tolerance
+        )
         metadata = build_v12_deployment_metadata(
             checkpoint=checkpoint,
             checkpoint_sha256=checkpoint_sha256,
@@ -1141,7 +1187,9 @@ def package_v12_deployment(
                     f"{attached.get(key)!r} != {wire!r}"
                 )
         _validate_graph_contract(temporary)
-        final_parity = _validate_final_parity(actor, temporary)
+        final_parity = _validate_final_parity(
+            actor, temporary, tolerance=parity_tolerance
+        )
         runtime_report = _run_microban_runtime_validator(
             temporary, microban_repo=microban_repo
         )

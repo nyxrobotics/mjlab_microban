@@ -24,6 +24,11 @@ from mjlab_microban.robot.microban_hand_fk import (
 )
 from mjlab_microban.scripts.live_pico_teleop_sim import (
     AUDITED_LEGACY_WALK_SHA256,
+    MICROBAN_DIRECT_ARM_JOINT_LOWER_DEG,
+    MICROBAN_DIRECT_ARM_JOINT_LOWER_RAD,
+    MICROBAN_DIRECT_ARM_JOINT_UPPER_DEG,
+    MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD,
+    MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION,
     V12_PREVIEW_TASK,
     LivePicoSimulationPolicy,
     SimulationCommand,
@@ -43,6 +48,7 @@ class Scenario:
     name: str
     twist: tuple[float, float, float]
     arm_target: tuple[tuple[float, float, float], tuple[float, float, float]]
+    target_domain: str = "custom"
 
 
 def _mirrored(
@@ -55,12 +61,52 @@ def scenarios() -> tuple[Scenario, ...]:
     lower = MICROBAN_ARM_JOINT_LOWER_RAD
     upper = MICROBAN_ARM_JOINT_UPPER_RAD
     return (
-        Scenario("neutral_home", (0.0, 0.0, 0.0), MICROBAN_ARM_HOME_JOINT_RAD),
-        Scenario("forward_upper", (0.2, 0.0, 0.0), upper),
-        Scenario("backward_lower", (-0.2, 0.0, 0.0), lower),
-        Scenario("left_mirrored", (0.0, 0.1, 0.0), _mirrored((0.25, 0.35, -0.5))),
-        Scenario("right_mirrored", (0.0, -0.1, 0.0), _mirrored((-0.25, 0.35, -0.7))),
-        Scenario("yaw_cross", (0.0, 0.0, 0.5), (upper[0], lower[1])),
+        Scenario(
+            "neutral_home",
+            (0.0, 0.0, 0.0),
+            MICROBAN_ARM_HOME_JOINT_RAD,
+            "home",
+        ),
+        Scenario("narrow_forward_upper", (0.2, 0.0, 0.0), upper, "narrow_policy"),
+        Scenario(
+            "narrow_backward_lower", (-0.2, 0.0, 0.0), lower, "narrow_policy"
+        ),
+        Scenario(
+            "narrow_left_mirrored",
+            (0.0, 0.1, 0.0),
+            _mirrored((0.25, 0.35, -0.5)),
+            "narrow_policy",
+        ),
+        Scenario(
+            "narrow_right_mirrored",
+            (0.0, -0.1, 0.0),
+            _mirrored((-0.25, 0.35, -0.7)),
+            "narrow_policy",
+        ),
+        Scenario(
+            "narrow_yaw_cross",
+            (0.0, 0.0, 0.5),
+            (upper[0], lower[1]),
+            "narrow_policy",
+        ),
+        Scenario(
+            "absolute_expanded_lower_stationary",
+            (0.0, 0.0, 0.0),
+            MICROBAN_DIRECT_ARM_JOINT_LOWER_RAD,
+            "absolute_direct_overlay",
+        ),
+        Scenario(
+            "absolute_expanded_upper_stationary",
+            (0.0, 0.0, 0.0),
+            MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD,
+            "absolute_direct_overlay",
+        ),
+        Scenario(
+            "absolute_expanded_mirrored_walk",
+            (0.2, 0.0, 0.0),
+            _mirrored(tuple(math.radians(value) for value in (-65.0, 55.0, -70.0))),
+            "absolute_direct_overlay",
+        ),
     )
 
 
@@ -102,8 +148,15 @@ def _command(
     ramp_steps: int,
 ) -> SimulationCommand:
     arm_target = _interpolate_arm_target(scenario.arm_target, step, ramp_steps)
+    # The learned locomotion actor must continue to observe only its original
+    # narrow hand-target domain.  The expanded target is applied separately to
+    # the six arm action columns after inference.
+    policy_joint_target = torch.tensor(arm_target, dtype=torch.float64).clamp(
+        min=torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64),
+        max=torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD, dtype=torch.float64),
+    )
     hands = microban_hand_offsets_from_arm_joints(
-        torch.tensor(arm_target, dtype=torch.float64)
+        policy_joint_target
     ).tolist()
     return SimulationCommand(
         enabled=True,
@@ -114,6 +167,7 @@ def _command(
         head_orientation=(0.0, 0.0, 0.0),
         head_yaw_front=False,
         locomotion_policy="pico_teleop",
+        arm_tracking_enabled=True,
         arm_joint_target=arm_target,
     )
 
@@ -233,7 +287,12 @@ def evaluate(
             results.append(
                 {
                     "name": scenario.name,
+                    "target_domain": scenario.target_domain,
                     "twist": list(scenario.twist),
+                    "final_arm_target_deg": [
+                        [math.degrees(value) for value in side]
+                        for side in scenario.arm_target
+                    ],
                     "steps": executed,
                     "settle_fell": settle_fell,
                     "fell": fell,
@@ -271,6 +330,16 @@ def evaluate(
             },
             "foot_target": "exact_zero_inactive",
             "arm_base": "audited_legacy_walk_six_columns_replaced",
+            "direct_arm_contract": {
+                "revision": MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION,
+                "joint_order": ["shoulder_pitch", "shoulder_roll", "elbow"],
+                "side_order": ["left", "right"],
+                "lower_deg": MICROBAN_DIRECT_ARM_JOINT_LOWER_DEG,
+                "upper_deg": MICROBAN_DIRECT_ARM_JOINT_UPPER_DEG,
+                "policy_hand_observation": (
+                    "component_projected_to_narrow_training_joint_box"
+                ),
+            },
             "results": results,
         }
     finally:

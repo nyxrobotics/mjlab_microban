@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import math
+import runpy
 import threading
 import unittest
 from io import BytesIO
@@ -30,6 +31,7 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_offsets_from_arm_joints,
 )
 from mjlab_microban.scripts.live_pico_teleop_sim import (
+    ARM_TRACKING_HOLD_MAX_S,
     AUDITED_LEGACY_WALK_SHA256,
     FOOT_INACTIVE_Z_MAX_M,
     FOOT_UPPER_M,
@@ -37,6 +39,8 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     UNACCEPTED_SIMULATION_WARNING,
     ControllerOnlyPreviewMapper,
     LivePicoSimulationPolicy,
+    MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD,
+    MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION,
     SimulationCommand,
     WebXrSimulationMapper,
     WebXrSimulationSource,
@@ -60,7 +64,6 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     _walk_actor_observation,
     build_parser,
     command_for_simulation,
-    neutral_simulation_command,
     scale_normalized_velocity,
     solve_hmd_neck_target,
 )
@@ -106,6 +109,81 @@ def _valid_command() -> dict[str, object]:
     }
 
 
+def _arm_joint_target(fraction: float) -> tuple[tuple[float, ...], ...]:
+    """Return one non-HOME, contract-bounded controller IK target."""
+
+    return tuple(
+        tuple(
+            home + fraction * (upper - home)
+            for home, upper in zip(home_side, upper_side, strict=True)
+        )
+        for home_side, upper_side in zip(
+            MICROBAN_ARM_HOME_JOINT_RAD,
+            MICROBAN_ARM_JOINT_UPPER_RAD,
+            strict=True,
+        )
+    )
+
+
+def _controller_arm_mapper_command(
+    *,
+    walking: bool,
+    arm_tracking_enabled: bool,
+    arm_joint_target: tuple[tuple[float, ...], ...] | None = None,
+) -> dict[str, object]:
+    """Build the local mapper contract consumed by the live simulator."""
+
+    zero_pair = {"left": (0.0, 0.0, 0.0), "right": (0.0, 0.0, 0.0)}
+    if arm_tracking_enabled:
+        assert arm_joint_target is not None
+        hand_values = microban_hand_offsets_from_arm_joints(
+            torch.tensor(arm_joint_target, dtype=torch.float64)
+        ).tolist()
+        hand_target = {"left": hand_values[0], "right": hand_values[1]}
+        serialized_arm_target = {
+            "left": list(arm_joint_target[0]),
+            "right": list(arm_joint_target[1]),
+        }
+    else:
+        hand_target = zero_pair
+        serialized_arm_target = None
+
+    active_moves = ["walk", "hmd_head"] if walking else []
+    if arm_tracking_enabled:
+        active_moves.append("pico_arms")
+    return {
+        "velocity": {
+            "vx": 0.5 if walking else 0.0,
+            "vy": 0.0,
+            "vtheta": 0.0,
+        },
+        "active_moves": active_moves,
+        "locomotion_policy": "pico_teleop",
+        "head_orientation": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+        # Right-grip neck-yaw mapping belongs to the external mapper contract;
+        # these tests isolate the independent controller-arm fields.
+        "head_yaw_front": False,
+        "foot_target": zero_pair,
+        "hand_target": hand_target,
+        "hand_active": {
+            "left": arm_tracking_enabled,
+            "right": arm_tracking_enabled,
+        },
+        "arm_tracking_enabled": arm_tracking_enabled,
+        "arm_joint_target": serialized_arm_target,
+        "body_target_calibrated": True,
+        "body_target_fresh": True,
+        "twist2_body_target_preview": {
+            "target_source": "controllers",
+            "controller_only_hand_fallback": True,
+            "absolute_arm_target_contract_revision": (
+                MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION
+            ),
+            "commanded_ik_q_rad": serialized_arm_target,
+        },
+    }
+
+
 class SimulationCommandTests(unittest.TestCase):
     def test_floor_band_matches_current_training_contract(self) -> None:
         self.assertEqual(FOOT_INACTIVE_Z_MAX_M, 0.0025)
@@ -143,22 +221,112 @@ class SimulationCommandTests(unittest.TestCase):
             "right": (0.0, 0.0, 0.0),
         }
         value["controller_arm_joint_target"] = {
-            side: list(MICROBAN_ARM_HOME_JOINT_RAD[index])
+            side: list(MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD[index])
             for index, side in enumerate(("left", "right"))
         }
         command = command_for_simulation(value)
         self.assertTrue(command.enabled)
-        self.assertEqual(command.arm_joint_target, MICROBAN_ARM_HOME_JOINT_RAD)
+        self.assertEqual(
+            command.arm_joint_target, MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD
+        )
 
         value["controller_arm_joint_target"]["left"][0] = (
-            MICROBAN_ARM_JOINT_UPPER_RAD[0][0] + 1.0e-6
+            MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD[0][0] + 1.0e-6
         )
         rejected = command_for_simulation(value)
         self.assertFalse(rejected.enabled)
         self.assertEqual(rejected.fault, "controller arm joints exceed contract")
 
+    def test_arm_tracking_gate_is_independent_of_locomotion_deadman(self) -> None:
+        desired = _arm_joint_target(0.5)
+
+        stationary = command_for_simulation(
+            _controller_arm_mapper_command(
+                walking=False,
+                arm_tracking_enabled=True,
+                arm_joint_target=desired,
+            )
+        )
+        self.assertFalse(stationary.enabled)
+        self.assertEqual(stationary.twist, (0.0, 0.0, 0.0))
+        self.assertTrue(stationary.arm_tracking_enabled)
+        self.assertEqual(stationary.arm_joint_target, desired)
+        self.assertEqual(stationary.hand_active, (True, True))
+
+        walking = command_for_simulation(
+            _controller_arm_mapper_command(
+                walking=True,
+                arm_tracking_enabled=True,
+                arm_joint_target=desired,
+            )
+        )
+        self.assertTrue(walking.enabled)
+        self.assertEqual(walking.twist, (0.35, 0.0, 0.0))
+        self.assertTrue(walking.arm_tracking_enabled)
+        self.assertEqual(walking.arm_joint_target, desired)
+        self.assertEqual(stationary.hand_target, walking.hand_target)
+
+        released_while_walking = command_for_simulation(
+            _controller_arm_mapper_command(
+                walking=True,
+                arm_tracking_enabled=False,
+            )
+        )
+        self.assertTrue(released_while_walking.enabled)
+        self.assertEqual(released_while_walking.twist, (0.35, 0.0, 0.0))
+        self.assertFalse(released_while_walking.arm_tracking_enabled)
+        self.assertIsNone(released_while_walking.arm_joint_target)
+
+    def test_arm_tracking_rejects_mismatched_absolute_contract_revision(self) -> None:
+        desired = _arm_joint_target(0.5)
+        value = _controller_arm_mapper_command(
+            walking=False,
+            arm_tracking_enabled=True,
+            arm_joint_target=desired,
+        )
+        preview = value["twist2_body_target_preview"]
+        assert isinstance(preview, dict)
+        preview["absolute_arm_target_contract_revision"] = "stale-contract"
+
+        rejected = command_for_simulation(value)
+
+        self.assertFalse(rejected.arm_tracking_enabled)
+        self.assertEqual(
+            rejected.fault, "absolute arm target contract revision mismatch"
+        )
+
 
 class ControllerOnlyPreviewTests(unittest.TestCase):
+    def test_deterministic_overlay_evaluator_actually_enables_arm_tracking(self) -> None:
+        namespace = runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "evaluate_pico_controller_overlay.py"
+            )
+        )
+        scenario_type = namespace["Scenario"]
+        make_command = namespace["_command"]
+        target = _arm_joint_target(0.5)
+        command = make_command(
+            scenario_type("arm_motion", (0.0, 0.0, 0.0), target),
+            step=0,
+            ramp_steps=1,
+        )
+        self.assertTrue(command.arm_tracking_enabled)
+        self.assertEqual(command.arm_joint_target, target)
+
+        scenario_values = namespace["scenarios"]()
+        self.assertIn("narrow_policy", {value.target_domain for value in scenario_values})
+        self.assertIn(
+            "absolute_direct_overlay",
+            {value.target_domain for value in scenario_values},
+        )
+        self.assertEqual(
+            namespace["MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION"],
+            MICROBAN_DIRECT_ARM_TARGET_CONTRACT_REVISION,
+        )
+
     def test_mapper_forces_controller_source_and_exact_zero_feet(self) -> None:
         class Mapper:
             def map_sample(self, frame):
@@ -172,6 +340,8 @@ class ControllerOnlyPreviewTests(unittest.TestCase):
                 ).tolist()
                 return {
                     "locomotion_policy": "pico_teleop",
+                    "arm_tracking_enabled": True,
+                    "arm_joint_target": joints,
                     "body_target_calibrated": True,
                     "body_target_fresh": True,
                     "hand_target": {
@@ -208,11 +378,11 @@ class ControllerOnlyPreviewTests(unittest.TestCase):
             {"left": [0.0, 0.0, 0.0], "right": [0.0, 0.0, 0.0]},
         )
         self.assertEqual(
-            result["controller_arm_joint_target"],
+            result["arm_joint_target"],
             result["twist2_body_target_preview"]["commanded_ik_q_rad"],
         )
 
-    def test_direct_overlay_replaces_only_six_arm_actions_and_homes_on_release(
+    def test_direct_overlay_tracks_stationary_and_walking_then_homes_on_release(
         self,
     ) -> None:
         policy = object.__new__(LivePicoSimulationPolicy)
@@ -228,42 +398,62 @@ class ControllerOnlyPreviewTests(unittest.TestCase):
             "right": torch.tensor([4, 7, 10]),
         }
         limits = torch.empty((1, 21, 2))
-        limits[..., 0] = -2.0
-        limits[..., 1] = 2.0
+        limits[..., 0] = -3.0
+        limits[..., 1] = 3.0
         policy.robot = SimpleNamespace(
             data=SimpleNamespace(soft_joint_pos_limits=limits)
         )
         base = torch.arange(18, dtype=torch.float32).unsqueeze(0) / 100.0
         desired = (
-            MICROBAN_ARM_JOINT_UPPER_RAD[0],
-            MICROBAN_ARM_JOINT_UPPER_RAD[1],
+            MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD[0],
+            MICROBAN_DIRECT_ARM_JOINT_UPPER_RAD[1],
         )
-        active = SimulationCommand(
+        arm_columns = {1, 2, 4, 5, 7, 8}
+        for locomotion_enabled in (False, True):
+            with self.subTest(locomotion_enabled=locomotion_enabled):
+                active = SimulationCommand(
+                    enabled=locomotion_enabled,
+                    twist=(0.1, 0.0, 0.0) if locomotion_enabled else (0.0, 0.0, 0.0),
+                    foot_target=((0.0, 0.0, 0.0),) * 2,
+                    hand_target=((0.0, 0.0, 0.0),) * 2,
+                    hand_active=(True, True),
+                    head_orientation=(0.0, 0.0, 0.0),
+                    head_yaw_front=False,
+                    locomotion_policy="pico_teleop",
+                    arm_tracking_enabled=True,
+                    arm_joint_target=desired,
+                )
+                overlaid = policy._apply_controller_arm_overlay(base, active)
+                for column in range(18):
+                    if column not in arm_columns:
+                        self.assertEqual(overlaid[0, column], base[0, column])
+                self.assertTrue(
+                    torch.allclose(
+                        overlaid[0, policy.arm_action_indices["left"]],
+                        torch.tensor(desired[0]),
+                    )
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        overlaid[0, policy.arm_action_indices["right"]],
+                        torch.tensor(desired[1]),
+                    )
+                )
+
+        released_while_walking = SimulationCommand(
             enabled=True,
             twist=(0.1, 0.0, 0.0),
             foot_target=((0.0, 0.0, 0.0),) * 2,
             hand_target=((0.0, 0.0, 0.0),) * 2,
-            hand_active=(True, True),
+            hand_active=(False, False),
             head_orientation=(0.0, 0.0, 0.0),
             head_yaw_front=False,
             locomotion_policy="pico_teleop",
+            arm_tracking_enabled=False,
+            # A stale value must never override the explicit right-trigger release.
             arm_joint_target=desired,
         )
-        overlaid = policy._apply_controller_arm_overlay(base, active)
-        arm_columns = {1, 2, 4, 5, 7, 8}
-        for column in range(18):
-            if column not in arm_columns:
-                self.assertEqual(overlaid[0, column], base[0, column])
-        self.assertTrue(
-            torch.allclose(overlaid[0, policy.arm_action_indices["left"]], torch.tensor(desired[0]))
-        )
-        self.assertTrue(
-            torch.allclose(overlaid[0, policy.arm_action_indices["right"]], torch.tensor(desired[1]))
-        )
-
-        released = policy._apply_controller_arm_overlay(
-            base, neutral_simulation_command()
-        )
+        released = policy._apply_controller_arm_overlay(base, released_while_walking)
         self.assertTrue(
             torch.allclose(
                 released[0, policy.arm_action_indices["left"]],
@@ -408,6 +598,340 @@ class ControllerOnlyPreviewTests(unittest.TestCase):
                 self.assertEqual(command.enabled, enabled)
 
 
+class ArmTrackingContinuityTests(unittest.TestCase):
+    class _Source:
+        def __init__(self, values: list[object]) -> None:
+            self.values = iter(values)
+            self.now_ns = 0
+
+        def read(self) -> SimpleNamespace:
+            value = next(self.values)
+            if isinstance(value, Exception):
+                raise value
+            assert isinstance(value, SimpleNamespace)
+            self.now_ns = value.sampled_at_ns
+            return value
+
+    class _Mapper:
+        def __init__(self, values: list[dict[str, object]]) -> None:
+            self.values = iter(values)
+            self.reset_count = 0
+
+        def map_sample(self, _frame: object) -> dict[str, object]:
+            return next(self.values)
+
+        def reset(self) -> None:
+            self.reset_count += 1
+
+    @staticmethod
+    def _frame(
+        sampled_at_ns: int,
+        *,
+        left_trigger: float | None,
+        right_trigger: float | None,
+        valid: bool = True,
+        fresh: bool = True,
+        error: str | None = None,
+    ) -> SimpleNamespace:
+        def controller(trigger: float | None) -> SimpleNamespace | None:
+            return None if trigger is None else SimpleNamespace(trigger=trigger)
+
+        return SimpleNamespace(
+            sampled_at_ns=sampled_at_ns,
+            left_controller=controller(left_trigger),
+            right_controller=controller(right_trigger),
+            controller_health=SimpleNamespace(
+                valid=valid,
+                fresh=fresh,
+                error=error,
+            ),
+        )
+
+    @staticmethod
+    def _policy(
+        source: _Source, mapper: _Mapper
+    ) -> LivePicoSimulationPolicy:
+        policy = object.__new__(LivePicoSimulationPolicy)
+        policy.source = source
+        policy.mapper = mapper
+        policy.legacy_fallback_mapper = None
+        policy.clock_ns = lambda: source.now_ns
+        policy._previous_sampled_at_ns = None
+        policy._pending_authority_token = None
+        policy._pending_legacy_command = None
+        policy._legacy_fallback_latched = False
+        policy._legacy_fallback_reason = None
+        policy.legacy_only = False
+        policy.controller_only_preview = True
+        policy.controller_arm_overlay = True
+        return policy
+
+    def test_brief_invalid_tracking_holds_then_recovers_without_repress(self) -> None:
+        first_target = _arm_joint_target(0.25)
+        recovered_target = _arm_joint_target(0.5)
+        invalid = _controller_arm_mapper_command(
+            walking=False,
+            arm_tracking_enabled=False,
+        )
+        source = self._Source(
+            [
+                self._frame(
+                    1_000_000_000,
+                    left_trigger=1.0,
+                    right_trigger=1.0,
+                ),
+                self._frame(
+                    1_020_000_000,
+                    left_trigger=None,
+                    right_trigger=None,
+                    valid=False,
+                    fresh=False,
+                    error="synthetic transient pose loss",
+                ),
+                self._frame(
+                    1_040_000_000,
+                    left_trigger=1.0,
+                    right_trigger=1.0,
+                ),
+            ]
+        )
+        mapper = self._Mapper(
+            [
+                _controller_arm_mapper_command(
+                    walking=True,
+                    arm_tracking_enabled=True,
+                    arm_joint_target=first_target,
+                ),
+                invalid,
+                _controller_arm_mapper_command(
+                    walking=True,
+                    arm_tracking_enabled=True,
+                    arm_joint_target=recovered_target,
+                ),
+            ]
+        )
+        policy = self._policy(source, mapper)
+
+        active = policy._read_command()
+        self.assertTrue(active.enabled)
+        self.assertTrue(active.arm_tracking_enabled)
+        self.assertEqual(active.arm_joint_target, first_target)
+
+        held = policy._read_command()
+        self.assertFalse(held.enabled)
+        self.assertEqual(held.twist, (0.0, 0.0, 0.0))
+        self.assertTrue(held.arm_tracking_enabled)
+        self.assertEqual(held.arm_joint_target, first_target)
+        self.assertEqual(held.hand_target, active.hand_target)
+        self.assertFalse(policy._legacy_fallback_latched)
+
+        recovered = policy._read_command()
+        self.assertTrue(recovered.enabled)
+        self.assertTrue(recovered.arm_tracking_enabled)
+        self.assertEqual(recovered.arm_joint_target, recovered_target)
+        self.assertNotEqual(recovered.arm_joint_target, first_target)
+        self.assertEqual(mapper.reset_count, 0)
+
+    def test_controller_preview_reports_absolute_pico_hands_in_hmd_frame(self) -> None:
+        desired = _arm_joint_target(0.25)
+        mapped = _controller_arm_mapper_command(
+            walking=False,
+            arm_tracking_enabled=True,
+            arm_joint_target=desired,
+        )
+        preview = mapped["twist2_body_target_preview"]
+        assert isinstance(preview, dict)
+        preview.update(
+            {
+                "absolute_arm_target_source": "current_hmd_to_controller_absolute",
+                "absolute_arm_rejection_reason": None,
+                "controller_hand_hmd_m": {
+                    "left": [0.1, -0.2, 0.3],
+                    "right": [-0.4, 0.5, -0.6],
+                },
+            }
+        )
+        source = self._Source(
+            [
+                self._frame(
+                    1_000_000_000,
+                    left_trigger=0.0,
+                    right_trigger=1.0,
+                )
+            ]
+        )
+        policy = self._policy(source, self._Mapper([mapped]))
+
+        policy._read_command()
+
+        assert policy._last_controller_hand_hmd_m is not None
+        for actual, expected in zip(
+            policy._last_controller_hand_hmd_m,
+            ((0.1, -0.2, 0.3), (-0.4, 0.5, -0.6)),
+            strict=True,
+        ):
+            self.assertSequenceEqual(
+                tuple(round(value, 12) for value in actual), expected
+            )
+
+    def test_valid_right_release_homes_arms_without_stopping_locomotion(self) -> None:
+        desired = _arm_joint_target(0.5)
+        source = self._Source(
+            [
+                self._frame(
+                    1_000_000_000,
+                    left_trigger=1.0,
+                    right_trigger=1.0,
+                ),
+                self._frame(
+                    1_020_000_000,
+                    left_trigger=1.0,
+                    right_trigger=0.0,
+                ),
+                self._frame(
+                    1_040_000_000,
+                    left_trigger=None,
+                    right_trigger=None,
+                    valid=False,
+                    fresh=False,
+                ),
+            ]
+        )
+        mapper = self._Mapper(
+            [
+                _controller_arm_mapper_command(
+                    walking=True,
+                    arm_tracking_enabled=True,
+                    arm_joint_target=desired,
+                ),
+                _controller_arm_mapper_command(
+                    walking=True,
+                    arm_tracking_enabled=False,
+                ),
+                _controller_arm_mapper_command(
+                    walking=False,
+                    arm_tracking_enabled=False,
+                ),
+            ]
+        )
+        policy = self._policy(source, mapper)
+
+        self.assertTrue(policy._read_command().arm_tracking_enabled)
+        released = policy._read_command()
+        self.assertTrue(released.enabled)
+        self.assertEqual(released.twist, (0.35, 0.0, 0.0))
+        self.assertFalse(released.arm_tracking_enabled)
+        self.assertIsNone(released.arm_joint_target)
+
+        invalid_after_release = policy._read_command()
+        self.assertFalse(invalid_after_release.arm_tracking_enabled)
+        self.assertIsNone(invalid_after_release.arm_joint_target)
+
+    def test_invalid_tracking_hold_expires_at_the_bounded_deadline(self) -> None:
+        desired = _arm_joint_target(0.5)
+        start_ns = 1_000_000_000
+        step_ns = 20_000_000
+        hold_ns = int(ARM_TRACKING_HOLD_MAX_S * 1.0e9)
+        offsets = list(range(step_ns, hold_ns + 1, step_ns))
+        offsets.append(offsets[-1] + step_ns)
+        invalid_frames = [
+            self._frame(
+                start_ns + offset,
+                left_trigger=None,
+                right_trigger=None,
+                valid=False,
+                fresh=False,
+            )
+            for offset in offsets
+        ]
+        invalid_mapping = _controller_arm_mapper_command(
+            walking=False,
+            arm_tracking_enabled=False,
+        )
+        source = self._Source(
+            [
+                self._frame(
+                    start_ns,
+                    left_trigger=0.0,
+                    right_trigger=1.0,
+                ),
+                *invalid_frames,
+            ]
+        )
+        mapper = self._Mapper(
+            [
+                _controller_arm_mapper_command(
+                    walking=False,
+                    arm_tracking_enabled=True,
+                    arm_joint_target=desired,
+                ),
+                *[invalid_mapping for _offset in offsets],
+            ]
+        )
+        policy = self._policy(source, mapper)
+
+        self.assertTrue(policy._read_command().arm_tracking_enabled)
+        for _offset in offsets[:-1]:
+            held = policy._read_command()
+            self.assertTrue(held.arm_tracking_enabled)
+            self.assertEqual(held.arm_joint_target, desired)
+
+        expired = policy._read_command()
+        self.assertFalse(expired.arm_tracking_enabled)
+        self.assertIsNone(expired.arm_joint_target)
+
+    def test_transport_disconnect_clears_held_arm_target(self) -> None:
+        desired = _arm_joint_target(0.5)
+        source = self._Source(
+            [
+                self._frame(
+                    1_000_000_000,
+                    left_trigger=0.0,
+                    right_trigger=1.0,
+                ),
+                RuntimeError("synthetic transport disconnect"),
+                self._frame(
+                    1_020_000_000,
+                    left_trigger=None,
+                    right_trigger=None,
+                    valid=False,
+                    fresh=False,
+                    error="disconnected",
+                ),
+            ]
+        )
+        mapper = self._Mapper(
+            [
+                _controller_arm_mapper_command(
+                    walking=False,
+                    arm_tracking_enabled=True,
+                    arm_joint_target=desired,
+                ),
+                _controller_arm_mapper_command(
+                    walking=False,
+                    arm_tracking_enabled=False,
+                ),
+            ]
+        )
+        policy = self._policy(source, mapper)
+
+        stationary = policy._read_command()
+        self.assertFalse(stationary.enabled)
+        self.assertTrue(stationary.arm_tracking_enabled)
+        self.assertEqual(stationary.arm_joint_target, desired)
+
+        disconnected = policy._read_command()
+        self.assertFalse(disconnected.enabled)
+        self.assertFalse(disconnected.arm_tracking_enabled)
+        self.assertIsNone(disconnected.arm_joint_target)
+        self.assertIn("source read failed", disconnected.fault or "")
+        self.assertEqual(mapper.reset_count, 1)
+
+        still_invalid = policy._read_command()
+        self.assertFalse(still_invalid.arm_tracking_enabled)
+        self.assertIsNone(still_invalid.arm_joint_target)
+
+
 class HmdSolverTests(unittest.TestCase):
     def test_identity_trunk_recovers_zxy_hmd_request(self) -> None:
         target = solve_hmd_neck_target(
@@ -534,7 +1058,10 @@ class WatchdogTests(unittest.TestCase):
                     ),
                     axis=(0.0, 1.0),
                     trigger=trigger,
+                    grip=0.0,
+                    axis_click=False,
                     primary_button=False,
+                    secondary_button=False,
                 ),
                 right_controller=SimpleNamespace(
                     pose=SimpleNamespace(
@@ -543,6 +1070,10 @@ class WatchdogTests(unittest.TestCase):
                     ),
                     axis=(0.5, 0.0),
                     trigger=0.0,
+                    grip=0.0,
+                    axis_click=False,
+                    primary_button=False,
+                    secondary_button=False,
                 ),
                 controller_health=controller_health,
                 body_health=stale_body_health,
@@ -966,6 +1497,13 @@ class CliSafetyTests(unittest.TestCase):
         )
         cfg = SimpleNamespace(
             scene=SimpleNamespace(num_envs=99),
+            viewer=SimpleNamespace(
+                body_name=None,
+                distance=3.0,
+                fovy=60.0,
+                elevation=-15.0,
+                azimuth=90.0,
+            ),
             auto_reset=False,
             observations={"actor": SimpleNamespace(enable_corruption=True)},
             curriculum={"difficulty": object()},
@@ -981,6 +1519,11 @@ class CliSafetyTests(unittest.TestCase):
         self.assertNotIn("time_out", cfg.terminations)
         self.assertEqual(set(cfg.events), {"reset_base"})
         self.assertEqual(cfg.scene.num_envs, 1)
+        self.assertEqual(cfg.viewer.body_name, "trunk")
+        self.assertEqual(cfg.viewer.distance, 0.8)
+        self.assertEqual(cfg.viewer.fovy, 45.0)
+        self.assertEqual(cfg.viewer.elevation, -12.0)
+        self.assertEqual(cfg.viewer.azimuth, 135.0)
 
     def test_cli_has_no_robot_destination_or_send_switch(self) -> None:
         parser = build_parser()
@@ -1276,6 +1819,14 @@ class CliSafetyTests(unittest.TestCase):
             "left": torch.tensor([0, 1, 2]),
             "right": torch.tensor([3, 4, 5]),
         }
+        policy._last_controller_hand_hmd_m = (
+            (0.1, -0.2, 0.3),
+            (-0.4, 0.5, -0.6),
+        )
+        policy._last_absolute_arm_target_source = (
+            "current_hmd_to_controller_absolute"
+        )
+        policy._last_absolute_arm_rejection = None
         command = SimulationCommand(
             enabled=True,
             twist=(0.0, 0.0, 0.0),
@@ -1294,6 +1845,18 @@ class CliSafetyTests(unittest.TestCase):
         self.assertIn("hand_active=LTrue/RFalse", status)
         self.assertIn(
             "arm_delta_deg=L(10.0, -20.0, 30.0)/R(-5.0, 0.0, 5.0)",
+            status,
+        )
+        self.assertIn(
+            "controller_hmd_abs_m=L(0.1, -0.2, 0.3)/R(-0.4, 0.5, -0.6)",
+            status,
+        )
+        self.assertIn(
+            "arm_target_abs_deg=L(0.0, 10.0, -20.0)/R(0.0, -10.0, -20.0)",
+            status,
+        )
+        self.assertIn(
+            "arm_actual_abs_deg=L(10.0, -20.0, 30.0)/R(-5.0, 0.0, 5.0)",
             status,
         )
         self.assertIn("hand_actual_m=unavailable", status)

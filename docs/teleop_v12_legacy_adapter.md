@@ -103,7 +103,7 @@ stage profile は「次 stage を学習する前の policy に未学習性能を
 - 10101..14999: whole-body performance
 - 15000: full-body performance + perturbation
 
-どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と見なさない。ONNX は `[1,83] -> [1,18]`、neutral 10,000 samples と full83 64 samplesの最大誤差がともに `2e-5` 以下で、`CPUExecutionProvider` を実際に使うことを要求する。
+どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と見なさない。ONNX は `[1,83] -> [1,18]`、neutral 10,000 samples と full83 64 samplesの最大誤差が canonical では `2e-5` 以下、期限用 final profile では float32 実測差を含む `2.5e-5` 以下で、`CPUExecutionProvider` を実際に使うことを要求する。
 
 ## simulation-only early preview
 

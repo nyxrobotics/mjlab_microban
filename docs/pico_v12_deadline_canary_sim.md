@@ -43,12 +43,33 @@ scripts/run_pico_v12_deadline_canary_sim.sh \
 The wrapper reuses the isolated simulation pairing on TCP 63903 and camera port
 8081. It never selects the generic `--checkpoint` option.
 
-Before holding the left trigger, pair and calibrate all three PICO Motion
-Trackers (waist, left ankle, right ankle) in Body Tracking mode. Confirm the PICO
-client reports `BODY READY`, `trackers 3/3`, and `joints 24/24`. Release the left
-trigger while standing still for at least 0.5 seconds so the mapper can acquire
-a coherent neutral pose, then hold it to command the simulated robot. Release
-the trigger to return to the initial pose.
+If an earlier preview has been stopped, relaunch it with the same command above;
+the control change requires no new launcher flag. No trigger state survives a
+stopped process or reconnect.
+
+Before the trial, pair and calibrate all three PICO Motion Trackers (waist, left
+ankle, right ankle) in Body Tracking mode. Confirm the PICO client reports
+`BODY READY`, `trackers 3/3`, and `joints 24/24`. Stand still with both triggers
+released for at least 0.5 seconds so the body and controller origins are
+coherent, then check the controls in this order:
+
+1. Hold the right trigger with the left trigger released. The six arm joints
+   track the controllers while the locomotion command remains exact zero.
+2. Keep the right trigger held and hold the left trigger. The locomotion/full-
+   body policy and arm tracking run together.
+3. Release only the right trigger. Both arms return to the exact PICO HOME joint
+   pose immediately; left-trigger locomotion may continue.
+4. Release the left trigger to neutralize locomotion/full-body policy control.
+   Both triggers are momentary hold controls, never toggles. Hold the right grip
+   separately when neck yaw should face the simulated body's front.
+
+During a momentary invalid controller sample lasting at most 500 ms, locomotion
+is neutralized and the arms hold their last validated joint target. A valid
+sample resumes held right-trigger tracking without a release/re-press cycle.
+Transport disconnect, authority loss, or expiry beyond 500 ms clears the held
+target and sends both arms to exact PICO HOME. After reconnect, establish a
+fresh released neutral frame before arming again. The fuller preview procedure
+and failure semantics are in [the v12 live preview guide](pico_v12_live_preview.md).
 
 ## Re-run the CPU-only guard tests
 
