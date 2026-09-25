@@ -81,9 +81,9 @@ check, hand P95 over 50 mm, missing foot causal response, or an ONNX/locomotion
 failure is rejected.
 
 The accepted post-canary receipt is pinned to SHA-256
-`e2ae7b6a59f1f5e641b98d316a8ada2b8d56d82aa6154db2e070771d117d2dad`;
+`f7fcf511ba75f326cd94a2fc21a05360fa9f7925849fc2bce91709fd8678f27b`;
 the corresponding schema-v2 gate SHA-256 is
-`dabc4e70df395ed8bc14fef223c71111a490376c1694309c482efb39e0b3b7fa`.
+`24caf0d3eb70d1bc816efe5396027ef9ed62d310f7a73d9fb3c9ed173e04f871`.
 Simulation consumers must authenticate the receipt bytes against that fixed
 hash before accepting its structural evidence.
 

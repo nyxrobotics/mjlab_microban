@@ -11,7 +11,7 @@ older generic `--checkpoint` route.
   `86a81f45f34d91036ab138963c835a3e78db98224f523d3484e1d3ed335082ff`;
 - checkpoint iteration: `model_10099.pt` (10,100 completed updates);
 - post-canary PASS receipt SHA-256:
-  `e2ae7b6a59f1f5e641b98d316a8ada2b8d56d82aa6154db2e070771d117d2dad`;
+  `f7fcf511ba75f326cd94a2fc21a05360fa9f7925849fc2bce91709fd8678f27b`;
 - actor-only inference from immutable checkpoint bytes.
 
 The receipt keeps the standard locomotion, fall, finite-value, dynamic

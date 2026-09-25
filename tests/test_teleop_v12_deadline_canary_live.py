@@ -311,7 +311,7 @@ class DeadlineCanaryReadOnlyRunnerTest(unittest.TestCase):
         self.assertIn("EXPECTED_CHECKPOINT_SHA256", text)
         self.assertIn("EXPECTED_RECEIPT_SHA256", text)
         self.assertIn(
-            "e2ae7b6a59f1f5e641b98d316a8ada2b8d56d82aa6154db2e070771d117d2dad",
+            "f7fcf511ba75f326cd94a2fc21a05360fa9f7925849fc2bce91709fd8678f27b",
             text,
         )
         self.assertIn("--v12-deadline-canary-checkpoint", text)
