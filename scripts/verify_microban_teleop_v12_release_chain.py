@@ -509,6 +509,21 @@ def _run_pinned_validators(
                         migration_command.extend(
                             (option, str(worktree / _repo_path(migration[field])[0]))
                         )
+                    for option, value in (
+                        ("--stage-7100", manifest["stages"][3]["checkpoint"]),
+                        ("--selected-10000", manifest["stages"][4]["checkpoint"]),
+                        (
+                            "--raw-agent-params",
+                            migration["raw_run_context"]["agent_params"],
+                        ),
+                        (
+                            "--replay-agent-params",
+                            migration["replay_run_context"]["agent_params"],
+                        ),
+                    ):
+                        migration_command.extend(
+                            (option, str(worktree / _repo_path(value)[0]))
+                        )
                     subprocess.run(
                         migration_command,
                         cwd=worktree,

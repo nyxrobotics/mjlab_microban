@@ -57,7 +57,11 @@ tracking admission before validating the 10,000-update endpoint. Thus the
 contains a migration marker. The raw and migrated replay runs' exact agent,
 environment and Git-diff files are hash-bound as well; in particular they
 record the `model_7099.pt -> model_9200.pt` 2,900-update run and the migrated
-`model_9200.pt -> model_9999.pt` 799-update replay.
+`model_9200.pt -> model_9999.pt` 799-update replay. The verifier parses their
+resume target, seed, iteration count and save policy, then checks the archived
+7,100→9,201→9,901→10,000 checkpoints pairwise: simulation and optimizer clocks,
+the exact active actor-column set, frozen actor tensors, zero foot columns and
+Adam moments, optimizer inventory, and unchanged bilateral migration marker.
 
 For the complete audit, omit `--paths-only`. The verifier creates disposable
 detached worktrees and reruns each gate with the evaluator commit recorded in

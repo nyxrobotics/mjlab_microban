@@ -15,6 +15,7 @@ dependencies = [
   "placo>=0.9.20",
   "better-actuator-models",
   "pillow>=11.0",
+  "onnxruntime>=1.26.0",
 ]
 
 [project.entry-points."mjlab.tasks"]
