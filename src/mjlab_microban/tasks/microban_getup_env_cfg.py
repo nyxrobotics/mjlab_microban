@@ -62,6 +62,7 @@ from mjlab_microban.tasks.mdp import (
     on_feet_reward,
     standing_torque_penalty,
     home_stillness_reward,
+    target_rate_l2,
     extreme_joint_velocity,
     reset_near_home_fraction,
     hands_released_reward,
@@ -242,7 +243,21 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["angular_momentum"].weight = -0.01
 
-    cfg.rewards["action_rate_l2"].weight = -0.02  # lighter than walking: getting up needs large motions
+    # Replaces mjlab's built-in action_rate_l2 (which penalizes
+    # env.action_manager.action/prev_action — the RAW, pre-clip network output,
+    # not what the robot is actually commanded to do; see target_rate_l2's own
+    # docstring) with a version reading asset.data.joint_pos_target instead, the
+    # same genuinely-clipped/physical field home_stillness_reward already uses.
+    # Weight recalibrated for the new (much smaller, bounded) scale: raw
+    # sum-of-squares here is roughly 18 joints x (a fast ~0.75rad/step change)^2
+    # =~ 10, versus the old raw-action version's measured 300+, so -0.02 there
+    # would be far too weak here — scaled up roughly proportionally, untested at
+    # this exact value yet.
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(
+        func=target_rate_l2,
+        weight=-0.3,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
+    )
 
     # Head height instead of trunk height: trunk-height-alone can't tell "right-side
     # up" from "upside down" (both have the trunk high), and once head height is also
@@ -292,7 +307,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # (now against the correct, un-lowered target) is doing that job on its own.
     cfg.rewards["head_height"] = RewardTermCfg(
         func=head_height_reward,
-        weight=36.0,
+        weight=144.0,  # 36.0 -> 144.0 (4x), alongside head_height_sq's own 4x below
         params={
             "target_height": HEAD_STANDING_HEIGHT,
             "asset_cfg": HEAD_ASSET_CFG,
@@ -323,7 +338,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # folding into it via a shared blend ratio.
     cfg.rewards["head_height_sq"] = RewardTermCfg(
         func=head_height_reward,
-        weight=20.0,
+        weight=80.0,  # 20.0 -> 80.0 (4x), per explicit request: just get up and reach home posture
         params={
             "target_height": HEAD_STANDING_HEIGHT,
             "asset_cfg": HEAD_ASSET_CFG,
@@ -519,7 +534,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     HOME_POSE_STD = {r".*": 0.6}
     cfg.rewards["standing_pose"] = RewardTermCfg(
         func=home_pose_reward,
-        # 240.0 is the FINAL weight, ramped up by pose_curriculum below (see that
+        # 480.0 is the FINAL weight, ramped up by pose_curriculum below (see that
         # curriculum term's own comment) — starts at 6.0 here. Measured directly
         # (a from-scratch run with every weight already at its final value):
         # standing_bonus/standing_pose plateau within the first ~5000 iterations
@@ -546,42 +561,33 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Dedicated hip pose-matching term, SEPARATE from standing_pose above (same
-    # home_pose_reward class, reused, scoped to just the 6 hip joints via
-    # asset_cfg: left/right x hip_yaw/hip_roll/hip_pitch — widened from just
-    # hip_roll/hip_pitch (4 joints) after a live rollout showed the hips as
-    # specifically where deviation still concentrates, hip_yaw included, not just
-    # roll/pitch. Tried folding a tighter std for these joints INTO standing_pose's
-    # shared std dict first and measured it backfire: standing_pose computes ONE
-    # exp(-mean(error^2/std^2)) over all 18 joints, so a single joint with a huge
-    # error (left_hip_pitch was ~98deg off) against a tight std dominates that mean
-    # enough to crush the WHOLE term toward zero — including the gradient for the
-    # OTHER joints that were already converging nicely. A separate term has its
-    # own independent exp(), so a tight std here only affects the hip joints' own
-    # reward/gradient, leaving standing_pose's (still at the looser uniform 0.6)
-    # alone.
-    cfg.rewards["hip_pose"] = RewardTermCfg(
+    # hip_pose (a dedicated per-hip-joint pull toward each hip's OWN default,
+    # separate from standing_pose) removed: was replaced by limb_symmetry, which
+    # in turn (along with foot_flat) has now ALSO been removed — a live rollout
+    # with both active (plus standing_pose at a doubled 480.0 weight) was still
+    # nowhere near home and moving too erratically. Simplifying back down to
+    # just standing_pose (whole-body, per-joint pull toward home) plus a much
+    # stronger head_height/head_height_sq (see those terms' own comments, just
+    # quadrupled) per explicit request: the core ask is just "get up and reach
+    # home", not also symmetric limbs or flat feet on top of that.
+
+    # Dedicated hip_roll-only pose-matching term, separate from standing_pose
+    # above, per explicit request — uses home_pose_reward same as
+    # standing_pose does, but scoped to just hip_roll (left+right), and reads
+    # MEASURED joint_pos (home_pose_reward's own default), not
+    # asset.data.joint_pos_target the way home_stillness_reward/
+    # limb_symmetry_reward did — explicitly requested as measurement-based this
+    # time, unlike those.
+    cfg.rewards["hip_roll_pose"] = RewardTermCfg(
         func=home_pose_reward,
-        # 240.0 is the FINAL weight (equal to standing_pose's — a live rollout
-        # showed the hips still the dominant source of remaining deviation even
-        # after a weight increase broke the original ~11-12/~7.5-8 plateau, so
-        # hip_pose gets matched up to standing_pose's own weight rather than
-        # staying at some fraction of it), ramped by pose_curriculum below
-        # alongside standing_pose — see that curriculum term's own comment for
-        # the full weight-escalation history and why this starts low.
-        weight=6.0,
+        # 240.0 -> 480.0: doubled per explicit request to push hip_roll toward
+        # home harder, matching standing_pose's own current weight.
+        weight=480.0,
         params={
             "height_threshold": 0.8 * HEAD_STANDING_HEIGHT,
-            # 0.6, NOT tighter: left_hip_pitch's current error (~98deg/1.7rad) means
-            # even std=0.3 numerically vanishes (exp(-(1.7/0.3)^2) underflows to
-            # ~0) — same lesson as standing_pose's own std history, just re-applied
-            # here. Start loose enough for real gradient at today's error, tighten
-            # once it's actually shrunk.
             "std": {r".*": 0.6},
             "head_asset_cfg": HEAD_ASSET_CFG,
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(r".*hip_yaw.*", r".*hip_roll.*", r".*hip_pitch.*")
-            ),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll.*",)),
         },
     )
 
@@ -768,59 +774,53 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             "stages": [
                 {
-                    # standing_pose/hip_pose start at 1/5th their final weight
-                    # (see those reward terms' own comments) so full-strength
-                    # pose-matching pressure doesn't compete with just learning to
-                    # reliably stand at all in the first place. standing_bonus
+                    # standing_pose starts at a fraction of its final weight
+                    # (see that reward term's own comment) so full-strength
+                    # pose-matching pressure doesn't compete with just learning
+                    # to reliably stand at all in the first place. standing_bonus
                     # (max 5.0) plateaued at 0.03-0.96 for the full 20000
-                    # iterations of the all-weights-final run — 2.0 is
+                    # iterations of an all-weights-final run — 2.0 is
                     # comfortably past that observed ceiling, so reaching it
                     # actually means "reliably standing", not just noise.
                     "name": "ramp up pose matching",
                     "reward_term_name": "standing_bonus",
                     "threshold": 2.0,
-                    # Weight history, each measured directly before moving on:
-                    # 30.0/15.0 (original target) plateaued hard at
-                    # standing_pose~11-12 / hip_pose~7.5-8.4 for 400+ iterations
-                    # with home_stillness held OFF (isolating this from any
-                    # home_stillness interaction) — a genuine ceiling, not noise.
-                    # 45.0/22.5 (1.5x) broke that, reaching standing_pose~17-18,
-                    # but hip_pose's own scope was ALSO widened around the same
-                    # time (4 hip_roll/hip_pitch joints -> 6, adding hip_yaw — see
-                    # that term's own comment) and measured to only reach ~5 at
-                    # that same 1.5x weight, not keeping pace with standing_pose.
-                    # 60.0/60.0 (2x again) kept climbing (standing_pose~30-33,
-                    # hip_pose~27-32) but still not converged onto home by the
-                    # time the run neared its own iteration budget — doubled to
-                    # 120.0/120.0, then close-but-not-quite on a live rollout at
-                    # that weight too — doubled once more (240.0/240.0) along
-                    # with stage 2's own thresholds below.
-                    "apply": lambda env: (
-                        env.reward_manager.get_term_cfg("standing_pose").__setattr__("weight", 240.0),
-                        env.reward_manager.get_term_cfg("hip_pose").__setattr__("weight", 240.0),
+                    # standing_pose weight history, each measured directly
+                    # before moving on (hip_pose and, later, limb_symmetry/
+                    # foot_flat were ramped alongside it at various points — both
+                    # since removed, see standing_pose's own comment): 30.0
+                    # (original target) plateaued hard at standing_pose~11-12
+                    # for 400+ iterations with home_stillness held OFF (isolating
+                    # this from any home_stillness interaction) — a genuine
+                    # ceiling, not noise. 45.0 (1.5x) broke that, reaching
+                    # ~17-18. 60.0 (2x again) kept climbing (~30-33) but still
+                    # not converged onto home by the time the run neared its own
+                    # iteration budget — doubled to 120.0, then close-but-not-
+                    # quite on a live rollout at that weight too — doubled once
+                    # more (240.0), then once more again (480.0) along with
+                    # stage 2's own threshold below, per explicit request after
+                    # a live rollout with limb_symmetry/foot_flat both also
+                    # active was still nowhere near home and moving too
+                    # erratically.
+                    "apply": lambda env: env.reward_manager.get_term_cfg("standing_pose").__setattr__(
+                        "weight", 480.0
                     ),
                 },
                 {
                     # home_stillness starts at 0.0 (fully off) — holding a
                     # commanded target still near home is a premature ask before
                     # the policy can even reliably MATCH that pose yet.
-                    # Gated on BOTH standing_pose AND hip_pose (not standing_pose
-                    # alone): with hip_pose's weight raised to match standing_pose
-                    # (see that term's own comment — hips were still the dominant
-                    # source of remaining deviation), a live rollout showed
-                    # hip_pose lagging behind standing_pose's own climb; requiring
-                    # both stops home_stillness engaging while hip_pose is still
-                    # well behind. Per-term (not shared) thresholds: hip_pose's
-                    # own scope (6 joints, including the harder-to-converge
-                    # hip_yaw — see that term's comment) measured a meaningfully
-                    # lower achievable ceiling than standing_pose's at the same
-                    # weight, so gating both on one shared number was either too
-                    # easy for standing_pose or unreachable for hip_pose.
                     "name": "enable home stillness",
-                    "reward_term_name": ["standing_pose", "hip_pose"],
-                    "threshold": [120.0, 60.0],
+                    "reward_term_name": "standing_pose",
+                    # Doubled to 240.0 alongside standing_pose's own weight
+                    # doubling (240.0 -> 480.0) to keep gating on roughly the
+                    # same relative "how converged" bar, not a now-trivially-
+                    # already-exceeded absolute number.
+                    "threshold": 240.0,
+                    # 50.0 -> 100.0: doubled per explicit request to push harder
+                    # on reducing velocity/trembling once standing.
                     "apply": lambda env: env.reward_manager.get_term_cfg("home_stillness").__setattr__(
-                        "weight", 50.0
+                        "weight", 100.0
                     ),
                 },
             ],

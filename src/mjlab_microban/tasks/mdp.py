@@ -808,6 +808,48 @@ def standing_torque_penalty(
     return torch.where(is_standing, total + peak, torch.zeros_like(total))
 
 
+class target_rate_l2:
+    """Penalize the commanded joint TARGET (asset.data.joint_pos_target) changing
+    between steps — a drop-in replacement for mjlab's built-in action_rate_l2,
+    which penalizes env.action_manager.action/prev_action instead: those are
+    explicitly the RAW, pre-scale/offset/clip network output (per
+    ActionManager.process_action's own docstring), not what the robot actually
+    ends up commanded to do. Once that raw value saturates past this task's own
+    clip range (measured directly: RMS raw action reaching >100 over an episode,
+    while the actual clipped target stays within +-1.57), action_rate_l2 can
+    penalize a target that ISN'T physically changing at all just because the
+    raw pre-clip number is still swinging — the opposite of what a smoothness
+    penalty is supposed to measure. This reads the same joint_pos_target field
+    home_stillness_reward does, which is bounded by the real clip and reflects
+    what's actually asked of the servo.
+
+    A previous joint_pos_target isn't separately exposed anywhere, so (like
+    home_stillness_reward) this class caches its own (self._prev_target,
+    updated every call) rather than being a plain function.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self._joint_ids = cfg.params["asset_cfg"].joint_ids
+        self._prev_target = asset.data.joint_pos_target[:, self._joint_ids].clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        target = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
+        rate_sq = torch.sum(torch.square(target - self._prev_target), dim=-1)
+        self._prev_target = target.clone()
+        return rate_sq
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused — a stale cross-episode rate spike for one step
+        # right after a reset is a minor, brief inaccuracy, not worth the extra
+        # bookkeeping (matches home_stillness_reward's own reset() reasoning).
+
+
 class home_stillness_reward:
     """Reward the commanded joint TARGET (asset.data.joint_pos_target, not the
     measured joint_pos/joint_vel) holding still near home, but only once actually
@@ -1002,6 +1044,55 @@ class home_pose_reward:
         del env_ids  # Unused.
 
 
+def limb_symmetry_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    std: float,
+    head_asset_cfg: SceneEntityCfg,
+    left_asset_cfg: SceneEntityCfg,
+    right_asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward the left/right limb joint PAIRS' commanded TARGETS (not measured
+    joint_pos) deviating from their own defaults in mirrored lockstep, once
+    standing. Generalizes an earlier hip-only version (left/right hip_roll,
+    hip_pitch) to every paired limb joint (shoulders, elbows, hips, knees,
+    ankles) — replaces hip_pose (a per-joint pull toward each hip's OWN default)
+    with a same-vs-mirror check across every limb pair instead, per request.
+
+    Uses env.action_manager... no: asset.data.joint_pos_target, the same field
+    home_stillness_reward reads (see that function's docstring for why: it's the
+    actual, post-scale/offset/clip position each joint's PD controller is
+    tracking right now — genuinely physical radians, not env.action_manager
+    .action's raw/unbounded pre-clip network output).
+
+    Mirror sign resolved from default_joint_pos itself, per joint pair, not
+    hardcoded: some pairs are mirrored (e.g. hip_roll's left/right defaults are
+    ~+5/-5deg, since the two hips share axis "0 0 1" in their own mirrored body
+    frames) while others are same-signed (e.g. hip_pitch's are both ~-10deg,
+    flexion defined the same way for both legs) — comparing |default_diff|
+    against |default_sum| per pair picks the right relationship automatically
+    for whichever joints left_asset_cfg/right_asset_cfg resolve, without
+    assuming which joint is which.
+    """
+    asset: Entity = env.scene[left_asset_cfg.name]
+    left_target = asset.data.joint_pos_target[:, left_asset_cfg.joint_ids]
+    right_target = asset.data.joint_pos_target[:, right_asset_cfg.joint_ids]
+    left_default = asset.data.default_joint_pos[:, left_asset_cfg.joint_ids]
+    right_default = asset.data.default_joint_pos[:, right_asset_cfg.joint_ids]
+
+    same_sign = (left_default - right_default).abs() < (left_default + right_default).abs()
+    mirror_sign = torch.where(same_sign, torch.ones_like(left_default), -torch.ones_like(left_default))
+
+    left_dev = left_target - left_default
+    right_dev = right_target - right_default
+    error_sq = torch.square(left_dev - mirror_sign * right_dev)
+    reward = torch.exp(-torch.mean(error_sq / std**2, dim=-1))
+
+    height = _head_height(env, head_asset_cfg)
+    is_standing = height > height_threshold
+    return torch.where(is_standing, reward, torch.zeros_like(reward))
+
+
 def foot_flat_reward(
     env: ManagerBasedRlEnv,
     std: float,
@@ -1009,28 +1100,33 @@ def foot_flat_reward(
     head_asset_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """Reward both feet flat/level (sole parallel to the ground) once standing.
+    """Reward both feet flat/level (sole parallel to the ground) once standing —
+    approximated from the commanded ankle_pitch/ankle_roll TARGETS matching their
+    own defaults, not measured body orientation.
 
-    on_feet_reward only checks that the feet are touching, not what angle they're
-    touching at — a foot resting on its edge or toe still counts. Same
-    projected-gravity-error shape as standing_bonus's orientation check, applied per
-    foot (asset_cfg should resolve to both foot bodies) and averaged. Gated on head
-    height, not trunk (see head_height_reward) — during recovery a tilted foot is
-    often unavoidable/necessary, so this only applies once actually up.
+    A true target-based version (forward-kinematics the whole leg chain's
+    commanded targets to get the foot's actual would-be orientation) isn't
+    practical here: training runs the batched GPU simulation, which has no
+    per-step forward-kinematics-from-arbitrary-qpos entry point exposed the way
+    the single-env CPU mujoco.mj_forward calls used elsewhere in this codebase
+    (calibration scripts, the viewer) do. Approximating with just the ankle
+    joints' own targets is only exactly right when the rest of the leg
+    (hip/knee) is ALSO at its default — true at convergence, since
+    standing_pose/limb_symmetry both pull the whole chain there too, but a
+    looser approximation early in training than reading the foot's real
+    orientation would have been.
+
+    asset_cfg should resolve exactly the ankle_pitch/ankle_roll joints (both
+    feet). Gated on head height, not trunk (see head_height_reward) — during
+    recovery a tilted foot is often unavoidable/necessary, so this only applies
+    once actually up.
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
-    body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
-    gravity_w = asset.data.gravity_vec_w.unsqueeze(1).expand(
-        -1, len(asset_cfg.body_ids), -1
-    )
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    projected_gravity_b_unit = projected_gravity_b / gravity_norm
-    flat_error = torch.square(projected_gravity_b_unit[..., 0]) + torch.square(
-        projected_gravity_b_unit[..., 1]
-    )
-    flat_reward = torch.exp(-flat_error / std**2).mean(dim=-1)
+    target = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
+    default = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    error_sq = torch.square(target - default)
+    flat_reward = torch.exp(-torch.mean(error_sq / std**2, dim=-1))
     is_standing = height > height_threshold
     return torch.where(is_standing, flat_reward, torch.zeros_like(flat_reward))
 
