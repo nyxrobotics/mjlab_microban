@@ -209,7 +209,7 @@ class PicoDegradedControlMatrixTests(unittest.TestCase):
         self.assertEqual(command.twist, (0.7, 0.0, 0.0))
         source.close()
 
-    def test_explicit_checkpoint_body_fault_degrades_and_latches(self) -> None:
+    def test_explicit_checkpoint_zero_trackers_uses_controller_policy(self) -> None:
         clock = _ManualClock()
         source = self.source_class(clock_ns=clock)
         mapper = self.mapper_class(deadzone=0.0)
@@ -248,12 +248,12 @@ class PicoDegradedControlMatrixTests(unittest.TestCase):
             capture_ns=2,
             trigger=1.0,
         )
-        degraded = policy._read_command()
-        self.assertTrue(degraded.enabled)
-        self.assertEqual(degraded.locomotion_policy, "walk")
-        self.assertEqual(degraded.twist, (0.7, 0.0, 0.0))
-        self.assertTrue(policy._legacy_fallback_latched)
-        self.assertIn("body policy unavailable", degraded.fault or "")
+        command = policy._read_command()
+        self.assertTrue(command.enabled)
+        self.assertEqual(command.locomotion_policy, "pico_teleop")
+        self.assertEqual(command.twist, (0.7, 0.0, 0.0))
+        self.assertFalse(policy._legacy_fallback_latched)
+        self.assertIsNone(command.fault)
 
         clock.advance_frame()
         self._publish(
@@ -264,8 +264,8 @@ class PicoDegradedControlMatrixTests(unittest.TestCase):
             capture_ns=3,
             trigger=1.0,
         )
-        self.assertEqual(policy._read_command().locomotion_policy, "walk")
-        self.assertTrue(policy._legacy_fallback_latched)
+        self.assertEqual(policy._read_command().locomotion_policy, "pico_teleop")
+        self.assertFalse(policy._legacy_fallback_latched)
 
         clock.advance_frame()
         self._publish(

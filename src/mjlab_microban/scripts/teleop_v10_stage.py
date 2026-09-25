@@ -30,7 +30,6 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_provenance import (
     MICROBAN_TELEOP_CANONICAL_MIGRATION_STAGE_MODE,
-    MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES,
     MICROBAN_TELEOP_CANONICAL_STAGE_MODE,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY,
     MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY,
@@ -48,7 +47,11 @@ from mjlab_microban.tasks.microban_teleop_provenance import (
     validate_v10_migration_source_identity,
 )
 
-V10_STAGE_BOUNDARIES = tuple(MICROBAN_TELEOP_CANONICAL_STAGE_BOUNDARIES)
+# Contract v10 started from the pinned 1,500-update v9 checkpoint and then
+# advanced through these four boundaries.  Do not alias the current contract's
+# boundary tuple: contract v11 added the fresh zero boundary for its own stage
+# planner, which would make this historical planner return 1,500 -> 0.
+V10_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)
 V10_GATE_SCHEMA_VERSION = 3
 V10_CANARY_RECEIPT_SCHEMA_VERSION = 1
 V10_CANARY_UPDATE_INTERVAL = 100

@@ -277,7 +277,7 @@ class SafeVelocityBootstrapLoaderTest(unittest.TestCase):
 
         tampered = deepcopy(info)
         tampered["observation_index_mapping"][0] = [0, 1]  # type: ignore[index]
-        with self.assertRaisesRegex(ValueError, "contract v9"):
+        with self.assertRaisesRegex(ValueError, "current actor-only mapping contract"):
             validate_safe_velocity_actor_bootstrap_info(
                 tampered, verify_source_checkpoint=False
             )
@@ -358,9 +358,9 @@ class SafeVelocityBootstrapLoaderTest(unittest.TestCase):
             validate_safe_velocity_acceptance_receipt(rebound, identity)
 
 
-class TeleopV10ConfigurationTest(unittest.TestCase):
+class TeleopV11ConfigurationTest(unittest.TestCase):
     def test_actor_is_raw_critic_normalized_and_bounds_match_source(self) -> None:
-        self.assertEqual(MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION, "10")
+        self.assertEqual(MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION, "11")
         self.assertFalse(MicrobanTeleopRlCfg.actor.obs_normalization)
         self.assertTrue(MicrobanTeleopRlCfg.critic.obs_normalization)
         self.assertIs(
@@ -396,7 +396,7 @@ class TeleopV10ConfigurationTest(unittest.TestCase):
         self,
     ) -> None:
         env = SimpleNamespace(clip_actions=None, num_actions=18)
-        with self.assertRaisesRegex(ValueError, "no fresh-run path"):
+        with self.assertRaisesRegex(ValueError, "fresh contract-v11 run requires"):
             MicrobanTeleopOnPolicyRunner(env, {})
         with self.assertRaisesRegex(ValueError, "rejects legacy"):
             MicrobanTeleopOnPolicyRunner(
@@ -406,7 +406,7 @@ class TeleopV10ConfigurationTest(unittest.TestCase):
                     "bootstrap_velocity_checkpoint_sha256": "0" * 64,
                 },
             )
-        with self.assertRaisesRegex(ValueError, "cannot bootstrap a fresh actor"):
+        with self.assertRaisesRegex(ValueError, "fresh-run only"):
             MicrobanTeleopOnPolicyRunner(
                 env,
                 {
@@ -419,11 +419,14 @@ class TeleopV10ConfigurationTest(unittest.TestCase):
 
     def test_all_checkpoint_consumers_select_actor_load_only_mode(self) -> None:
         factories = (
-            export_teleop_onnx._construct_checkpoint_consumer_runner,
-            evaluate_teleop_checkpoint._construct_checkpoint_consumer_runner,
-            live_pico_teleop_sim._construct_checkpoint_consumer_runner,
+            (export_teleop_onnx._construct_checkpoint_consumer_runner, {}),
+            (evaluate_teleop_checkpoint._construct_checkpoint_consumer_runner, {}),
+            (
+                live_pico_teleop_sim._construct_checkpoint_consumer_runner,
+                {"runtime_task": live_pico_teleop_sim.TASK},
+            ),
         )
-        for factory in factories:
+        for factory, kwargs in factories:
 
             class _FakeRunner:
                 def __init__(
@@ -436,7 +439,7 @@ class TeleopV10ConfigurationTest(unittest.TestCase):
             module = __import__(factory.__module__, fromlist=["dummy"])
             agent_cfg = deepcopy(MicrobanTeleopRlCfg)
             with patch.object(module, "load_runner_cls", return_value=_FakeRunner):
-                runner = factory("env", agent_cfg, "cpu")
+                runner = factory("env", agent_cfg, "cpu", **kwargs)
             self.assertIsInstance(runner, _FakeRunner)
             config = runner.config
             self.assertIs(config["checkpoint_consumer_mode"], True)
@@ -453,7 +456,7 @@ class TeleopV10ConfigurationTest(unittest.TestCase):
             MicrobanTeleopOnPolicyRunner(
                 env, {"checkpoint_consumer_mode": True, "resume": True}
             )
-        with self.assertRaisesRegex(ValueError, "cannot bootstrap a fresh actor"):
+        with self.assertRaisesRegex(ValueError, "cannot accept fresh safe-velocity"):
             MicrobanTeleopOnPolicyRunner(
                 env,
                 {
