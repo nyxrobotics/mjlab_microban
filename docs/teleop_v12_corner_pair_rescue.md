@@ -16,10 +16,10 @@ foot adapter columns, and their Adam moments remain inactive and exact zero.
 - replay: exactly 99 PPO updates, seed 42, 2048 environments, 24 steps;
 - endpoint: `model_9999.pt`, completed update 10000, optimizer step 200000.
 
-The sampler uses the existing uniform/independent hand sampler for 40% of
-resamples, the currently failing left-forward/right-backward corner for 40%,
-and the already-passing left-backward/right-forward corner for 20%. Both hands
-are active in the two corner branches. The joint tuples and the 40/40/20 mix
+The v2 sampler uses the existing uniform/independent hand sampler for 5% of
+resamples, the currently failing left-forward/right-backward corner for 90%,
+and the already-passing left-backward/right-forward corner for 5%. Both hands
+are active in the two corner branches. The joint tuples and the 5/90/5 mix
 are embedded in every rescue checkpoint marker.
 
 ## Launch
@@ -32,11 +32,12 @@ stage evaluator and resume launcher can find the result:
 scripts/train_microban_teleop_v12_corner_rescue.sh \
   /absolute/path/to/model_9900.pt \
   /absolute/path/to/2026-09-25_23-16-50_v12_lrfix_model_9900_tracking.json \
-  --agent.run-name v12_corner_rescue_9901_to10000
+  /absolute/path/to/v1_model_9999_tracking.json \
+  --agent.run-name v12_corner_rescue_v2_9901_to10000
 ```
 
-Before simulator startup it deep-validates both fixed inputs, including the
-report's exact identity and its sole `hand_tracking_rms` failure. The runner
+Before simulator startup it deep-validates all fixed inputs, including both
+reports' exact identities and sole `hand_tracking_rms` failures. The runner
 then reasserts the source and target clocks, every Adam step, frozen foot
 normalizer values, exact-zero foot W0/Adam columns, and live zero foot command
 tensor/active masks.
@@ -56,7 +57,7 @@ report, schema-v2 gate, all three report hashes, and ONNX artifact:
 
 ```bash
 scripts/evaluate_microban_teleop_v12_corner_rescue.sh \
-  v12_corner_rescue_9901_to10000
+  v12_corner_rescue_v2_9901_to10000
 ```
 
 It exits before ONNX/gate/receipt promotion if strict locomotion or tracking
@@ -65,7 +66,7 @@ fails. On success, the gate is written to the canonical
 
 ```bash
 scripts/train_microban_teleop_v12.sh resume \
-  v12_corner_rescue_9901_to10000 \
+  v12_corner_rescue_v2_9901_to10000 \
   --agent.run-name v12_canonical_10000_to10100
 ```
 

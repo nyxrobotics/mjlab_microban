@@ -1,8 +1,8 @@
 """Hash-pinned corner-pair rescue for the pre-foot contract-v12 boundary.
 
-The ordinary hand sampler remains active for 40% of resamples.  The failing
-LF+RB bilateral extremum is replayed for 40%, while the already-passing LB+RF
-extremum retains 20%.  This is a deliberately separate recipe: it changes command
+The ordinary hand sampler remains active for 5% of resamples.  The failing
+LF+RB bilateral extremum is replayed for 90%, while the already-passing LB+RF
+extremum retains 5%.  This is a deliberately separate recipe: it changes command
 sampling only, while retaining the v12 actor, optimizer, rewards, normalizer,
 action semantics, and frozen legacy tensors.
 """
@@ -48,13 +48,13 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY = (
     "microban_teleop_v12_corner_pair_rescue"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION = (
-    "model9900_targeted_bilateral_corner_pair_replay_to10000_v1"
+    "model9900_targeted_bilateral_corner_pair_replay_to10000_v2"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_MARKER_REVISION = (
-    "pinned_model9900_uniform40_lf_rb40_lb_rf20_99_updates_v1"
+    "pinned_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v2"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_SAMPLER_REVISION = (
-    "uniform_joint_box40pct_lf_rb40pct_lb_rf20pct_v1"
+    "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_v2"
 )
 
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256 = (
@@ -62,6 +62,12 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256 = (
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256 = (
     "399db0cee55c137d3d0226ebcb54b0fa3bb84c95496c5c206af55f2fb25837f4"
+)
+MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256 = (
+    "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
+)
+MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256 = (
+    "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION = 9_900
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMPLETED_UPDATES = 9_901
@@ -80,9 +86,9 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP = (
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_OPTIMIZER_STEP = 198_020
 MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP = 200_000
 
-MICROBAN_TELEOP_V12_LF_RB_PROBABILITY = 0.40
-MICROBAN_TELEOP_V12_LB_RF_PROBABILITY = 0.20
-MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY = 0.40
+MICROBAN_TELEOP_V12_LF_RB_PROBABILITY = 0.90
+MICROBAN_TELEOP_V12_LB_RF_PROBABILITY = 0.05
+MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY = 0.05
 MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS = (
     *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     *TELEOP_V12_HAND_OBSERVATION_COLUMNS,
@@ -266,7 +272,7 @@ class CornerPairHandTargetCommand(ResetFixedHandTargetCommand):
 
 @dataclass(kw_only=True)
 class CornerPairHandTargetCommandCfg(ResetFixedHandTargetCommandCfg):
-    """Pinned uniform/LF+RB/LB+RF = 40/40/20 sampler configuration."""
+    """Pinned uniform/LF+RB/LB+RF = 5/90/5 sampler configuration."""
 
     def build(self, env: Any) -> CornerPairHandTargetCommand:
         return CornerPairHandTargetCommand(self, env)
@@ -284,6 +290,22 @@ def corner_rescue_marker() -> dict[str, Any]:
         "parent_strict_tracking_report_sha256": (
             MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256
         ),
+        "superseded_v1_evidence": {
+            "checkpoint_sha256": (
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256
+            ),
+            "strict_tracking_report_sha256": (
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256
+            ),
+            "sampler_probabilities": {
+                "ordinary_uniform_independent": 0.40,
+                "left_forward_right_backward": 0.40,
+                "left_backward_right_forward": 0.20,
+            },
+            "failed_checks": ["hand_tracking_rms"],
+            "left_forward_right_backward_rms_m": 0.0334825,
+            "left_backward_right_forward_rms_m": 0.0235841,
+        },
         "parent_iteration": MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
         "parent_completed_updates": (
             MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMPLETED_UPDATES

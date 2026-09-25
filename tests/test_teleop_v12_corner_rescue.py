@@ -124,9 +124,9 @@ def _final_infos() -> dict:
 
 
 class TeleopV12CornerRescueTest(unittest.TestCase):
-    def test_sampler_boundaries_are_exact_40_40_20(self) -> None:
+    def test_sampler_boundaries_are_exact_5_90_5(self) -> None:
         selector = torch.tensor(
-            [0.0, 0.399999, 0.4, 0.599999, 0.6, 0.999999],
+            [0.0, 0.899999, 0.9, 0.949999, 0.95, 0.999999],
             dtype=torch.float64,
         )
         self.assertEqual(
@@ -136,9 +136,9 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         self.assertEqual(
             marker["sampler_probabilities"],
             {
-                "ordinary_uniform_independent": 0.4,
-                "left_forward_right_backward": 0.4,
-                "left_backward_right_forward": 0.2,
+                "ordinary_uniform_independent": 0.05,
+                "left_forward_right_backward": 0.9,
+                "left_backward_right_forward": 0.05,
             },
         )
 
@@ -236,10 +236,12 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         ).stdout
         self.assertIn("exactly 99", help_text)
         self.assertIn("PARENT_TRACKING_REPORT", help_text)
+        self.assertIn("SUPERSEDED_V1_TRACKING_REPORT", help_text)
         launcher = LAUNCHER.read_text(encoding="utf-8")
         for fixed in (
             "mjlab_microban_teleop_v12\"",
             "PARENT_TRACKING_SHA=",
+            "SUPERSEDED_V1_TRACKING_SHA=",
             "--env.scene.num-envs 2048",
             "--env.seed 42",
             "--agent.seed 42",
