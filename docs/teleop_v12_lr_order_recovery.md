@@ -79,3 +79,27 @@ CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
 ```
 
 These are simulation measurements, not physical deployment authorization.
+
+## Model 9200 decision record
+
+The deterministic CPU gate (`seed=42`, 300 steps, 50 settling steps) produced:
+
+| candidate/environment | `max_hands_left` RMS / P95 | `max_hands_right` RMS / P95 | hand causal response | safety |
+| --- | ---: | ---: | --- | --- |
+| raw model 9200, old crossed order | 4.12 / 4.88 cm | 5.11 / 6.13 cm | pass | pass |
+| exact swap, corrected order | 4.50 / 5.49 cm | 3.38 / 4.13 cm | pass | pass |
+| zero hand columns, corrected order | 7.10 / 7.80 cm | 7.42 / 8.46 cm | fail | pass |
+
+Here “safety pass” means all scenarios completed with no fall, no non-finite
+state, and no actual soft-limit violation.  The exact swap is the selected
+recovery: it preserves strong command causality and is substantially better
+than discarding the learned hand adapter.  It is not an acceptance pass by
+itself because the strict per-scenario limits remain 3 cm RMS / 5 cm P95.  The
+checkpoint must therefore continue from update 9201 through canonical update
+10000 under the corrected order before the formal gate.
+
+The measured source checkpoint was SHA-256
+`16c9b9d19df6513851b3da26228ae612512fdb2d894542741f0474e4762691c7`.
+The specific swap artifact used for this comparison was SHA-256
+`bcdb1cddf8d7daff012f884e41e3a89e81d54ee3d564526990346533799a26e2`;
+its receipt recorded `iter=9200` and `common_step_counter=220824` unchanged.
