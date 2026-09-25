@@ -67,6 +67,9 @@ from mjlab_microban.tasks.mdp import (
     reset_near_home_fraction,
     hands_released_reward,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import (
+    effective_action_after_target_clip,
+)
 
 STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
 
@@ -211,6 +214,19 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.observations["critic"].terms["joint_pos"] = deepcopy(cfg.observations["actor"].terms["joint_pos"])
     cfg.observations["critic"].terms["joint_vel"] = deepcopy(cfg.observations["actor"].terms["joint_vel"])
+
+    # JointPositionAction stores the policy's unbounded network output as its raw
+    # ``action``/``last_action``, even though the actuator receives the absolute
+    # target only after adding the default-pose offset and applying the clip above.
+    # Feeding that raw value back gave the policy an unbounded hidden recurrence
+    # which the hardware cannot reproduce.  Observe the effective post-clip delta
+    # instead; deployment can reconstruct it from the target with the same
+    # ``(clipped_target - default_pose) / scale`` contract.
+    for group_name in ("actor", "critic"):
+        cfg.observations[group_name].terms["actions"] = ObservationTermCfg(
+            func=effective_action_after_target_clip,
+            params={"action_name": "joint_pos"},
+        )
 
     # foot_contact is NOT added to the actor observation (unlike an earlier version
     # of this config): the real robot has no foot-contact/pressure sensor hardware
