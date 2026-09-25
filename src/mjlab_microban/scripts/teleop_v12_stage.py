@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -64,8 +65,15 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     resolve_bootstrap_artifact_path,
     sha256_file,
 )
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+    assert_corner_rescue_foot_adapter_zero,
+    assert_corner_rescue_optimizer_step,
+    validate_corner_rescue_canonical_lineage,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
@@ -697,15 +705,25 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     infos = payload["infos"]
     validate_bilateral_site_order_checkpoint(infos)
     reject_preview_checkpoint(infos)
-    if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_RECIPE_REVISION
-    ) or infos.get("adapter_gradient_schedule_revision") != (
-        TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
-    ):
-        raise ValueError("Checkpoint is not the safe staged-mask v12 recipe")
     iteration = payload.get("iter")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
         raise ValueError("Stage checkpoint iteration is invalid")
+    corner_rescue = validate_corner_rescue_canonical_lineage(
+        infos, iteration=iteration
+    )
+    if infos.get("adapter_gradient_schedule_revision") != (
+        TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+    ):
+        raise ValueError("Checkpoint is not the safe staged-mask v12 recipe")
+    if infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+    ):
+        assert corner_rescue is not None
+        assert_corner_rescue_foot_adapter_zero(payload)
+        assert_corner_rescue_optimizer_step(
+            payload,
+            expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+        )
     completed = iteration + 1
     env_state = payload["infos"].get("env_state")
     if (
@@ -793,7 +811,7 @@ def create_gate(
     onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     sanitization = infos.get("adapter_sanitization")
-    return {
+    result = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
         "status": "pass",
@@ -820,6 +838,10 @@ def create_gate(
             "sha256": onnx_sha,
         },
     }
+    corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    if corner_rescue is not None:
+        result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
+    return result
 
 
 def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
@@ -842,6 +864,9 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "tracking_profile": required_tracking_profile(completed),
         "adapter_sanitization": sanitization,
     }
+    corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    if corner_rescue is not None:
+        exact[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
     if any(gate.get(name) != value for name, value in exact.items()):
         raise ValueError("V12 stage gate identity mismatch")
     reports = gate.get("reports")

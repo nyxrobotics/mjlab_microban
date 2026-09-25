@@ -848,6 +848,7 @@ def run_evaluation(
     settle_steps: int,
     allow_nondeployable_preview: bool = False,
     allow_legacy_preview_v1: bool = False,
+    allow_corner_rescue: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -862,9 +863,12 @@ def run_evaluation(
         device=device,
         allow_nondeployable_preview=allow_nondeployable_preview,
         allow_legacy_preview_v1=allow_legacy_preview_v1,
+        allow_corner_rescue=allow_corner_rescue,
     )
     completed = iteration + 1
-    if allow_nondeployable_preview:
+    if allow_corner_rescue:
+        required = HMD_HAND_PROFILE
+    elif allow_nondeployable_preview:
         marker = infos.get(TELEOP_V12_PREVIEW_INFO_KEY, {})
         required = (
             HMD_HAND_PROFILE
@@ -968,6 +972,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--allow-corner-rescue",
+        action="store_true",
+        help="require the authenticated final model9999 corner-rescue checkpoint",
+    )
     return parser
 
 
@@ -981,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
+        allow_corner_rescue=args.allow_corner_rescue,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

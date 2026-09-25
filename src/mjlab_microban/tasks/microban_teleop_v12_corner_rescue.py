@@ -33,6 +33,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_OBSERVATION_COLUMNS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+    TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
@@ -100,6 +101,94 @@ if not math.isclose(
     1.0,
 ):
     raise RuntimeError("Corner rescue sampler probabilities must sum to one")
+
+
+def assert_corner_rescue_optimizer_step(
+    payload: Mapping[str, Any], *, expected_step: int
+) -> None:
+    """Require every initialized Adam state to share one exact update clock."""
+
+    if isinstance(expected_step, bool) or expected_step < 0:
+        raise ValueError("Expected optimizer step must be a non-negative integer")
+    optimizer = payload.get("optimizer_state_dict")
+    states = optimizer.get("state") if isinstance(optimizer, Mapping) else None
+    if not isinstance(states, Mapping) or not states:
+        raise TypeError("Corner rescue Adam state is missing")
+    observed: list[int] = []
+    for state in states.values():
+        if not isinstance(state, Mapping) or "step" not in state:
+            raise ValueError("Every corner rescue Adam state must expose a step")
+        value = state["step"]
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1 or not bool(torch.isfinite(value).all().item()):
+                raise ValueError("Corner rescue Adam step must be one finite scalar")
+            scalar = float(value.item())
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            scalar = float(value)
+        else:
+            raise TypeError("Corner rescue Adam step has an unsupported type")
+        if not scalar.is_integer():
+            raise ValueError("Corner rescue Adam step must be integral")
+        observed.append(int(scalar))
+    if set(observed) != {expected_step}:
+        raise ValueError(
+            "Corner rescue optimizer clock drifted: "
+            f"expected {expected_step}, observed {sorted(set(observed))}"
+        )
+
+
+def assert_corner_rescue_foot_adapter_zero(payload: Mapping[str, Any]) -> None:
+    """Prove frozen foot normalizer, actor weights, and Adam state exactly."""
+
+    actor = payload.get("actor_state_dict")
+    optimizer = payload.get("optimizer_state_dict")
+    if not isinstance(actor, Mapping) or not isinstance(optimizer, Mapping):
+        raise TypeError("Corner rescue checkpoint state is incomplete")
+    first = actor.get("mlp.0.weight")
+    if not isinstance(first, torch.Tensor) or tuple(first.shape) != (512, 83):
+        raise ValueError("Corner rescue actor W0 shape drifted")
+    foot = first[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
+    if not torch.equal(foot, torch.zeros_like(foot)):
+        raise ValueError("Corner rescue foot actor columns are not exact zero")
+    expected_std_values = TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD[:6]
+    for name, expected_values in (
+        ("obs_normalizer._mean", (0.0,) * 6),
+        (
+            "obs_normalizer._var",
+            tuple(value * value for value in expected_std_values),
+        ),
+        ("obs_normalizer._std", expected_std_values),
+    ):
+        tensor = actor.get(name)
+        if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != (1, 83):
+            raise ValueError(f"Corner rescue actor {name} shape drifted")
+        foot_tensor = tensor[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
+        expected = foot_tensor.new_tensor(expected_values).unsqueeze(0)
+        if not torch.equal(foot_tensor, expected):
+            raise ValueError(f"Corner rescue foot {name} drifted")
+
+    states = optimizer.get("state")
+    if not isinstance(states, Mapping):
+        raise TypeError("Corner rescue Adam state is missing")
+    candidates = []
+    for state in states.values():
+        if not isinstance(state, Mapping):
+            continue
+        first_moment = state.get("exp_avg")
+        second_moment = state.get("exp_avg_sq")
+        if (
+            isinstance(first_moment, torch.Tensor)
+            and isinstance(second_moment, torch.Tensor)
+            and tuple(first_moment.shape) == (512, 83)
+            and tuple(second_moment.shape) == (512, 83)
+        ):
+            candidates.append(state)
+    if len(candidates) != 1:
+        raise ValueError("Corner rescue requires one unambiguous actor Adam state")
+    for name in ("exp_avg", "exp_avg_sq"):
+        moment = candidates[0][name][:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
+        if not torch.equal(moment, torch.zeros_like(moment)):
+            raise ValueError(f"Corner rescue foot Adam {name} is not exact zero")
 
 
 def _named_joint_pose(name: str) -> tuple[float, float, float]:
@@ -316,11 +405,49 @@ def validate_corner_rescue_marker(
         MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS
     ):
         raise ValueError("Corner rescue active actor columns drifted")
-    marker = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    return validate_corner_rescue_lineage_marker(
+        infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    )
+
+
+def validate_corner_rescue_lineage_marker(marker: object) -> dict[str, Any]:
+    """Validate the immutable rescue lineage independent of current recipe."""
+
     expected = corner_rescue_marker()
     if marker != expected:
         raise ValueError("Corner rescue lineage marker drifted")
-    return dict(expected)
+    return deepcopy(expected)
+
+
+def validate_corner_rescue_canonical_lineage(
+    infos: Mapping[str, Any], *, iteration: int
+) -> dict[str, Any] | None:
+    """Accept only the final rescue checkpoint or a marked canonical descendant.
+
+    Intermediate rescue checkpoints are intentionally not consumable.  The first
+    ordinary runner save after resuming model9999 returns to the canonical recipe
+    while retaining the immutable historical marker.
+    """
+
+    if not isinstance(infos, Mapping):
+        raise TypeError("Contract-v12 checkpoint infos must be a mapping")
+    if isinstance(iteration, bool) or not isinstance(iteration, int):
+        raise TypeError("Contract-v12 checkpoint iteration must be an integer")
+    recipe = infos.get("microban_teleop_recipe_revision")
+    marker = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    if recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION:
+        if iteration != MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
+            raise ValueError(
+                "Only final model9999 from the corner rescue is consumable"
+            )
+        return validate_corner_rescue_marker(infos, iteration=iteration)
+    if recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION:
+        raise ValueError("Checkpoint recipe is neither canonical nor corner rescue")
+    if marker is None:
+        return None
+    if iteration <= MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
+        raise ValueError("Canonical corner-rescue descendant clock is invalid")
+    return validate_corner_rescue_lineage_marker(marker)
 
 
 def make_microban_teleop_v12_corner_rescue_env_cfg(play: bool = False):

@@ -41,6 +41,14 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+    assert_corner_rescue_foot_adapter_zero,
+    assert_corner_rescue_optimizer_step,
+    validate_corner_rescue_canonical_lineage,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
@@ -300,6 +308,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
         self.teleop_v12_sanitization: dict | None = None
         self.teleop_v12_lr_order_migration: dict | None = None
+        self.teleop_v12_corner_rescue: dict | None = None
         self.teleop_v12_preview: dict | None = None
         self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
@@ -387,6 +396,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if self.teleop_v12_lr_order_migration is not None:
             result[MIGRATION_INFO_KEY] = deepcopy(
                 validate_lr_order_migration_marker(self.teleop_v12_lr_order_migration)
+            )
+        if self.teleop_v12_corner_rescue is not None:
+            result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
+                self.teleop_v12_corner_rescue
             )
         if self.teleop_v12_preview is not None:
             result["preview_non_deployable"] = True
@@ -526,10 +539,22 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             phase1_acceptance = None
         if infos.get("microban_teleop_training_contract_version") != (
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
-        ) or infos.get("microban_teleop_recipe_revision") != (
-            MICROBAN_TELEOP_V12_RECIPE_REVISION
         ):
             raise ValueError("Checkpoint is not contract-v12")
+        corner_rescue = validate_corner_rescue_canonical_lineage(
+            infos, iteration=iteration
+        )
+        if infos.get("microban_teleop_recipe_revision") == (
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+        ):
+            assert corner_rescue is not None
+            assert_corner_rescue_foot_adapter_zero(payload)
+            assert_corner_rescue_optimizer_step(
+                payload,
+                expected_step=(
+                    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
+                ),
+            )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
             infos.get("action_clip", object()) is not None
         ):
@@ -583,6 +608,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         self.teleop_v12_bootstrap = provenance
         self.teleop_v12_sanitization = sanitization
         self.teleop_v12_lr_order_migration = deepcopy(lr_order_migration)
+        self.teleop_v12_corner_rescue = deepcopy(corner_rescue)
         self.teleop_v12_preview = preview
         self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)

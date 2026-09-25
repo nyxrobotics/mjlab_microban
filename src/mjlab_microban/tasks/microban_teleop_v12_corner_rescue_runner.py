@@ -26,6 +26,8 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
     CornerPairHandTargetCommand,
+    assert_corner_rescue_foot_adapter_zero,
+    assert_corner_rescue_optimizer_step,
     corner_rescue_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
@@ -34,94 +36,6 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     MicrobanTeleopV12OnPolicyRunner,
 )
-
-
-def assert_corner_rescue_optimizer_step(
-    payload: dict[str, Any], *, expected_step: int
-) -> None:
-    """Require every initialized Adam state to share one exact update clock."""
-
-    if isinstance(expected_step, bool) or expected_step < 0:
-        raise ValueError("Expected optimizer step must be a non-negative integer")
-    optimizer = payload.get("optimizer_state_dict")
-    states = optimizer.get("state") if isinstance(optimizer, dict) else None
-    if not isinstance(states, dict) or not states:
-        raise TypeError("Corner rescue Adam state is missing")
-    observed: list[int] = []
-    for state in states.values():
-        if not isinstance(state, dict) or "step" not in state:
-            raise ValueError("Every corner rescue Adam state must expose a step")
-        value = state["step"]
-        if isinstance(value, torch.Tensor):
-            if value.numel() != 1 or not bool(torch.isfinite(value).all().item()):
-                raise ValueError("Corner rescue Adam step must be one finite scalar")
-            scalar = float(value.item())
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            scalar = float(value)
-        else:
-            raise TypeError("Corner rescue Adam step has an unsupported type")
-        if not scalar.is_integer():
-            raise ValueError("Corner rescue Adam step must be integral")
-        observed.append(int(scalar))
-    if set(observed) != {expected_step}:
-        raise ValueError(
-            "Corner rescue optimizer clock drifted: "
-            f"expected {expected_step}, observed {sorted(set(observed))}"
-        )
-
-
-def assert_corner_rescue_foot_adapter_zero(payload: dict[str, Any]) -> None:
-    """Prove frozen foot normalizer, actor weights, and Adam state exactly."""
-
-    actor = payload.get("actor_state_dict")
-    optimizer = payload.get("optimizer_state_dict")
-    if not isinstance(actor, dict) or not isinstance(optimizer, dict):
-        raise TypeError("Corner rescue checkpoint state is incomplete")
-    first = actor.get("mlp.0.weight")
-    if not isinstance(first, torch.Tensor) or tuple(first.shape) != (512, 83):
-        raise ValueError("Corner rescue actor W0 shape drifted")
-    foot = first[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
-    if not torch.equal(foot, torch.zeros_like(foot)):
-        raise ValueError("Corner rescue foot actor columns are not exact zero")
-    expected_std_values = TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD[:6]
-    for name, expected_values in (
-        ("obs_normalizer._mean", (0.0,) * 6),
-        (
-            "obs_normalizer._var",
-            tuple(value * value for value in expected_std_values),
-        ),
-        ("obs_normalizer._std", expected_std_values),
-    ):
-        tensor = actor.get(name)
-        if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != (1, 83):
-            raise ValueError(f"Corner rescue actor {name} shape drifted")
-        foot_tensor = tensor[:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
-        expected = foot_tensor.new_tensor(expected_values).unsqueeze(0)
-        if not torch.equal(foot_tensor, expected):
-            raise ValueError(f"Corner rescue foot {name} drifted")
-
-    states = optimizer.get("state")
-    if not isinstance(states, dict):
-        raise TypeError("Corner rescue Adam state is missing")
-    candidates = []
-    for state in states.values():
-        if not isinstance(state, dict):
-            continue
-        first_moment = state.get("exp_avg")
-        second_moment = state.get("exp_avg_sq")
-        if (
-            isinstance(first_moment, torch.Tensor)
-            and isinstance(second_moment, torch.Tensor)
-            and tuple(first_moment.shape) == (512, 83)
-            and tuple(second_moment.shape) == (512, 83)
-        ):
-            candidates.append(state)
-    if len(candidates) != 1:
-        raise ValueError("Corner rescue requires one unambiguous actor Adam state")
-    for name in ("exp_avg", "exp_avg_sq"):
-        moment = candidates[0][name][:, TELEOP_V12_FOOT_OBSERVATION_COLUMNS]
-        if not torch.equal(moment, torch.zeros_like(moment)):
-            raise ValueError(f"Corner rescue foot Adam {name} is not exact zero")
 
 
 def validate_corner_rescue_parent_payload(

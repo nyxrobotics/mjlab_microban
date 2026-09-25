@@ -27,6 +27,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     corner_pair_joint_targets,
     corner_pair_selection,
     corner_rescue_marker,
+    validate_corner_rescue_canonical_lineage,
     validate_corner_rescue_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
@@ -204,6 +205,26 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
                 tampered,
                 iteration=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
             )
+
+    def test_canonical_consumers_accept_only_final_rescue_and_descendants(self) -> None:
+        final = _final_infos()
+        self.assertEqual(
+            validate_corner_rescue_canonical_lineage(final, iteration=9_999),
+            corner_rescue_marker(),
+        )
+        with self.assertRaisesRegex(ValueError, "Only final model9999"):
+            validate_corner_rescue_canonical_lineage(final, iteration=9_998)
+        descendant = copy.deepcopy(final)
+        descendant["microban_teleop_recipe_revision"] = (
+            MICROBAN_TELEOP_V12_RECIPE_REVISION
+        )
+        descendant["env_state"]["common_step_counter"] = 10_001 * 24
+        self.assertEqual(
+            validate_corner_rescue_canonical_lineage(descendant, iteration=10_000),
+            corner_rescue_marker(),
+        )
+        with self.assertRaisesRegex(ValueError, "descendant clock"):
+            validate_corner_rescue_canonical_lineage(descendant, iteration=9_999)
 
     def test_launcher_is_syntax_checked_and_fully_pinned(self) -> None:
         subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)

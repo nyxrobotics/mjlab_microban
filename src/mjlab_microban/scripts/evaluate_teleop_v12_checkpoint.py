@@ -36,8 +36,14 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
-from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-    MICROBAN_TELEOP_V12_RECIPE_REVISION,
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+    validate_corner_rescue_canonical_lineage,
+)
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
+    assert_corner_rescue_foot_adapter_zero,
+    assert_corner_rescue_optimizer_step,
 )
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
@@ -92,6 +98,7 @@ def _load_actor(
     device: str,
     allow_nondeployable_preview: bool = False,
     allow_legacy_preview_v1: bool = False,
+    allow_corner_rescue: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
@@ -100,6 +107,9 @@ def _load_actor(
     iteration = payload.get("iter")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
         raise ValueError("Checkpoint iteration is invalid")
+    expected_step = 0 if iteration == -1 else (iteration + 1) * 24
+    if allow_nondeployable_preview and allow_corner_rescue:
+        raise ValueError("Preview and corner-rescue checkpoint modes are exclusive")
     if allow_nondeployable_preview:
         preview_marker = validate_preview_marker(
             infos,
@@ -117,10 +127,24 @@ def _load_actor(
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     validate_bilateral_site_order_checkpoint(infos)
-    if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_RECIPE_REVISION
-    ):
-        raise ValueError("Checkpoint is not the safe contract-v12 recipe")
+    corner_lineage = validate_corner_rescue_canonical_lineage(
+        infos, iteration=iteration
+    )
+    is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+    )
+    if allow_corner_rescue and not is_final_corner_rescue:
+        raise ValueError(
+            "--allow-corner-rescue requires the exact final rescue checkpoint"
+    )
+    if is_final_corner_rescue:
+        assert corner_lineage is not None
+        assert_corner_rescue_foot_adapter_zero(payload)
+        assert_corner_rescue_optimizer_step(
+            payload,
+            expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
+        )
+    expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")
     if infos.get("action_clip", object()) is not None:
@@ -133,7 +157,6 @@ def _load_actor(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
     env_state = infos.get("env_state")
-    expected_step = 0 if iteration == -1 else (iteration + 1) * 24
     if (
         not isinstance(env_state, dict)
         or env_state.get("common_step_counter") != expected_step
@@ -145,9 +168,7 @@ def _load_actor(
         raise TypeError("Checkpoint actor state is missing")
     actor.load_state_dict(actor_state, strict=True)
     actor.bind_common_step_provider(lambda: expected_step)
-    if infos.get("active_actor_columns_at_save") != list(
-        teleop_v12_active_adapter_columns(expected_step)
-    ):
+    if infos.get("active_actor_columns_at_save") != expected_active_columns:
         raise ValueError("Checkpoint active adapter columns drifted from its clock")
     assert_actor_frozen_against_source(actor, provenance)
     actor.bind_frozen_legacy_reference()
