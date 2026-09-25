@@ -73,8 +73,7 @@ def _source_payload(*, iteration: int = PINNED_SOURCE_ITERATION) -> dict:
                 9: {
                     "step": torch.tensor(9201.0),
                     "exp_avg": torch.randn(512, 137, generator=generator) * 0.01,
-                    "exp_avg_sq": torch.rand(512, 137, generator=generator)
-                    * 0.001,
+                    "exp_avg_sq": torch.rand(512, 137, generator=generator) * 0.001,
                 },
             },
             "param_groups": [{"params": [1, 9], "lr": 1.0e-4}],
@@ -215,12 +214,12 @@ class TeleopV12LrRecoveryTest(unittest.TestCase):
         self.assertIn("exactly 799 updates", help_text)
         launcher = LAUNCHER.read_text(encoding="utf-8")
         for exact_argument in (
-            '--env.scene.num-envs 2048',
-            '--env.seed 42',
-            '--agent.seed 42',
-            '--agent.num-steps-per-env 24',
-            '--agent.save-interval 100',
-            '--agent.resume True',
+            "--env.scene.num-envs 2048",
+            "--env.seed 42",
+            "--agent.seed 42",
+            "--agent.num-steps-per-env 24",
+            "--agent.save-interval 100",
+            "--agent.resume True",
             '--agent.load-checkpoint "^model_${SOURCE_ITERATION}[.]pt$"',
         ):
             self.assertIn(exact_argument, launcher)

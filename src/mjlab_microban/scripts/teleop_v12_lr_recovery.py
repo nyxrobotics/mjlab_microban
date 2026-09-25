@@ -271,9 +271,7 @@ def validate_recovery_seed(
     if len({source, migrated, receipt_path}) != 3:
         raise ValueError("Source, migrated checkpoint, and receipt must be distinct")
     if migrated.name != EXPECTED_MIGRATED_FILENAME:
-        raise ValueError(
-            f"Recovery seed must be named {EXPECTED_MIGRATED_FILENAME!r}"
-        )
+        raise ValueError(f"Recovery seed must be named {EXPECTED_MIGRATED_FILENAME!r}")
 
     source_sha256 = checkpoint_sha256(source)
     if source_sha256 != expected_source_sha256:
@@ -334,8 +332,7 @@ def validate_recovery_seed(
         raise ValueError("Migrated checkpoint lacks the corrected site-order revision")
     if (
         marker.get("revision") != MIGRATION_REVISION
-        or marker.get("site_order_revision")
-        != MICROBAN_BILATERAL_SITE_ORDER_REVISION
+        or marker.get("site_order_revision") != MICROBAN_BILATERAL_SITE_ORDER_REVISION
         or marker.get("strategy") != "swap"
     ):
         raise ValueError("Migrated checkpoint marker is not the required L/R swap")
