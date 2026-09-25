@@ -36,17 +36,51 @@ relax a gate.
 
 The accepted release also versions the exact 3,000, 7,000, 10,000 and 15,000
 update checkpoints, every required 100-update activation canary, and each
-stage's locomotion, tracking/safety and ONNX evidence. Verify all tracked paths,
-SHA-256 bindings and the final physical-runtime receipt with:
+stage's locomotion, tracking/safety and ONNX evidence. It also archives the
+exact deployable `pico_teleop.onnx` bytes admitted by the physical runtime,
+rather than retaining only a receipt that names their digest. Verify all
+tracked paths, nested report/ONNX SHA-256 bindings and the final
+physical-runtime receipt with:
 
 ```bash
 uv run --locked python scripts/verify_microban_teleop_v12_release_chain.py \
   --paths-only
 ```
 
+The archive includes the raw update-9,201 `model_9200.pt`, its independently
+reconstructed bilateral-order migration, the migration and recovery receipts,
+and the authenticated update-9,901 corner-rescue parent. Full verification
+rebuilds the migration from the raw checkpoint, compares the complete migrated
+payload (actor, critic, optimizer and clocks), and reruns the corner-parent
+tracking admission before validating the 10,000-update endpoint. Thus the
+7,100-to-10,000 handoff is not accepted merely because the final checkpoint
+contains a migration marker. The raw and migrated replay runs' exact agent,
+environment and Git-diff files are hash-bound as well; in particular they
+record the `model_7099.pt -> model_9200.pt` 2,900-update run and the migrated
+`model_9200.pt -> model_9999.pt` 799-update replay.
+
 For the complete audit, omit `--paths-only`. The verifier creates disposable
 detached worktrees and reruns each gate with the evaluator commit recorded in
 `artifacts/teleop_v12_releases/microban_teleop_v12_full_chain_manifest.json`.
+It then loads the archived deployable policy with ONNX Runtime's CPU provider
+and runs 16 deterministic `[1,83] -> [1,18]` finite-output samples. The audit
+requires every evidence file and all verifier scripts to be regular files
+whose index and working-tree bytes exactly match committed `HEAD`; it refuses
+to mix dirty working files with evidence checked out from another revision.
+Only hash-bound files below the teleop artifact and run-data directories may be
+overlaid into a pinned evaluator worktree, so release evidence cannot replace
+the evaluator's source code.
+
+Some historical reports contain the workstation's then-current absolute
+checkout path. During the disposable replay, a fail-closed relocation wrapper
+maps only those recorded roots' `artifacts/teleop_v12_*` and
+`logs/rsl_rl/mjlab_microban_teleop_v12` files to the same repository-relative
+files in the detached worktree. The two exact legacy bootstrap inputs already
+stored by the pinned evaluator are readable but are never overlaid from the
+release commit. The wrapper does not rewrite the archived JSON or its hash.
+Relative paths, path traversal, symlinks, unrecorded absolute roots, and
+non-data paths are rejected.
+
 This pin is intentional: the 3,000/7,000 stages predate the authenticated
 bilateral-site-order migration and are checked with their historical evaluator;
 the migrated 10,000/15,000 stages use the later evaluator. A current evaluator

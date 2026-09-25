@@ -2,6 +2,43 @@
   "schema": "microban_teleop_v12_release_chain_v1",
   "status": "pass",
   "training_contract_version": "12",
+  "recorded_project_roots": [
+    "/home/kanade/Git-projects/mjlab_microban_v8j",
+    "/home/kanade/Git-projects/mjlab_microban_v12_deferred"
+  ],
+  "bilateral_migration": {
+    "status": "pass",
+    "raw_checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-18-45_v12_canonical_7100_to10000/model_9200.pt",
+    "raw_checkpoint_sha256": "16c9b9d19df6513851b3da26228ae612512fdb2d894542741f0474e4762691c7",
+    "migrated_checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-17-45_v12_lrfix_9200_replay/model_9200.pt",
+    "migrated_checkpoint_sha256": "83d915b8646ae5c70aab4d367ec9f0516e9b42fe4b6ec5a0977482b81018459b",
+    "migration_receipt": "repo://artifacts/teleop_v12_lr_order/2026-09-25_23-17-45_v12_lrfix_9200_replay_model_9200_migration.json",
+    "migration_receipt_sha256": "86529ca91f10e8fcf3bbc4a6255312d3eee57d380f110ee4320a8bb433afab77",
+    "recovery_receipt": "repo://artifacts/teleop_v12_lr_recovery/2026-09-25_23-17-45_model_9200_recovery.json",
+    "recovery_receipt_sha256": "a65dd27fc3d0f0f1a277ea4bb87ac5de96881bd4e316f60eb0ded69ad303fb6a",
+    "corner_parent_checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-16-50_v12_lrfix_9201_to10000/model_9900.pt",
+    "corner_parent_checkpoint_sha256": "063a8f65ebf9007d63395e9a5b98420eb025bd39416dab5727f9f4c06fc6e877",
+    "corner_parent_tracking_report": "repo://artifacts/teleop_v12_lr_order/2026-09-25_23-16-50_v12_lrfix_model_9900_tracking.json",
+    "corner_parent_tracking_report_sha256": "399db0cee55c137d3d0226ebcb54b0fa3bb84c95496c5c206af55f2fb25837f4",
+    "corner_superseded_tracking_report": "repo://artifacts/teleop_v12_corner_rescue/2026-09-25_23-49-47_v12_corner_rescue_9901_to10000_model_9999_tracking.json",
+    "corner_superseded_tracking_report_sha256": "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7",
+    "raw_run_context": {
+      "agent_params": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-18-45_v12_canonical_7100_to10000/params/agent.yaml",
+      "agent_params_sha256": "f645d93dd2b9f741726ee919d19571dd016c3ea2cfeea68ddb123a5b603af118",
+      "environment_params": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-18-45_v12_canonical_7100_to10000/params/env.yaml",
+      "environment_params_sha256": "c1fd236386738a27385b8e9f6cb749a467060bbd9deb64cdd477a129d80ac80f",
+      "source_diff": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-18-45_v12_canonical_7100_to10000/git/mjlab_microban_v8j.diff",
+      "source_diff_sha256": "1700193370bded66143d9aeeeecd72f788983a844d1de4a03a50acf63cb624e9"
+    },
+    "replay_run_context": {
+      "agent_params": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-16-50_v12_lrfix_9201_to10000/params/agent.yaml",
+      "agent_params_sha256": "86d72e10b15632a481e0d8e78104cc33b683daa2acdad9ae0e9052ce7385c988",
+      "environment_params": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-16-50_v12_lrfix_9201_to10000/params/env.yaml",
+      "environment_params_sha256": "5e2b3e1a79fecc40c16b0dbf5a3384db0946b84e75b71eb41fc1a76e85514066",
+      "source_diff": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_23-16-50_v12_lrfix_9201_to10000/git/mjlab_microban_v12_deferred.diff",
+      "source_diff_sha256": "6fc1d93ed9ded7cd1342c059cc24f37f24012ced153f9d7c4f8d2bd335b64a43"
+    }
+  },
   "stages": [
     {
       "kind": "canonical_boundary",
@@ -84,6 +121,7 @@
   "deployment": {
     "receipt": "repo://artifacts/teleop_v12_releases/2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926_model_14999_deployment_receipt.json",
     "receipt_sha256": "6c60208b4e22253b98c4ea27d910e67fb4c5db7115252a2e5c457551b8888d2b",
+    "packaged_policy": "repo://artifacts/teleop_v12_releases/2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926_model_14999_pico_teleop.onnx",
     "packaged_policy_sha256": "2e531e6a3d04569980b79fdedbdca373e12edc9ca62172b997879e1e55bee65c",
     "input_shape": [1, 83],
     "output_shape": [1, 18],
