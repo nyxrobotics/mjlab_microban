@@ -1,0 +1,73 @@
+seed: 42
+num_steps_per_env: 24
+max_iterations: 100
+obs_groups:
+  actor: !!python/tuple
+  - actor
+  critic: !!python/tuple
+  - critic
+save_interval: 100
+experiment_name: mjlab_microban_teleop_v12
+run_name: v12_canonical_7000_to7100
+logger: tensorboard
+wandb_project: mjlab_microban_teleop_v12
+wandb_tags: !!python/tuple []
+resume: true
+load_run: ^2026-09-25_21-04-21_v12_canonical_3100_to7000$
+load_checkpoint: ^model_6999[.]pt$
+clip_actions: null
+upload_model: false
+class_name: OnPolicyRunner
+actor:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  cnn_cfg: null
+  distribution_cfg:
+    class_name: GaussianDistribution
+    init_std: 1.0
+    std_type: scalar
+  rnn_type: null
+  rnn_hidden_dim: 256
+  rnn_num_layers: 1
+  class_name: mjlab_microban.tasks.microban_teleop_v12_actor:LegacyAdapterTeleopActor
+critic:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  cnn_cfg: null
+  distribution_cfg: null
+  rnn_type: null
+  rnn_hidden_dim: 256
+  rnn_num_layers: 1
+  class_name: MLPModel
+algorithm:
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.0001
+  schedule: fixed
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.0
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  optimizer: adam
+  share_cnn_encoders: false
+  class_name: mjlab_microban.tasks.microban_teleop_v12_actor:LegacyAdapterPPO
+checkpoint_consumer_mode: false
+legacy_velocity_checkpoint: null
+legacy_velocity_checkpoint_sha256: null
+legacy_teleop_probe_receipt: null
+legacy_teleop_probe_receipt_sha256: null
+save_pristine_checkpoint: false
+simulation_preview_mode: false

@@ -1,0 +1,598 @@
+{
+  "checkpoint": {
+    "completed_updates": 7100,
+    "iteration": 7099,
+    "path": "/home/kanade/Git-projects/mjlab_microban_v8j/logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-14-43_v12_canonical_7000_to7100/model_7099.pt",
+    "sha256": "3f03c9c8e42ad4ee30595a2d54b4cad98eed2d9c0251d1762f3fc3e1a7855d68"
+  },
+  "checks": {
+    "actual_soft_limits": true,
+    "all_scenarios_completed": true,
+    "directional_signs": true,
+    "finite": true,
+    "minimum_directional_response": true,
+    "neutral_targets": true,
+    "no_falls": true,
+    "raw_action_recurrence": true
+  },
+  "gate": "microban_teleop_v12_neutral_locomotion_9x300",
+  "results": [
+    {
+      "command": {
+        "vx_m_s": 0.0,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": null,
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 0.8438079953193665,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.004548076540231705,
+          "mean": 0.0006906107850518311,
+          "minimum": -0.0007878514588810503,
+          "p05": -0.000548493058886379,
+          "p95": 0.003966205846518277
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.0002342686493648216,
+          "mean": -0.0001756438761458412,
+          "minimum": -0.0014369351556524634,
+          "p05": -0.0009052066889125854,
+          "p95": 8.573171544412568e-05
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.0021767569705843925,
+          "mean": -0.0007387963233340997,
+          "minimum": -0.004745382349938154,
+          "p05": -0.003862694161944091,
+          "p95": 0.0015995495952665806
+        }
+      },
+      "minimum_root_height_m": 0.1704079657793045,
+      "name": "neutral",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.061338044703006744,
+        "maximum_velocity_rad_s": 0.010855152271687984
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.1,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vx_m_s",
+        "command": 0.1,
+        "measured_mean": 0.09447429771721363,
+        "sign_matches": true,
+        "signed_response": 0.09447429771721363
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.4325997829437256,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.16734465956687927,
+          "mean": 0.09447429771721363,
+          "minimum": 0.05597425252199173,
+          "p05": 0.06407686695456505,
+          "p95": 0.13917870000004767
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.25922638177871704,
+          "mean": -0.007354806752642617,
+          "minimum": -0.22123070061206818,
+          "p05": -0.16842713654041291,
+          "p95": 0.15699582770466802
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.5925499200820923,
+          "mean": -0.003719252120121382,
+          "minimum": -0.3873176574707031,
+          "p05": -0.24799400493502616,
+          "p95": 0.1828024126589297
+        }
+      },
+      "minimum_root_height_m": 0.16664500534534454,
+      "name": "forward_0p1",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06222711130976677,
+        "maximum_velocity_rad_s": 0.024101752787828445
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.2,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vx_m_s",
+        "command": 0.2,
+        "measured_mean": 0.15518330177664758,
+        "sign_matches": true,
+        "signed_response": 0.15518330177664758
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 1.972790241241455,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.20592349767684937,
+          "mean": 0.15518330177664758,
+          "minimum": 0.12446152418851852,
+          "p05": 0.12727232724428178,
+          "p95": 0.19169845581054684
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.19854284822940826,
+          "mean": -0.014847561636473983,
+          "minimum": -0.21876388788223267,
+          "p05": -0.1672199286520481,
+          "p95": 0.14302293732762333
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.475555419921875,
+          "mean": -0.014371898295008578,
+          "minimum": -0.4653140902519226,
+          "p05": -0.21497712954878806,
+          "p95": 0.1586091548204422
+        }
+      },
+      "minimum_root_height_m": 0.165996253490448,
+      "name": "forward_0p2",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06236598268151283,
+        "maximum_velocity_rad_s": 0.02122214436531067
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": -0.1,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vx_m_s",
+        "command": -0.1,
+        "measured_mean": -0.05691855331882834,
+        "sign_matches": true,
+        "signed_response": 0.05691855331882834
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.2282731533050537,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": -0.005868050269782543,
+          "mean": -0.05691855331882834,
+          "minimum": -0.10874206572771072,
+          "p05": -0.07846906296908855,
+          "p95": -0.033094334788620484
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.3041921555995941,
+          "mean": 0.026323509786860086,
+          "minimum": -0.25045046210289,
+          "p05": -0.16386538445949556,
+          "p95": 0.23413969129323958
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.25463709235191345,
+          "mean": -0.026955564308445902,
+          "minimum": -0.47583863139152527,
+          "p05": -0.20373272150754929,
+          "p95": 0.1606377072632312
+        }
+      },
+      "minimum_root_height_m": 0.16712935268878937,
+      "name": "backward_0p1",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06194290518760681,
+        "maximum_velocity_rad_s": 0.019267072901129723
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": -0.2,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vx_m_s",
+        "command": -0.2,
+        "measured_mean": -0.11127699795365334,
+        "sign_matches": true,
+        "signed_response": 0.11127699795365334
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.368441581726074,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": -0.07808397710323334,
+          "mean": -0.11127699795365334,
+          "minimum": -0.17977117002010345,
+          "p05": -0.13836439549922944,
+          "p95": -0.08946558199822903
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.21049849689006805,
+          "mean": -0.020291999246925117,
+          "minimum": -0.2794410288333893,
+          "p05": -0.22367107346653936,
+          "p95": 0.1682734563946724
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.28799211978912354,
+          "mean": 0.02004220806027297,
+          "minimum": -0.31285005807876587,
+          "p05": -0.16297589242458344,
+          "p95": 0.17045739293098444
+        }
+      },
+      "minimum_root_height_m": 0.1659735143184662,
+      "name": "backward_0p2",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.062044888734817505,
+        "maximum_velocity_rad_s": 0.019425153732299805
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.0,
+        "vy_m_s": 0.1,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vy_m_s",
+        "command": 0.1,
+        "measured_mean": 0.03281787271262147,
+        "sign_matches": true,
+        "signed_response": 0.03281787271262147
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.2111012935638428,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.05592530965805054,
+          "mean": 0.019449066360597497,
+          "minimum": 0.0004732820962090045,
+          "p05": 0.006874735653400421,
+          "p95": 0.034133283980190735
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.27639079093933105,
+          "mean": 0.03281787271262147,
+          "minimum": -0.17313289642333984,
+          "p05": -0.15012983307242395,
+          "p95": 0.21886895522475236
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.2828337550163269,
+          "mean": -0.024276078919880092,
+          "minimum": -0.6265482306480408,
+          "p05": -0.24943033084273336,
+          "p95": 0.15231615751981728
+        }
+      },
+      "minimum_root_height_m": 0.16824403405189514,
+      "name": "lateral_left_0p1",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06206374242901802,
+        "maximum_velocity_rad_s": 0.018126294016838074
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.0,
+        "vy_m_s": -0.1,
+        "yaw_rad_s": 0.0
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "vy_m_s",
+        "command": -0.1,
+        "measured_mean": -0.04875975066144019,
+        "sign_matches": true,
+        "signed_response": 0.04875975066144019
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.295898914337158,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.0542326420545578,
+          "mean": 0.009992950640938943,
+          "minimum": -0.020444517955183983,
+          "p05": -0.011311736563220619,
+          "p95": 0.038945128023624404
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.18436092138290405,
+          "mean": -0.04875975066144019,
+          "minimum": -0.30043095350265503,
+          "p05": -0.2501745618879795,
+          "p95": 0.15964145064353943
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.2512170672416687,
+          "mean": -0.005113079244154505,
+          "minimum": -0.3917838931083679,
+          "p05": -0.2242481306195259,
+          "p95": 0.18607641384005547
+        }
+      },
+      "minimum_root_height_m": 0.1673988550901413,
+      "name": "lateral_right_0p1",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06220153719186783,
+        "maximum_velocity_rad_s": 0.016658779233694077
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.0,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": 0.5
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "yaw_rad_s",
+        "command": 0.5,
+        "measured_mean": 0.47825972451642157,
+        "sign_matches": true,
+        "signed_response": 0.47825972451642157
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 2.2082221508026123,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.06841325759887695,
+          "mean": 0.027328998772427438,
+          "minimum": 0.004792295396327972,
+          "p05": 0.010800022445619107,
+          "p95": 0.04924437701702117
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.30391374230384827,
+          "mean": 0.029260278593748808,
+          "minimum": -0.18198439478874207,
+          "p05": -0.14393117800354957,
+          "p95": 0.21302858963608734
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": 0.8269163966178894,
+          "mean": 0.47825972451642157,
+          "minimum": -0.2731521725654602,
+          "p05": 0.22898046523332594,
+          "p95": 0.6339735627174378
+        }
+      },
+      "minimum_root_height_m": 0.16768860816955566,
+      "name": "yaw_left_0p5",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.061828359961509705,
+        "maximum_velocity_rad_s": 0.018639573827385902
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    },
+    {
+      "command": {
+        "vx_m_s": 0.0,
+        "vy_m_s": 0.0,
+        "yaw_rad_s": -0.5
+      },
+      "completed": true,
+      "directional_response": {
+        "axis": "yaw_rad_s",
+        "command": -0.5,
+        "measured_mean": -0.5208092247992754,
+        "sign_matches": true,
+        "signed_response": 0.5208092247992754
+      },
+      "executed_steps": 300,
+      "fall_step": null,
+      "fell": false,
+      "maximum_actual_soft_limit_violation_rad": 0.0,
+      "maximum_hypothetical_raw_target_soft_limit_excess_rad": 1.9274399280548096,
+      "measured_velocity_body": {
+        "vx_m_s": {
+          "count": 250,
+          "maximum": 0.07972335815429688,
+          "mean": 0.01985670998506248,
+          "minimum": -0.012532562017440796,
+          "p05": -0.008564989548176527,
+          "p95": 0.04666979201138018
+        },
+        "vy_m_s": {
+          "count": 250,
+          "maximum": 0.18332643806934357,
+          "mean": -0.018138871748466043,
+          "minimum": -0.2476264089345932,
+          "p05": -0.18552992790937423,
+          "p95": 0.15122825875878332
+        },
+        "yaw_rad_s": {
+          "count": 250,
+          "maximum": -0.032359275966882706,
+          "mean": -0.5208092247992754,
+          "minimum": -0.777099609375,
+          "p05": -0.6817759364843369,
+          "p95": -0.3315918937325478
+        }
+      },
+      "minimum_root_height_m": 0.16888675093650818,
+      "name": "yaw_right_0p5",
+      "neck_home": {
+        "joint_names": [
+          "head",
+          "neck_roll",
+          "neck_pitch"
+        ],
+        "maximum_position_error_rad": 0.06222888082265854,
+        "maximum_velocity_rad_s": 0.02055455558001995
+      },
+      "neutral_foot_hand_target_verified_steps": 300,
+      "nonfinite": null,
+      "raw_action_recurrence_verified_steps": 300,
+      "termination_names": []
+    }
+  ],
+  "schema_version": 1,
+  "settings": {
+    "action_clip": null,
+    "device": "cuda:0",
+    "policy_observation_width": 83,
+    "previous_action": "raw_actor_output",
+    "seed": 42,
+    "settle_steps": 50,
+    "steps": 300
+  },
+  "status": "pass",
+  "summary": {
+    "completed_scenario_count": 9,
+    "directional_scenario_count": 8,
+    "directionally_correct_scenario_count": 8,
+    "fall_scenario_count": 0,
+    "maximum_actual_soft_limit_violation_rad": 0.0,
+    "minimum_signed_response": 0.03281787271262147,
+    "nonfinite_scenario_count": 0,
+    "scenario_count": 9
+  },
+  "thresholds": {
+    "actual_soft_limit_violation_rad_max": 0.08726646259971647,
+    "minimum_signed_response": {
+      "backward_0p1": 0.02,
+      "backward_0p2": 0.04,
+      "forward_0p1": 0.04,
+      "forward_0p2": 0.08,
+      "lateral_left_0p1": 0.02,
+      "lateral_right_0p1": 0.02,
+      "yaw_left_0p5": 0.2,
+      "yaw_right_0p5": 0.2
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "checkpoint": {
+    "completed_updates": 7100,
+    "iteration": 7099,
+    "path": "/home/kanade/Git-projects/mjlab_microban_v8j/logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_22-14-43_v12_canonical_7000_to7100/model_7099.pt",
+    "sha256": "3f03c9c8e42ad4ee30595a2d54b4cad98eed2d9c0251d1762f3fc3e1a7855d68"
+  },
+  "gate": "microban_teleop_v12_checkpoint_onnx",
+  "neutral_legacy_parity": {
+    "maximum_absolute_error": 3.814697265625e-06,
+    "samples": 10000,
+    "teleop_only_columns": "exact_zero",
+    "tolerance": 2e-05
+  },
+  "onnx": {
+    "input_coverage": "deterministic_nonzero_all_83_columns",
+    "input_shape": [
+      1,
+      83
+    ],
+    "onnxruntime_cpu_maximum_absolute_error": 1.1920928955078125e-05,
+    "onnxruntime_providers": [
+      "CPUExecutionProvider"
+    ],
+    "onnxruntime_version": "1.30.0",
+    "opset": 18,
+    "output_shape": [
+      1,
+      18
+    ],
+    "path": "/home/kanade/Git-projects/mjlab_microban_v8j/artifacts/teleop_v12_gates/2026-09-25_22-14-43_v12_canonical_7000_to7100_model_7099.onnx",
+    "reference_evaluator_maximum_absolute_error": 3.814697265625e-06,
+    "reference_samples": 64,
+    "sha256": "a4691cc80844b1c369240d1160a00a272d8416a23617b1ed67e4d4b1ff2f2fd5",
+    "teleop_only_columns_nonzero": true,
+    "tolerance": 2e-05
+  },
+  "schema_version": 1,
+  "status": "pass"
+}
