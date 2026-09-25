@@ -55,13 +55,15 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     head_height_reward,
-    standing_pose_reward,
-    foot_flat_reward,
+    home_pose_reward,
     hold_airborne,
     standing_bonus,
     on_feet_reward,
     standing_torque_penalty,
+    home_stillness_reward,
     extreme_joint_velocity,
+    reset_near_home_fraction,
+    hands_released_reward,
 )
 
 STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
@@ -138,7 +140,20 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         num_slots=1,
         track_air_time=True,
     )
-    cfg.scene.sensors = (self_collision_sensor_cfg, feet_ground_sensor_cfg)
+    # Detects hand/forearm-ground contact ("radius"/"radius_2" are the forearm
+    # bodies the hand sites sit on — see robot.xml) so hands_released_reward (below)
+    # can tell "propped up on hands" from "hands free" — added after watching a live
+    # training-in-progress rollout get stuck propped up on its hands at ~half
+    # height, never releasing them to stand on its feet alone.
+    hands_ground_sensor_cfg = ContactSensorCfg(
+        name="hands_ground_contact",
+        primary=ContactMatch(mode="body", pattern=r"^(radius|radius_2)$", entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="netforce",
+        num_slots=1,
+    )
+    cfg.scene.sensors = (self_collision_sensor_cfg, feet_ground_sensor_cfg, hands_ground_sensor_cfg)
 
     #---------------------------- Terrain ---------------------------
     cfg.scene.terrain.terrain_type = "plane"
@@ -232,23 +247,83 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # while still flat as the trunk version was (same world-Z-height shape). Keeping
     # both would let a high-but-inverted trunk still collect partial credit from the
     # trunk term, fighting the very thing head height is meant to fix.
-    # HEAD_STANDING_HEIGHT measured directly (make_microban_velocity_env_cfg, standing
-    # pose, "head" body world Z).
-    # Lowered from the theoretical standing-pose value (0.298, computed from
-    # make_microban_velocity_env_cfg's own standing keyframe) to what this policy
-    # actually converges to in practice (measured: 256-env rollout of the trained
-    # checkpoint settles at head height 0.260 mean, ~94.5% of envs above 0.25) — no
-    # point rewarding height the motion doesn't actually reach.
-    HEAD_STANDING_HEIGHT = 0.260
+    # HEAD_STANDING_HEIGHT: the TRUE standing-pose head height, computed directly via
+    # forward kinematics from HOME_FRAME (mujoco.mj_forward on the home keyframe,
+    # "head" body world Z) — 0.294m.
+    #
+    # A previous version of this constant (0.260) was deliberately LOWERED from this
+    # same theoretical value to match what an earlier, imperfect policy happened to
+    # converge to in practice ("no point rewarding height the motion doesn't
+    # actually reach") — but that reasoning is circular: capping the target at
+    # whatever height the policy already reaches guarantees the policy never has to
+    # reach any higher. Confirmed as a real cause (not just theoretically) by
+    # watching a live rollout of a training-in-progress checkpoint: it settles into
+    # a stable SEATED posture — which a 0.260m head-height bar (and the
+    # upright-error metric, which a seated trunk can also satisfy) doesn't
+    # distinguish from standing — rather than fully extending its legs. Restored to
+    # the true kinematic value so seated no longer satisfies the target.
+    HEAD_STANDING_HEIGHT = 0.294
+    # Despite the name, _head_height (mdp.py) no longer reads the actual "head" body
+    # through this — it only uses .name to resolve the robot entity, then computes a
+    # virtual point above the TRUNK's own center of mass/orientation (fixed offset,
+    # see _head_height's docstring for why: this task actuates the neck, so tracking
+    # the literal head body would let the policy game "head height" via neck
+    # articulation alone). Kept as body_names=("head",) only for readability at
+    # other call sites, not because anything resolves those body_ids anymore.
     HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))
+    # 0.95 was tried (the user asked to raise it from 0.85) and MEASURED to create a
+    # genuine plateau: head height stalled at ~0.234m (80% of target) from iteration
+    # 5000 through 10000 with zero further improvement, and standing_bonus/
+    # standing_pose (both gated on this same threshold) stayed near-zero the whole
+    # time — the policy could get most of the way up but essentially never
+    # sustained crossing the stricter bar, so those two terms never got enough
+    # on-policy signal to do their job. Reverted to 0.85 (the value the best run so
+    # far — height 0.249m/upright 0.288 by iteration 1750 — used).
     HEAD_STANDING_THRESHOLD = HEAD_STANDING_HEIGHT * 0.85
+    # Weight raised 6.0 -> 8.0: standing_bonus's separate trunk-upright check was
+    # just dropped (see standing_bonus's docstring) since the TRUE standing head
+    # height target makes it redundant — a seated/kneeling/inverted pose physically
+    # cannot reach it. That budget is folded in here instead, since head height
+    # (now against the correct, un-lowered target) is doing that job on its own.
     cfg.rewards["head_height"] = RewardTermCfg(
         func=head_height_reward,
-        weight=6.0,
+        weight=36.0,
         params={
             "target_height": HEAD_STANDING_HEIGHT,
             "asset_cfg": HEAD_ASSET_CFG,
             "sensor_name": feet_ground_sensor_cfg.name,
+            # power=1.0: no extra steepness bonus, just the plain linear-rise/
+            # linear-fall peaked shape (shape = clamp(1-|frac-1|,0,1)). Tried
+            # power=3 and power=1.4 first, both add a steeper-near-target bonus on
+            # top of the linear shape, but measured directly that even a partial
+            # power bonus isn't worth its added complexity/tuning risk here — the
+            # weight increase below (8.0 -> 12.0) gives the same "push harder
+            # toward the true target" effect the power bonus was meant to provide,
+            # more simply and without the early-gradient risk power>1 carries.
+            "power": 1.0,
+        },
+    )
+
+    # Second, separate head-height term at power=2.0 — added on top of the linear
+    # one above rather than raising that one's own power in place, so the linear
+    # term keeps providing its already-proven, never-vanishing baseline gradient
+    # (see head_height's own comment/head_height_reward's docstring for that
+    # history) while this one ADDS an accelerating, "closer-to-target pays
+    # disproportionately more" bonus: a flat linear reward pays the same marginal
+    # amount for the last 10% of the height gap as the first 10%, which measured
+    # out as a real plateau (height settling ~80% of target, see standing_bonus's
+    # own comment) — nothing in a purely linear reward specifically discourages
+    # settling for "pretty tall" over finishing the climb to true standing height.
+    # Own weight, independently tunable from the linear term's, rather than
+    # folding into it via a shared blend ratio.
+    cfg.rewards["head_height_sq"] = RewardTermCfg(
+        func=head_height_reward,
+        weight=20.0,
+        params={
+            "target_height": HEAD_STANDING_HEIGHT,
+            "asset_cfg": HEAD_ASSET_CFG,
+            "sensor_name": feet_ground_sensor_cfg.name,
+            "power": 2.0,
         },
     )
 
@@ -267,10 +342,16 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=standing_bonus,
         weight=5.0,
         params={
-            "height_threshold": HEAD_STANDING_THRESHOLD,
-            "upright_std": np.sqrt(0.1),
+            # Own threshold (0.9), higher than standing_pose's (0.8, below) — the
+            # payout keeps scaling up to the TRUE target height above that anyway
+            # (fixes a measured plateau where height stalled almost exactly at
+            # whatever threshold this gate used, since a flat 1.0 the instant it's
+            # crossed gave zero incentive to keep pushing to target_height once
+            # banked), so this gate itself can afford to sit later than
+            # standing_pose's without reintroducing a similar hard stopping point.
+            "height_threshold": 0.9 * HEAD_STANDING_HEIGHT,
+            "target_height": HEAD_STANDING_HEIGHT,
             "head_asset_cfg": HEAD_ASSET_CFG,
-            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk",)),
         },
     )
 
@@ -286,18 +367,31 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # on_feet only checks contact, not angle — a foot resting on its edge/toe still
-    # scores well there. This rewards the sole actually being level once standing.
-    cfg.rewards["foot_flat"] = RewardTermCfg(
-        func=foot_flat_reward,
+    # Rewards letting go of the ground with the hands once already about halfway up
+    # (0.5 * HEAD_STANDING_HEIGHT — deliberately much earlier than
+    # HEAD_STANDING_THRESHOLD, which gates on_feet/standing_bonus/foot_flat once
+    # nearly done). Added after watching a live rollout of a training-in-progress
+    # checkpoint prop itself up on its hands/forearms and get stuck there — nothing
+    # else in this reward stack ever penalizes staying propped up once the trunk is
+    # clearly already elevated enough not to need it, so "prop up and stop" was a
+    # stable resting point under the reward stack as it stood.
+    cfg.rewards["hands_released"] = RewardTermCfg(
+        func=hands_released_reward,
         weight=1.5,
         params={
-            "std": np.sqrt(0.3),
-            "height_threshold": HEAD_STANDING_THRESHOLD,
+            "height_threshold": 0.5 * HEAD_STANDING_HEIGHT,
+            "sensor_name": hands_ground_sensor_cfg.name,
             "head_asset_cfg": HEAD_ASSET_CFG,
-            "asset_cfg": SceneEntityCfg("robot", body_names=(r"^(foot|foot_2)$",)),
         },
     )
+
+    # foot_flat_reward (explicit "sole level with the ground" check, on top of
+    # on_feet's contact-only check) dropped — with standing_pose now weighted
+    # heavily (20.0) and gated on genuinely being up, home-pose-matching alone
+    # already implies flat feet (the home keyframe's ankle angles ARE flat), so a
+    # separate term for it is redundant complexity rather than a real additional
+    # constraint (same reasoning as dropping standing_bonus's separate upright
+    # check once head height alone already implied it).
 
     # Hand-support shaping (bracing/releasing a hand/forearm during recovery) is
     # dropped for now: after several iterations (flat reward -> velocity-scaled ->
@@ -321,25 +415,139 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Light secondary nudge toward the natural default pose once standing — kept
-    # small (well below head_height=6.0/standing_bonus=5.0) so it only polishes the
-    # motion the other terms already produce, rather than dictating it.
-    # gate_center=0.230 / gate_sharpness=0.005: near-zero below ~0.22, ramped to full
-    # strength by ~0.24 — a steep transition around the user-specified 0.230m rather
-    # than a hard cutoff or a linear ramp across the whole approach (which would stay
-    # weak right up to standing instead of ever clearly taking over). Weight (4.0) is
-    # a real increase from the flat version's 1.0 but deliberately still below
-    # head_height (6.0) / standing_bonus (5.0) — not falling over matters more than
-    # matching the default pose exactly.
-    cfg.rewards["standing_pose"] = RewardTermCfg(
-        func=standing_pose_reward,
-        weight=4.0,
+    # Trembling/oscillation suppression, in terms of the commanded joint TARGET
+    # (asset.data.joint_pos_target) — never measured joint_pos/joint_vel, and NOT
+    # env.action_manager.action either (that field turned out to be the RAW,
+    # pre-clip network output, empirically unbounded — see
+    # home_stillness_reward's own docstring for the full history of earlier
+    # versions of this idea, including that dead end). Gated on height too (not
+    # just target-near-home): only reward holding still once actually standing,
+    # matching every other "are we done" reward here.
+    cfg.rewards["home_stillness"] = RewardTermCfg(
+        func=home_stillness_reward,
+        # 5.0 -> 50.0: raw value (pose_closeness * target_stillness) currently
+        # tiny (~0.003), safe to scale up since weight is a linear multiplier on
+        # an already-smooth piecewise-linear function (no saturation/underflow
+        # risk the way the earlier std/threshold miscalibrations had). Not going
+        # all the way to 100x-500 in one jump: max possible per-step contribution
+        # at weight=50 (pose_closeness=target_stillness=1) is 50, already on par
+        # with standing_pose's own max (30) — plenty to compete without instantly
+        # dwarfing every other term and destabilizing the value function via a
+        # too-rare, too-large reward spike.
+        weight=50.0,
         params={
-            "gate_center": 0.230,
-            "gate_sharpness": 0.005,
-            "std": 1.0,
+            "height_threshold": HEAD_STANDING_THRESHOLD,
+            # Both measured directly (a debug rollout filtered to standing-only
+            # steps, deterministic policy — see the checked-in
+            # scratchpad/debug_stillness.py): target_pose_error currently sits at
+            # median 1.15rad / p90 1.37rad / max 1.65rad even while standing,
+            # and target_rate at median 37.7 / p90 57.4 / max 92.2 rad/sec. The
+            # first attempt (1.5, 30) left target_rate's factor saturated at
+            # exactly 0 for essentially every standing step (median 37.7 > worst
+            # 30), zeroing the whole multiplicative reward regardless of
+            # target_pose_worst being reasonably calibrated already. Both raised
+            # above today's observed max so there's real (if currently small)
+            # headroom on both factors instead of one dominating via saturation.
+            "target_pose_worst": 1.7,
+            "target_rate_worst": 60.0,
             "head_asset_cfg": HEAD_ASSET_CFG,
             "asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,)),
+        },
+    )
+
+    # Pull toward the natural default (home) pose — redesigned after surveying the
+    # fall-recovery RL literature (HoST arXiv:2502.08378, FRASA arXiv:2410.08655 —
+    # Rhoban's own fall-recovery policy for a similarly small biped, HumanUP
+    # arXiv:2502.12152) for the "gets up but settles into the wrong posture"
+    # failure mode.
+    #
+    # An earlier version of this fix (broadened gate to ~40% of standing height,
+    # weight ramped 3.0->7.0 and std tightened 0.2-0.4->0.1-0.15, both at the same
+    # curriculum step) was trained for the full 15,000 iterations and MEASURED to
+    # regress badly relative to this task's own prior documented baseline (0.260m
+    # mean head height, 94.5% standing success): it plateaued by iteration ~3000-
+    # 6000 at ~0.18m head height, ~0.70 upright error (well off vertical), and
+    # ~60deg RMS joint deviation from home — and never moved from that plateau
+    # for the remaining 9000+ iterations, i.e. a genuine stuck local optimum, not
+    # an undertrained one. Root cause (inferred from which joints were most
+    # off — shoulders/elbows 50-90deg, hips/ankles 55-95deg): opening the
+    # pose-matching gate that early (~0.13m, about half of standing height) starts
+    # pulling the arms back toward their home configuration while this robot still
+    # needs to brace with its arms against the ground to complete the actual
+    # stand-up motion, fighting the recovery itself rather than just polishing it.
+    #
+    # This version keeps only the low-risk part of that fix (per-joint MSE instead
+    # of a sum-of-squares-then-exp kernel, so the gradient doesn't collapse when
+    # several joints are simultaneously off) and is otherwise deliberately close to
+    # the ORIGINAL, empirically-working design: gate still centered near the
+    # standing threshold (moved from 0.230 to 0.85*HEAD_STANDING_HEIGHT = 0.221,
+    # i.e. exactly HEAD_STANDING_THRESHOLD, so pose-matching turns on together with
+    # standing_bonus/on_feet/foot_flat rather than a full ~40% window before them)
+    # with a softer-but-still-late sharpness (0.02, vs the original's near-step
+    # 0.005 and the regressing version's 0.05), a single std (no loose/tight
+    # curriculum swap — that swap's own mid-training reward-scale jump is itself a
+    # plausible destabilizer, independent of the gate timing), and NO weight
+    # ramp — a fixed, modest weight from step 0, avoiding a second reward-scale
+    # discontinuity. std is calibrated to be equivalent-to-slightly-looser than the
+    # original sum-of-squares/std=1.0 kernel rather than tighter: for N joints each
+    # off by the same amount, sum(err^2)/1.0 == mean(err^2)/std^2 when
+    # std == 1/sqrt(N) ≈ 1/sqrt(18) ≈ 0.235 — used as the common value below
+    # instead of per-joint-tuned values, so this change doesn't also (silently,
+    # like the regressing version did) make the reward harder to earn than before.
+    # 0.235 (calibrated to roughly match the OLD sum-of-squares/std=1.0 kernel's
+    # tolerance) turned out to be far tighter than the actual joint errors a
+    # standing-but-not-yet-home-postured policy has: measured directly (eval
+    # script) that once genuinely standing, RMS joint deviation from home was still
+    # ~53-65 degrees (~0.9-1.1 rad) — plugging that into
+    # exp(-mean(error^2/std^2)) with std=0.235 numerically underflows to ~0,
+    # meaning this reward (and its gradient) were effectively zero even while
+    # weighted at 20.0, exactly like the head_height power>1 regression earlier:
+    # technically-correct shape, but far too unforgiving for where training
+    # actually is right now to provide any usable signal. Loosened to 0.6 (~34deg)
+    # so a 50-60deg current error still gives a small-but-nonzero reward/gradient
+    # to shrink from, rather than a numerical zero.
+    HOME_POSE_STD = {r".*": 0.6}
+    cfg.rewards["standing_pose"] = RewardTermCfg(
+        func=home_pose_reward,
+        weight=30.0,
+        params={
+            # Own threshold (0.8), lower/earlier than standing_bonus's (0.9) — pose
+            # matching gets a head start on shaping before the "sustain full
+            # height" bonus commits, since pose_reward's own exp(-error) shape
+            # already provides continuous gradient once gated (no separate ramp
+            # needed the way standing_bonus's flat-until-scaled version did).
+            # Exactly 0 below the threshold, full pose_reward above it.
+            "height_threshold": 0.8 * HEAD_STANDING_HEIGHT,
+            "std": HOME_POSE_STD,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,)),
+        },
+    )
+
+    # Dedicated hip_roll/hip_pitch pose-matching term, SEPARATE from standing_pose
+    # above (same home_pose_reward class, reused, scoped to just these 2 joint
+    # types via asset_cfg). Tried folding a tighter std for these two joints INTO
+    # standing_pose's shared std dict first and measured it backfire: standing_pose
+    # computes ONE exp(-mean(error^2/std^2)) over all 18 joints, so a single joint
+    # with a huge error (left_hip_pitch was ~98deg off) against a tight std
+    # dominates that mean enough to crush the WHOLE term toward zero — including
+    # the gradient for the OTHER 16 joints that were already converging nicely.
+    # A separate term has its own independent exp(), so a tight std here only
+    # affects hip_roll/hip_pitch's own reward/gradient, leaving standing_pose's
+    # (still at the looser uniform 0.6) alone.
+    cfg.rewards["hip_pose"] = RewardTermCfg(
+        func=home_pose_reward,
+        weight=15.0,
+        params={
+            "height_threshold": 0.8 * HEAD_STANDING_HEIGHT,
+            # 0.6, NOT tighter: left_hip_pitch's current error (~98deg/1.7rad) means
+            # even std=0.3 numerically vanishes (exp(-(1.7/0.3)^2) underflows to
+            # ~0) — same lesson as standing_pose's own std history, just re-applied
+            # here. Start loose enough for real gradient at today's error, tighten
+            # once it's actually shrunk.
+            "std": {r".*": 0.6},
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll.*", r".*hip_pitch.*")),
         },
     )
 
@@ -383,10 +591,22 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     #---------------------------- Events ------------------------------
-    # Full-range orientation (any lying pose) and joint angles (any limb configuration,
-    # covering "powered on already on the ground"). position_range is wider than any
-    # joint's own range so the post-clamp result saturates at that joint's actual limits
-    # (reset_joints_by_offset clamps to soft_joint_pos_limits).
+    # An initial-state (fallen pose) difficulty curriculum — start narrower, widen
+    # via a step-count-gated curriculum stage — was tried and MEASURED to make
+    # things worse, not better: performance dropped sharply the instant the range
+    # widened (iteration 800) and never recovered for the remaining 14,000+
+    # iterations, ending measurably worse (head height 0.044m, upright error 0.99)
+    # than training on the full range from step 0 (head height 0.10-0.19m). A fixed
+    # iteration count to widen on, uninformed by whether the policy has actually
+    # mastered the easy regime yet, is a plausible reason: it forces a distribution
+    # shift the policy hadn't earned readiness for. Reverted back to full-range
+    # randomization from step 0.
+    #
+    # Full-range orientation (any lying pose) and joint angles (any limb
+    # configuration, covering "powered on already on the ground"). position_range
+    # is wider than any joint's own range so the post-clamp result saturates at
+    # that joint's actual limits (reset_joints_by_offset clamps to
+    # soft_joint_pos_limits).
     cfg.events["reset_base"].params["pose_range"] = {
         "x": (-0.1, 0.1),
         "y": (-0.1, 0.1),
@@ -396,6 +616,33 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "yaw": (-3.14159, 3.14159),
     }
     cfg.events["reset_robot_joints"].params["position_range"] = (-3.14159, 3.14159)
+
+    # Re-place a fraction of the just-randomized-fallen envs back into the home
+    # pose (+ small noise) instead — found in FRASA (arXiv:2410.08655, Rhoban's own
+    # fall-recovery policy: its "reset_final_p") and HumanUP (arXiv:2502.12152:
+    # "standing_init_prob"/_reset_stand_and_lie_states), both independently, while
+    # surveying the literature for the "ends in wrong posture" fix (see
+    # home_pose_reward's docstring in mdp.py). Without this, home_pose_reward only
+    # ever gets on-policy gradient from wherever the get-up motion happens to arrive
+    # organically — it never directly practices "stay AT home", only "pass near home
+    # once, at the tail of a long noisy rollout". rel_near_home_envs=0.1 matches
+    # FRASA's own value. Relies on dict insertion order (this key is added after
+    # reset_base/reset_robot_joints above) so it overrides their fallen-pose sample
+    # for the selected envs rather than being overwritten by them.
+    cfg.events["reset_near_home"] = EventTermCfg(
+        mode="reset",
+        func=reset_near_home_fraction,
+        params={
+            "rel_near_home_envs": 0.1,
+            "joint_noise_range": (-0.05, 0.05),
+            "orientation_noise_range": (-0.09, 0.09),  # ~+-5 deg roll/pitch
+            # All joints (not dofs_filter-restricted): this is a physical state
+            # reset, not the policy's action/observation space — head/neck should
+            # also land near their (0.0) default for a "near home" episode rather
+            # than keep whatever full-range angle reset_robot_joints gave them.
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
 
     del cfg.events["push_robot"]  # no external pushes needed while learning to stand up
 

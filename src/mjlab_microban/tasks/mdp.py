@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 from mjlab.entity import Entity
+from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -23,10 +24,12 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommandCfg,
 )
 from mjlab.utils.lab_api.math import (
+    quat_apply,
     quat_apply_inverse,
     sample_uniform,
     subtract_frame_transforms,
 )
+from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 ############################ COMMANDS #############################
 
@@ -709,53 +712,72 @@ def extreme_joint_velocity(
     return joint_vel.abs().amax(dim=-1) > max_joint_vel
 
 
-def _head_height(
-    env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg
-) -> torch.Tensor:
+# Calibrated once via mj_forward on HOME_FRAME, the same technique
+# microban_getup_env_cfg.py's own HEAD_STANDING_HEIGHT (0.294) uses: the vertical
+# distance, in the trunk's OWN frame, from its center of mass up to where the head
+# sits when standing upright (0.294 - trunk COM z of 0.22076). A fixed scalar, not
+# read from the head body's live position — this task actuates the neck (head yaw,
+# neck_roll, neck_pitch; see this env's own "all 21 joints actuated" docstring), so
+# tracking the actual head body would let the policy raise/lower "head height" by
+# tilting or extending the neck alone, independent of whether the trunk itself is
+# any more upright or elevated. Anchoring to the trunk's own center of mass and
+# orientation instead means only trunk pose drives this, and it stays correct for
+# any neck geometry/placement (or a robot with no neck at all — read the offset off
+# whatever body this is calibrated against, not the mjcf's specific head/neck
+# bodies) since it never actually reads the head chain at runtime.
+_TRUNK_TO_HEAD_OFFSET = 0.07324
+
+
+def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Entity = env.scene[head_asset_cfg.name]
-    return asset.data.body_link_pos_w[:, head_asset_cfg.body_ids[0], 2]
+    com_pos_w = asset.data.root_com_pos_w
+    com_quat_w = asset.data.root_com_quat_w
+    local_up = torch.zeros_like(com_pos_w)
+    local_up[:, 2] = _TRUNK_TO_HEAD_OFFSET
+    virtual_head_pos_w = com_pos_w + quat_apply(com_quat_w, local_up)
+    return virtual_head_pos_w[:, 2]
 
 
 def standing_bonus(
     env: ManagerBasedRlEnv,
     height_threshold: float,
-    upright_std: float,
+    target_height: float,
     head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Dense reward active only once the robot is near-standing (head height above
-    height_threshold AND close to upright), rewarding staying there.
+    height_threshold), rewarding staying there — and, above that threshold,
+    continuing to scale with how much of the way to target_height (the TRUE
+    standing height) it's actually reached, rather than paying flat full credit
+    the instant it merely crosses the threshold.
 
     HoST's "post-task" mechanism (arXiv:2502.08378): since this only pays out once
     standing is reached, reaching it earlier and holding it accumulates strictly more
-    of it over a fixed-length episode. Height/upright reward alone measurably plateaus
-    around 80% of target height without ever crossing into genuine standing (see
-    microban_teleop/docs/getup_research.md) — this term is a targeted "finish the job"
-    incentive that height/upright alone don't provide: partial credit for progress
-    isn't the same as a payoff specifically for completing it.
+    of it over a fixed-length episode. This term is a targeted "finish the job"
+    incentive that a dense height reward alone doesn't provide: partial credit for
+    progress isn't the same as a payoff specifically for completing it.
 
-    Gated on head height (see head_height_reward), not trunk height — an inverted-
-    but-elevated trunk shouldn't count as "near-standing" even before this term
-    existed to check orientation too.
+    The continued scaling above threshold (rather than a flat 1.0) was added after
+    a real plateau: training stalled with head height sitting almost exactly AT
+    height_threshold for thousands of iterations. Mechanism (confirmed, not just
+    suspected): this reward and standing_pose both gated flat/binary on the same
+    threshold, so once crossed there was no further gradient from either to keep
+    pushing toward target_height, while standing_torque's effort cost keeps rising
+    the higher (and more extended) the stance gets — net incentive was to stop
+    right at the minimum height that still banks the bonuses, not the true target.
+
+    Previously also multiplied by a separate trunk-upright reward (checking
+    projected gravity against a target std) on top of the height gate. Dropped: once
+    height_threshold is set relative to the TRUE standing head height (see
+    HEAD_STANDING_HEIGHT in microban_getup_env_cfg.py — this used to be a lower,
+    empirically-lowered value a seated posture could also satisfy, which is exactly
+    why the separate upright check seemed necessary), reaching it is only physically
+    possible while upright — a seated, kneeling, or inverted-but-elevated pose cannot
+    reach the head that high.
     """
-    asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
-
-    if asset_cfg.body_ids:
-        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
-    else:
-        body_quat_w = asset.data.root_link_quat_w
-    gravity_w = asset.data.gravity_vec_w
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    projected_gravity_b_unit = projected_gravity_b / gravity_norm
-    upright_error = torch.square(projected_gravity_b_unit[:, 0]) + torch.square(
-        projected_gravity_b_unit[:, 1]
-    )
-    upright_reward = torch.exp(-upright_error / upright_std**2)
-
     is_standing = height > height_threshold
-    return torch.where(is_standing, upright_reward, torch.zeros_like(upright_reward))
+    scale = torch.clamp(height / target_height, min=0.0, max=1.0)
+    return torch.where(is_standing, scale, torch.zeros_like(scale))
 
 
 def standing_torque_penalty(
@@ -786,32 +808,198 @@ def standing_torque_penalty(
     return torch.where(is_standing, total + peak, torch.zeros_like(total))
 
 
-def standing_pose_reward(
-    env: ManagerBasedRlEnv,
-    gate_center: float,
-    gate_sharpness: float,
-    std: float,
-    head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward joint angles close to default pose, weighted by a steep sigmoid gate on
-    head height instead of a hard on/off threshold — near-zero below gate_center,
-    rapidly ramping to full strength just above it (gate_sharpness controls how
-    quickly; small values = steeper). A linear height-based scale was avoided because
-    it would keep this reward weak most of the way to the target instead of ever
-    really taking over there; this gives a clearer regime change once actually near
-    standing. Kept as a secondary nudge, not a dominant term — not falling over
-    matters more than exactly matching the default pose, so its configured weight
-    stays modest relative to height/standing_bonus/standing_torque.
+class home_stillness_reward:
+    """Reward the commanded joint TARGET (asset.data.joint_pos_target, not the
+    measured joint_pos/joint_vel) holding still near home, but only once actually
+    standing (head height above height_threshold) — a triple AND (standing,
+    target-near-home, target-not-changing) via multiplication/gating, not a
+    penalty gated by any one of these alone.
+
+    Went through several earlier versions of this idea, each found to backfire:
+    1. A hard is_near_home threshold switching a joint-velocity PENALTY on/off:
+       made trembling WORSE on a live rollout — a step function right at the
+       boundary gives a policy sitting near it a reason to keep crossing back and
+       forth (avoiding the penalty on one side costs nothing the reward
+       otherwise cares about), the same hard-gate-creates-instability lesson
+       home_pose_reward's own docstring already describes for its gate.
+    2. Smoothing that penalty into a continuous ramp fixed the boundary problem
+       but kept a different one: as a pure penalty gated by closeness, being FAR
+       from home paid exactly 0 regardless of velocity, while being CLOSE always
+       carried at least the risk of a penalty unless velocity was exactly 0 — a
+       net asymmetric incentive to just not fully converge onto home at all.
+    3. A positive reward using env.action_manager.action (the policy's RAW,
+       pre-scale/offset/clip network output): measured via a live debug rollout
+       to be essentially unbounded (RMS growing past 100 over an episode, no
+       ceiling) — this task's JointPositionActionCfg clips the fully-processed
+       action to (-1.57, 1.57) rad, but that clip is applied to
+       raw*scale+offset, a quantity the action MANAGER never exposes; the RAW
+       action alone has no such bound and drifts arbitrarily, since nothing
+       downstream of that clip pushes back on its scale. Any fixed "worst case"
+       constant for it is meaningless — it measured to either saturate every
+       ramp to exactly 0 or (once loosened far enough to stop doing that)
+       plainly not correspond to anything physical.
+    This version reads asset.data.joint_pos_target instead: the ACTUAL,
+    post-scale/offset/clip position each joint's PD controller is tracking right
+    now (what apply_actions() in mjlab's JointPositionAction writes via
+    set_joint_position_target) — same physical radians and indexing as joint_pos/
+    default_joint_pos, genuinely bounded by the action term's own clip, and
+    exactly "the target value" in the sense meant throughout this reward's
+    design: what the policy is currently asking for, independent of how well the
+    real joint is tracking it.
+
+    A previous joint_pos_target isn't separately exposed anywhere, so this class
+    caches its own (self._prev_target, updated every call) rather than being a
+    plain function like most other reward terms here.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    height = _head_height(env, head_asset_cfg)
-    joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-    default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
-    error = torch.sum(torch.square(joint_pos - default_pos), dim=-1)
-    pose_reward = torch.exp(-error / std**2)
-    gate = torch.sigmoid((height - gate_center) / gate_sharpness)
-    return gate * pose_reward
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self._joint_ids = cfg.params["asset_cfg"].joint_ids
+        self._prev_target = asset.data.joint_pos_target[:, self._joint_ids].clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        height_threshold: float,
+        target_pose_worst: float,
+        target_rate_worst: float,
+        head_asset_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        target_pos = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
+        default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+        target_offset = target_pos - default_pos
+        target_pose_error = torch.sqrt(torch.mean(torch.square(target_offset), dim=-1))
+        pose_closeness = torch.clamp(1.0 - target_pose_error / target_pose_worst, min=0.0, max=1.0)
+
+        target_rate = torch.sqrt(
+            torch.mean(torch.square((target_pos - self._prev_target) / env.step_dt), dim=-1)
+        )
+        target_stillness = torch.clamp(1.0 - target_rate / target_rate_worst, min=0.0, max=1.0)
+        self._prev_target = target_pos.clone()
+
+        height = _head_height(env, head_asset_cfg)
+        is_standing = height > height_threshold
+
+        reward = pose_closeness * target_stillness
+        return torch.where(is_standing, reward, torch.zeros_like(reward))
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused — a stale cross-episode target_rate spike for one
+        # step right after a reset is harmless, since is_standing gates the whole
+        # term to 0 right at that moment anyway (a just-reset env starts fallen).
+
+
+class home_pose_reward:
+    """Reward joint angles close to the robot's own default/home pose, gated by a
+    BROAD sigmoid on head height (not a hard on/off threshold, and not the earlier,
+    near-step-function gate this replaced).
+
+    Two independent problems with the previous version of this term (found by
+    surveying HoST arXiv:2502.08378, FRASA arXiv:2410.08655, and HumanUP
+    arXiv:2502.12152 — see microban_getup_env_cfg.py for how this term is wired):
+
+    1. Error shape: summing squared error across ~18 joints then applying ONE
+       exp(-sum/std^2) saturates near 0 whenever several joints are simultaneously
+       off (the normal case for most of a recovery motion), collapsing the gradient
+       into an undifferentiated "far from home" signal that can't tell "1 joint off"
+       from "8 joints off". This uses per-joint standard deviations and the MEAN
+       (not sum) of error^2/std^2 — identical shape to
+       mjlab.tasks.velocity.mdp.rewards.variable_posture, the reward already driving
+       this same robot's walking policy's own standing/walking pose term (see
+       microban_velocity_env_cfg.py's std_standing) — averaging keeps the scale
+       independent of joint count, and per-joint std lets tight/loose joints be
+       tuned individually.
+    2. Gate shape: the previous gate_center/gate_sharpness sat right next to
+       HEAD_STANDING_THRESHOLD with a sharpness making it an almost-literal step
+       function — pose-matching only ever got a nonzero gradient in the last ~1cm
+       of the ascent, by which point the policy had already committed to whichever
+       height/upright/on-feet-satisfying strategy it found first. HoST's own style
+       reward (which this term's whole existence is inspired by) is present
+       "essentially throughout the episode", not gated behind near-completion.
+       Replaced with the same clamp(frac, 0, 1)**power shape head_height_reward
+       uses for its own rising side (see that function): ramps up smoothly as head
+       height approaches gate_target_height, reaching exactly 1.0 (and staying
+       flat, not continuing to depend on height at all) once standing height is
+       reached — unlike head_height_reward, this does NOT fall off again past the
+       target, since matching the home pose is equally good whether the head is
+       exactly at, or a little above, standing height.
+
+    Still gated (not literally dense from frame 1 like FRASA, which trains with an
+    off-policy algorithm less prone to single-critic reward interference — see
+    HoST's own single-critic-vs-multi-critic ablation): with on-policy PPO and a
+    single critic here, giving large pose-matching gradient while the robot is still
+    mid-flip (where large joint excursions from home are the correct behavior) would
+    fight the get-up motion itself. The height gate keeps this a "which of the
+    successful strategies do you converge to" signal, not a "do this instead of
+    getting up" signal — just over a wider window than before.
+
+    ``std`` is re-resolved from ``cfg.params["std"]`` on every call (only the joint
+    NAME list is cached from ``__init__``), not precomputed once into a fixed tensor
+    — this lets a curriculum term tighten it over training (mutating
+    ``env.reward_manager.get_term_cfg("standing_pose").params["std"]`` in place) the
+    same way this term's own weight gets ramped. This matters: verified numerically
+    (see microban_getup_env_cfg.py's HOME_POSE_STD_LOOSE/_TIGHT split) that reusing
+    the walking policy's tight std_standing values (0.1-0.15 rad) from step 0 makes
+    this term saturate to ~0 for the still-imperfect joint configurations a
+    mid-training policy actually reaches — even once the gate is open — MORE
+    aggressively than the old sum-of-squares/std=1.0 kernel did, silently defeating
+    the gate-broadening fix above. Starting loose and tightening in step with the
+    weight ramp avoids that.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        _, self._joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std: dict[str, float],
+        height_threshold: float,
+        head_asset_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        _, _, std_values = resolve_matching_names_values(
+            data=std,
+            list_of_strings=self._joint_names,
+        )
+        std_t = torch.tensor(std_values, device=env.device, dtype=torch.float32)
+        height = _head_height(env, head_asset_cfg)
+        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+        error_sq = torch.square(joint_pos - default_pos)
+        scaled_error_sq = error_sq / std_t**2
+        # "mean" (default, used by standing_pose): scale-independent of joint count,
+        # matches variable_posture's own shape. "max" (used by hip_pose): gradient
+        # flows ONLY through the single worst joint in this group each step, instead
+        # of being diluted 1/N across N joints — requested because a mean over just
+        # the 4 hip joints still let 3-already-converged joints outvote the one
+        # (left_hip_pitch) still ~90+deg off; this makes the term care about
+        # shrinking whichever hip joint is currently worst, not the group average.
+        if reduction == "max":
+            reduced = torch.amax(scaled_error_sq, dim=-1)
+        elif reduction == "mean":
+            reduced = torch.mean(scaled_error_sq, dim=-1)
+        else:
+            raise ValueError(f"Unknown reduction: {reduction!r}")
+        pose_reward = torch.exp(-reduced)
+        # Simple binary gate at the SAME height_threshold as standing_bonus (pass
+        # HEAD_STANDING_THRESHOLD from the env cfg) — no ramp, no separate minimum
+        # fraction: exactly 0 below it, full pose_reward above it. Simplified from
+        # an earlier smooth-ramp-with-hard-floor version once it became clear the
+        # extra tunable shape (gate_target_height/gate_power/gate_min_frac) wasn't
+        # earning its complexity back over just reusing the one threshold every
+        # other "are we actually standing now" reward already gates on.
+        is_standing = height > height_threshold
+        return torch.where(is_standing, pose_reward, torch.zeros_like(pose_reward))
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused.
 
 
 def foot_flat_reward(
@@ -867,28 +1055,96 @@ def on_feet_reward(
     return both_feet * height_frac
 
 
+def hands_released_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    sensor_name: str,
+    head_asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward NOT bracing on the hands/forearms once past a (deliberately early, not
+    "nearly standing") height threshold.
+
+    Added after watching a live rollout of a training-in-progress checkpoint: the
+    policy reliably props itself up on its hands to roughly half height, then gets
+    stuck there — it never lets go to complete the extension onto its feet alone.
+    Every other reward term here rewards being tall/on-feet/home-postured, but none
+    of them ever penalizes STAYING propped on the hands once there's clearly no need
+    to be (the trunk is already elevated) — so "prop up and stop" is a stable
+    stopping point under the existing reward stack, not just a slow-to-leave one.
+
+    Gated at a LOWER height than standing_bonus/on_feet/foot_flat (which all key off
+    HEAD_STANDING_THRESHOLD, i.e. near-complete) specifically because the failure
+    mode happens well before that point — gating this the same way would never
+    engage during the exact phase where the policy is stuck. height_threshold should
+    be passed in around the "propped up on hands" height observed in practice (much
+    lower than standing height), not the standing threshold itself.
+    """
+    found = env.scene[sensor_name].data.found
+    hands_off_ground = (found <= 0).all(dim=-1).float()
+    height = _head_height(env, head_asset_cfg)
+    is_past_threshold = height > height_threshold
+    return torch.where(is_past_threshold, hands_off_ground, torch.zeros_like(hands_off_ground))
+
+
 def head_height_reward(
     env: ManagerBasedRlEnv,
     target_height: float,
     asset_cfg: SceneEntityCfg,
     sensor_name: str | None = None,
+    power: float = 1.0,
 ) -> torch.Tensor:
     """Dense reward proportional to head height, capped once standing head height is
     reached.
 
-    Using the head body rather than the trunk root: raw trunk-Z height alone is
-    orientation-blind (rewards getting the trunk high regardless of which way the
-    robot is facing, which gives a useful gradient from any starting pose, but can't
-    distinguish "trunk high, right-side up" from "trunk high, upside down" — e.g. some
-    inverted/handstand-like configuration). Head height doesn't have that failure
-    mode: an inverted pose has the head low even with the trunk high, so it only
-    rewards a genuinely upright-and-high pose, while keeping the same useful gradient
-    from a flat starting pose (head low there too). Matches HumanUP's
-    (arXiv:2502.12152) choice to reward head height directly rather than trunk height.
+    Using a virtual point above the trunk's own center of mass (see _head_height)
+    rather than raw trunk-Z height: trunk-Z alone is orientation-blind (rewards
+    getting the trunk high regardless of which way the robot is facing, which
+    gives a useful gradient from any starting pose, but can't distinguish "trunk
+    high, right-side up" from "trunk high, upside down" — e.g. some
+    inverted/handstand-like configuration). This doesn't have that failure mode:
+    an inverted trunk puts the virtual point low even with the trunk itself high,
+    so it only rewards a genuinely upright-and-high pose, while keeping the same
+    useful gradient from a flat starting pose (virtual point low there too).
+    Matches HumanUP's (arXiv:2502.12152) choice to reward head height directly
+    rather than trunk height, without actually reading the (in this task,
+    independently actuated) head/neck bodies themselves.
+
+    ``power`` (default 1.0, i.e. the original linear-up-then-flat shape) blends in
+    an extra bonus for how reward rises toward target_height AND, unlike the
+    original, falls again past it:
+
+        shape = clamp(1 - |height/target_height - 1|, 0, 1)   # peak at target_height
+        reward = 0.5 * shape + 0.5 * shape ** power
+
+    ``shape`` alone is a peak centered exactly at target_height, symmetric in the
+    height FRACTION (not raw meters) on either side, reaching exactly 1.0 only at
+    target_height. Blended 50/50 with a HALF-WEIGHTED linear (``shape``) term
+    rather than using ``shape ** power`` alone: measured directly that the power
+    term by itself crushes the reward for early, modest height gains too much to
+    bootstrap the get-up motion at all (e.g. power=3 pays frac=0.2 only 0.008, vs
+    0.2 for plain linear — confirmed as a real regression, not just theoretical:
+    head_height reward stayed flat at ~0.03-0.09 through iteration 100+ with a
+    pure-power shape, dramatically worse than every run using a linear or
+    blended shape at the same point). The linear half guarantees a reasonable
+    baseline gradient at every height; the power half is a top-up bonus for two
+    problems, both found by watching live rollouts of training-in-progress
+    checkpoints:
+    1. (power > 1) A flat linear reward pays the same marginal amount whether
+       closing the last 10% of the height gap or the first 10% — nothing
+       specifically discouraged settling into a stable SEATED local optimum well
+       short of standing. d/dx[x^p] = p*x^(p-1) grows with x for p > 1, so the
+       last stretch pays disproportionately more.
+    2. (falling off past target_height, not clamped flat at 1.0) A reward that
+       merely saturates at "at least target_height" gives no reason to avoid
+       overshooting it either (standing on tiptoes, a jump, or other
+       overextension) — peaking exactly at the true standing height and paying
+       less on EITHER side keeps target_height as the one specific point being
+       optimized for, not a floor.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    height = asset.data.body_link_pos_w[:, asset_cfg.body_ids[0], 2]
-    reward = torch.clamp(height / target_height, min=0.0, max=1.0)
+    height = _head_height(env, asset_cfg)
+    frac = height / target_height
+    shape = torch.clamp(1.0 - torch.abs(frac - 1.0), min=0.0, max=1.0)
+    reward = 0.5 * shape + 0.5 * shape**power
     if sensor_name is not None:
         airborne = _feet_airborne(env, sensor_name)
         reward = torch.where(airborne, torch.zeros_like(reward), reward)
@@ -1330,6 +1586,61 @@ def set_stepping_parameters(
         env.command_manager.get_term_cfg("twist").rel_standing_envs = rel_standing_envs
     if rel_rotation_envs is not None:
         env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
+
+def reset_near_home_fraction(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    rel_near_home_envs: float,
+    joint_noise_range: tuple[float, float],
+    orientation_noise_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """After the fallen-pose reset events (reset_base / reset_robot_joints) have
+    already placed ``env_ids`` in an extreme random fallen configuration — this
+    task's main training distribution — re-place a random fraction of THOSE SAME
+    env_ids back into the home/standing pose plus small noise instead.
+
+    Both FRASA (arXiv:2410.08655, Rhoban's own fall-recovery policy for a similarly
+    small biped — its ``reset_final_p`` fraction) and HumanUP (arXiv:2502.12152 —
+    ``_reset_stand_and_lie_states`` / ``standing_init_prob``) independently use this
+    exact mechanism, found while surveying the fall-recovery RL literature for this
+    task (see microban_getup_env_cfg.py). Without it, the pose-matching reward
+    (home_pose_reward) only ever gets on-policy gradient from whatever pose the
+    get-up policy happens to arrive at organically at the tail of a long, noisy
+    recovery rollout — it never directly practices "stay AT home", only "pass
+    through/near home once". Spawning some episodes already there gives dense,
+    correctly-attributed gradient for stabilizing at exactly the target the pose
+    reward is shaping toward.
+
+    Relies on dict insertion order in ``cfg.events``: this event must be registered
+    AFTER ``reset_base``/``reset_robot_joints`` so it overrides their sampled fallen
+    pose for the selected subset rather than being overwritten by them.
+    """
+    mask = torch.rand(len(env_ids), device=env.device) < rel_near_home_envs
+    near_home_ids = env_ids[mask]
+    if len(near_home_ids) == 0:
+        return
+
+    lo, hi = orientation_noise_range
+    envs_mdp.reset_root_state_uniform(
+        env,
+        near_home_ids,
+        pose_range={
+            "x": (-0.02, 0.02),
+            "y": (-0.02, 0.02),
+            "z": (0.0, 0.005),
+            "roll": (lo, hi),
+            "pitch": (lo, hi),
+            "yaw": (-3.14159, 3.14159),
+        },
+    )
+    envs_mdp.reset_joints_by_offset(
+        env,
+        near_home_ids,
+        position_range=joint_noise_range,
+        velocity_range=(0.0, 0.0),
+        asset_cfg=asset_cfg,
+    )
 
 
 def hold_at_default_pose(
