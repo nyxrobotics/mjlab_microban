@@ -2167,6 +2167,84 @@ class CheckpointContractTest(unittest.TestCase):
             changed_runner.load(str(checkpoint), load_cfg={"actor": True})
         base_load.assert_not_called()
 
+    def test_boundary_resume_hashes_resolved_path_when_loader_passes_string(
+        self,
+    ) -> None:
+        expected = self._bounded_actor_state()
+        policy = SimpleNamespace(state_dict=lambda: expected)
+        loaded_manifest, loaded_digest = self._canonical_initial_training_provenance(
+            resume=False,
+            include_safe_identity=True,
+        )
+        infos = {
+            "env_state": {"common_step_counter": 1500 * 24},
+            "microban_teleop_training_contract_version": (
+                MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
+            ),
+            "previous_action_semantics": MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+            "microban_teleop_actor_initialization": (
+                MICROBAN_TELEOP_ACTOR_INITIALIZATION
+            ),
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_RECIPE_REVISION,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_KEY: loaded_manifest,
+            MICROBAN_TELEOP_TRAINING_PROVENANCE_SHA256_KEY: loaded_digest,
+            "safe_velocity_actor_bootstrap": self._valid_bootstrap_info(),
+        }
+        checkpoint = self.root / "model_1499.pt"
+        torch.save(
+            {
+                "actor_state_dict": {
+                    key: value.clone() for key, value in expected.items()
+                },
+                "iter": 1499,
+                "infos": infos,
+            },
+            checkpoint,
+        )
+        checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+        current_manifest, _current_digest = (
+            self._canonical_initial_training_provenance(
+                resume=True,
+                include_safe_identity=False,
+                resume_source=checkpoint,
+            )
+        )
+        current_manifest["invocation"].update(
+            {
+                "stage_start_boundary": 1500,
+                "stage_target_boundary": 3000,
+                "parent_checkpoint_sha256": checkpoint_sha256,
+                "parent_gate_sha256": "d" * 64,
+            }
+        )
+        runner = object.__new__(MicrobanTeleopOnPolicyRunner)
+        runner.alg = SimpleNamespace(get_policy=lambda: policy)
+        runner.teleop_training_resume = True
+        runner.checkpoint_consumer_mode = False
+        runner.safe_velocity_bootstrap_provenance = None
+        runner.teleop_training_provenance = current_manifest
+        runner.teleop_training_provenance_sha256 = canonical_json_sha256(
+            current_manifest
+        )
+        runner.loaded_checkpoint_contract = None
+
+        with (
+            patch.object(MjlabOnPolicyRunner, "load", return_value=infos) as base_load,
+            patch.object(
+                MicrobanTeleopOnPolicyRunner,
+                "_validate_canonical_parent_gate",
+            ) as parent_gate,
+        ):
+            runner.load(str(checkpoint), load_cfg={"actor": True})
+
+        base_load.assert_called_once()
+        parent_gate.assert_called_once_with(
+            boundary=1500,
+            parent_checkpoint_sha256=checkpoint_sha256,
+            parent_gate_sha256="d" * 64,
+        )
+
     def test_save_adds_current_marker_and_legacy_runner_cannot_write(self) -> None:
         fresh = object.__new__(MicrobanTeleopOnPolicyRunner)
         fresh.loaded_checkpoint_contract = None

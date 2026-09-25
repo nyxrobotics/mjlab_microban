@@ -2647,7 +2647,7 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
         if start is None or target is None:
             raise ValueError("Canonical resume stage boundaries are missing")
         if completed == start:
-            if current.parent_checkpoint_sha256 != _sha256_file(checkpoint_path):
+            if current.parent_checkpoint_sha256 != observed_checkpoint_sha256:
                 raise ValueError(
                     "Canonical resume parent checkpoint SHA-256 does not match "
                     "the loaded checkpoint"
