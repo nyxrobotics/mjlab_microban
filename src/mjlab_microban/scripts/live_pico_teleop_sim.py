@@ -76,6 +76,7 @@ AUDITED_LEGACY_WALK_SHA256 = (
 )
 MAX_FRAME_GAP_S = 0.1
 MAX_FRAME_AGE_S = 0.1
+LEFT_TRIGGER_RELEASE_THRESHOLD = 0.45
 
 FORWARD_MAX_M_S = 0.7
 BACKWARD_MAX_M_S = 0.5
@@ -143,6 +144,69 @@ def _legacy_walk_input_frame(frame: Any) -> Any:
         return frame
     legacy_left = _FieldOverrideView(left, primary_button=False)
     return _FieldOverrideView(frame, left_controller=legacy_left)
+
+
+def _legacy_walk_mapping(mapped: Any) -> Any:
+    """Return a legacy-only view of an already mapped controller snapshot."""
+
+    if not isinstance(mapped, Mapping):
+        return mapped
+    return {
+        **mapped,
+        "locomotion_policy": "walk",
+        "foot_target": None,
+        "hand_target": None,
+        "hand_active": {"left": False, "right": False},
+        "body_target_calibrated": False,
+        "body_target_fresh": False,
+    }
+
+
+def _left_trigger_explicitly_released(frame: Any, mapped: Any) -> bool:
+    """Recognize a real deadman release without treating data loss as one."""
+
+    health = (
+        frame.get("controller_health")
+        if isinstance(frame, Mapping)
+        else getattr(frame, "controller_health", None)
+    )
+    if health is not None:
+        fresh = (
+            health.get("fresh")
+            if isinstance(health, Mapping)
+            else getattr(health, "fresh", False)
+        )
+        valid = (
+            health.get("valid")
+            if isinstance(health, Mapping)
+            else getattr(health, "valid", False)
+        )
+        if not bool(fresh) or not bool(valid):
+            return False
+
+    if isinstance(frame, Mapping):
+        left = frame.get("left_controller")
+    else:
+        left = getattr(frame, "left_controller", None)
+    if left is not None:
+        trigger = (
+            left.get("trigger")
+            if isinstance(left, Mapping)
+            else getattr(left, "trigger", None)
+        )
+        value = _finite_number(trigger)
+        return value is not None and value <= LEFT_TRIGGER_RELEASE_THRESHOLD
+
+    # WebXR hands off an already mapped command rather than a native controller
+    # object. A fresh mapped snapshot with no walk move is its explicit release.
+    if isinstance(frame, _WebXrFrame) and isinstance(mapped, Mapping):
+        moves = mapped.get("active_moves")
+        return (
+            isinstance(moves, Sequence)
+            and not isinstance(moves, (str, bytes, bytearray))
+            and "walk" not in moves
+        )
+    return False
 
 
 @dataclass(frozen=True)
@@ -375,6 +439,12 @@ def neutral_simulation_command(*, fault: str | None = None) -> SimulationCommand
         locomotion_policy="walk",
         fault=fault,
     )
+
+
+def _command_with_fault(
+    command: SimulationCommand, fault: str | None
+) -> SimulationCommand:
+    return SimulationCommand(**{**asdict(command), "fault": fault})
 
 
 def _finite_number(value: Any) -> float | None:
@@ -789,6 +859,7 @@ class LivePicoSimulationPolicy:
         walk_actor: LegacyWalkActor,
         source: _Source,
         mapper: _Mapper,
+        legacy_fallback_mapper: _Mapper | None = None,
         camera_publisher: StereoMjpegPublisher | None = None,
         legacy_only: bool = False,
         native_legacy_action_semantics: bool = False,
@@ -800,8 +871,12 @@ class LivePicoSimulationPolicy:
         self.walk_actor = walk_actor.policy
         self.source = source
         self.mapper = mapper
+        self.legacy_fallback_mapper = legacy_fallback_mapper
         self.camera_publisher = camera_publisher
         self._camera_fault: str | None = None
+        self._legacy_fallback_latched = False
+        self._legacy_fallback_reason: str | None = None
+        self._pending_legacy_command: SimulationCommand | None = None
         self.legacy_only = legacy_only
         self.native_legacy_action_semantics = native_legacy_action_semantics
         self.clock_ns = clock_ns
@@ -921,12 +996,28 @@ class LivePicoSimulationPolicy:
             raise TypeError(f"Unexpected hand command type: {type(hand).__name__}")
 
     def reset(self) -> None:
-        self.mapper.reset()
+        self._reset_mappers()
         self._previous_sampled_at_ns = None
         self._pending_authority_token = None
+        self._pending_legacy_command = None
+        self._clear_legacy_fallback_latch()
         self.hmd_current_target.copy_(self.robot.data.joint_pos[:, self.hmd_joint_ids])
         self.walk_last_action.zero_()
         self._previous_episode_length = self.env.episode_length_buf.clone()
+
+    def _reset_mappers(self) -> None:
+        self.mapper.reset()
+        fallback_mapper = getattr(self, "legacy_fallback_mapper", None)
+        if fallback_mapper is not None and fallback_mapper is not self.mapper:
+            fallback_mapper.reset()
+
+    def _latch_legacy_fallback(self, reason: str) -> None:
+        self._legacy_fallback_latched = True
+        self._legacy_fallback_reason = reason
+
+    def _clear_legacy_fallback_latch(self) -> None:
+        self._legacy_fallback_latched = False
+        self._legacy_fallback_reason = None
 
     def _read_command(self) -> SimulationCommand:
         try:
@@ -938,7 +1029,7 @@ class LivePicoSimulationPolicy:
                 self._pending_authority_token = None
         except Exception as exc:  # noqa: BLE001 - SDK faults must fail closed
             self._pending_authority_token = None
-            self.mapper.reset()
+            self._reset_mappers()
             return neutral_simulation_command(
                 fault=f"PICO source read failed: {type(exc).__name__}: {exc}"
             )
@@ -949,7 +1040,7 @@ class LivePicoSimulationPolicy:
             or isinstance(sampled_at_ns, bool)
             or sampled_at_ns < 0
         ):
-            self.mapper.reset()
+            self._reset_mappers()
             return neutral_simulation_command(fault="invalid host sample timestamp")
 
         previous = self._previous_sampled_at_ns
@@ -960,14 +1051,14 @@ class LivePicoSimulationPolicy:
             # snapshot twice. Its original age still expires at 100 ms; only a
             # backwards timestamp or a genuine host-side gap disarms immediately.
             if delta_ns < 0 or delta_ns > int(MAX_FRAME_GAP_S * 1.0e9):
-                self.mapper.reset()
+                self._reset_mappers()
                 return neutral_simulation_command(
                     fault="host sampling gap; trigger rearm required"
                 )
 
         age_ns = self.clock_ns() - sampled_at_ns
         if age_ns < 0 or age_ns > int(MAX_FRAME_AGE_S * 1.0e9):
-            self.mapper.reset()
+            self._reset_mappers()
             return neutral_simulation_command(
                 fault="aged PICO frame; trigger rearm required"
             )
@@ -988,9 +1079,57 @@ class LivePicoSimulationPolicy:
                 # regardless of the optional X-button hybrid-policy selector.  The
                 # mapper still owns the trigger deadman and all of its rearm rules.
                 mapped = {**mapped, "locomotion_policy": "walk"}
-            return command_for_simulation(mapped, legacy_walk_available=True)
+                command = command_for_simulation(
+                    mapped, legacy_walk_available=True
+                )
+                self._pending_legacy_command = command
+                return command
+
+            fallback_mapper = getattr(self, "legacy_fallback_mapper", None)
+            if fallback_mapper is None:
+                fallback_mapped = _legacy_walk_mapping(mapped)
+            else:
+                fallback_mapped = fallback_mapper.map_sample(
+                    _legacy_walk_input_frame(frame)
+                )
+                fallback_mapped = _legacy_walk_mapping(fallback_mapped)
+            fallback_command = command_for_simulation(
+                fallback_mapped, legacy_walk_available=True
+            )
+            self._pending_legacy_command = fallback_command
+            primary_command = command_for_simulation(
+                mapped, legacy_walk_available=True
+            )
+
+            explicit_release = _left_trigger_explicitly_released(
+                frame, fallback_mapped
+            )
+            if explicit_release:
+                self._clear_legacy_fallback_latch()
+            elif getattr(self, "_legacy_fallback_latched", False):
+                return _command_with_fault(
+                    fallback_command,
+                    self._legacy_fallback_reason
+                    or "legacy fallback latched until trigger release",
+                )
+
+            if (
+                primary_command.locomotion_policy == "pico_teleop"
+                and fallback_command.enabled
+                and (
+                    not primary_command.enabled
+                    or primary_command.fault is not None
+                )
+            ):
+                reason = (
+                    "PICO body policy unavailable; using legacy joystick "
+                    "until trigger release"
+                )
+                self._latch_legacy_fallback(reason)
+                return _command_with_fault(fallback_command, reason)
+            return primary_command
         except Exception as exc:  # noqa: BLE001 - mapper faults must fail closed
-            self.mapper.reset()
+            self._reset_mappers()
             return neutral_simulation_command(
                 fault=f"PICO mapper failed: {type(exc).__name__}: {exc}"
             )
@@ -1088,7 +1227,7 @@ class LivePicoSimulationPolicy:
         if injected:
             return command
 
-        self.mapper.reset()
+        self._reset_mappers()
         self._pending_authority_token = None
         neutral = neutral_simulation_command(
             fault="native authority changed before simulation injection"
@@ -1110,6 +1249,81 @@ class LivePicoSimulationPolicy:
             f"fault={fault} camera_fault={self._camera_fault or 'none'}",
             flush=True,
         )
+
+    def _legacy_actor_action(self, observations: Any) -> torch.Tensor:
+        native_legacy = bool(
+            getattr(self, "native_legacy_action_semantics", False)
+        )
+        if native_legacy:
+            actor_observation = _patch_native_walk_observation(
+                observations, self.env
+            )
+            action = self.walk_actor(actor_observation)
+            self._require_safe_action(action, "legacy walk")
+            return action
+
+        patched = _patch_command_observation(observations, self.env)
+        actor_observation = _walk_actor_observation(
+            patched,
+            self.body_joint_observation_indices,
+            self.walk_position_offset,
+            self.walk_last_action,
+        )
+        walk_action = self.walk_actor(actor_observation)
+        self._require_safe_action(walk_action, "legacy walk")
+        self.walk_last_action.copy_(walk_action)
+        action = walk_action * self.walk_output_scale + self.walk_output_offset
+        self._require_safe_action(action, "adapted legacy walk")
+        return action
+
+    def _require_safe_action(self, action: Any, label: str) -> None:
+        if not isinstance(action, torch.Tensor):
+            raise TypeError(f"{label} returned {type(action).__name__}, not Tensor")
+        finite = bool(torch.isfinite(action).all().item())
+        if action.shape != self.zero_action.shape or not finite:
+            raise RuntimeError(
+                f"unsafe {label} output: shape={tuple(action.shape)}, "
+                f"finite={finite}"
+            )
+
+    def _fallback_after_learned_fault(
+        self, observations: Any, reason: str
+    ) -> torch.Tensor:
+        self._latch_legacy_fallback(reason)
+        fallback = getattr(self, "_pending_legacy_command", None)
+        if fallback is None or not fallback.enabled:
+            self.walk_last_action.zero_()
+            return self.zero_action.clone()
+
+        fallback = _command_with_fault(fallback, reason)
+        authority = getattr(self, "_pending_authority_token", None)
+        guarded_inject = getattr(
+            getattr(self, "source", None), "run_if_current", None
+        )
+        if authority is not None and callable(guarded_inject):
+            still_current, _result = guarded_inject(authority, lambda: None)
+            if not still_current:
+                self._reset_mappers()
+                self.walk_last_action.zero_()
+                return self.zero_action.clone()
+        # The primary command already injected the same joystick twist and HMD
+        # orientation for this policy step. Do not inject a second time: doing
+        # so would advance the neck slew limiter twice. The legacy observation
+        # projection ignores hybrid hand/foot target columns.
+        self._print_status(fallback)
+        try:
+            return self._legacy_actor_action(observations)
+        except Exception as exc:  # noqa: BLE001 - keep the viewer alive at HOME
+            self._legacy_fallback_reason = (
+                f"{reason}; legacy fallback failed: {type(exc).__name__}: {exc}"
+            )
+            self._reset_mappers()
+            self.walk_last_action.zero_()
+            neutral = neutral_simulation_command(
+                fault=self._legacy_fallback_reason
+            )
+            self._inject_with_authority(neutral)
+            return self.zero_action.clone()
 
     def __call__(self, observations: Any) -> torch.Tensor:
         # Auto-reset after a simulated fall is visible for one policy call.
@@ -1148,38 +1362,26 @@ class LivePicoSimulationPolicy:
             # policy is actively selected and the trigger is held.
             return self.zero_action.clone()
 
-        native_legacy = bool(
-            getattr(self, "native_legacy_action_semantics", False)
-        )
-        if native_legacy:
-            actor_observation = _patch_native_walk_observation(observations, self.env)
-            action = self.walk_actor(actor_observation)
-        else:
-            patched = _patch_command_observation(observations, self.env)
-        if not native_legacy and command.locomotion_policy == "walk":
-            actor_observation = _walk_actor_observation(
-                patched,
-                self.body_joint_observation_indices,
-                self.walk_position_offset,
-                self.walk_last_action,
-            )
-            walk_action = self.walk_actor(actor_observation)
-            self.walk_last_action.copy_(walk_action)
-            action = walk_action * self.walk_output_scale + self.walk_output_offset
-        elif not native_legacy:
-            self.walk_last_action.zero_()
-            if self.actor is None:
-                raise RuntimeError("Hybrid policy was selected without a checkpoint")
-            action = self.actor(patched)
-        if action.shape != self.zero_action.shape or not bool(
-            torch.isfinite(action).all().item()
+        if (
+            bool(getattr(self, "native_legacy_action_semantics", False))
+            or command.locomotion_policy == "walk"
         ):
-            self.mapper.reset()
-            raise RuntimeError(
-                f"Unsafe live actor output: shape={tuple(action.shape)}, "
-                f"finite={bool(torch.isfinite(action).all().item())}"
+            return self._legacy_actor_action(observations)
+
+        self.walk_last_action.zero_()
+        patched = _patch_command_observation(observations, self.env)
+        try:
+            if self.actor is None:
+                raise RuntimeError("learned PICO actor is unavailable")
+            action = self.actor(patched)
+            self._require_safe_action(action, "learned PICO actor")
+            return action
+        except Exception as exc:  # noqa: BLE001 - same-cycle legacy degradation
+            reason = (
+                "learned PICO actor failed; using legacy joystick until trigger "
+                f"release: {type(exc).__name__}: {exc}"
             )
-        return action
+            return self._fallback_after_learned_fault(observations, reason)
 
 
 def _positive_float(value: str) -> float:
@@ -1243,8 +1445,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint",
         type=Path,
         help=(
-            "optional hybrid-policy checkpoint; omit it for the deadline-safe "
-            "legacy walking path"
+            "optional hybrid-policy checkpoint; load/inference/body faults "
+            "degrade to the audited legacy walking actor"
         ),
     )
     parser.add_argument(
@@ -1309,8 +1511,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if args.checkpoint is not None and not args.checkpoint.is_file():
-        parser.error(f"checkpoint not found: {args.checkpoint}")
     if not args.walk_checkpoint.is_file():
         parser.error(f"walk checkpoint not found: {args.walk_checkpoint}")
     walk_sha256 = _sha256(args.walk_checkpoint)
@@ -1484,6 +1684,7 @@ def run(args: argparse.Namespace) -> int:
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     wrapped_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     source: _Source | None = None
+    legacy_fallback_mapper: _Mapper | None = None
     camera_publisher: StereoMjpegPublisher | None = None
     web_server: _WebServerThread | None = None
     native_server_thread: _NativeServerThread | None = None
@@ -1504,17 +1705,25 @@ def run(args: argparse.Namespace) -> int:
             validate_microban_teleop_observation_contract(env)
         actor = None
         if not legacy_only:
-            runner = _construct_checkpoint_consumer_runner(
-                wrapped_env, agent_cfg, device
-            )
-            runner.load(
-                str(args.checkpoint.resolve()),
-                load_cfg={"actor": True},
-                strict=True,
-                map_location=device,
-            )
-            actor = runner.get_inference_policy(device=device)
             walk_actor = _load_legacy_walk_actor(args.walk_checkpoint, device)
+            try:
+                runner = _construct_checkpoint_consumer_runner(
+                    wrapped_env, agent_cfg, device
+                )
+                runner.load(
+                    str(args.checkpoint.resolve()),
+                    load_cfg={"actor": True},
+                    strict=True,
+                    map_location=device,
+                )
+                actor = runner.get_inference_policy(device=device)
+            except Exception as exc:  # noqa: BLE001 - legacy actor remains usable
+                print(
+                    "Learned PICO checkpoint unavailable; legacy joystick "
+                    "fallback remains active: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
         if not args.no_camera:
             camera_publisher = StereoMjpegPublisher(
@@ -1536,6 +1745,12 @@ def run(args: argparse.Namespace) -> int:
                 hand_scale_override=args.hand_scale,
                 foot_scale_override=args.foot_scale,
             )
+            if not legacy_only:
+                legacy_fallback_mapper = mapper_class(
+                    body_scale=args.body_scale,
+                    hand_scale_override=args.hand_scale,
+                    foot_scale_override=args.foot_scale,
+                )
         elif args.input == "pico-app":
             (
                 load_pairing_store,
@@ -1550,10 +1765,22 @@ def run(args: argparse.Namespace) -> int:
                 hand_scale_override=args.hand_scale,
                 foot_scale_override=args.foot_scale,
             )
+            if not legacy_only:
+                legacy_fallback_mapper = mapper_class(
+                    body_scale=args.body_scale,
+                    hand_scale_override=args.hand_scale,
+                    foot_scale_override=args.foot_scale,
+                )
+
+            def reset_native_mappers() -> None:
+                mapper.reset()
+                if legacy_fallback_mapper is not None:
+                    legacy_fallback_mapper.reset()
+
             native_server = server_class(
                 pairing_store,
                 source=source,
-                on_reset=mapper.reset,
+                on_reset=reset_native_mappers,
             )
             native_server_thread = _NativeServerThread(native_server)
             native_server_thread.start()
@@ -1597,6 +1824,7 @@ def run(args: argparse.Namespace) -> int:
             walk_actor=walk_actor,
             source=source,
             mapper=mapper,
+            legacy_fallback_mapper=legacy_fallback_mapper,
             camera_publisher=camera_publisher,
             legacy_only=legacy_only,
             native_legacy_action_semantics=legacy_only,
@@ -1607,6 +1835,12 @@ def run(args: argparse.Namespace) -> int:
             print(
                 "DEADLINE FALLBACK: audited model_14999.pt owns locomotion; "
                 "the X-button hybrid selector is forced to legacy walk."
+            )
+        else:
+            print(
+                "RESILIENT HYBRID: body/checkpoint/inference faults use the "
+                "audited legacy actor until left-trigger release; the next "
+                "activation retries the learned actor."
             )
         if args.input == "webxr":
             print(
