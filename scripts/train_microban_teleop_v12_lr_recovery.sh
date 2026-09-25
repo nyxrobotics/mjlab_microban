@@ -61,7 +61,15 @@ migrated_checkpoint="${seed_dir}/model_${SOURCE_ITERATION}.pt"
 [[ -f "${recovery_receipt}" ]] \
     || fail "Recovery receipt not found: ${recovery_receipt}"
 
+# Resolve every caller-supplied file before changing directory. This makes the
+# authenticated paths independent of the directory from which this script ran.
+raw_source="$(realpath -e -- "${raw_source}")"
+migration_receipt="$(realpath -e -- "${migration_receipt}")"
+recovery_receipt="$(realpath -e -- "${recovery_receipt}")"
+
 cd -- "${PROJECT_ROOT}"
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] \
+    || fail "Recovery training requires a clean committed source tree."
 [[ "$(sha256sum -- "${raw_source}" | awk '{print $1}')" == "${SOURCE_SHA}" ]] \
     || fail "Pinned raw model9200 SHA-256 mismatch."
 

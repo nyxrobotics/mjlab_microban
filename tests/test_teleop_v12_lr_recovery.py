@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 import torch
-from mjlab_microban.scripts.migrate_teleop_v12_lr_order import migrate_checkpoint
 
+from mjlab_microban.scripts.migrate_teleop_v12_lr_order import migrate_checkpoint
 from mjlab_microban.scripts.teleop_v12_lr_recovery import (
     EXPECTED_ACTIVE_ACTOR_COLUMNS,
     PINNED_SOURCE_COMMON_STEP_COUNTER,

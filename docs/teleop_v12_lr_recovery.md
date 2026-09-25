@@ -152,7 +152,7 @@ export the failed checkpoint.
 Before launching the replay:
 
 ```bash
-uv run --locked pytest -q tests/test_teleop_v12_lr_order.py \
+uv run --locked --with pytest python -m pytest -q tests/test_teleop_v12_lr_order.py \
   tests/test_teleop_v12_lr_recovery.py
 bash -n scripts/train_microban_teleop_v12_lr_recovery.sh
 git status --short

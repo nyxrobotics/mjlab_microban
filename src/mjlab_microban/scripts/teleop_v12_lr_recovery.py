@@ -22,23 +22,27 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from mjlab_microban.scripts.migrate_teleop_v12_lr_order import (
-    ACTOR_PERMUTATION,
-    CRITIC_PERMUTATION,
-    MIGRATION_INFO_KEY,
-    MIGRATION_REVISION,
-    migrate_checkpoint_payload,
-)
 
 from mjlab_microban.legacy_velocity_diagnostics import (
     checkpoint_sha256,
     publish_json_atomic,
+)
+from mjlab_microban.scripts.migrate_teleop_v12_lr_order import (
+    migrate_checkpoint_payload,
 )
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_OBSERVATION_COLUMNS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
+)
+from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    ACTOR_PERMUTATION,
+    BILATERAL_SITE_ORDER_INFO_KEY,
+    CRITIC_PERMUTATION,
+    MIGRATION_INFO_KEY,
+    MIGRATION_REVISION,
+    validate_lr_order_migration_marker,
 )
 
 RECOVERY_SCHEMA_VERSION = 1
@@ -224,6 +228,7 @@ def _expected_migration_receipt(
         "gate": "microban_teleop_v12_lr_order_migration",
         "status": "pass",
         "migration_revision": MIGRATION_REVISION,
+        "site_order_revision": MICROBAN_BILATERAL_SITE_ORDER_REVISION,
         "strategy": "swap",
         "source_checkpoint": {
             "path": str(source),
@@ -322,6 +327,11 @@ def validate_recovery_seed(
     marker = infos.get(MIGRATION_INFO_KEY)
     if not isinstance(marker, dict):
         raise TypeError("Migrated checkpoint lacks the L/R migration marker")
+    validate_lr_order_migration_marker(marker)
+    if infos.get(BILATERAL_SITE_ORDER_INFO_KEY) != (
+        MICROBAN_BILATERAL_SITE_ORDER_REVISION
+    ):
+        raise ValueError("Migrated checkpoint lacks the corrected site-order revision")
     if (
         marker.get("revision") != MIGRATION_REVISION
         or marker.get("site_order_revision")
