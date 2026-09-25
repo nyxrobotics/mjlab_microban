@@ -36,6 +36,7 @@ from mjlab_microban.scripts.live_pico_teleop_sim import (
     _patch_command_observation,
     _patch_native_walk_observation,
     _runtime_task,
+    _selected_checkpoint,
     _sha256,
     _walk_actor_observation,
     build_parser,
@@ -734,6 +735,27 @@ class CliSafetyTests(unittest.TestCase):
             _runtime_task(Path("hybrid.pt")),
             "Mjlab-Teleop-Microban",
         )
+
+    def test_v12_preview_requires_dedicated_cli_option_and_task(self) -> None:
+        checkpoint = Path("preview.pt")
+        args = build_parser().parse_args(
+            ["--v12-preview-checkpoint", str(checkpoint), "--input", "pico-app"]
+        )
+        self.assertEqual(_selected_checkpoint(args), checkpoint)
+        self.assertEqual(
+            _runtime_task(args.checkpoint, args.v12_preview_checkpoint),
+            "Mjlab-Teleop-V12-Preview-Microban",
+        )
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "--checkpoint",
+                    "ordinary.pt",
+                    "--v12-preview-checkpoint",
+                    str(checkpoint),
+                ]
+            )
 
     def test_default_legacy_checkpoint_is_the_audited_model_14999(self) -> None:
         checkpoint = _default_walk_checkpoint()

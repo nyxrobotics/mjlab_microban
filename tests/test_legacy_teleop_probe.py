@@ -12,6 +12,8 @@ from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import (
     ActorLayout,
     _assemble_legacy_observation,
     _indices_by_name,
+)
+from mjlab_microban.tasks.microban_teleop_v12_actor import (
     transplant_legacy_actor_state_to_teleop83,
 )
 

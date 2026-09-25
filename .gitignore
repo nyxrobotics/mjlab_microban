@@ -8,7 +8,13 @@ src/mjlab_microban/robot/microban/scad/
 logs/*
 wandb/*
 policy.onnx
-artifacts/
+# Generated evaluation artifacts stay local, except for the immutable source
+# receipt that contract-v12 checkpoints re-hash on every save/resume.  Keeping
+# that one exact file in Git makes repo:// provenance portable to another PC.
+artifacts/*
+!artifacts/legacy_teleop_probe/
+artifacts/legacy_teleop_probe/*
+!artifacts/legacy_teleop_probe/model_14999_teleop83_raw_9x300.json
 
 # Generated/recorded motion datasets are reproducible inputs, not source.  Keep
 # them local; the training guide records how to regenerate and checksum them.

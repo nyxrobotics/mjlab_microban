@@ -1,0 +1,497 @@
+"""CPU-only regression tests for v12 stage routing and evidence gates."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+
+import torch
+
+from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
+    MINIMUM_SIGNED_RESPONSE,
+)
+from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
+    _acceptance as _locomotion_acceptance,
+)
+from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    DIRECTIONAL_RESPONSE_MINIMUM,
+    EXPANDED_LOCOMOTION_PROFILE,
+    FINAL_PROFILE,
+    FOOT_P95_MAX_M,
+    FOOT_RMS_MAX_M,
+    HAND_P95_MAX_M,
+    HAND_RMS_MAX_M,
+    HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+    HMD_HAND_PROFILE,
+    HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+    PRE_ACTIVATION_EXPOSURE_PROFILE,
+    WHOLE_BODY_PROFILE,
+    _acceptance,
+    _active_foot_tracking_error,
+    _aggregate_action_envelopes,
+    _scenarios,
+    required_tracking_profile,
+)
+from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
+    ONNX_PARITY_TOLERANCE,
+    PRISTINE_PARITY_TOLERANCE,
+)
+from mjlab_microban.scripts.teleop_v12_stage import (
+    _checkpoint_kind,
+    create_gate,
+    next_training_target,
+    validate_gate,
+)
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+)
+from mjlab_microban.tasks.microban_teleop_v12_actor import (
+    TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+    TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+)
+from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
+)
+
+
+def _result(**overrides):
+    value = {
+        "completed": True,
+        "fell": False,
+        "nonfinite": None,
+        "maximum_actual_soft_limit_violation_rad": 0.0,
+        "raw_action_recurrence_verified_steps": 300,
+        "executed_steps": 300,
+        "hmd_motion_evidence_passed": True,
+        "observation_coverage": {"passed": True},
+        "twist_directional_response_passed": True,
+        "target_error": {
+            "active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
+            "foot": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
+        },
+        "command": {"foot_target": [[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]]},
+    }
+    value.update(overrides)
+    return value
+
+
+def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
+    commands = {
+        "neutral": (0.0, 0.0, 0.0),
+        "forward_0p1": (0.1, 0.0, 0.0),
+        "forward_0p2": (0.2, 0.0, 0.0),
+        "backward_0p1": (-0.1, 0.0, 0.0),
+        "backward_0p2": (-0.2, 0.0, 0.0),
+        "lateral_left_0p1": (0.0, 0.1, 0.0),
+        "lateral_right_0p1": (0.0, -0.1, 0.0),
+        "yaw_left_0p5": (0.0, 0.0, 0.5),
+        "yaw_right_0p5": (0.0, 0.0, -0.5),
+    }
+    axis_names = ("vx_m_s", "vy_m_s", "yaw_rad_s")
+    results = []
+    for name in ("neutral", *MINIMUM_SIGNED_RESPONSE):
+        twist = commands[name]
+        measured = {axis: 0.0 for axis in axis_names}
+        response = None
+        if name != "neutral":
+            index = next(index for index, value in enumerate(twist) if value != 0.0)
+            axis = axis_names[index]
+            measured[axis] = (
+                MINIMUM_SIGNED_RESPONSE[name]
+                if twist[index] > 0.0
+                else -MINIMUM_SIGNED_RESPONSE[name]
+            )
+            response = {
+                "axis": axis,
+                "command": twist[index],
+                "measured_mean": measured[axis],
+                "sign_matches": True,
+                "signed_response": MINIMUM_SIGNED_RESPONSE[name],
+            }
+        results.append(
+            {
+                "name": name,
+                "completed": True,
+                "executed_steps": 300,
+                "fell": False,
+                "nonfinite": None,
+                "termination_names": [],
+                "maximum_actual_soft_limit_violation_rad": 0.0,
+                "raw_action_recurrence_verified_steps": 300,
+                "neutral_foot_hand_target_verified_steps": 300,
+                "directional_response": response,
+                "command": dict(zip(axis_names, twist, strict=True)),
+                "measured_velocity_body": {
+                    axis: {"count": 250, "mean": mean}
+                    for axis, mean in measured.items()
+                },
+            }
+        )
+    checks, status = _locomotion_acceptance(results)
+    return {
+        "schema_version": 1,
+        "gate": "microban_teleop_v12_neutral_locomotion_9x300",
+        "status": status,
+        "checkpoint": identity,
+        "settings": {
+            "device": "cpu",
+            "seed": 42,
+            "steps": 300,
+            "settle_steps": 50,
+            "action_clip": None,
+            "previous_action": "raw_actor_output",
+            "policy_observation_width": 83,
+        },
+        "thresholds": {"minimum_signed_response": MINIMUM_SIGNED_RESPONSE},
+        "checks": checks,
+        "results": results,
+        "summary": {
+            "scenario_count": 9,
+            "completed_scenario_count": 9,
+            "fall_scenario_count": 0,
+            "nonfinite_scenario_count": 0,
+            "directionally_correct_scenario_count": 8,
+            "directional_scenario_count": 8,
+            "minimum_signed_response": min(MINIMUM_SIGNED_RESPONSE.values()),
+            "maximum_actual_soft_limit_violation_rad": 0.0,
+        },
+    }
+
+
+def _zero_action_envelope() -> dict[str, object]:
+    zero = [0.0] * 18
+    summary = {
+        "minimum": zero.copy(),
+        "maximum": zero.copy(),
+        "absolute_maximum": zero.copy(),
+    }
+    return {
+        "joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+        "v12": deepcopy(summary),
+        "legacy_source": deepcopy(summary),
+        "learned_minus_source": deepcopy(summary),
+    }
+
+
+def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
+    profile = PRE_ACTIVATION_EXPOSURE_PROFILE
+    results = []
+    for scenario in _scenarios(profile):
+        expects_foot = any(
+            abs(value) > 0.0 for target in scenario.foot_target for value in target
+        )
+        expects_hand = any(scenario.hand_active)
+        directional = {}
+        for axis, command in zip(
+            ("vx_m_s", "vy_m_s", "yaw_rad_s"), scenario.twist, strict=True
+        ):
+            if command == 0.0:
+                continue
+            signed = DIRECTIONAL_RESPONSE_MINIMUM[axis]
+            directional[axis] = {
+                "command": command,
+                "measured_mean": signed if command > 0 else -signed,
+                "signed_response": signed,
+                "minimum_signed_response": signed,
+                "passed": True,
+            }
+        hmd_axes = {
+            name: {
+                "target_peak_to_peak_rad": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+                "actual_peak_to_peak_rad": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+            }
+            for name in MICROBAN_HMD_JOINT_NAMES
+        }
+        results.append(
+            {
+                "name": scenario.name,
+                "command": {
+                    "twist": list(scenario.twist),
+                    "foot_target": [list(value) for value in scenario.foot_target],
+                    "hand_target": [list(value) for value in scenario.hand_target],
+                    "hand_active": list(scenario.hand_active),
+                },
+                "completed": True,
+                "executed_steps": 300,
+                "fell": False,
+                "nonfinite": None,
+                "termination_names": [],
+                "maximum_actual_soft_limit_violation_rad": 0.0,
+                "raw_action_recurrence_verified_steps": 300,
+                "hmd_motion_evidence_passed": True,
+                "hmd_motion": {
+                    "joint_names": list(MICROBAN_HMD_JOINT_NAMES),
+                    "sample_count": 301,
+                    "active_event_member": True,
+                    "per_axis": hmd_axes,
+                },
+                "observation_coverage": {
+                    "hmd_nonzero_steps": 299,
+                    "foot_nonzero_steps": 300 if expects_foot else 0,
+                    "hand_nonzero_steps": 300 if expects_hand else 0,
+                    "foot_target_expected": expects_foot,
+                    "hand_target_expected": expects_hand,
+                    "passed": True,
+                },
+                "directional_response": directional,
+                "twist_directional_response_passed": True,
+                "measured_velocity_body": {
+                    axis: {
+                        "sample_count": 250,
+                        "mean": (
+                            directional[axis]["measured_mean"]
+                            if axis in directional
+                            else 0.0
+                        ),
+                    }
+                    for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")
+                },
+                "target_error": {
+                    "active_hand": {
+                        "sample_count": 1 if expects_hand else 0,
+                        "rms": 0.01 if expects_hand else None,
+                        "p95": 0.02 if expects_hand else None,
+                    },
+                    "foot": {
+                        "sample_count": 1 if expects_foot else 0,
+                        "rms": 0.01 if expects_foot else None,
+                        "p95": 0.02 if expects_foot else None,
+                    },
+                },
+                "raw_action_envelope": _zero_action_envelope(),
+            }
+        )
+    checks, status = _acceptance(results, profile)
+    return {
+        "schema_version": 1,
+        "gate": "microban_teleop_v12_tracking",
+        "profile": profile,
+        "status": status,
+        "checkpoint": identity,
+        "settings": {
+            "device": "cpu",
+            "seed": 42,
+            "steps": 300,
+            "settle_steps": 50,
+            "moving_hmd": "forced_non_neutral",
+            "perturbation": False,
+            "action_clip": None,
+            "previous_action": "raw_actor_output",
+        },
+        "thresholds": {
+            "actual_soft_limit_violation_rad_max": 1.0e-7,
+            "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+            "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
+            "hand_rms_m_max": HAND_RMS_MAX_M,
+            "hand_p95_m_max": HAND_P95_MAX_M,
+            "foot_rms_m_max": FOOT_RMS_MAX_M,
+            "foot_p95_m_max": FOOT_P95_MAX_M,
+            "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+            "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
+        },
+        "checks": checks,
+        "raw_action_envelope": _aggregate_action_envelopes(results),
+        "results": results,
+    }
+
+
+def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "gate": "microban_teleop_v12_checkpoint_onnx",
+        "status": "pass",
+        "checkpoint": identity,
+        "neutral_legacy_parity": {
+            "samples": 10_000,
+            "maximum_absolute_error": 0.0,
+            "tolerance": PRISTINE_PARITY_TOLERANCE,
+            "teleop_only_columns": "exact_zero",
+        },
+        "onnx": {
+            "path": str(onnx_path),
+            "sha256": sha256_file(onnx_path),
+            "opset": 18,
+            "input_shape": [1, 83],
+            "output_shape": [1, 18],
+            "reference_samples": 64,
+            "input_coverage": "deterministic_nonzero_all_83_columns",
+            "teleop_only_columns_nonzero": True,
+            "reference_evaluator_maximum_absolute_error": 0.0,
+            "onnxruntime_cpu_maximum_absolute_error": 0.0,
+            "onnxruntime_version": "unit-test",
+            "onnxruntime_providers": ["CPUExecutionProvider"],
+            "tolerance": ONNX_PARITY_TOLERANCE,
+        },
+    }
+
+
+class TeleopV12StageTest(unittest.TestCase):
+    def test_route_covers_recovery_boundaries_and_activation_canaries(self) -> None:
+        expected = {
+            601: (3_000, False),
+            2_999: (3_000, False),
+            3_000: (3_100, True),
+            3_001: (3_100, True),
+            3_099: (3_100, True),
+            3_100: (7_000, False),
+            7_000: (7_100, True),
+            7_099: (7_100, True),
+            7_100: (10_000, False),
+            10_000: (10_100, True),
+            10_099: (10_100, True),
+            10_100: (15_000, False),
+            14_999: (15_000, False),
+        }
+        for completed, route in expected.items():
+            with self.subTest(completed=completed):
+                self.assertEqual(next_training_target(completed), route)
+        with self.assertRaisesRegex(ValueError, "Final"):
+            next_training_target(15_000)
+
+    def test_tracking_profiles_follow_trained_then_next_exposure_semantics(
+        self,
+    ) -> None:
+        self.assertEqual(
+            required_tracking_profile(601), PRE_ACTIVATION_EXPOSURE_PROFILE
+        )
+        self.assertEqual(
+            required_tracking_profile(3_000), PRE_ACTIVATION_EXPOSURE_PROFILE
+        )
+        self.assertEqual(required_tracking_profile(3_001), EXPANDED_LOCOMOTION_PROFILE)
+        self.assertEqual(required_tracking_profile(7_000), EXPANDED_LOCOMOTION_PROFILE)
+        self.assertEqual(required_tracking_profile(7_001), HMD_HAND_PROFILE)
+        self.assertEqual(required_tracking_profile(10_000), HMD_HAND_PROFILE)
+        self.assertEqual(required_tracking_profile(10_001), WHOLE_BODY_PROFILE)
+        self.assertEqual(required_tracking_profile(15_000), FINAL_PROFILE)
+
+    def test_tracking_acceptance_rejects_done_coverage_direction_and_active_error(
+        self,
+    ) -> None:
+        checks, status = _acceptance([_result()], WHOLE_BODY_PROFILE)
+        self.assertEqual(status, "pass")
+        self.assertTrue(all(checks.values()))
+        for mutation in (
+            {"completed": False, "termination_names": ["out_of_terrain_bounds"]},
+            {"observation_coverage": {"passed": False}},
+            {"twist_directional_response_passed": False},
+            {"maximum_actual_soft_limit_violation_rad": 0.01},
+        ):
+            with self.subTest(mutation=mutation):
+                failed, failed_status = _acceptance(
+                    [_result(**mutation)], WHOLE_BODY_PROFILE
+                )
+                self.assertEqual(failed_status, "fail")
+                self.assertFalse(all(failed.values()))
+
+    def test_active_foot_metric_excludes_inactive_foot(self) -> None:
+        default = torch.zeros(1, 2, 3)
+        target = torch.tensor([[[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]]])
+        current = torch.tensor([[[0.0, 0.0, 0.03], [9.0, 9.0, 9.0]]])
+        error = _active_foot_tracking_error(current, default, target)
+        self.assertEqual(tuple(error.shape), (1,))
+        torch.testing.assert_close(error, torch.tensor([0.01]))
+
+    def test_schema2_gate_accepts_hash_bound_sanitized_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model_600.pt"
+            infos = {
+                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+                "adapter_gradient_schedule_revision": (
+                    TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+                ),
+                "active_actor_columns_at_save": [],
+                "env_state": {"common_step_counter": 601 * 24},
+                "adapter_sanitization": {
+                    "schema_version": 1,
+                    "revision": "zero_pre7000_extra_w0_and_adam_v1",
+                    "parent_checkpoint_sha256": "a" * 64,
+                    "parent_iteration": 600,
+                    "completed_updates": 601,
+                    "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+                },
+            }
+            torch.save({"iter": 600, "infos": infos}, checkpoint)
+            checkpoint_sha = sha256_file(checkpoint)
+            identity = {
+                "sha256": checkpoint_sha,
+                "iteration": 600,
+                "completed_updates": 601,
+            }
+            locomotion_path = root / "locomotion.json"
+            tracking_path = root / "tracking.json"
+            onnx_report_path = root / "onnx.json"
+            onnx_path = root / "policy.onnx"
+            onnx_path.write_bytes(b"unit-test-onnx")
+            locomotion = _locomotion_report(identity)
+            tracking = _tracking_report(identity)
+            onnx = _onnx_report(identity, onnx_path)
+            locomotion_path.write_text(json.dumps(locomotion))
+            tracking_path.write_text(json.dumps(tracking))
+            onnx_report_path.write_text(json.dumps(onnx))
+            gate = create_gate(
+                checkpoint=checkpoint,
+                locomotion_report=locomotion_path,
+                tracking_report=tracking_path,
+                onnx_report=onnx_report_path,
+            )
+            self.assertEqual(gate["schema_version"], 2)
+            self.assertEqual(gate["checkpoint_kind"], "sanitized_recovery")
+            gate_path = root / "gate.json"
+            gate_path.write_text(json.dumps(gate))
+            self.assertEqual(validate_gate(gate_path, checkpoint), gate)
+            self.assertEqual(
+                _checkpoint_kind(602, infos["adapter_sanitization"]),
+                "interrupted_recovery",
+            )
+
+            corruptions = (
+                (locomotion_path, locomotion, ("checks",), {}),
+                (tracking_path, tracking, ("results",), []),
+                (
+                    tracking_path,
+                    tracking,
+                    ("results", 0, "hmd_motion", "per_axis"),
+                    {},
+                ),
+                (
+                    tracking_path,
+                    tracking,
+                    ("results", 0, "directional_response"),
+                    {},
+                ),
+                (
+                    onnx_report_path,
+                    onnx,
+                    ("onnx", "onnxruntime_cpu_maximum_absolute_error"),
+                    ONNX_PARITY_TOLERANCE * 2.0,
+                ),
+            )
+            for path, original, keys, replacement in corruptions:
+                with self.subTest(keys=keys):
+                    corrupted = deepcopy(original)
+                    target = corrupted
+                    for key in keys[:-1]:
+                        target = target[key]
+                    target[keys[-1]] = replacement
+                    path.write_text(json.dumps(corrupted))
+                    with self.assertRaises(ValueError):
+                        create_gate(
+                            checkpoint=checkpoint,
+                            locomotion_report=locomotion_path,
+                            tracking_report=tracking_path,
+                            onnx_report=onnx_report_path,
+                        )
+                    locomotion_path.write_text(json.dumps(locomotion))
+                    tracking_path.write_text(json.dumps(tracking))
+                    onnx_report_path.write_text(json.dumps(onnx))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -26,6 +26,19 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MicrobanTeleopRlCfg,
     make_microban_teleop_env_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_TASK_ID,
+    MicrobanTeleopV12PreviewRlCfg,
+    MicrobanTeleopV12RlCfg,
+    make_microban_teleop_v12_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
+)
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    MicrobanTeleopV12OnPolicyRunner,
+    MicrobanTeleopV12PreviewOnPolicyRunner,
+)
 from mjlab_microban.tasks.microban_tracking_env_cfg import (
     MicrobanTrackingRlCfg,
     make_microban_tracking_env_cfg,
@@ -76,4 +89,20 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_env_cfg(play=True),
     rl_cfg=MicrobanTeleopRlCfg,
     runner_cls=MicrobanTeleopOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_TASK_ID,
+    env_cfg=make_microban_teleop_v12_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV12RlCfg,
+    runner_cls=MicrobanTeleopV12OnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
+    env_cfg=make_microban_teleop_v12_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV12PreviewRlCfg,
+    runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
 )

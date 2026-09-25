@@ -18,7 +18,9 @@ authenticated Microban Unity frames pass through ``microban_teleop``'s
 validated native mapper. Without a hybrid checkpoint, the audited legacy actor
 runs in its original 63-observation ``Mjlab-Velocity-Microban`` environment and
 its raw 18 actions are executed unchanged. Supplying a hybrid checkpoint keeps
-the separate 83-observation teleoperation environment.
+the separate 83-observation teleoperation environment.  Contract-v12 early
+full-body checkpoints are accepted only through the dedicated, permanently
+non-deployable simulation-preview runner.
 """
 
 from __future__ import annotations
@@ -68,8 +70,16 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     ResetFixedFootTargetCommand,
     ResetFixedHandTargetCommand,
 )
+from mjlab_microban.tasks.microban_teleop_v12_preview import (
+    MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
+)
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    make_teleop_v12_preview_consumer,
+    preview_actor_load_cfg,
+)
 
 TASK = "Mjlab-Teleop-Microban"
+V12_PREVIEW_TASK = MICROBAN_TELEOP_V12_PREVIEW_TASK_ID
 WALK_TASK = "Mjlab-Velocity-Microban"
 AUDITED_LEGACY_WALK_SHA256 = (
     "b0bcdadac39716be784207dd6b2b93157162a3e80650e23c05f490c400b9e141"
@@ -1441,12 +1451,22 @@ def build_parser() -> argparse.ArgumentParser:
             "has no robot UDP or motor path"
         )
     )
-    parser.add_argument(
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
         "--checkpoint",
         type=Path,
         help=(
             "optional hybrid-policy checkpoint; load/inference/body faults "
             "degrade to the audited legacy walking actor"
+        ),
+    )
+    checkpoint_group.add_argument(
+        "--v12-preview-checkpoint",
+        type=Path,
+        help=(
+            "explicitly allow a marker-authenticated, non-deployable contract-v12 "
+            "full-body preview checkpoint in this simulation-only process; load/"
+            "inference/body faults degrade to the audited legacy walking actor"
         ),
     )
     parser.add_argument(
@@ -1652,28 +1672,44 @@ def _load_legacy_walk_actor(checkpoint: Path, device: str) -> LegacyWalkActor:
         wrapped_env.close()
 
 
-def _construct_checkpoint_consumer_runner(env, agent_cfg, device: str):
+def _construct_checkpoint_consumer_runner(
+    env, agent_cfg, device: str, *, runtime_task: str
+):
     """Construct the explicit actor-load-only runner used by live simulation."""
 
+    if runtime_task == V12_PREVIEW_TASK:
+        return make_teleop_v12_preview_consumer(env, agent_cfg, device)
     agent_cfg.checkpoint_consumer_mode = True
-    runner_class = load_runner_cls(TASK)
+    runner_class = load_runner_cls(runtime_task)
     if runner_class is None:
-        raise RuntimeError(f"No runner is registered for {TASK}")
+        raise RuntimeError(f"No runner is registered for {runtime_task}")
     return runner_class(env, asdict(agent_cfg), device=device)
 
 
-def _runtime_task(checkpoint: Path | None) -> str:
+def _runtime_task(
+    checkpoint: Path | None, v12_preview_checkpoint: Path | None = None
+) -> str:
     """Select the original velocity task unless a hybrid actor was requested."""
 
+    if v12_preview_checkpoint is not None:
+        return V12_PREVIEW_TASK
     return WALK_TASK if checkpoint is None else TASK
+
+
+def _selected_checkpoint(args: argparse.Namespace) -> Path | None:
+    """Return the one checkpoint selected by the mutually exclusive CLI."""
+
+    return args.v12_preview_checkpoint or args.checkpoint
 
 
 def run(args: argparse.Namespace) -> int:
     configure_torch_backends()
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    legacy_only = args.checkpoint is None
-    runtime_task = _runtime_task(args.checkpoint)
+    checkpoint = _selected_checkpoint(args)
+    preview_mode = args.v12_preview_checkpoint is not None
+    legacy_only = checkpoint is None
+    runtime_task = _runtime_task(args.checkpoint, args.v12_preview_checkpoint)
     env_cfg = load_env_cfg(runtime_task, play=True)
     # Nominalize resets and remove timeout/DR/push events for an operator-owned
     # live session. This deliberately does not change the selected task's action
@@ -1708,11 +1744,16 @@ def run(args: argparse.Namespace) -> int:
             walk_actor = _load_legacy_walk_actor(args.walk_checkpoint, device)
             try:
                 runner = _construct_checkpoint_consumer_runner(
-                    wrapped_env, agent_cfg, device
+                    wrapped_env,
+                    agent_cfg,
+                    device,
+                    runtime_task=runtime_task,
                 )
                 runner.load(
-                    str(args.checkpoint.resolve()),
-                    load_cfg={"actor": True},
+                    str(checkpoint.resolve()),
+                    load_cfg=(
+                        preview_actor_load_cfg() if preview_mode else {"actor": True}
+                    ),
                     strict=True,
                     map_location=device,
                 )
@@ -1831,10 +1872,21 @@ def run(args: argparse.Namespace) -> int:
         )
 
         print("SIMULATION ONLY: no robot UDP socket or motor interface is opened.")
-        if args.checkpoint is None:
+        if checkpoint is None:
             print(
                 "DEADLINE FALLBACK: audited model_14999.pt owns locomotion; "
                 "the X-button hybrid selector is forced to legacy walk."
+            )
+        elif preview_mode:
+            print(
+                "NON-DEPLOYABLE V12 PREVIEW: the permanently marked checkpoint "
+                "is accepted only by this simulation runner; it cannot enter the "
+                "canonical ONNX or robot runtime path."
+            )
+            print(
+                "RESILIENT PREVIEW: body/checkpoint/inference faults use the "
+                "audited legacy actor until left-trigger release; the next "
+                "activation retries the preview actor."
             )
         else:
             print(

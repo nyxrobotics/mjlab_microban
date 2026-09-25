@@ -18,7 +18,6 @@ import argparse
 import json
 import math
 import sys
-from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -61,123 +60,6 @@ class ActorLayout:
     joint_pos_names: tuple[str, ...]
     joint_vel_names: tuple[str, ...]
     action_names: tuple[str, ...]
-
-
-LEGACY_ACTOR_STATE_KEYS: frozenset[str] = frozenset(
-    {
-        "obs_normalizer._mean",
-        "obs_normalizer._var",
-        "obs_normalizer._std",
-        "obs_normalizer.count",
-        "distribution.std_param",
-        "mlp.0.weight",
-        "mlp.0.bias",
-        "mlp.2.weight",
-        "mlp.2.bias",
-        "mlp.4.weight",
-        "mlp.4.bias",
-        "mlp.6.weight",
-        "mlp.6.bias",
-    }
-)
-
-
-def transplant_legacy_actor_state_to_teleop83(
-    source_state: Mapping[str, torch.Tensor],
-    target_template: Mapping[str, torch.Tensor],
-    source_to_target_columns: Sequence[tuple[int, int]],
-) -> dict[str, torch.Tensor]:
-    """Return an exact 63-to-83 legacy Gaussian actor transplant.
-
-    The target must use the legacy actor topology and semantics: an empirical
-    observation normalizer, 512/256/128 ELU hidden layers, and an unbounded
-    scalar-parameterized ``GaussianDistribution`` with 18 raw outputs.  New
-    teleop columns receive identity normalization and zero first-layer weights,
-    so the initial deterministic actor ignores them while retaining gradients
-    that can learn their influence later.
-    """
-
-    if set(source_state) != LEGACY_ACTOR_STATE_KEYS:
-        raise ValueError("Legacy source actor state keys drifted")
-    if set(target_template) != LEGACY_ACTOR_STATE_KEYS:
-        raise ValueError("83-input target actor state keys drifted")
-    pairs = tuple((int(source), int(target)) for source, target in source_to_target_columns)
-    if tuple(source for source, _target in pairs) != tuple(range(63)):
-        raise ValueError("Actor transplant must cover source columns 0..62 in order")
-    target_columns = tuple(target for _source, target in pairs)
-    if len(set(target_columns)) != 63 or any(
-        target < 0 or target >= 83 for target in target_columns
-    ):
-        raise ValueError("Actor transplant target columns must be 63 unique 83-wide indices")
-
-    expected_source_shapes = {
-        "obs_normalizer._mean": (1, 63),
-        "obs_normalizer._var": (1, 63),
-        "obs_normalizer._std": (1, 63),
-        "obs_normalizer.count": (),
-        "distribution.std_param": (18,),
-        "mlp.0.weight": (512, 63),
-        "mlp.0.bias": (512,),
-        "mlp.2.weight": (256, 512),
-        "mlp.2.bias": (256,),
-        "mlp.4.weight": (128, 256),
-        "mlp.4.bias": (128,),
-        "mlp.6.weight": (18, 128),
-        "mlp.6.bias": (18,),
-    }
-    expected_target_shapes = dict(expected_source_shapes)
-    expected_target_shapes["obs_normalizer._mean"] = (1, 83)
-    expected_target_shapes["obs_normalizer._var"] = (1, 83)
-    expected_target_shapes["obs_normalizer._std"] = (1, 83)
-    expected_target_shapes["mlp.0.weight"] = (512, 83)
-    for name, shape in expected_source_shapes.items():
-        if tuple(source_state[name].shape) != shape:
-            raise ValueError(f"Legacy source tensor {name!r} shape drifted")
-    for name, shape in expected_target_shapes.items():
-        if tuple(target_template[name].shape) != shape:
-            raise ValueError(f"Teleop target tensor {name!r} shape drifted")
-
-    result = {name: value.detach().clone() for name, value in target_template.items()}
-    source_columns = torch.tensor(
-        [source for source, _target in pairs], dtype=torch.long
-    )
-    target_columns_tensor = torch.tensor(target_columns, dtype=torch.long)
-
-    for name, fill in (
-        ("obs_normalizer._mean", 0.0),
-        ("obs_normalizer._var", 1.0),
-        ("obs_normalizer._std", 1.0),
-    ):
-        target = result[name]
-        target.fill_(fill)
-        source_tensor = source_state[name].to(
-            device=target.device, dtype=target.dtype
-        )
-        target[:, target_columns_tensor.to(target.device)] = source_tensor[
-            :, source_columns.to(target.device)
-        ]
-
-    first = result["mlp.0.weight"]
-    first.zero_()
-    source_first = source_state["mlp.0.weight"].to(
-        device=first.device, dtype=first.dtype
-    )
-    first[:, target_columns_tensor.to(first.device)] = source_first[
-        :, source_columns.to(first.device)
-    ]
-
-    for name in LEGACY_ACTOR_STATE_KEYS - {
-        "obs_normalizer._mean",
-        "obs_normalizer._var",
-        "obs_normalizer._std",
-        "mlp.0.weight",
-    }:
-        result[name].copy_(
-            source_state[name].to(
-                device=result[name].device, dtype=result[name].dtype
-            )
-        )
-    return result
 
 
 def _term_slices(env: ManagerBasedRlEnv) -> tuple[dict[str, slice], int]:
@@ -374,6 +256,7 @@ def _evaluate_scenario(
     seed: int,
     steps: int,
     settle_steps: int,
+    policy_observation_mode: str = "legacy63",
 ) -> dict[str, Any]:
     env.reset(seed=seed)
     command = env.command_manager.get_term("twist")
@@ -419,21 +302,32 @@ def _evaluate_scenario(
         if not bool(torch.isfinite(actor_obs).all().item()):
             nonfinite = {"phase": "teleop_observation", "step": step}
             break
-        legacy_obs = _assemble_legacy_observation(
-            actor_obs,
-            teleop=teleop_layout,
-            legacy=legacy_layout,
-            joint_pos_indices=joint_pos_indices,
-            joint_vel_indices=joint_vel_indices,
-            action_indices=action_indices,
-            twist=expected_twist,
-        )
-        if tuple(legacy_obs.shape) != (1, 63):
-            raise ValueError(f"Legacy mapped observation drifted: {legacy_obs.shape}")
+        if policy_observation_mode == "legacy63":
+            policy_obs = _assemble_legacy_observation(
+                actor_obs,
+                teleop=teleop_layout,
+                legacy=legacy_layout,
+                joint_pos_indices=joint_pos_indices,
+                joint_vel_indices=joint_vel_indices,
+                action_indices=action_indices,
+                twist=expected_twist,
+            )
+            if tuple(policy_obs.shape) != (1, 63):
+                raise ValueError(
+                    f"Legacy mapped observation drifted: {policy_obs.shape}"
+                )
+        elif policy_observation_mode == "teleop83":
+            policy_obs = actor_obs
+            if tuple(policy_obs.shape) != (1, 83):
+                raise ValueError(f"Teleop observation drifted: {policy_obs.shape}")
+        else:
+            raise ValueError(
+                f"Unknown policy observation mode: {policy_observation_mode!r}"
+            )
         with torch.inference_mode():
-            actions = policy(TensorDict({"actor": legacy_obs}, batch_size=[1]))
+            actions = policy(TensorDict({"actor": policy_obs}, batch_size=[1]))
         if not bool(torch.isfinite(actions).all().item()):
-            nonfinite = {"phase": "legacy_policy", "step": step}
+            nonfinite = {"phase": f"{policy_observation_mode}_policy", "step": step}
             break
         if tuple(actions.shape) != (1, 18):
             raise ValueError(f"Legacy action shape drifted: {actions.shape}")
