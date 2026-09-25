@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import subprocess
 from pathlib import Path
 
@@ -369,6 +370,32 @@ def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
             checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
             receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
         )
+
+
+def test_validate_receipt_cli_rebuilds_10000_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import mjlab_microban.scripts.teleop_v12_deadline_fallback as fallback
+
+    receipt = tmp_path / "receipt.json"
+    expected = {
+        "gate": fallback.DEADLINE_FALLBACK_RECEIPT_GATE,
+        "checkpoint": {"iteration": 9_999, "completed_updates": 10_000},
+    }
+    receipt.write_text(json.dumps(expected), encoding="utf-8")
+    monkeypatch.setattr(fallback, "build_receipt", lambda **_kwargs: expected)
+
+    assert fallback.main(
+        [
+            "validate-receipt",
+            str(receipt),
+            "model_9999.pt",
+            "strict.json",
+            "fallback.json",
+            "gate.json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == expected
 
 
 def test_canary_is_exact_one_hop_and_requires_pinned_hash_to_resume() -> None:

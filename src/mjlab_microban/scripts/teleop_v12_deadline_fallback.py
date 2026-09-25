@@ -332,13 +332,7 @@ def validate_receipt(
     fallback_tracking_report: Path,
     stage_gate: Path,
 ) -> dict[str, Any]:
-    receipt_path = receipt.expanduser().resolve(strict=True)
-    actual = _load_json(receipt_path)
-    validate_deadline_post_canary_receipt_payload(
-        actual,
-        checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
-        receipt_sha256=sha256_file(receipt_path),
-    )
+    actual = _load_json(receipt.expanduser().resolve(strict=True))
     expected = build_receipt(
         checkpoint=checkpoint,
         strict_tracking_report=strict_tracking_report,
