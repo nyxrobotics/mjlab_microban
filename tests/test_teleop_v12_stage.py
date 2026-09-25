@@ -21,6 +21,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    DEADLINE_FINAL_FALLBACK_PROFILE,
     DIRECTIONAL_RESPONSE_MINIMUM,
     EXPANDED_LOCOMOTION_PROFILE,
     FINAL_PROFILE,
@@ -28,7 +29,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FOOT_P95_MAX_M,
     FOOT_RMS_MAX_M,
     HAND_P95_MAX_M,
-    HAND_RMS_MAX_M,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_HAND_ACTIVATION_CANARY_PROFILE,
     HMD_HAND_PROFILE,
@@ -41,6 +41,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
     _scenarios,
+    hand_tracking_rms_max_m,
     required_target_column_ablation_targets,
     required_tracking_check_names,
     required_tracking_profile,
@@ -241,8 +242,11 @@ def _zero_action_envelope() -> dict[str, object]:
     }
 
 
-def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
-    profile = required_tracking_profile(int(identity["completed_updates"]))
+def _tracking_report(
+    identity: dict[str, object], *, profile: str | None = None
+) -> dict[str, object]:
+    if profile is None:
+        profile = required_tracking_profile(int(identity["completed_updates"]))
     results = []
     for scenario in _scenarios(profile):
         expects_foot = any(
@@ -371,7 +375,12 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
             "steps": 300,
             "settle_steps": 50,
             "moving_hmd": "forced_non_neutral",
-            "perturbation": profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE),
+            "perturbation": profile
+            in (
+                EXPANDED_LOCOMOTION_PROFILE,
+                FINAL_PROFILE,
+                DEADLINE_FINAL_FALLBACK_PROFILE,
+            ),
             "action_clip": None,
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
@@ -383,7 +392,7 @@ def _tracking_report(identity: dict[str, object]) -> dict[str, object]:
             ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            "hand_rms_m_max": HAND_RMS_MAX_M,
+            "hand_rms_m_max": hand_tracking_rms_max_m(profile),
             "hand_p95_m_max": HAND_P95_MAX_M,
             "foot_rms_m_max": FOOT_RMS_MAX_M,
             "foot_p95_m_max": FOOT_P95_MAX_M,
@@ -499,6 +508,35 @@ class TeleopV12StageTest(unittest.TestCase):
         )
         self.assertEqual(required_tracking_profile(10_101), WHOLE_BODY_PROFILE)
         self.assertEqual(required_tracking_profile(15_000), FINAL_PROFILE)
+
+    def test_deadline_final_tracking_report_requires_perturbation(self) -> None:
+        identity = {
+            "sha256": "a" * 64,
+            "iteration": 14_999,
+            "completed_updates": 15_000,
+        }
+        report = _tracking_report(
+            identity, profile=DEADLINE_FINAL_FALLBACK_PROFILE
+        )
+        self.assertTrue(report["settings"]["perturbation"])
+        self.assertEqual(
+            report["thresholds"]["hand_rms_m_max"],
+            hand_tracking_rms_max_m(DEADLINE_FINAL_FALLBACK_PROFILE),
+        )
+        _validate_tracking_report(
+            report,
+            identity,
+            profile_override=DEADLINE_FINAL_FALLBACK_PROFILE,
+        )
+
+        without_perturbation = deepcopy(report)
+        without_perturbation["settings"]["perturbation"] = False
+        with self.assertRaisesRegex(ValueError, "settings are not canonical"):
+            _validate_tracking_report(
+                without_perturbation,
+                identity,
+                profile_override=DEADLINE_FINAL_FALLBACK_PROFILE,
+            )
 
     def test_activation_canaries_require_causality_before_final_quality(self) -> None:
         hand_canary_checks = required_tracking_check_names(

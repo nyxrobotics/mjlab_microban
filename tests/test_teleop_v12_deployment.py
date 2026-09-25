@@ -34,6 +34,10 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     LegacyVelocitySourceIdentity,
     TeleopV12BootstrapProvenance,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    deadline_fallback_marker,
+    deadline_post_canary_marker,
+)
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     ACTOR_PERMUTATION,
     ACTOR_SWAP_BLOCKS,
@@ -257,6 +261,51 @@ def test_final_gate_rejects_every_nonfinal_identity(
             checkpoint=checkpoint,
             checkpoint_sha256="1" * 64,
         )
+
+
+def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model_14999.pt"
+    gate, *_ = _evidence(tmp_path)
+    canonical_infos: dict[str, object] = {}
+    assert (
+        deployment._expected_final_tracking_profile(canonical_infos)
+        == deployment.FINAL_PROFILE
+    )
+
+    deadline_infos = {
+        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
+            deadline_fallback_marker()
+        ),
+        deployment.MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY: (
+            deadline_post_canary_marker()
+        ),
+    }
+    expected = deployment._expected_final_tracking_profile(deadline_infos)
+    assert expected == deployment.DEADLINE_FINAL_FALLBACK_PROFILE
+    gate["tracking_profile"] = expected
+    deployment._require_final_gate(
+        gate,
+        checkpoint=checkpoint,
+        checkpoint_sha256="1" * 64,
+        expected_tracking_profile=expected,
+    )
+
+    gate["tracking_profile"] = deployment.FINAL_PROFILE
+    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=expected,
+        )
+
+    missing_post = {
+        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
+            deadline_fallback_marker()
+        )
+    }
+    with pytest.raises(ValueError, match="missing post-canary lineage"):
+        deployment._expected_final_tracking_profile(missing_post)
 
 
 def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> None:

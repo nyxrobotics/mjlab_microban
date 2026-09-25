@@ -398,7 +398,12 @@ def _validate_tracking_report(
             "steps": 300,
             "settle_steps": 50,
             "moving_hmd": "forced_non_neutral",
-            "perturbation": profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE),
+            "perturbation": profile
+            in (
+                EXPANDED_LOCOMOTION_PROFILE,
+                FINAL_PROFILE,
+                DEADLINE_FINAL_FALLBACK_PROFILE,
+            ),
             "action_clip": None,
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,

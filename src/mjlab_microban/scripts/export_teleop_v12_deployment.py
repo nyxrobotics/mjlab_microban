@@ -34,7 +34,10 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
-from mjlab_microban.scripts.evaluate_teleop_v12_tracking import FINAL_PROFILE
+from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    DEADLINE_FINAL_FALLBACK_PROFILE,
+    FINAL_PROFILE,
+)
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     _export_onnx_atomic,
@@ -62,6 +65,12 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
+from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
+    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
+    validate_deadline_fallback_marker,
+    validate_deadline_post_canary_marker,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
@@ -85,6 +94,9 @@ from mjlab_microban.teleop_v12_safety import (
 
 FINAL_ITERATION = 14_999
 FINAL_COMPLETED_UPDATES = 15_000
+SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
+    (FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
+)
 PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v2"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 2.0
@@ -344,8 +356,26 @@ def _require_deployable_lr_order_lineage(infos: Mapping[str, Any]) -> dict[str, 
     return marker
 
 
+def _expected_final_tracking_profile(infos: Mapping[str, Any]) -> str:
+    deadline = infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+    post_canary = infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
+    if post_canary is None:
+        if deadline is not None:
+            raise ValueError(
+                "Final deadline-fallback checkpoint is missing post-canary lineage"
+            )
+        return FINAL_PROFILE
+    validate_deadline_fallback_marker(deadline)
+    validate_deadline_post_canary_marker(post_canary)
+    return DEADLINE_FINAL_FALLBACK_PROFILE
+
+
 def _require_final_gate(
-    gate: Mapping[str, Any], *, checkpoint: Path, checkpoint_sha256: str
+    gate: Mapping[str, Any],
+    *,
+    checkpoint: Path,
+    checkpoint_sha256: str,
+    expected_tracking_profile: str | None = None,
 ) -> None:
     expected = {
         "schema_version": 2,
@@ -356,9 +386,14 @@ def _require_final_gate(
         "completed_updates": FINAL_COMPLETED_UPDATES,
         "canonical_boundary": True,
         "checkpoint_kind": "canonical_boundary",
-        "tracking_profile": FINAL_PROFILE,
     }
     mismatches = [name for name, value in expected.items() if gate.get(name) != value]
+    tracking_profile = gate.get("tracking_profile")
+    if expected_tracking_profile is None:
+        if tracking_profile not in SUPPORTED_FINAL_TRACKING_PROFILES:
+            mismatches.append("tracking_profile")
+    elif tracking_profile != expected_tracking_profile:
+        mismatches.append("tracking_profile")
     if mismatches:
         raise ValueError(
             "Contract-v12 deployment requires the exact accepted 15000-update "
@@ -437,7 +472,10 @@ def build_v12_deployment_metadata(
     """Translate only already-validated gate evidence to the robot wire contract."""
 
     _require_final_gate(
-        gate, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256
+        gate,
+        checkpoint=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        expected_tracking_profile=_expected_final_tracking_profile(infos),
     )
     if infos.get("trainable_actor_parameters") != ["mlp.0.weight"] or infos.get(
         "trainable_actor_columns"

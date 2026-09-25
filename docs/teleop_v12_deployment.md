@@ -36,8 +36,11 @@ The packager performs the following fail-closed sequence on CPU:
 1. Rebuilds and compares the supplied stage gate using its current evaluator
    code, rehashing the checkpoint, all three reports, and the gate ONNX.
 2. Requires exactly `model_14999.pt`, iteration `14999`, 15,000 completed
-   updates, canonical-boundary kind, final perturbation tracking profile, and
-   `status=pass`.
+   updates, canonical-boundary kind, `status=pass`, and either the canonical
+   final perturbation profile or the explicitly authorized deadline-final
+   profile. The latter is accepted only when the checkpoint contains the exact
+   pinned fallback and post-canary lineage; changing only the gate/profile name
+   is rejected.
 3. Captures immutable checkpoint bytes before loading the actor, then revalidates
    the pinned legacy checkpoint/probe and frozen legacy tensors. It also
    requires the corrected bilateral-site revision and the authenticated
@@ -66,7 +69,9 @@ The packager performs the following fail-closed sequence on CPU:
    `src/moves/policy_selector.py` fallback selector, `src/moves/walk.py`,
    `src/constants.py`, the exact `src/agents/walk.onnx`, and the physical
    repository's `uv.lock`. The validator independently compares those embedded
-   identities with the files that actually performed admission.
+   identities with the files that actually performed admission, reports the
+   complete seven-entry identity, and rehashes all seven after its CPU smokes to
+   reject a mid-validation change.
 9. Rehashes and revalidates the complete gate lineage once more immediately
    before an `os.replace` plus directory `fsync` publishes the file.
 

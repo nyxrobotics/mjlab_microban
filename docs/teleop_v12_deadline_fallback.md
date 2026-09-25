@@ -101,3 +101,21 @@ uses `save_interval=15000`, and may write only `model_14999.pt`. The final gate
 keeps hand RMS at 35 mm but restores the normal final eight-scenario profile,
 including strict 15 mm foot RMS, 25 mm foot P95, perturbation, all safety and
 causal checks, 9x300 locomotion, and CPU ONNX parity.
+
+When `model_14999.pt` has been written, run the ordinary final evaluator and
+deployment packager against that exact run:
+
+```bash
+scripts/evaluate_microban_teleop_v12_stage.sh \
+  2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926 14999
+scripts/export_microban_teleop_v12_deployment.sh \
+  2026-09-26_00-40-44_v12_deadline_post_canary_10100_to15000_20260926 \
+  artifacts/microban_teleop_v12_deadline_final.onnx
+```
+
+The resulting gate must use
+`deadline_full_body_hand_rms35mm_foot_strict_perturbation_v1`. The packager and
+Microban runtime both accept that name only as an explicit final-profile
+allowlist entry; the stage validator still binds it to the checkpoint's pinned
+post-canary lineage and all unchanged strict foot, safety, locomotion, and ONNX
+evidence.
