@@ -21,8 +21,10 @@ from tensordict import TensorDict
 
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
     CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M,
+    DEPLOYMENT_PERFORMANCE_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
+    INTERMEDIATE_HARD_SAFETY_PROFILE,
     EvaluationScenario,
     HmdMotionStats,
     _configure_nominal_evaluation,
@@ -468,6 +470,12 @@ class ReportPublicationTest(unittest.TestCase):
             ),
         )
         self.assertEqual(current_report["status"], "pass")
+        self.assertEqual(
+            current_report["acceptance_profile"], DEPLOYMENT_PERFORMANCE_PROFILE
+        )
+        self.assertTrue(
+            current_report["summary"]["performance_acceptance_checks_enforced"]
+        )
         self.assertEqual(current_report["schema_version"], 8)
         self.assertFalse(current_report["hmd_neck_motion"]["enabled"])
         self.assertIsNone(current_report["hmd_neck_motion"]["params"])
@@ -525,6 +533,28 @@ class ReportPublicationTest(unittest.TestCase):
         self.assertEqual(failed_current_report["status"], "fail")
         self.assertEqual(evaluation_exit_code(failed_current_report), 2)
         self.assertEqual(evaluation_exit_code(current_report), 0)
+
+        intermediate_report = build_report(
+            **common,
+            checkpoint_contract=TeleopCheckpointContract(
+                version="9",
+                previous_action_semantics=MICROBAN_TELEOP_PREVIOUS_ACTION_SEMANTICS,
+                iteration=1499,
+                common_step_counter=36000,
+            ),
+            intermediate_hard_safety_only=True,
+        )
+        self.assertEqual(intermediate_report["status"], "diagnostic")
+        self.assertEqual(
+            intermediate_report["acceptance_profile"],
+            INTERMEDIATE_HARD_SAFETY_PROFILE,
+        )
+        self.assertFalse(
+            intermediate_report["summary"][
+                "performance_acceptance_checks_enforced"
+            ]
+        )
+        self.assertEqual(evaluation_exit_code(intermediate_report), 3)
 
         legacy_report = build_report(
             **common,
@@ -709,6 +739,13 @@ class MetricHelperTest(unittest.TestCase):
         acceptance = evaluate_scenario_acceptance(scenario, report)
         self.assertFalse(acceptance["passed"])
         self.assertEqual(acceptance["failed_checks"], ["command_axis_sign"])
+
+        safety_only = evaluate_scenario_acceptance(
+            scenario, report, enforce_performance=False
+        )
+        self.assertTrue(safety_only["passed"])
+        self.assertFalse(safety_only["performance_checks_enforced"])
+        self.assertNotIn("command_axis_sign", safety_only["checks"])
 
 
 if __name__ == "__main__":

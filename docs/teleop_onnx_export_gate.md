@@ -44,6 +44,9 @@ the current evaluator and acceptance revisions, and the current evaluator source
 SHA-256. Its three nominal and three moving-HMD report files must still match
 their recorded SHA-256s, seeds, 1,000-step/50-settle configuration, canonical
 scenario order, safety/acceptance results, and moving-HMD excursion evidence.
+Both the receipt and all six reports must use
+`deployment_performance_v1`; the intermediate
+`canonical_intermediate_hard_safety_v1` profile is explicitly rejected.
 The ONNX records the receipt SHA-256, so it binds the exact six-report evidence
 rather than merely claiming that a final-stage checkpoint exists.
 

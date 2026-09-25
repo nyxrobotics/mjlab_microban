@@ -400,7 +400,11 @@ def _write_final_acceptance_receipt(
     checkpoint = checkpoint.resolve()
     checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     scenario_reports = [
-        {"name": scenario.name} for scenario in teleop_evaluator.default_scenarios()
+        {
+            "name": scenario.name,
+            "acceptance": {"performance_checks_enforced": True},
+        }
+        for scenario in teleop_evaluator.default_scenarios()
     ]
     report_paths: list[Path] = []
     moving_paths: list[Path] = []
@@ -414,6 +418,9 @@ def _write_final_acceptance_receipt(
                 "checkpoint_sha256": checkpoint_sha256,
                 "evaluator_revision": teleop_evaluator.TELEOP_EVALUATOR_REVISION,
                 "acceptance_revision": teleop_evaluator.TELEOP_ACCEPTANCE_REVISION,
+                "acceptance_profile": (
+                    teleop_evaluator.DEPLOYMENT_PERFORMANCE_PROFILE
+                ),
                 "steps_per_scenario": 1000,
                 "settle_steps": 50,
                 "status": "diagnostic" if moving_hmd else "pass",
@@ -426,6 +433,7 @@ def _write_final_acceptance_receipt(
                 "summary": {
                     "hard_safety_checks_passed": True,
                     "acceptance_checks_passed": True,
+                    "performance_acceptance_checks_enforced": True,
                     "canonical_coverage": not moving_hmd,
                 },
                 "scenarios": scenario_reports,
@@ -478,6 +486,7 @@ def _write_final_acceptance_receipt(
         "training_provenance_sha256": training_provenance_sha256,
         "evaluator_revision": teleop_evaluator.TELEOP_EVALUATOR_REVISION,
         "acceptance_revision": teleop_evaluator.TELEOP_ACCEPTANCE_REVISION,
+        "acceptance_profile": teleop_evaluator.DEPLOYMENT_PERFORMANCE_PROFILE,
         "evaluator_source_sha256": evaluator_source_sha256,
         "run_name": checkpoint.parent.name,
         "completed_iterations": 20_000,

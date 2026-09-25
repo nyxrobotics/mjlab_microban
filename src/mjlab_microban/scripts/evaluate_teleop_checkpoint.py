@@ -64,8 +64,10 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 TASK = "Mjlab-Teleop-Microban"
 LOG_ROOT = Path("logs/rsl_rl/mjlab_microban_teleop")
 _CHECKPOINT_RE = re.compile(r"^model_(?:(\d+)|(pristine))\.pt$")
-TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v9_1"
-TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v9_1"
+TELEOP_EVALUATOR_REVISION = "microban_teleop_deterministic_evaluator_v9_2"
+TELEOP_ACCEPTANCE_REVISION = "microban_teleop_acceptance_v9_2"
+INTERMEDIATE_HARD_SAFETY_PROFILE = "canonical_intermediate_hard_safety_v1"
+DEPLOYMENT_PERFORMANCE_PROFILE = "deployment_performance_v1"
 
 # These are the physical command limits applied by microban's central input
 # scaler and the final teleop-training curriculum.  Stationary yaw is wider
@@ -972,6 +974,7 @@ def _evaluate_scenario(
     settle_steps: int,
     seed: int,
     saturation_margin_ratio: float,
+    enforce_performance: bool = True,
 ) -> dict[str, Any]:
     env.reset(seed=seed)
     _set_scenario(env, scenario)
@@ -1432,7 +1435,9 @@ def _evaluate_scenario(
     report["command_axis_sign"] = command_axis_sign_diagnostic(
         scenario, report["measured_base_velocity"]
     )
-    report["acceptance"] = evaluate_scenario_acceptance(scenario, report)
+    report["acceptance"] = evaluate_scenario_acceptance(
+        scenario, report, enforce_performance=enforce_performance
+    )
     return report
 
 
@@ -1545,9 +1550,12 @@ def summarize_hmd_motion_evidence(
 
 
 def evaluate_scenario_acceptance(
-    scenario: EvaluationScenario, report: dict[str, Any]
+    scenario: EvaluationScenario,
+    report: dict[str, Any],
+    *,
+    enforce_performance: bool = True,
 ) -> dict[str, Any]:
-    """Apply the documented simulation gates to one deterministic rollout."""
+    """Apply hard safety and, when requested, deployment-performance gates."""
 
     checks: dict[str, dict[str, Any]] = {}
 
@@ -1602,69 +1610,70 @@ def evaluate_scenario_acceptance(
     )
     vx, vy, yaw = scenario.twist
     low_linear_command = yaw == 0.0 and 0.0 < math.hypot(vx, vy) <= 0.1000001
-    add_maximum(
-        "linear_velocity_mae_m_s",
-        report["velocity_tracking_error"]["linear_xy"]["mean"],
-        ACCEPTANCE_THRESHOLDS[
-            "low_linear_velocity_mae_m_s_max"
-            if low_linear_command
-            else "linear_velocity_mae_m_s_max"
-        ],
-    )
-    add_maximum(
-        "yaw_velocity_mae_rad_s",
-        report["velocity_tracking_error"]["yaw"]["mean"],
-        ACCEPTANCE_THRESHOLDS["yaw_velocity_mae_rad_s_max"],
-    )
-    command_axis_sign = report["command_axis_sign"]
-    checks["command_axis_sign"] = {
-        "applied": command_axis_sign["applied"],
-        "value": command_axis_sign["passed"],
-        "required": True,
-        "passed": command_axis_sign["passed"],
-        "axes": command_axis_sign["axes"],
-    }
-    if low_linear_command:
-        commanded_axis = "linear_x" if vx != 0.0 else "linear_y"
-        actual_mean = report["measured_base_velocity"][commanded_axis]["mean"]
-        add_minimum(
-            "low_linear_signed_response_m_s",
-            abs(float(actual_mean)) if actual_mean is not None else None,
-            ACCEPTANCE_THRESHOLDS["low_linear_signed_response_m_s_min"],
-        )
-
-    if any(scenario.hand_active):
-        add_maximum(
-            "hand_rms_m",
-            report["target_error"]["active_hand"]["rms"],
-            ACCEPTANCE_THRESHOLDS["hand_rms_m_max"],
-        )
-        add_maximum(
-            "hand_p95_m",
-            report["target_error"]["active_hand"]["p95"],
-            ACCEPTANCE_THRESHOLDS["hand_p95_m_max"],
-        )
-
-    # A fixed-foot gate is meaningful only for an exact stationary command.
-    # Applying it to low-speed walking rewards the stationary local optimum.
     foot_tracking_active = vx == 0.0 and vy == 0.0 and yaw == 0.0
-    if foot_tracking_active:
+    if enforce_performance:
         add_maximum(
-            "foot_rms_m",
-            report["target_error"]["foot"]["rms"],
-            ACCEPTANCE_THRESHOLDS["foot_rms_m_max"],
+            "linear_velocity_mae_m_s",
+            report["velocity_tracking_error"]["linear_xy"]["mean"],
+            ACCEPTANCE_THRESHOLDS[
+                "low_linear_velocity_mae_m_s_max"
+                if low_linear_command
+                else "linear_velocity_mae_m_s_max"
+            ],
         )
         add_maximum(
-            "foot_p95_m",
-            report["target_error"]["foot"]["p95"],
-            ACCEPTANCE_THRESHOLDS["foot_p95_m_max"],
+            "yaw_velocity_mae_rad_s",
+            report["velocity_tracking_error"]["yaw"]["mean"],
+            ACCEPTANCE_THRESHOLDS["yaw_velocity_mae_rad_s_max"],
         )
+        if low_linear_command:
+            commanded_axis = "linear_x" if vx != 0.0 else "linear_y"
+            actual_mean = report["measured_base_velocity"][commanded_axis]["mean"]
+            add_minimum(
+                "low_linear_signed_response_m_s",
+                abs(float(actual_mean)) if actual_mean is not None else None,
+                ACCEPTANCE_THRESHOLDS["low_linear_signed_response_m_s_min"],
+            )
+        command_axis_sign = report["command_axis_sign"]
+        checks["command_axis_sign"] = {
+            "applied": command_axis_sign["applied"],
+            "value": command_axis_sign["passed"],
+            "required": True,
+            "passed": command_axis_sign["passed"],
+            "axes": command_axis_sign["axes"],
+        }
+        if any(scenario.hand_active):
+            add_maximum(
+                "hand_rms_m",
+                report["target_error"]["active_hand"]["rms"],
+                ACCEPTANCE_THRESHOLDS["hand_rms_m_max"],
+            )
+            add_maximum(
+                "hand_p95_m",
+                report["target_error"]["active_hand"]["p95"],
+                ACCEPTANCE_THRESHOLDS["hand_p95_m_max"],
+            )
+
+        # A fixed-foot gate is meaningful only for an exact stationary command.
+        # Applying it to low-speed walking rewards the stationary local optimum.
+        if foot_tracking_active:
+            add_maximum(
+                "foot_rms_m",
+                report["target_error"]["foot"]["rms"],
+                ACCEPTANCE_THRESHOLDS["foot_rms_m_max"],
+            )
+            add_maximum(
+                "foot_p95_m",
+                report["target_error"]["foot"]["p95"],
+                ACCEPTANCE_THRESHOLDS["foot_p95_m_max"],
+            )
 
     failed = sorted(name for name, check in checks.items() if not check["passed"])
     return {
         "passed": not failed,
         "failed_checks": failed,
         "checks": checks,
+        "performance_checks_enforced": enforce_performance,
         "foot_tracking_gate_applied": foot_tracking_active,
     }
 
@@ -1683,6 +1692,7 @@ def build_report(
     control_hz: float,
     checkpoint_contract: TeleopCheckpointContract,
     hmd_neck_motion: dict[str, Any] | None = None,
+    intermediate_hard_safety_only: bool = False,
 ) -> dict[str, Any]:
     if hmd_neck_motion is None:
         hmd_neck_motion = {"enabled": False, "params": None}
@@ -1762,6 +1772,7 @@ def build_report(
     status = "fail" if not acceptance_pass else "diagnostic"
     if (
         acceptance_pass
+        and not intermediate_hard_safety_only
         and canonical_coverage
         and not checkpoint_contract.diagnostic_legacy
         and not checkpoint_contract.pristine_pre_update
@@ -1800,6 +1811,12 @@ def build_report(
             "Nominal evaluation holds the HMD-owned neck at its default pose; "
             "use --moving-hmd-neck for the independent inertial-disturbance gate."
         )
+    if intermediate_hard_safety_only:
+        limitations.append(
+            "This canonical intermediate-stage gate enforces hard safety only; "
+            "velocity and body-target performance remain diagnostic until the "
+            "final 20,000-update deployment gate."
+        )
     if checkpoint_contract.diagnostic_legacy:
         limitations.append(
             "This is an explicitly requested legacy-v1 diagnostic using raw "
@@ -1815,6 +1832,11 @@ def build_report(
         "schema_version": 8,
         "evaluator_revision": TELEOP_EVALUATOR_REVISION,
         "acceptance_revision": TELEOP_ACCEPTANCE_REVISION,
+        "acceptance_profile": (
+            INTERMEDIATE_HARD_SAFETY_PROFILE
+            if intermediate_hard_safety_only
+            else DEPLOYMENT_PERFORMANCE_PROFILE
+        ),
         "status": status,
         "task": TASK,
         "checkpoint": str(checkpoint),
@@ -1864,6 +1886,9 @@ def build_report(
             "canonical_coverage": canonical_coverage,
             "hard_safety_checks_passed": hard_pass,
             "acceptance_checks_passed": acceptance_pass,
+            "performance_acceptance_checks_enforced": (
+                not intermediate_hard_safety_only
+            ),
             "hmd_motion_evidence_passed": hmd_motion_evidence["passed"],
             "training_contract_check_passed": (
                 not checkpoint_contract.diagnostic_legacy
@@ -1964,6 +1989,15 @@ def parse_args() -> argparse.Namespace:
             "neutral_probability=0.0. Even full coverage cannot be canonical."
         ),
     )
+    parser.add_argument(
+        "--intermediate-hard-safety-only",
+        action="store_true",
+        help=(
+            "Canonical stage gates before 20,000 updates only: enforce all hard "
+            "safety and HMD-motion evidence while keeping command/body-target "
+            "performance diagnostic. The final deployment gate forbids this mode."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2004,6 +2038,19 @@ def main() -> None:
         map_location="cpu",
         allow_legacy_diagnostic=args.allow_legacy_teleop_contract,
     )
+    if args.intermediate_hard_safety_only:
+        training = checkpoint_contract.training_provenance_identity
+        if (
+            training is None
+            or not training.canonical_stage
+            or training.stage_target_boundary is None
+            or training.stage_target_boundary >= 20_000
+            or checkpoint_contract.iteration != training.stage_target_boundary - 1
+        ):
+            raise ValueError(
+                "--intermediate-hard-safety-only requires an exact canonical "
+                "stage boundary before 20,000 updates"
+            )
 
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
@@ -2111,6 +2158,7 @@ def main() -> None:
                 settle_steps=args.settle_steps,
                 seed=args.seed,
                 saturation_margin_ratio=args.saturation_margin_ratio,
+                enforce_performance=not args.intermediate_hard_safety_only,
             )
             for scenario in scenarios
         ]
@@ -2127,6 +2175,7 @@ def main() -> None:
             control_hz=1.0 / raw_env.step_dt,
             checkpoint_contract=checkpoint_contract,
             hmd_neck_motion=hmd_neck_motion,
+            intermediate_hard_safety_only=args.intermediate_hard_safety_only,
         )
     finally:
         wrapped_env.close()

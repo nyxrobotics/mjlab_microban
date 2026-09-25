@@ -97,6 +97,8 @@ def _validate_parent_gate(
     parent_checkpoint_sha256: str,
     parent_gate_sha256: str,
 ) -> Path:
+    from mjlab_microban.scripts import evaluate_teleop_checkpoint as evaluator
+
     matches: list[Path] = []
     for candidate in sorted(
         gate_root.glob(f"*_boundary_{start_boundary}_gate.json")
@@ -110,6 +112,11 @@ def _validate_parent_gate(
             and gate.get("training_contract_version")
             == MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
             and gate.get("completed_iterations") == start_boundary
+            and gate.get("evaluator_revision") == evaluator.TELEOP_EVALUATOR_REVISION
+            and gate.get("acceptance_revision")
+            == evaluator.TELEOP_ACCEPTANCE_REVISION
+            and gate.get("acceptance_profile")
+            == evaluator.INTERMEDIATE_HARD_SAFETY_PROFILE
             and gate.get("checkpoint_sha256") == parent_checkpoint_sha256
             and parent_checkpoint.is_file()
             and sha256_file(parent_checkpoint) == parent_checkpoint_sha256

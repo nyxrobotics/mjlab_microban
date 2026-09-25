@@ -726,6 +726,7 @@ def _validate_acceptance_report(
         "checkpoint_sha256": checkpoint_sha256,
         "evaluator_revision": evaluator_revision,
         "acceptance_revision": acceptance_revision,
+        "acceptance_profile": "deployment_performance_v1",
         "steps_per_scenario": 1000,
         "settle_steps": 50,
         "status": "diagnostic" if moving_hmd else "pass",
@@ -760,6 +761,7 @@ def _validate_acceptance_report(
     if (
         summary.get("hard_safety_checks_passed") is not True
         or summary.get("acceptance_checks_passed") is not True
+        or summary.get("performance_acceptance_checks_enforced") is not True
     ):
         raise ValueError(f"Acceptance report {path.name} did not pass acceptance")
     expected_canonical_coverage = not moving_hmd
@@ -772,6 +774,11 @@ def _validate_acceptance_report(
         not isinstance(scenario_reports, list)
         or any(not isinstance(item, dict) for item in scenario_reports)
         or tuple(item.get("name") for item in scenario_reports) != expected_scenarios
+        or any(
+            not isinstance(item.get("acceptance"), dict)
+            or item["acceptance"].get("performance_checks_enforced") is not True
+            for item in scenario_reports
+        )
     ):
         raise ValueError(
             f"Acceptance report {path.name} canonical scenario order is invalid"
@@ -864,6 +871,7 @@ def validate_final_teleop_acceptance_receipt(
         "training_provenance_sha256",
         "evaluator_revision",
         "acceptance_revision",
+        "acceptance_profile",
         "evaluator_source_sha256",
         "run_name",
         "completed_iterations",
@@ -910,6 +918,8 @@ def validate_final_teleop_acceptance_receipt(
     if (
         receipt.get("evaluator_revision") != evaluator_revision
         or receipt.get("acceptance_revision") != acceptance_revision
+        or receipt.get("acceptance_profile")
+        != evaluator.DEPLOYMENT_PERFORMANCE_PROFILE
         or receipt.get("evaluator_source_sha256") != evaluator_source_sha256
     ):
         raise ValueError(
@@ -2737,6 +2747,8 @@ class MicrobanTeleopOnPolicyRunner(MjlabOnPolicyRunner):
                 == evaluator.TELEOP_EVALUATOR_REVISION
                 and gate.get("acceptance_revision")
                 == evaluator.TELEOP_ACCEPTANCE_REVISION
+                and gate.get("acceptance_profile")
+                == evaluator.INTERMEDIATE_HARD_SAFETY_PROFILE
                 and gate.get("evaluator_source_sha256")
                 == _sha256_file(Path(evaluator.__file__))
                 and gate.get("evaluation_seeds") == [42, 43, 44]

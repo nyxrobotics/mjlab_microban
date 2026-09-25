@@ -129,6 +129,18 @@ The wrapper records and verifies parent checkpoint/gate SHA-256 values, keeps an
 interrupted stage on its original interval, and makes the final reproducible
 stage exactly `18000->20000`. Generic resume is rejected by the runner.
 
+Because the accepted safe-velocity seed is intentionally slow, boundaries before
+20,000 use the explicit `canonical_intermediate_hard_safety_v1` profile. They
+still require three seeded, complete deterministic rollouts with no fall,
+non-finite value, unexpected termination, self-collision, target clipping, or
+actual soft-limit violation. Moving-HMD boundaries also still require measured
+target and physical neck excursion. Velocity, hand, and foot tracking metrics
+are recorded but do not block continuation at these intermediate boundaries.
+The final 20,000-update gate switches back to
+`deployment_performance_v1`; every original command-direction, velocity, and
+body-target performance threshold is mandatory there. A hard-safety-only report
+can never produce a deployable ONNX.
+
 Every resume also records a separate `resume_source_checkpoint_path`,
 `resume_source_checkpoint_sha256`, and `resume_source_checkpoint_iteration` in
 the new stage manifest. These identify the exact `model_N.pt` loaded by this

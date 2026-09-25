@@ -161,6 +161,9 @@ for seed in "${EVALUATION_SEEDS[@]}"; do
         --output "${report_path}"
         "${force_args[@]}"
     )
+    if (( COMPLETED_ITERATIONS < 20000 )); then
+        evaluator_args+=(--intermediate-hard-safety-only)
+    fi
     if [[ -n "${scenarios}" ]]; then
         evaluator_args+=(--scenarios "${scenarios}")
     fi
@@ -194,6 +197,9 @@ for seed in "${EVALUATION_SEEDS[@]}"; do
             --output "${moving_hmd_report_path}"
             "${force_args[@]}"
         )
+        if (( COMPLETED_ITERATIONS < 20000 )); then
+            moving_hmd_args+=(--intermediate-hard-safety-only)
+        fi
         if [[ -n "${scenarios}" ]]; then
             moving_hmd_args+=(--scenarios "${scenarios}")
         fi
@@ -222,6 +228,8 @@ from pathlib import Path
 import torch
 
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
+    DEPLOYMENT_PERFORMANCE_PROFILE,
+    INTERMEDIATE_HARD_SAFETY_PROFILE,
     TELEOP_ACCEPTANCE_REVISION,
     TELEOP_EVALUATOR_REVISION,
 )
@@ -248,6 +256,11 @@ report_paths = [Path(value).resolve() for value in sys.argv[7:10]]
 moving_hmd_report_paths = [Path(value).resolve() for value in sys.argv[10:]]
 expected_seeds = [42, 43, 44]
 expected_scenarios = scenario_csv.split(",") if scenario_csv else None
+expected_acceptance_profile = (
+    DEPLOYMENT_PERFORMANCE_PROFILE
+    if completed_iterations == 20_000
+    else INTERMEDIATE_HARD_SAFETY_PROFILE
+)
 failures = []
 reports = []
 moving_hmd_reports = []
@@ -292,6 +305,8 @@ def validate_report(
         failures.append(f"{report_path.name}: evaluator revision mismatch")
     if report.get("acceptance_revision") != TELEOP_ACCEPTANCE_REVISION:
         failures.append(f"{report_path.name}: acceptance revision mismatch")
+    if report.get("acceptance_profile") != expected_acceptance_profile:
+        failures.append(f"{report_path.name}: acceptance profile mismatch")
     if report.get("steps_per_scenario") != 1000:
         failures.append(f"{report_path.name}: evaluation was not 1000 steps")
     if report.get("settle_steps") != 50:
@@ -314,10 +329,26 @@ def validate_report(
     if not report.get("training_contract", {}).get("deployment_compatible"):
         failures.append(f"{report_path.name}: checkpoint is not deployment-compatible")
     summary = report.get("summary", {})
+    expected_performance_enforcement = completed_iterations == 20_000
     if not summary.get("hard_safety_checks_passed"):
         failures.append(f"{report_path.name}: hard safety checks failed")
     if not summary.get("acceptance_checks_passed"):
         failures.append(f"{report_path.name}: acceptance checks failed")
+    if (
+        summary.get("performance_acceptance_checks_enforced")
+        is not expected_performance_enforcement
+    ):
+        failures.append(f"{report_path.name}: performance enforcement mismatch")
+    scenario_reports = report.get("scenarios", [])
+    if any(
+        item.get("acceptance", {}).get("performance_checks_enforced")
+        is not expected_performance_enforcement
+        for item in scenario_reports
+        if isinstance(item, dict)
+    ):
+        failures.append(
+            f"{report_path.name}: scenario performance enforcement mismatch"
+        )
     expected_status = (
         "diagnostic"
         if moving_hmd or completed_iterations != 20000
@@ -445,6 +476,7 @@ gate = {
     "training_provenance_sha256": training_provenance_sha256,
     "evaluator_revision": TELEOP_EVALUATOR_REVISION,
     "acceptance_revision": TELEOP_ACCEPTANCE_REVISION,
+    "acceptance_profile": expected_acceptance_profile,
     "evaluator_source_sha256": sha256_file(
         Path(__import__(
             "mjlab_microban.scripts.evaluate_teleop_checkpoint",

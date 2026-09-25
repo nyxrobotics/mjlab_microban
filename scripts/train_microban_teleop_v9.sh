@@ -205,7 +205,12 @@ import sys
 from pathlib import Path
 
 import mjlab_microban.scripts.evaluate_teleop_checkpoint as evaluator
-from mjlab_microban.scripts.evaluate_teleop_checkpoint import TELEOP_ACCEPTANCE_REVISION, TELEOP_EVALUATOR_REVISION
+from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
+    DEPLOYMENT_PERFORMANCE_PROFILE,
+    INTERMEDIATE_HARD_SAFETY_PROFILE,
+    TELEOP_ACCEPTANCE_REVISION,
+    TELEOP_EVALUATOR_REVISION,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_RECIPE_REVISION,
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
@@ -236,6 +241,13 @@ if gate.get("evaluator_revision") != TELEOP_EVALUATOR_REVISION:
     failures.append("gate evaluator revision mismatch")
 if gate.get("acceptance_revision") != TELEOP_ACCEPTANCE_REVISION:
     failures.append("gate acceptance revision mismatch")
+expected_acceptance_profile = (
+    DEPLOYMENT_PERFORMANCE_PROFILE
+    if boundary == 20_000
+    else INTERMEDIATE_HARD_SAFETY_PROFILE
+)
+if gate.get("acceptance_profile") != expected_acceptance_profile:
+    failures.append("gate acceptance profile mismatch")
 if gate.get("evaluator_source_sha256") != sha256_file(Path(evaluator.__file__)):
     failures.append("gate evaluator source mismatch")
 if gate.get("run_name") != run_name or gate.get("completed_iterations") != boundary:

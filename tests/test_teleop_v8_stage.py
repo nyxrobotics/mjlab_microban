@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import torch
 
-from mjlab_microban.scripts import teleop_v8_stage
+from mjlab_microban.scripts import evaluate_teleop_checkpoint, teleop_v8_stage
 from mjlab_microban.scripts.teleop_v8_stage import (
     StageInterval,
     resolve_stage_interval,
@@ -88,6 +88,7 @@ class StageWrapperReceiptContractTest(unittest.TestCase):
             "recipe_revision",
             "evaluator_revision",
             "acceptance_revision",
+            "acceptance_profile",
             "evaluator_source_sha256",
             "report_sha256",
             "moving_hmd_report_sha256",
@@ -185,6 +186,15 @@ class InterruptedStageProvenanceTest(unittest.TestCase):
                         MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION
                     ),
                     "completed_iterations": 1500,
+                    "evaluator_revision": (
+                        evaluate_teleop_checkpoint.TELEOP_EVALUATOR_REVISION
+                    ),
+                    "acceptance_revision": (
+                        evaluate_teleop_checkpoint.TELEOP_ACCEPTANCE_REVISION
+                    ),
+                    "acceptance_profile": (
+                        evaluate_teleop_checkpoint.INTERMEDIATE_HARD_SAFETY_PROFILE
+                    ),
                     "checkpoint": str(parent_checkpoint),
                     "checkpoint_sha256": parent_checkpoint_sha256,
                 }
