@@ -440,9 +440,21 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # — this term exists specifically to close that gap, not to duplicate height/upright.
     # "is standing" is gated on head height (HEAD_ASSET_CFG) everywhere below;
     # orientation itself still reads the trunk body specifically (asset_cfg).
+    # Weight raised 5.0 -> 20.0 (matching head_height_sq's own weight; both cap at
+    # 1.0 per step at the peak, so this puts "finish and hold" on equal footing
+    # with "get tall" instead of being a much weaker afterthought). Measured
+    # directly via a 16-env rollout at iteration 4000 of the action_rate_l2 fix
+    # run: mean max height already reaches 118% of target_height (the robot can
+    # physically overshoot standing height, so head_height itself is not the
+    # bottleneck), but only 3/16 envs were still standing in the final second of
+    # the episode -- most rise past the threshold and fall back to ~69% of
+    # target by the end. Raising the "get tall" rewards further (as tried once
+    # before, see head_height's own comment on the 4x/144.0 revert) doesn't
+    # address a sustain problem; raising the term that specifically rewards
+    # staying up might.
     cfg.rewards["standing_bonus"] = RewardTermCfg(
         func=standing_bonus,
-        weight=5.0,
+        weight=20.0,
         params={
             # Own threshold (0.9), higher than standing_pose's (0.8, below) — the
             # payout keeps scaling up to the TRUE target height above that anyway
