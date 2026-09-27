@@ -93,12 +93,16 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         # this alongside the v2 rate limit was tried and measured to make the
         # std/entropy runaway markedly worse, not moot -- get-up's own action
         # space exploits the clip-saturation-is-free property far more than
-        # walking's does, independent of any rate limit.
+        # walking's does, independent of any rate limit. Only its presence/
+        # func is checked, not one fixed weight: it's meant to scale with how
+        # hard other reward terms push toward the clip boundary (see its own
+        # comment on -2.0 -> -4.0), not stay pinned at whatever value happened
+        # to work for a weaker version of those terms.
         raw_clip_reward = unwrapped.cfg.rewards.get("raw_target_clip_excess")
         if (
             raw_clip_reward is None
             or raw_clip_reward.func is not normalized_target_clip_excess_l1_sum
-            or raw_clip_reward.weight != -2.0
+            or raw_clip_reward.weight >= 0.0
         ):
             raise ValueError("Get-up v3 requires the raw target clip-excess reward")
         super().__init__(env, train_cfg, log_dir, device)

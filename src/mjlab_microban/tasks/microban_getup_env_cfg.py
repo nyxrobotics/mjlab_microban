@@ -320,13 +320,25 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # needed joint angles rarely approach its clip boundaries, but get-up's
     # actual recovery motion needs several joints AT or near their limit for
     # much of an episode, making this exploit far more available/rewarding
-    # here. Restored at the same -2.0 weight that controlled std well (1.1-1.5
-    # through iteration 8000+) under the old, rate-limited action; unverified
-    # yet whether -2.0 is still the right value under the new, unlimited-rate
-    # action -- watch the iteration-0-1500 std trend on the next run.
+    # here.
+    #
+    # -2.0 held std at 0.8-0.9 through iteration 5500 with action_rate_l2 and
+    # standing_bonus both at their original values -- but raising EITHER
+    # head_height (historically) or standing_bonus (just now, 5.0 -> 20.0) to
+    # push harder on getting/staying standing reproduced the same runaway
+    # shape each time (std climbing 0.85 -> 1.49 within ~150 iterations of the
+    # standing_bonus change alone). Rather than tip-toe around every future
+    # reward change that might push the policy toward its clip boundaries
+    # harder, doubled the counter-force itself to -4.0: this is the fixed
+    # weight meant to keep excess-raw-magnitude non-free regardless of what
+    # else changes, so it should scale with how hard OTHER terms push toward
+    # the boundary, not stay pinned at whatever value happened to work for a
+    # weaker version of those terms. Testing alongside standing_bonus back at
+    # 20.0 (see that reward's own comment) specifically to check whether this
+    # holds std flat where -2.0 didn't.
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=-2.0,
+        weight=-4.0,
         params={"action_name": "joint_pos"},
     )
 
@@ -440,25 +452,23 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # — this term exists specifically to close that gap, not to duplicate height/upright.
     # "is standing" is gated on head height (HEAD_ASSET_CFG) everywhere below;
     # orientation itself still reads the trunk body specifically (asset_cfg).
-    # 20.0 (4x, matching head_height_sq's own weight) was tried and reverted: a
-    # 16-env rollout at iteration 4000 of the action_rate_l2 fix run showed a
-    # real sustain problem (mean max height already 118% of target -- height
-    # itself is not the bottleneck -- but only 3/16 envs still standing at
-    # episode end), so raising the "stay up" term seemed like the right target,
-    # unlike raising a "get tall" term (already tried once at head_height's own
-    # 4x, see that revert comment). But this ALSO reproduced the same
-    # std/entropy runaway: resumed training held std at 0.85-0.88 for the
-    # first ~100 iterations post-resume, then climbed to 1.49 within the next
-    # 60 (0.94 -> 1.06 -> 1.23 -> 1.36 -> 1.49), the same accelerating shape as
-    # every other large weight increase on a threshold-gated reward has shown
-    # here. Suggests this isn't specific to head_height or standing_bonus --
-    # any sufficiently large increase on a height-threshold-gated term seems to
-    # find the same clip-saturation exploit faster than the fixed -2.0
-    # raw_target_clip_excess weight can counter it. Reverted to 5.0 pending a
-    # smaller step and/or revisiting raw_target_clip_excess's own weight.
+    # 20.0 (4x, matching head_height_sq's own weight): a 16-env rollout at
+    # iteration 4000 of the action_rate_l2 fix run showed a real sustain
+    # problem (mean max height already 118% of target -- height itself is not
+    # the bottleneck -- but only 3/16 envs still standing at episode end), so
+    # raising the "stay up" term is the target, unlike raising a "get tall"
+    # term (already tried once at head_height's own 4x, see that revert
+    # comment). First attempt at this reproduced the same std/entropy runaway
+    # every large weight increase on a threshold-gated reward has shown here
+    # (std climbing 0.85 -> 1.49 within ~150 iterations) -- but that was
+    # against raw_target_clip_excess still at -2.0. Retrying at 20.0 now that
+    # raw_target_clip_excess is doubled to -4.0 (see that reward's own
+    # comment): if std stays flat this time, -2.0 was simply too weak a
+    # counter-force for this size of change, not evidence that standing_bonus
+    # itself is unsafe to raise.
     cfg.rewards["standing_bonus"] = RewardTermCfg(
         func=standing_bonus,
-        weight=5.0,
+        weight=20.0,
         params={
             # Own threshold (0.9), higher than standing_pose's (0.8, below) — the
             # payout keeps scaling up to the TRUE target height above that anyway
