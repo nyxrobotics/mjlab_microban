@@ -26,6 +26,7 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
+from mjlab_microban.tasks.microban_getup_runner import GETUP_ANGULAR_VELOCITY_FRAME
 
 TASK = "Mjlab-Getup-Microban"
 CONTRACT_VERSION = "v2"
@@ -61,9 +62,10 @@ def _require_new_checkpoint(path: Path) -> str:
     if not isinstance(infos, dict) or (
         infos.get("microban_getup_contract") != CONTRACT_VERSION
         or str(infos.get("microban_getup_target_slew_rad_s")) != TARGET_SLEW_RAD_S
+        or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
     ):
         raise ValueError(
-            "Checkpoint lacks the get-up v2 / 0.5 rad/s training marker; "
+            "Checkpoint lacks the get-up v2 / 0.5 rad/s / IMU-frame training marker; "
             "retrain from scratch with the current Mjlab-Getup-Microban task"
         )
     if not isinstance(checkpoint.get("actor_state_dict"), dict):
@@ -285,6 +287,7 @@ def main() -> None:
                 ).tolist(),
                 "microban_getup_contract": CONTRACT_VERSION,
                 "microban_getup_target_slew_rad_s": TARGET_SLEW_RAD_S,
+                "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
                 "checkpoint_sha256": checkpoint_sha256,
                 "checkpoint_filename": checkpoint.name,
             }

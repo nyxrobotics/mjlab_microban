@@ -4,6 +4,8 @@ Run these commands on the training PC from this repository. Start a **new**
 training run; do not resume or initialize from an earlier get-up checkpoint.
 Earlier checkpoints used a different previous-action observation and did not
 model the robot's 0.5 rad/s target slew.
+The actor reads angular velocity in the IMU sensor's own axes, matching the
+unrotated BMI088 gyroscope values sent to the robot's get-up actor.
 The new training task penalizes raw commands beyond the ±1.57 rad absolute
 target clip, in addition to clipping the actuator target itself.
 
@@ -24,7 +26,8 @@ uv run --locked python -m mjlab_microban.scripts.export_getup_onnx \
 
 The exporter refuses an existing output unless `--replace` is passed. It loads
 the `Mjlab-Getup-Microban` play environment and actor, checks the checkpoint's
-`microban_getup_contract=v2` and `microban_getup_target_slew_rad_s=0.5`
+`microban_getup_contract=v2`, `microban_getup_target_slew_rad_s=0.5`, and
+`microban_getup_angular_velocity_frame=imu_sensor_xyz`
 training markers, and checks the exported 60-input/18-output ONNX. In
 particular, the last 18 observation normalizer means and standard deviations
 must fit the reachable previous-action range. That range includes each joint's

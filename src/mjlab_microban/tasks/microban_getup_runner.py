@@ -6,6 +6,7 @@ import math
 
 import torch
 
+from mjlab.envs.mdp.observations import builtin_sensor
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
 from mjlab_microban.tasks.microban_getup_action import (
@@ -21,6 +22,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_exce
 
 
 GETUP_CONTRACT_VERSION = "v2"
+GETUP_ANGULAR_VELOCITY_FRAME = "imu_sensor_xyz"
 
 
 class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
@@ -41,6 +43,9 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Get-up v2 requires target slew at 0.5 rad/s")
         if action.cfg.scale != 1.0 or action.cfg.offset != 0.0 or not action.cfg.use_default_offset:
             raise ValueError("Get-up v2 requires unit-scale default-relative actions")
+        gyro_term = unwrapped.cfg.observations["actor"].terms["base_ang_vel"]
+        if gyro_term.func is not builtin_sensor or gyro_term.params != {"sensor_name": "robot/imu_ang_vel"}:
+            raise ValueError("Get-up v2 requires raw IMU-sensor-frame angular velocity")
         for group in ("actor", "critic"):
             term = unwrapped.cfg.observations[group].terms["actions"]
             if term.func is not effective_getup_action_after_target_slew:
@@ -65,6 +70,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             **(infos or {}),
             "microban_getup_contract": GETUP_CONTRACT_VERSION,
             "microban_getup_target_slew_rad_s": GETUP_TARGET_SLEW_RAD_S,
+            "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
         }
         super().save(path, infos)
 
@@ -76,6 +82,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         if (
             infos.get("microban_getup_contract") != GETUP_CONTRACT_VERSION
             or infos.get("microban_getup_target_slew_rad_s") != GETUP_TARGET_SLEW_RAD_S
+            or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
         ):
-            raise ValueError("Checkpoint lacks the get-up v2 post-slew action contract; start a fresh run")
+            raise ValueError("Checkpoint lacks the get-up v2 action and IMU-frame contract; start a fresh run")
         return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
