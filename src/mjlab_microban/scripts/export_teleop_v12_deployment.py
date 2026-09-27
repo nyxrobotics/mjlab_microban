@@ -97,12 +97,13 @@ FINAL_COMPLETED_UPDATES = 15_000
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
 )
-PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v2"
+PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v3"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0
 RUNTIME_GUARD_SEMANTICS = (
-    "finite_float32_then_per_joint_absmax_else_same_cycle_legacy_fallback_v1"
+    "finite_float32_then_per_joint_absmax_else_hold_previous_targets_v1"
 )
+PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS = "finite_target_no_software_clip_v1"
 
 _FOOT_LOWER = (-0.03, -0.03, 0.0) * 2
 _FOOT_UPPER = (0.03, 0.03, 0.05) * 2
@@ -244,6 +245,7 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "action_clip_semantics",
         "action_distribution_semantics",
         "runtime_action_semantics",
+        "physical_motor_target_guard_semantics",
         "control_hz",
         "foot_target_lower",
         "foot_target_upper",
@@ -739,7 +741,9 @@ def build_v12_deployment_metadata(
         "action_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
         "default_joint_pos": action_defaults,
         "action_scale": [1.0] * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
-        "base_ang_vel_frame": "robot_body_xyz",
+        # The v12 task inherits the MJLab `robot/imu_ang_vel` built-in sensor
+        # observation. That sensor reports the IMU site's local XYZ axes.
+        "base_ang_vel_frame": "imu_sensor_xyz",
         "base_ang_vel_units": "rad_s",
         "locomotion_command_order": [
             "linear_velocity_x",
@@ -754,6 +758,9 @@ def build_v12_deployment_metadata(
         "action_distribution_semantics": ("unbounded_gaussian_deterministic_mean_raw"),
         "runtime_action_semantics": (
             "raw_unbounded_default_plus_scale_no_target_clip_v1"
+        ),
+        "physical_motor_target_guard_semantics": (
+            PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS
         ),
         "control_hz": 50.0,
         "foot_target_lower": list(_FOOT_LOWER),
@@ -940,6 +947,16 @@ def _run_microban_runtime_validator(
     if (
         report.get("status") != "pass"
         or report.get("policy") != str(path.resolve())
+        or metadata.get("base_ang_vel_frame") != "imu_sensor_xyz"
+        or metadata.get("runtime_raw_action_guard_semantics")
+        != RUNTIME_GUARD_SEMANTICS
+        or metadata.get("physical_motor_target_guard_semantics")
+        != PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS
+        or report.get("physical_motor_target_guard_semantics")
+        != PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS
+        or not isinstance(report.get("v12_raw_action_guard"), Mapping)
+        or report["v12_raw_action_guard"].get("semantics")
+        != RUNTIME_GUARD_SEMANTICS
         or report.get("input_width") != 83
         or report.get("output_width") != 18
         or report.get("training_contract_version")
