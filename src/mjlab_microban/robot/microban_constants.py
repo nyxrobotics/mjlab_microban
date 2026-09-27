@@ -20,18 +20,6 @@ assert MICROBAN_XML.exists(), f"XML not found: {MICROBAN_XML}"
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
-HOME_TRUNK_PITCH_RAD = 0.0
-
-# Reverted from a same-day "upright centered" experiment (hip_pitch +1.198deg,
-# ankle_pitch -1.198deg, pos.z 0.170554885633559) back to the original A-button
-# NEUTRAL_POSE match: measured directly that get-up training under the
-# centered pose still couldn't sustain standing after retuning several
-# rewards, and separately judged worse overall. Reverting this shared HOME
-# also reverts everything keyed off it: get-up's HEAD_STANDING_HEIGHT
-# (microban_getup_env_cfg.py) and the independent
-# Mjlab-Teleop-Upright-Fullbody-Microban task's own local pose constants
-# (microban_teleop_upright_fullbody_env_cfg.py) must move with this value,
-# not just this file.
 HOME_FRAME = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, 0.168),
     joint_pos={
@@ -40,8 +28,8 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
         "neck_pitch": float(np.deg2rad(0.0)),
         "left_shoulder_roll": float(np.deg2rad(10.0)),
         "right_shoulder_roll": float(np.deg2rad(-10.0)),
-        "left_shoulder_pitch": 0.0,
-        "right_shoulder_pitch": 0.0,
+        "left_shoulder_pitch": float(np.deg2rad(0.0)),
+        "right_shoulder_pitch": float(np.deg2rad(0.0)),
         "left_elbow": float(np.deg2rad(-20.0)),
         "right_elbow": float(np.deg2rad(-20.0)),
         "left_hip_roll": float(np.deg2rad(5.0)),
