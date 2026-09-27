@@ -151,14 +151,20 @@ MICROBAN_END_EFFECTOR_BODY_NAMES: tuple[str, ...] = (
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-# Must match microban_constants.HOME_FRAME's own revision tag (see
-# microban_teleop_upright_fullbody_env_cfg.py). The old walk004 clip was
-# retargeted around the previous (non-centered) HOME and must not be used
-# with this HOME_FRAME; the loader below rejects it (and any other
-# mismatched NPZ) at environment build time regardless of filename.
-TRACKING_HOME_POSE_REVISION = "physical_neutral_shoulder_zero_com_centered_v4"
+# Must match microban_constants.HOME_FRAME's own revision tag. HOME_FRAME was
+# reverted from the short-lived "centered" upright pose back to this crouched
+# pose after new training built on the centered pose (Tracking, Teleop-
+# Upright-Fullbody, get-up v2/v3) repeatedly hit convergence and stability
+# problems. microban_twist2_centered_home.npz was retargeted around that
+# abandoned pose and must not be used with this HOME_FRAME; the loader below
+# rejects it (and any other mismatched NPZ) at environment build time
+# regardless of filename. microban_twist2_walk002_crouched_home.npz is the
+# pre-existing, already-validated walk002 IK retarget (source_session_id
+# twist2-b06178f19a22-0807_yanjie_walk_002, IK RMS <= 6.4mm) with the four
+# home-pose provenance fields appended to match this HOME_FRAME exactly.
+TRACKING_HOME_POSE_REVISION = "pre_centered_crouched_v1"
 DEFAULT_MICROBAN_TRACKING_MOTION_FILE = (
-    _REPOSITORY_ROOT / "data" / "motions" / "microban_twist2_centered_home.npz"
+    _REPOSITORY_ROOT / "data" / "motions" / "microban_twist2_walk002_crouched_home.npz"
 )
 
 

@@ -21,3 +21,4 @@ artifacts/legacy_teleop_probe/*
 data/motions/*.jsonl
 data/motions/*.npz
 !data/motions/microban_twist2_walk002_locomotion_prior.npz
+!data/motions/microban_twist2_walk002_crouched_home.npz

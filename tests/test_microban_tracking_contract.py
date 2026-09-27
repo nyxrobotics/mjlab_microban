@@ -115,14 +115,14 @@ class TrackingConfigTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(final.bias[ids], torch.zeros_like(final.bias[ids])))
 
-    def test_training_config_uses_the_centered_home_motion(self) -> None:
+    def test_training_config_uses_the_crouched_home_motion(self) -> None:
         cfg = make_microban_tracking_env_cfg()
 
         self.assertEqual(
             cfg.commands["motion"].motion_file,
             str(DEFAULT_MICROBAN_TRACKING_MOTION_FILE.resolve()),
         )
-        self.assertIn("centered_home", cfg.commands["motion"].motion_file)
+        self.assertIn("crouched_home", cfg.commands["motion"].motion_file)
         self.assertAlmostEqual(
             cfg.rewards["motion_global_root_pos"].params["std"], 0.05
         )
