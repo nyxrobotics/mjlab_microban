@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
@@ -35,6 +36,7 @@ from mjlab_microban.robot.microban_constants import HOME_FRAME, MICROBAN_ROBOT_C
 from mjlab_microban.tasks.microban_policy_export import (
     guarded_teleop_actor_raw_bounds,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import ResumeSafeStepBasedStagedCurriculum
 from mjlab_microban.tasks.microban_tracking_mdp import controlled_motion_command
 
 # Stable model/export contracts.  Retargeting must emit these exact orders.
@@ -270,6 +272,14 @@ def _motion_path(motion_file: str | Path | None) -> str:
     return str(DEFAULT_MICROBAN_TRACKING_MOTION_FILE)
 
 
+def _scaled_range(
+    final_range: dict[str, tuple[float, float]], scale: float
+) -> dict[str, tuple[float, float]]:
+    """Scale every axis of a symmetric-ish reset/event range toward zero."""
+
+    return {key: (lower * scale, upper * scale) for key, (lower, upper) in final_range.items()}
+
+
 def make_microban_tracking_env_cfg(
     play: bool = False,
     motion_file: str | Path | None = None,
@@ -297,13 +307,8 @@ def make_microban_tracking_env_cfg(
     action.scale = 1.0
     action.clip = MICROBAN_BODY_JOINT_SOFT_LIMITS
 
-    motion = cfg.commands["motion"]
-    assert isinstance(motion, MotionCommandCfg)
-    motion.motion_file = _motion_path(motion_file)
-    motion.anchor_body_name = "trunk"
-    motion.body_names = MICROBAN_TRACKED_BODY_NAMES
-    motion.joint_position_range = (-0.08, 0.08)
-    motion.pose_range = {
+    MICROBAN_TRACKING_FINAL_JOINT_POSITION_RANGE = (-0.08, 0.08)
+    MICROBAN_TRACKING_FINAL_POSE_RANGE = {
         "x": (-0.02, 0.02),
         "y": (-0.02, 0.02),
         "z": (-0.005, 0.005),
@@ -311,7 +316,7 @@ def make_microban_tracking_env_cfg(
         "pitch": (-0.08, 0.08),
         "yaw": (-0.15, 0.15),
     }
-    motion.velocity_range = {
+    MICROBAN_TRACKING_FINAL_VELOCITY_RANGE = {
         "x": (-0.25, 0.25),
         "y": (-0.25, 0.25),
         "z": (-0.10, 0.10),
@@ -319,6 +324,15 @@ def make_microban_tracking_env_cfg(
         "pitch": (-0.30, 0.30),
         "yaw": (-0.50, 0.50),
     }
+
+    motion = cfg.commands["motion"]
+    assert isinstance(motion, MotionCommandCfg)
+    motion.motion_file = _motion_path(motion_file)
+    motion.anchor_body_name = "trunk"
+    motion.body_names = MICROBAN_TRACKED_BODY_NAMES
+    motion.joint_position_range = MICROBAN_TRACKING_FINAL_JOINT_POSITION_RANGE
+    motion.pose_range = dict(MICROBAN_TRACKING_FINAL_POSE_RANGE)
+    motion.velocity_range = dict(MICROBAN_TRACKING_FINAL_VELOCITY_RANGE)
 
     controlled_joints = SceneEntityCfg(
         "robot", joint_names=(MICROBAN_BODY_JOINT_PATTERN,)
@@ -356,27 +370,34 @@ def make_microban_tracking_env_cfg(
         1: (-0.005, 0.005),
         2: (-0.005, 0.005),
     }
-    cfg.events["push_robot"].params["velocity_range"] = {
-        "x": (-0.25, 0.25),
-        "y": (-0.25, 0.25),
-        "z": (-0.10, 0.10),
-        "roll": (-0.30, 0.30),
-        "pitch": (-0.30, 0.30),
-        "yaw": (-0.50, 0.50),
-    }
+    cfg.events["push_robot"].params["velocity_range"] = dict(
+        MICROBAN_TRACKING_FINAL_VELOCITY_RANGE
+    )
 
     # Position tolerances are scaled for a roughly 30 cm robot, rather than the
     # generic adult-size humanoid defaults.
     cfg.rewards["motion_global_root_pos"].params["std"] = 0.05
     cfg.rewards["motion_body_pos"].params["std"] = 0.04
     cfg.rewards["motion_body_lin_vel"].params["std"] = 0.5
-    cfg.rewards["motion_body_ang_vel"].params["std"] = 2.0
+    # Left at the upstream default (not tightened): a robot ~4.5x shorter than
+    # the reference this task ships for needs equal-or-higher angular-rate
+    # tolerance for dynamic similarity, not less. The prior override (2.0) had
+    # no recorded rationale beyond a single unexplained commit and moved this
+    # number in the direction opposite that reasoning.
+    cfg.rewards["motion_body_ang_vel"].params["std"] = 3.14
     cfg.rewards["self_collisions"].params["force_threshold"] = 1.0
 
-    cfg.terminations["anchor_pos"].params["threshold"] = 0.08
+    # Final (deployment/eval) position tolerances. Training starts far looser
+    # (see the threshold curriculum below) and tightens to exactly these
+    # values, so play mode and the end of a training run share one number.
+    MICROBAN_TRACKING_FINAL_ANCHOR_POS_THRESHOLD_M = 0.08
+    MICROBAN_TRACKING_FINAL_EE_BODY_POS_THRESHOLD_M = 0.08
+    cfg.terminations["anchor_pos"].params["threshold"] = (
+        MICROBAN_TRACKING_FINAL_ANCHOR_POS_THRESHOLD_M
+    )
     cfg.terminations["ee_body_pos"].params.update(
         {
-            "threshold": 0.08,
+            "threshold": MICROBAN_TRACKING_FINAL_EE_BODY_POS_THRESHOLD_M,
             "body_names": MICROBAN_END_EFFECTOR_BODY_NAMES,
         }
     )
@@ -395,6 +416,126 @@ def make_microban_tracking_env_cfg(
         motion.velocity_range = {}
         motion.joint_position_range = (0.0, 0.0)
         motion.sampling_mode = "start"
+    else:
+        # A from-scratch 30,000-iteration run plateaued almost immediately:
+        # Episode_Termination/ee_body_pos was already ~99.2% within the first
+        # 200 iterations and stayed ~99.6% for the entire run (mean episode
+        # length only 26->39 steps out of this motion's 667 frames), with no
+        # curriculum at all on these thresholds -- an untrained policy was
+        # required to hit the full final 8cm end-effector/anchor precision
+        # from iteration 0. A diagnostic run with only the position threshold
+        # loosened (0.30m) confirmed the curriculum mechanism works -- ee_body_pos
+        # termination dropped to 0% immediately -- but uncovered a second, equally
+        # hard wall behind it: anchor_ori (a scale-independent gravity-projection
+        # tilt check, upstream default 0.8, never overridden by Microban) then sat
+        # at 100% for 500 straight iterations with reward trending worse, not
+        # better. push_robot's 1.0-3.0s interval starts after this run's ~0.7-0.85s
+        # failure window, ruling out mid-episode pushes as the direct cause; the
+        # remaining unconditional-from-iteration-0 disturbance is the *reset-time*
+        # randomization (pose_range/velocity_range/joint_position_range), which
+        # perturbs every episode's initial orientation and angular velocity at
+        # full strength regardless of policy quality. Every other staged
+        # curriculum in this codebase (teleop's velocity/push/tracking-envelope
+        # stages) ramps difficulty in one axis at a time; this task had none for
+        # either the position thresholds or the disturbance strength. Ramp both
+        # in, on interleaved (never simultaneous) steps, so no single stage
+        # bundles more than one escalation -- the exact bundling mistake already
+        # found and fixed once this session in the sibling teleop task.
+        MICROBAN_TRACKING_INITIAL_POS_THRESHOLD_M = 0.30
+        cfg.terminations["anchor_pos"].params["threshold"] = (
+            MICROBAN_TRACKING_INITIAL_POS_THRESHOLD_M
+        )
+        cfg.terminations["ee_body_pos"].params["threshold"] = (
+            MICROBAN_TRACKING_INITIAL_POS_THRESHOLD_M
+        )
+        motion.pose_range = _scaled_range(MICROBAN_TRACKING_FINAL_POSE_RANGE, 0.0)
+        motion.velocity_range = _scaled_range(
+            MICROBAN_TRACKING_FINAL_VELOCITY_RANGE, 0.0
+        )
+        motion.joint_position_range = (0.0, 0.0)
+        cfg.events["push_robot"].params["velocity_range"] = _scaled_range(
+            MICROBAN_TRACKING_FINAL_VELOCITY_RANGE, 0.0
+        )
+
+        def _set_tracking_position_thresholds(
+            env: object, *, threshold: float
+        ) -> None:
+            env.termination_manager.get_term_cfg("anchor_pos").params[
+                "threshold"
+            ] = threshold
+            env.termination_manager.get_term_cfg("ee_body_pos").params[
+                "threshold"
+            ] = threshold
+
+        def _set_tracking_disturbance_scale(env: object, *, scale: float) -> None:
+            command = env.command_manager.get_term_cfg("motion")
+            command.pose_range = _scaled_range(
+                MICROBAN_TRACKING_FINAL_POSE_RANGE, scale
+            )
+            command.velocity_range = _scaled_range(
+                MICROBAN_TRACKING_FINAL_VELOCITY_RANGE, scale
+            )
+            lower, upper = MICROBAN_TRACKING_FINAL_JOINT_POSITION_RANGE
+            command.joint_position_range = (lower * scale, upper * scale)
+            push_event = env.event_manager.get_term_cfg("push_robot")
+            push_event.params["velocity_range"] = _scaled_range(
+                MICROBAN_TRACKING_FINAL_VELOCITY_RANGE, scale
+            )
+
+        cfg.curriculum = {
+            "tracking_threshold_curriculum": CurriculumTermCfg(
+                func=ResumeSafeStepBasedStagedCurriculum,
+                params={
+                    "stages": [
+                        {
+                            "name": "ramp reset-time disturbance in (1 of 3)",
+                            "step": 1500 * 24,
+                            "apply": lambda env: _set_tracking_disturbance_scale(
+                                env, scale=0.35
+                            ),
+                        },
+                        {
+                            "name": "tighten position threshold toward final (1 of 3)",
+                            "step": 3000 * 24,
+                            "apply": lambda env: _set_tracking_position_thresholds(
+                                env, threshold=0.20
+                            ),
+                        },
+                        {
+                            "name": "ramp reset-time disturbance in (2 of 3)",
+                            "step": 5000 * 24,
+                            "apply": lambda env: _set_tracking_disturbance_scale(
+                                env, scale=0.7
+                            ),
+                        },
+                        {
+                            "name": "tighten position threshold toward final (2 of 3)",
+                            "step": 8000 * 24,
+                            "apply": lambda env: _set_tracking_position_thresholds(
+                                env, threshold=0.14
+                            ),
+                        },
+                        {
+                            "name": "reach full reset-time disturbance (3 of 3)",
+                            "step": 11000 * 24,
+                            "apply": lambda env: _set_tracking_disturbance_scale(
+                                env, scale=1.0
+                            ),
+                        },
+                        {
+                            "name": "reach final deployment position threshold (3 of 3)",
+                            "step": 15000 * 24,
+                            "apply": lambda env: _set_tracking_position_thresholds(
+                                env,
+                                threshold=(
+                                    MICROBAN_TRACKING_FINAL_ANCHOR_POS_THRESHOLD_M
+                                ),
+                            ),
+                        },
+                    ],
+                },
+            ),
+        }
 
     # Task registration builds all configs eagerly, before a new reference NPZ
     # exists. Check at environment creation so other tasks remain importable.
