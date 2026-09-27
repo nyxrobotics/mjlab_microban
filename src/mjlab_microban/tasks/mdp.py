@@ -784,47 +784,43 @@ def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torc
 def standing_bonus(
     env: ManagerBasedRlEnv,
     height_threshold: float,
-    upright_std: float,
+    target_height: float,
     head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    target_pitch: float = 0.0,
 ) -> torch.Tensor:
     """Dense reward active only once the robot is near-standing (head height above
-    height_threshold AND close to the target pitch), rewarding staying there.
+    height_threshold), rewarding staying there — and, above that threshold,
+    continuing to scale with how much of the way to target_height (the TRUE
+    standing height) it's actually reached, rather than paying flat full credit
+    the instant it merely crosses the threshold.
 
     HoST's "post-task" mechanism (arXiv:2502.08378): since this only pays out once
     standing is reached, reaching it earlier and holding it accumulates strictly more
-    of it over a fixed-length episode. Height/upright reward alone measurably plateaus
-    around 80% of target height without ever crossing into genuine standing (see
-    microban_teleop/docs/getup_research.md) — this term is a targeted "finish the job"
-    incentive that height/upright alone don't provide: partial credit for progress
-    isn't the same as a payoff specifically for completing it.
+    of it over a fixed-length episode. This term is a targeted "finish the job"
+    incentive that a dense height reward alone doesn't provide: partial credit for
+    progress isn't the same as a payoff specifically for completing it.
 
-    Gated on head height (see head_height_reward), not trunk height — an inverted-
-    but-elevated trunk shouldn't count as "near-standing" even before this term
-    existed to check orientation too.
+    The continued scaling above threshold (rather than a flat 1.0) was added after
+    a real plateau: training stalled with head height sitting almost exactly AT
+    height_threshold for thousands of iterations. Mechanism (confirmed, not just
+    suspected): this reward and standing_pose both gated flat/binary on the same
+    threshold, so once crossed there was no further gradient from either to keep
+    pushing toward target_height, while standing_torque's effort cost keeps rising
+    the higher (and more extended) the stance gets — net incentive was to stop
+    right at the minimum height that still banks the bonuses, not the true target.
+
+    Previously also multiplied by a separate trunk-upright reward (checking
+    projected gravity against a target std) on top of the height gate. Dropped: once
+    height_threshold is set relative to the TRUE standing head height (see
+    HEAD_STANDING_HEIGHT in microban_getup_env_cfg.py — this used to be a lower,
+    empirically-lowered value a seated posture could also satisfy, which is exactly
+    why the separate upright check seemed necessary), reaching it is only physically
+    possible while upright — a seated, kneeling, or inverted-but-elevated pose cannot
+    reach the head that high.
     """
-    asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
-
-    if asset_cfg.body_ids:
-        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
-    else:
-        body_quat_w = asset.data.root_link_quat_w
-    gravity_w = asset.data.gravity_vec_w
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    projected_gravity_b_unit = projected_gravity_b / gravity_norm
-    # Forward trunk pitch gives positive body-frame gravity X. The zero
-    # default preserves the vertical-trunk reward for existing callers.
-    target_gx = math.sin(target_pitch)
-    upright_error = torch.square(
-        projected_gravity_b_unit[:, 0] - target_gx
-    ) + torch.square(projected_gravity_b_unit[:, 1])
-    upright_reward = torch.exp(-upright_error / upright_std**2)
-
     is_standing = height > height_threshold
-    return torch.where(is_standing, upright_reward, torch.zeros_like(upright_reward))
+    scale = torch.clamp(height / target_height, min=0.0, max=1.0)
+    return torch.where(is_standing, scale, torch.zeros_like(scale))
 
 
 def standing_torque_penalty(
@@ -941,23 +937,60 @@ def head_height_reward(
     target_height: float,
     asset_cfg: SceneEntityCfg,
     sensor_name: str | None = None,
+    power: float = 1.0,
 ) -> torch.Tensor:
     """Dense reward proportional to head height, capped once standing head height is
     reached.
 
-    Using the head body rather than the trunk root: raw trunk-Z height alone is
-    orientation-blind (rewards getting the trunk high regardless of which way the
-    robot is facing, which gives a useful gradient from any starting pose, but can't
-    distinguish "trunk high, right-side up" from "trunk high, upside down" — e.g. some
-    inverted/handstand-like configuration). Head height doesn't have that failure
-    mode: an inverted pose has the head low even with the trunk high, so it only
-    rewards a genuinely upright-and-high pose, while keeping the same useful gradient
-    from a flat starting pose (head low there too). Matches HumanUP's
-    (arXiv:2502.12152) choice to reward head height directly rather than trunk height.
+    Using a virtual point above the trunk's own center of mass (see _head_height)
+    rather than raw trunk-Z height: trunk-Z alone is orientation-blind (rewards
+    getting the trunk high regardless of which way the robot is facing, which
+    gives a useful gradient from any starting pose, but can't distinguish "trunk
+    high, right-side up" from "trunk high, upside down" — e.g. some
+    inverted/handstand-like configuration). This doesn't have that failure mode:
+    an inverted trunk puts the virtual point low even with the trunk itself high,
+    so it only rewards a genuinely upright-and-high pose, while keeping the same
+    useful gradient from a flat starting pose (virtual point low there too).
+    Matches HumanUP's (arXiv:2502.12152) choice to reward head height directly
+    rather than trunk height, without actually reading the (in this task,
+    independently actuated) head/neck bodies themselves.
+
+    ``power`` (default 1.0, i.e. the original linear-up-then-flat shape) blends in
+    an extra bonus for how reward rises toward target_height AND, unlike the
+    original, falls again past it:
+
+        shape = clamp(1 - |height/target_height - 1|, 0, 1)   # peak at target_height
+        reward = 0.5 * shape + 0.5 * shape ** power
+
+    ``shape`` alone is a peak centered exactly at target_height, symmetric in the
+    height FRACTION (not raw meters) on either side, reaching exactly 1.0 only at
+    target_height. Blended 50/50 with a HALF-WEIGHTED linear (``shape``) term
+    rather than using ``shape ** power`` alone: measured directly that the power
+    term by itself crushes the reward for early, modest height gains too much to
+    bootstrap the get-up motion at all (e.g. power=3 pays frac=0.2 only 0.008, vs
+    0.2 for plain linear — confirmed as a real regression, not just theoretical:
+    head_height reward stayed flat at ~0.03-0.09 through iteration 100+ with a
+    pure-power shape, dramatically worse than every run using a linear or
+    blended shape at the same point). The linear half guarantees a reasonable
+    baseline gradient at every height; the power half is a top-up bonus for two
+    problems, both found by watching live rollouts of training-in-progress
+    checkpoints:
+    1. (power > 1) A flat linear reward pays the same marginal amount whether
+       closing the last 10% of the height gap or the first 10% — nothing
+       specifically discouraged settling into a stable SEATED local optimum well
+       short of standing. d/dx[x^p] = p*x^(p-1) grows with x for p > 1, so the
+       last stretch pays disproportionately more.
+    2. (falling off past target_height, not clamped flat at 1.0) A reward that
+       merely saturates at "at least target_height" gives no reason to avoid
+       overshooting it either (standing on tiptoes, a jump, or other
+       overextension) — peaking exactly at the true standing height and paying
+       less on EITHER side keeps target_height as the one specific point being
+       optimized for, not a floor.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    height = asset.data.body_link_pos_w[:, asset_cfg.body_ids[0], 2]
-    reward = torch.clamp(height / target_height, min=0.0, max=1.0)
+    height = _head_height(env, asset_cfg)
+    frac = height / target_height
+    shape = torch.clamp(1.0 - torch.abs(frac - 1.0), min=0.0, max=1.0)
+    reward = 0.5 * shape + 0.5 * shape**power
     if sensor_name is not None:
         airborne = _feet_airborne(env, sensor_name)
         reward = torch.where(airborne, torch.zeros_like(reward), reward)
@@ -1270,12 +1303,25 @@ class reward_based_staged_curriculum:
     Curriculum based on stages ending while a reward component gets its mean
     episode reward accross all environments above a threshold.
 
+    "reward_term_name" can be a single term name, or a list of term names — a
+    stage with a list only advances once EVERY named term's mean episode reward
+    has crossed its threshold, not just one of them. Added for a case where two
+    terms (standing_pose/hip_pose) were raised to the same weight and a live
+    rollout showed one of them (hip_pose) lagging behind the other — gating the
+    next stage on standing_pose alone would have let it fire before hip_pose had
+    actually caught up. "threshold" is then EITHER one number (applied to every
+    named term) OR a list the same length as "reward_term_name" (one threshold
+    per term, in the same order) — added because hip_pose's own achievable
+    ceiling measured meaningfully lower than standing_pose's at the same weight
+    (added joint dof, presumably harder to converge), so gating both on the same
+    number was either too easy for one or unreachable for the other.
+
     Stage definitions example:
     stages = [
         {
             "name": "stage 1",
-            "reward_term_name": "term_name",
-            "threshold": 0.5,
+            "reward_term_name": "term_name",  # or ["term_a", "term_b"]
+            "threshold": 0.5,  # or [0.5, 0.3] matching ["term_a", "term_b"]
             "apply": lambda env: env.reward_manager.get_term_cfg("term_name").weight = 1.0,
         },
         ...
@@ -1283,7 +1329,7 @@ class reward_based_staged_curriculum:
     """
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.rewards = torch.zeros(env.num_envs, device=env.device)
+        self.rewards: dict[str, torch.Tensor] = {}
         self.current_stage = 0
         self.stage_first_step = 0
 
@@ -1293,27 +1339,46 @@ class reward_based_staged_curriculum:
         env_ids: torch.Tensor,
         stages: list[dict],
     ) -> dict[str, torch.Tensor]:
-        self.rewards[env_ids] = (
-            env.reward_manager._episode_sums[
-                stages[self.current_stage]["reward_term_name"]
-            ][env_ids]
-            / env.max_episode_length_s
-        )
-        mean_reward = self.rewards.mean().item()
+        # Pre-existing bug, fixed here: this used to index stages[self.current_stage]
+        # unconditionally before checking self.current_stage < len(stages), so once
+        # every stage had actually been applied (self.current_stage == len(stages))
+        # the very next call crashed with IndexError instead of just staying done —
+        # only surfaces once a reward_based_staged_curriculum's LAST stage actually
+        # triggers, which apparently hadn't happened before with this class in this
+        # codebase. Guarding the whole body on the bounds check fixes it.
+        if self.current_stage >= len(stages):
+            return {"stage": self.current_stage}
+
+        stage = stages[self.current_stage]
+        term_names = stage["reward_term_name"]
+        if isinstance(term_names, str):
+            term_names = [term_names]
+        thresholds = stage["threshold"]
+        if not isinstance(thresholds, (list, tuple)):
+            thresholds = [thresholds] * len(term_names)
+
+        mean_rewards = {}
+        for name in term_names:
+            if name not in self.rewards:
+                self.rewards[name] = torch.zeros(env.num_envs, device=env.device)
+            self.rewards[name][env_ids] = (
+                env.reward_manager._episode_sums[name][env_ids] / env.max_episode_length_s
+            )
+            mean_rewards[name] = self.rewards[name].mean().item()
 
         if (
-            self.current_stage < len(stages)
-            and mean_reward >= stages[self.current_stage]["threshold"]
+            all(mean_rewards[name] >= t for name, t in zip(term_names, thresholds))
             and env.common_step_counter >= self.stage_first_step + 100 * 24
         ):
-            stage = stages[self.current_stage]
+            rewards_str = ", ".join(f"{name}={r:.4f}" for name, r in mean_rewards.items())
             print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {mean_reward:.4f})"
+                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {rewards_str})"
             )
             stage["apply"](env)
             self.current_stage += 1
             self.stage_first_step = env.common_step_counter
-            self.rewards.zero_()  # Reset rewards to avoid immediately triggering the next stage
+            for name in term_names:
+                self.rewards[name].zero_()  # Reset rewards to avoid immediately triggering the next stage
 
         return {"stage": self.current_stage}
 
