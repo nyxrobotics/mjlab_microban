@@ -11,8 +11,6 @@ import torch
 from mjlab_microban.tasks.microban_tracking_env_cfg import (
     DEFAULT_MICROBAN_TRACKING_MOTION_FILE,
     MICROBAN_TRACKING_ACTION_JOINT_NAMES,
-    MICROBAN_TRACKING_CLIP_DURATION_S,
-    MICROBAN_TRACKING_CLIP_STEP_COUNT,
     MicrobanTrackingRlCfg,
     make_microban_tracking_env_cfg,
     microban_tracking_action_delta_bounds,
@@ -64,7 +62,11 @@ class TrackingRewardTest(unittest.TestCase):
 
 
 class TrackingConfigTest(unittest.TestCase):
-    def test_actor_is_bounded_with_safe_per_joint_std(self) -> None:
+    def test_bounded_delta_helpers_are_safe_per_joint(self) -> None:
+        # These helpers are no longer used by the tracking task's own RL
+        # config (see MicrobanTrackingRlCfg below), but microban_safe_velocity
+        # still borrows them for its own bounded action space, so their
+        # underlying math must stay correct.
         lower, upper = microban_tracking_action_delta_bounds()
         std = microban_tracking_initial_action_std()
 
@@ -78,15 +80,20 @@ class TrackingConfigTest(unittest.TestCase):
         self.assertTrue(
             all(std[index] == 0.15 for index in range(18) if index not in (1, 10))
         )
-        self.assertIs(
+
+    def test_tracking_uses_the_standard_unbounded_actor(self) -> None:
+        # Unlike the retired walk004/locomotion_prior design, the centered-home
+        # tracking task trains a plain scalar Gaussian actor with both actor
+        # and critic normalized -- no bounded distribution, no custom PPO class.
+        self.assertEqual(
             MicrobanTrackingRlCfg.actor.distribution_cfg["class_name"],
-            MicrobanTrackingBoundedGaussianDistribution,
+            "GaussianDistribution",
         )
-        self.assertFalse(MicrobanTrackingRlCfg.actor.obs_normalization)
+        self.assertTrue(MicrobanTrackingRlCfg.actor.obs_normalization)
         self.assertTrue(MicrobanTrackingRlCfg.critic.obs_normalization)
-        self.assertEqual(MicrobanTrackingRlCfg.algorithm.entropy_coef, 0.0)
-        self.assertEqual(MicrobanTrackingRlCfg.algorithm.num_learning_epochs, 3)
-        self.assertEqual(MicrobanTrackingRlCfg.algorithm.learning_rate, 3.0e-5)
+        self.assertEqual(MicrobanTrackingRlCfg.algorithm.entropy_coef, 0.005)
+        self.assertEqual(MicrobanTrackingRlCfg.algorithm.num_learning_epochs, 5)
+        self.assertEqual(MicrobanTrackingRlCfg.algorithm.learning_rate, 1.0e-3)
 
     def test_tracking_distribution_initializes_all_arms_at_home(self) -> None:
         lower, upper = microban_tracking_action_delta_bounds()
@@ -108,28 +115,19 @@ class TrackingConfigTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(final.bias[ids], torch.zeros_like(final.bias[ids])))
 
-    def test_training_config_rejects_stationary_survival_solution(self) -> None:
+    def test_training_config_uses_the_centered_home_motion(self) -> None:
         cfg = make_microban_tracking_env_cfg()
 
         self.assertEqual(
             cfg.commands["motion"].motion_file,
             str(DEFAULT_MICROBAN_TRACKING_MOTION_FILE.resolve()),
         )
-        self.assertAlmostEqual(cfg.episode_length_s, MICROBAN_TRACKING_CLIP_DURATION_S)
-        self.assertEqual(MICROBAN_TRACKING_CLIP_STEP_COUNT, 267)
-        self.assertTrue(cfg.is_finite_horizon)
+        self.assertIn("centered_home", cfg.commands["motion"].motion_file)
         self.assertAlmostEqual(
-            cfg.rewards["motion_global_root_pos"].params["std"], 0.20
+            cfg.rewards["motion_global_root_pos"].params["std"], 0.05
         )
-        self.assertAlmostEqual(cfg.rewards["motion_global_root_pos"].weight, 2.0)
-        self.assertAlmostEqual(
-            cfg.rewards["motion_anchor_planar_position_l1"].weight, -2.0
-        )
-        self.assertAlmostEqual(
-            cfg.rewards["motion_anchor_planar_velocity_l1"].weight, -4.0
-        )
-        self.assertGreaterEqual(cfg.sim.nconmax, 512)
-        self.assertGreaterEqual(cfg.sim.njmax, 2048)
+        self.assertNotIn("motion_anchor_planar_position_l1", cfg.rewards)
+        self.assertNotIn("motion_anchor_planar_velocity_l1", cfg.rewards)
 
     def test_play_config_does_not_time_out(self) -> None:
         cfg = make_microban_tracking_env_cfg(play=True)
