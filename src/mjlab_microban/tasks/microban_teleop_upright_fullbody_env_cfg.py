@@ -11,6 +11,15 @@ from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
+from mjlab_microban.tasks.microban_teleop_env_cfg import (
+    MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
+    MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES,
+    MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
+    MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+    _set_push_velocity_range,
+    _set_teleop_locomotion_stage,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
 )
@@ -97,6 +106,65 @@ def make_microban_teleop_upright_fullbody_env_cfg(
     cfg.observations["critic"].terms.pop("locomotion_prior", None)
     cfg.rewards.pop("locomotion_prior_action_target", None)
     cfg.rewards.pop("locomotion_prior_joint_position", None)
+
+    # The shared base curriculum's "restore pushes and expand final
+    # translation at formal locomotion gate" step (3000) bundles three
+    # escalations at once (wider velocity envelope, tighter tracking_std,
+    # and external pushes back on), unlike every earlier stage, which each
+    # change exactly one thing. A from-scratch run at the new centered HOME
+    # plateaued hard right at this step: fell_over stayed ~11-15 and
+    # velocity-tracking progress stayed ~0.39-0.45 with no trend at all
+    # across the entire 3000->15000 remainder of a 15,000-iteration run
+    # (checked directly against that run's own per-1000-iteration binned
+    # log averages). Overridden here, task-local only (the shared base and
+    # its own contract test, and the historical v8/v12 lineages that still
+    # use it, are untouched): split into expanding the envelope/std alone
+    # at 3000, then restoring pushes separately at 4000, giving the policy
+    # a dedicated window to consolidate the harder tracking task before
+    # also having to reject external disturbances.
+    if "staged_curriculum" in cfg.curriculum:
+        stages = cfg.curriculum["staged_curriculum"].params["stages"]
+        split_index = next(
+            (
+                index
+                for index, stage in enumerate(stages)
+                if stage["step"] == 3000 * 24
+            ),
+            None,
+        )
+        if split_index is None:
+            raise ValueError(
+                "Upright full-body curriculum split target (step 3000) not found"
+            )
+        stages[split_index] = {
+            "name": (
+                "expand final translation at formal locomotion gate "
+                "(pushes still off)"
+            ),
+            "step": 3000 * 24,
+            "apply": lambda env: _set_teleop_locomotion_stage(
+                env,
+                envelope=MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
+                signed_axis_ranges=(
+                    MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES
+                ),
+                signed_axis_probabilities=(
+                    MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES
+                ),
+                linear_tracking_std=MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+                angular_tracking_std=MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
+            ),
+        }
+        stages.insert(
+            split_index + 1,
+            {
+                "name": "restore pushes at the formal locomotion gate",
+                "step": 4000 * 24,
+                "apply": lambda env: _set_push_velocity_range(
+                    env, x=(-0.5, 0.5), y=(-0.5, 0.5)
+                ),
+            },
+        )
     return cfg
 
 
