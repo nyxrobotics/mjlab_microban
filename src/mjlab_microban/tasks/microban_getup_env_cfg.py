@@ -285,10 +285,20 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["angular_momentum"].weight = -0.01
 
     # Penalize changes in the actual actuator target rather than changes in the
-    # raw network output.
+    # raw network output (see target_rate_l2's own docstring for why).
+    # Weight: -0.02, matching the ORIGINAL get-up design intent (lighter than
+    # walking's own action_rate_l2 weight: getting up needs large motions). An
+    # intermediate version of this task 15x'd this to -0.3, justified only by
+    # "the 0.01 rad/step target-rate slew keeps this small by construction" --
+    # once that slew was found to be a mistake and removed entirely (see
+    # microban_getup_action.py's module docstring), the justification for the
+    # 15x was gone, but the weight itself was never revisited, and a from-
+    # scratch run under -0.3-with-no-slew moved sluggishly and showed little
+    # standing intent even past iteration 12000. Restored to the original
+    # -0.02 the same day this was caught.
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=target_rate_l2,
-        weight=-0.3,
+        weight=-0.02,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
     )
 
