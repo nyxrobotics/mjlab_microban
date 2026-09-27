@@ -1678,8 +1678,11 @@ class home_stillness_reward:
        made trembling WORSE on a live rollout — a step function right at the
        boundary gives a policy sitting near it a reason to keep crossing back and
        forth (avoiding the penalty on one side costs nothing the reward
-       otherwise cares about), the same hard-gate-creates-instability lesson
-       home_pose_reward's own docstring already describes for its gate.
+       otherwise cares about). Note this is specifically a penalty-gate pathology,
+       not a general problem with binary gates: home_pose_reward's own gate is
+       also binary (on height, not closeness-to-home) but gates a REWARD rather
+       than a penalty, so a policy oscillating across it isn't rewarded for the
+       oscillation itself the way it would be for dodging a penalty here.
     2. Smoothing that penalty into a continuous ramp fixed the boundary problem
        but kept a different one: as a pure penalty gated by closeness, being FAR
        from home paid exactly 0 regardless of velocity, while being CLOSE always
@@ -1754,60 +1757,45 @@ class home_stillness_reward:
 
 class home_pose_reward:
     """Reward joint angles close to the robot's own default/home pose, gated by a
-    BROAD sigmoid on head height (not a hard on/off threshold, and not the earlier,
-    near-step-function gate this replaced).
+    simple binary threshold on head height (0 below it, full reward above it — see
+    __call__; this replaced an earlier smooth ramp-shaped gate once the extra
+    tunable shape wasn't earning its complexity back over just reusing the one
+    threshold every other "are we actually standing now" reward already gates on).
 
-    Two independent problems with the previous version of this term (found by
-    surveying HoST arXiv:2502.08378, FRASA arXiv:2410.08655, and HumanUP
-    arXiv:2502.12152 — see microban_getup_env_cfg.py for how this term is wired):
+    The error-shape problem this term was designed to fix (found by surveying HoST
+    arXiv:2502.08378, FRASA arXiv:2410.08655, and HumanUP arXiv:2502.12152 — see
+    microban_getup_env_cfg.py for how this term is wired): summing squared error
+    across ~18 joints then applying ONE exp(-sum/std^2) saturates near 0 whenever
+    several joints are simultaneously off (the normal case for most of a recovery
+    motion), collapsing the gradient into an undifferentiated "far from home"
+    signal that can't tell "1 joint off" from "8 joints off". This uses per-joint
+    standard deviations and the MEAN (or, for hip_pose, MAX — see the reduction
+    param) of error^2/std^2 — identical mean shape to
+    mjlab.tasks.velocity.mdp.rewards.variable_posture, the reward already driving
+    this same robot's walking policy's own standing/walking pose term (see
+    microban_velocity_env_cfg.py's std_standing) — averaging keeps the scale
+    independent of joint count, and per-joint std lets tight/loose joints be tuned
+    individually.
 
-    1. Error shape: summing squared error across ~18 joints then applying ONE
-       exp(-sum/std^2) saturates near 0 whenever several joints are simultaneously
-       off (the normal case for most of a recovery motion), collapsing the gradient
-       into an undifferentiated "far from home" signal that can't tell "1 joint off"
-       from "8 joints off". This uses per-joint standard deviations and the MEAN
-       (not sum) of error^2/std^2 — identical shape to
-       mjlab.tasks.velocity.mdp.rewards.variable_posture, the reward already driving
-       this same robot's walking policy's own standing/walking pose term (see
-       microban_velocity_env_cfg.py's std_standing) — averaging keeps the scale
-       independent of joint count, and per-joint std lets tight/loose joints be
-       tuned individually.
-    2. Gate shape: the previous gate_center/gate_sharpness sat right next to
-       HEAD_STANDING_THRESHOLD with a sharpness making it an almost-literal step
-       function — pose-matching only ever got a nonzero gradient in the last ~1cm
-       of the ascent, by which point the policy had already committed to whichever
-       height/upright/on-feet-satisfying strategy it found first. HoST's own style
-       reward (which this term's whole existence is inspired by) is present
-       "essentially throughout the episode", not gated behind near-completion.
-       Replaced with the same clamp(frac, 0, 1)**power shape head_height_reward
-       uses for its own rising side (see that function): ramps up smoothly as head
-       height approaches gate_target_height, reaching exactly 1.0 (and staying
-       flat, not continuing to depend on height at all) once standing height is
-       reached — unlike head_height_reward, this does NOT fall off again past the
-       target, since matching the home pose is equally good whether the head is
-       exactly at, or a little above, standing height.
-
-    Still gated (not literally dense from frame 1 like FRASA, which trains with an
-    off-policy algorithm less prone to single-critic reward interference — see
-    HoST's own single-critic-vs-multi-critic ablation): with on-policy PPO and a
+    Still gated at all (not literally dense from frame 1 like FRASA, which trains
+    with an off-policy algorithm less prone to single-critic reward interference —
+    see HoST's own single-critic-vs-multi-critic ablation): with on-policy PPO and a
     single critic here, giving large pose-matching gradient while the robot is still
     mid-flip (where large joint excursions from home are the correct behavior) would
     fight the get-up motion itself. The height gate keeps this a "which of the
     successful strategies do you converge to" signal, not a "do this instead of
-    getting up" signal — just over a wider window than before.
+    getting up" signal.
 
     ``std`` is re-resolved from ``cfg.params["std"]`` on every call (only the joint
-    NAME list is cached from ``__init__``), not precomputed once into a fixed tensor
-    — this lets a curriculum term tighten it over training (mutating
-    ``env.reward_manager.get_term_cfg("standing_pose").params["std"]`` in place) the
-    same way this term's own weight gets ramped. This matters: verified numerically
-    (see microban_getup_env_cfg.py's HOME_POSE_STD_LOOSE/_TIGHT split) that reusing
-    the walking policy's tight std_standing values (0.1-0.15 rad) from step 0 makes
-    this term saturate to ~0 for the still-imperfect joint configurations a
-    mid-training policy actually reaches — even once the gate is open — MORE
-    aggressively than the old sum-of-squares/std=1.0 kernel did, silently defeating
-    the gate-broadening fix above. Starting loose and tightening in step with the
-    weight ramp avoids that.
+    NAME list is cached from ``__init__``), not precomputed once into a fixed
+    tensor. Nothing currently mutates it mid-training (only this term's own weight
+    gets ramped by the env cfg's curriculum, via ``get_term_cfg("standing_pose")
+    .weight``), but the re-resolution keeps that option open cheaply. It matters
+    which std you start with regardless of any curriculum: the walking policy's own
+    tight std_standing values (0.1-0.15 rad) saturate this term to ~0 for the
+    still-imperfect joint configurations a mid-training get-up policy actually
+    reaches, even once the gate is open — hence the much looser flat
+    HOME_POSE_STD in microban_getup_env_cfg.py.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
