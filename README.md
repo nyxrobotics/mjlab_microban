@@ -79,6 +79,9 @@ The complete observation/action contract, staged curriculum, resume and safe
 18-action ONNX export procedure are in
 [`docs/pico_teleop_policy.md`](docs/pico_teleop_policy.md).
 
+For fresh get-up training and the v2 ONNX export gate, see
+[`docs/getup_training_export.md`](docs/getup_training_export.md).
+
 Evaluate a saved hybrid checkpoint headlessly before export or hardware use:
 
 ```bash

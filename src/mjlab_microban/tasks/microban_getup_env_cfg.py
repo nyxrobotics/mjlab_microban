@@ -15,9 +15,8 @@ alongside locomotion risks interference. See microban_teleop/docs/getup_research
 for the survey this follows (HumanUP, HoST, FRASA, ANYmal) and the switch heuristic
 (height/orientation threshold, handled outside this env, in the real control loop).
 
-All 21 joints are actuated here (including neck/head/arms) — getting up needs every
-available DOF, and the "keep the neck predictable" concern that excludes it from the
-walking policy doesn't apply during a recovery maneuver.
+The policy controls 18 body joints; head and both neck joints are excluded from
+its action and actor observation spaces, matching the robot's get-up policy path.
 """
 
 import numpy as np
@@ -32,7 +31,6 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -67,9 +65,15 @@ from mjlab_microban.tasks.mdp import (
     reset_near_home_fraction,
     hands_released_reward,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import (
-    effective_action_after_target_clip,
+from mjlab_microban.tasks.microban_getup_action import (
+    GETUP_TARGET_SLEW_RAD_S,
+    SlewLimitedGetupJointPositionActionCfg,
+    effective_getup_action_after_target_slew,
 )
+from mjlab_microban.tasks.microban_getup_actuator import (
+    make_getup_robot_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
 
@@ -81,7 +85,7 @@ SCENE_CFG = SceneCfg(
     ),
     num_envs=1,
     extent=2.0,
-    entities={"robot": MICROBAN_ROBOT_CFG},
+    entities={"robot": make_getup_robot_cfg()},
 )
 
 VIEWER_CONFIG = ViewerConfig(
@@ -165,12 +169,9 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # Excludes head/neck_roll/neck_pitch, matching the walking policy's own exclusion
-    # (microban_velocity_env_cfg.py) — get-up shouldn't move the neck either. Their
-    # default pose is 0.0 for all three, so they don't need a hold_at_default_pose
-    # event: EntityData.joint_pos_target resetting excluded joints to 0.0 every episode
-    # (the bug the walking policy's own comment documents) is a no-op when the default
-    # already IS 0.0, unlike e.g. the elbows/shoulders whose defaults are far from zero.
+    # Exclude head/neck_roll/neck_pitch from the 18-action policy. The robot
+    # holds these joints at their measured angles with P gain 400 during get-up;
+    # the get-up-specific action and actuator reproduce that behavior.
     dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
     cfg.actions["joint_pos"].actuator_names = (dofs_filter,)
     cfg.actions["joint_pos"].scale = 1.0
@@ -184,6 +185,18 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # HoST's "start with a restrictive action bound" curriculum idea, as a static
     # bound rather than a scheduled one for now.
     cfg.actions["joint_pos"].clip = {r".*": (-1.57, 1.57)}
+    base_action = cfg.actions["joint_pos"]
+    assert isinstance(base_action, JointPositionActionCfg)
+    cfg.actions["joint_pos"] = SlewLimitedGetupJointPositionActionCfg(
+        entity_name=base_action.entity_name,
+        actuator_names=base_action.actuator_names,
+        scale=base_action.scale,
+        offset=base_action.offset,
+        preserve_order=base_action.preserve_order,
+        use_default_offset=base_action.use_default_offset,
+        clip=base_action.clip,
+        max_target_speed_rad_s=GETUP_TARGET_SLEW_RAD_S,
+    )
 
     #---------------------------- Commands ---------------------------
     # No velocity command: this task is "get up", not "walk somewhere".
@@ -215,16 +228,15 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["critic"].terms["joint_pos"] = deepcopy(cfg.observations["actor"].terms["joint_pos"])
     cfg.observations["critic"].terms["joint_vel"] = deepcopy(cfg.observations["actor"].terms["joint_vel"])
 
-    # JointPositionAction stores the policy's unbounded network output as its raw
-    # ``action``/``last_action``, even though the actuator receives the absolute
-    # target only after adding the default-pose offset and applying the clip above.
-    # Feeding that raw value back gave the policy an unbounded hidden recurrence
-    # which the hardware cannot reproduce.  Observe the effective post-clip delta
-    # instead; deployment can reconstruct it from the target with the same
-    # ``(clipped_target - default_pose) / scale`` contract.
+    # The robot clips the absolute policy target, then moves its commanded target
+    # by at most 0.5 rad/s. Observe that actual post-slew target as a delta from
+    # the default pose; the actor's raw output or pre-slew clipped target would
+    # give the network feedback different from the physical controller. At reset,
+    # previous-action feedback stays zero while the slew state starts at the
+    # randomized measured joint pose.
     for group_name in ("actor", "critic"):
         cfg.observations[group_name].terms["actions"] = ObservationTermCfg(
-            func=effective_action_after_target_clip,
+            func=effective_getup_action_after_target_slew,
             params={"action_name": "joint_pos"},
         )
 
@@ -259,20 +271,24 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["angular_momentum"].weight = -0.01
 
-    # Replaces mjlab's built-in action_rate_l2 (which penalizes
-    # env.action_manager.action/prev_action — the RAW, pre-clip network output,
-    # not what the robot is actually commanded to do; see target_rate_l2's own
-    # docstring) with a version reading asset.data.joint_pos_target instead, the
-    # same genuinely-clipped/physical field home_stillness_reward already uses.
-    # Weight recalibrated for the new (much smaller, bounded) scale: raw
-    # sum-of-squares here is roughly 18 joints x (a fast ~0.75rad/step change)^2
-    # =~ 10, versus the old raw-action version's measured 300+, so -0.02 there
-    # would be far too weak here — scaled up roughly proportionally, untested at
-    # this exact value yet.
+    # Penalize changes in the actual actuator target rather than changes in the
+    # raw network output. With the new 0.01 rad/step slew, this term is now small
+    # by construction; its main purpose is continuity with the prior reward set.
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=target_rate_l2,
         weight=-0.3,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
+    )
+
+    # Clipping and the slow actuator slew otherwise make very large raw actions
+    # indistinguishable at the plant. A modest L1 cost keeps PPO from learning
+    # saturated outputs: a single joint 0.5 rad beyond the ±1.57 target clip
+    # costs only about 0.06 before the common dt scale, versus head-height
+    # rewards weighted 36 and 20; a pathological 120 rad command costs ~15.
+    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-0.2,
+        params={"action_name": "joint_pos"},
     )
 
     # Head height instead of trunk height: trunk-height-alone can't tell "right-side

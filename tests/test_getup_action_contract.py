@@ -14,26 +14,27 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-from mjlab.envs.mdp.actions import JointPositionAction
 
+from mjlab_microban.tasks.microban_getup_action import (
+    SlewLimitedGetupJointPositionAction,
+    SlewLimitedGetupJointPositionActionCfg,
+    effective_getup_action_after_target_slew,
+)
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import (
-    effective_action_after_target_clip,
-)
 
 
 class GetupActionObservationContractTest(unittest.TestCase):
-    def test_actor_and_critic_observe_effective_post_clip_action(self) -> None:
+    def test_actor_and_critic_observe_effective_post_slew_action(self) -> None:
         cfg = make_microban_getup_env_cfg()
 
         for group_name in ("actor", "critic"):
             term = cfg.observations[group_name].terms["actions"]
-            self.assertIs(term.func, effective_action_after_target_clip)
+            self.assertIs(term.func, effective_getup_action_after_target_slew)
             self.assertEqual(term.params, {"action_name": "joint_pos"})
 
     def test_current_clip_and_default_offset_are_runtime_reconstructible(self) -> None:
@@ -47,6 +48,8 @@ class GetupActionObservationContractTest(unittest.TestCase):
         self.assertEqual(action_cfg.offset, 0.0)
         self.assertTrue(action_cfg.use_default_offset)
         self.assertEqual(action_cfg.clip, {r".*": (-1.57, 1.57)})
+        self.assertIsInstance(action_cfg, SlewLimitedGetupJointPositionActionCfg)
+        self.assertEqual(action_cfg.max_target_speed_rad_s, 0.5)
 
         default_joint_pos = cfg.scene.entities["robot"].init_state.joint_pos
         default_pose = torch.tensor(
@@ -57,9 +60,31 @@ class GetupActionObservationContractTest(unittest.TestCase):
         lower = torch.full_like(default_pose, -1.57)
         upper = torch.full_like(default_pose, 1.57)
 
-        action = object.__new__(JointPositionAction)
-        action._raw_actions = raw
+        # A fallen reset may begin outside the policy's narrower target clip.
+        # The first actor observation must still have zero previous action.
+        measured = torch.full_like(default_pose, 2.0)
+        measured_all = torch.cat(
+            (measured, torch.tensor([[0.1, 0.2, 0.3]], dtype=measured.dtype)), dim=-1
+        )
+        target_all = torch.zeros_like(measured_all)
+
+        def set_joint_position_target(position, joint_ids, env_ids):
+            target_all[env_ids, joint_ids] = position
+
+        action = object.__new__(SlewLimitedGetupJointPositionAction)
+        action.cfg = action_cfg
+        action._env = SimpleNamespace(num_envs=1, device="cpu", step_dt=0.02)
+        action._entity = SimpleNamespace(
+            data=SimpleNamespace(joint_pos=measured_all),
+            set_joint_position_target=set_joint_position_target,
+        )
+        action._target_ids = torch.arange(default_pose.shape[-1])
+        action._raw_actions = torch.zeros_like(raw)
+        action._processed_actions = torch.zeros_like(raw)
+        action._has_processed_action = torch.zeros(1, 1, dtype=torch.bool)
+        action._neck_target_ids = torch.arange(default_pose.shape[-1], measured_all.shape[-1])
         action._scale = action_cfg.scale
+        action._clip = torch.stack((lower, upper), dim=-1)
         # JointPositionAction replaces cfg.offset with default_joint_pos when
         # use_default_offset is true; mirror that initialized state here.
         action._offset = default_pose
@@ -69,23 +94,35 @@ class GetupActionObservationContractTest(unittest.TestCase):
             action_manager=SimpleNamespace(get_term=lambda name: action)
         )
 
-        effective = effective_action_after_target_clip(env)
-        expected_target = torch.clamp(
+        action.reset()
+        torch.testing.assert_close(
+            effective_getup_action_after_target_slew(env), torch.zeros_like(raw)
+        )
+        torch.testing.assert_close(target_all[:, -3:], measured_all[:, -3:])
+        measured_all[:, -3:] += 0.05
+        action.process_actions(raw)
+        torch.testing.assert_close(target_all[:, -3:], measured_all[:, -3:])
+        clipped_target = torch.clamp(
             raw * action_cfg.scale + default_pose,
             min=lower,
             max=upper,
         )
+        expected_target = measured + torch.clamp(
+            clipped_target - measured, min=-0.01, max=0.01
+        )
         expected_effective = (
             expected_target - default_pose
         ) / action_cfg.scale
+        effective = effective_getup_action_after_target_slew(env)
         torch.testing.assert_close(effective, expected_effective)
-
-        # This is the exact arithmetic available to the Python robot runtime:
-        # store the effective delta as previous-action feedback, then add the
-        # ONNX default_joint_pos metadata to reproduce the commanded target.
         runtime_target = default_pose + effective * action_cfg.scale
         torch.testing.assert_close(runtime_target, expected_target)
-        self.assertTrue(bool(torch.any(effective != raw).item()))
+        self.assertTrue(bool(torch.any(expected_target > upper).item()))
+
+        action.reset()
+        torch.testing.assert_close(
+            effective_getup_action_after_target_slew(env), torch.zeros_like(raw)
+        )
 
 
 if __name__ == "__main__":
