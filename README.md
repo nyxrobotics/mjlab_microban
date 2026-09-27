@@ -11,6 +11,11 @@ If you are interested in learning more about Microban, or even building your own
 The environments are built using the [MjLab](https://github.com/mujocolab/mjlab) framework.
 A velocity control task is currently implemented, allowing the robot to follow target linear and angular velocities while resisting external disturbances.
 
+For fresh velocity, get-up, and offline tracking training with the current
+upright, centered HOME, follow [the centered HOME training guide](docs/centered_home_training.md).
+The bundled older `velocity.pt` is from a different HOME and is only for its
+historical playback example below.
+
 <br>
 <br>
 

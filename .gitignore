@@ -4,14 +4,14 @@ src/mjlab_microban/robot/microban/scad/
 
 .vscode/*
 .venv/*
-uv.lock
 
 logs/*
 wandb/*
 policy.onnx
 artifacts/
 
-# Generated/recorded motion datasets are reproducible inputs, not source.  Keep
-# them local; the training guide records how to regenerate and checksum them.
+# Keep local captures and generated motions out of Git. The pinned TWIST2
+# example below is committed so fresh tracking training can start immediately.
 data/motions/*.jsonl
 data/motions/*.npz
+!data/motions/microban_twist2_centered_home.npz

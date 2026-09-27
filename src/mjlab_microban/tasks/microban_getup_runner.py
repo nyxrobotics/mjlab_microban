@@ -9,6 +9,7 @@ import torch
 from mjlab.envs.mdp.observations import builtin_sensor
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
+from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_getup_action import (
     GETUP_TARGET_SLEW_RAD_S,
     SlewLimitedGetupJointPositionAction,
@@ -24,6 +25,27 @@ from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_exce
 
 GETUP_CONTRACT_VERSION = "v2"
 GETUP_ANGULAR_VELOCITY_FRAME = "imu_sensor_xyz"
+
+
+def getup_home_pose() -> dict[str, object]:
+    """Return the complete training HOME in a checkpoint-safe form."""
+
+    joints = {name: float(value) for name, value in sorted(HOME_FRAME.joint_pos.items())}
+    if len(joints) != 21:
+        raise ValueError("Get-up HOME must define all 21 Microban joints")
+    return {
+        "root_pos_m": [float(value) for value in HOME_FRAME.pos],
+        "root_quat_wxyz": [float(value) for value in HOME_FRAME.rot],
+        "joint_pos_rad": joints,
+    }
+
+
+def require_current_getup_home_pose(infos: dict) -> None:
+    if infos.get("microban_getup_home_pose") != getup_home_pose():
+        raise ValueError(
+            "Checkpoint has a different or unknown get-up HOME pose; "
+            "train from scratch with the current task"
+        )
 
 
 class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
@@ -74,6 +96,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             "microban_getup_contract": GETUP_CONTRACT_VERSION,
             "microban_getup_target_slew_rad_s": GETUP_TARGET_SLEW_RAD_S,
             "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
+            "microban_getup_home_pose": getup_home_pose(),
         }
         super().save(path, infos)
 
@@ -88,4 +111,5 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
         ):
             raise ValueError("Checkpoint lacks the get-up v2 action and IMU-frame contract; start a fresh run")
+        require_current_getup_home_pose(infos)
         return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)

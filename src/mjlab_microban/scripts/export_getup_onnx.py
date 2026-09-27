@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import uuid
 from dataclasses import asdict
@@ -26,7 +27,11 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.tasks.microban_getup_runner import GETUP_ANGULAR_VELOCITY_FRAME
+from mjlab_microban.tasks.microban_getup_runner import (
+    GETUP_ANGULAR_VELOCITY_FRAME,
+    getup_home_pose,
+    require_current_getup_home_pose,
+)
 
 TASK = "Mjlab-Getup-Microban"
 CONTRACT_VERSION = "v2"
@@ -68,6 +73,7 @@ def _require_new_checkpoint(path: Path) -> str:
             "Checkpoint lacks the get-up v2 / 0.5 rad/s / IMU-frame training marker; "
             "retrain from scratch with the current Mjlab-Getup-Microban task"
         )
+    require_current_getup_home_pose(infos)
     if not isinstance(checkpoint.get("actor_state_dict"), dict):
         raise ValueError("Checkpoint has no actor_state_dict")
     if _sha256(path) != before:
@@ -288,6 +294,9 @@ def main() -> None:
                 "microban_getup_contract": CONTRACT_VERSION,
                 "microban_getup_target_slew_rad_s": TARGET_SLEW_RAD_S,
                 "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
+                "microban_getup_home_pose": json.dumps(
+                    getup_home_pose(), sort_keys=True, separators=(",", ":")
+                ),
                 "checkpoint_sha256": checkpoint_sha256,
                 "checkpoint_filename": checkpoint.name,
             }

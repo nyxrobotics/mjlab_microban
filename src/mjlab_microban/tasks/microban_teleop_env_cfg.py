@@ -383,11 +383,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         initial_twist.rel_world_envs = 0.0
         initial_twist.init_velocity_prob = 0.0
 
-    # The current control runtime's NEUTRAL_POSE constant uses +10 degrees for
-    # both shoulder-pitch joints.  This is a provisional software-contract match,
-    # not a measured physical calibration or a claim about which task predates
-    # another.  Keep the override local to this task so the deployed/get-up tasks
-    # remain untouched.
+    # Historical v8 teleop used +10-degree shoulder pitches. Keep this
+    # task-local contract for its old checkpoints; fresh full-body teleop uses
+    # the separate v12 training branch with the physical 0-degree neutral.
     teleop_joint_pos = cfg.scene.entities["robot"].init_state.joint_pos
     if teleop_joint_pos is None:
         raise ValueError("Microban teleop requires an explicit initial joint pose")

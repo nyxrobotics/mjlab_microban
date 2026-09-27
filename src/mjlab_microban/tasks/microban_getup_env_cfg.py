@@ -50,6 +50,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
+from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     reward_based_staged_curriculum,
@@ -75,7 +76,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
 )
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
-STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
+STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 
 SCENE_CFG = SceneCfg(
@@ -301,9 +302,10 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # while still flat as the trunk version was (same world-Z-height shape). Keeping
     # both would let a high-but-inverted trunk still collect partial credit from the
     # trunk term, fighting the very thing head height is meant to fix.
-    # HEAD_STANDING_HEIGHT: the TRUE standing-pose head height, computed directly via
-    # forward kinematics from HOME_FRAME (mujoco.mj_forward on the home keyframe,
-    # "head" body world Z) — 0.294m.
+    # HEAD_STANDING_HEIGHT: the HOME value of the virtual head height actually
+    # used by _head_height: trunk COM plus its rotated 0.07324 m local offset.
+    # MuJoCo forward kinematics at the physical-neutral HOME gives
+    # 0.296534095899190 m.
     #
     # A previous version of this constant (0.260) was deliberately LOWERED from this
     # same theoretical value to match what an earlier, imperfect policy happened to
@@ -316,7 +318,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # upright-error metric, which a seated trunk can also satisfy) doesn't
     # distinguish from standing — rather than fully extending its legs. Restored to
     # the true kinematic value so seated no longer satisfies the target.
-    HEAD_STANDING_HEIGHT = 0.294
+    HEAD_STANDING_HEIGHT = 0.296534095899190
     # Despite the name, _head_height (mdp.py) no longer reads the actual "head" body
     # through this — it only uses .name to resolve the robot entity, then computes a
     # virtual point above the TRUNK's own center of mass/orientation (fixed offset,
@@ -549,7 +551,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # of a sum-of-squares-then-exp kernel, so the gradient doesn't collapse when
     # several joints are simultaneously off) and is otherwise deliberately close to
     # the ORIGINAL, empirically-working design: gate still centered near the
-    # standing threshold (moved from 0.230 to 0.85*HEAD_STANDING_HEIGHT = 0.221,
+    # standing threshold (moved from 0.230 to 0.85*HEAD_STANDING_HEIGHT,
     # i.e. exactly HEAD_STANDING_THRESHOLD, so pose-matching turns on together with
     # standing_bonus/on_feet/foot_flat rather than a full ~40% window before them)
     # with a softer-but-still-late sharpness (0.02, vs the original's near-step

@@ -712,10 +712,9 @@ def extreme_joint_velocity(
     return joint_vel.abs().amax(dim=-1) > max_joint_vel
 
 
-# Calibrated once via mj_forward on HOME_FRAME, the same technique
-# microban_getup_env_cfg.py's own HEAD_STANDING_HEIGHT (0.294) uses: the vertical
-# distance, in the trunk's OWN frame, from its center of mass up to where the head
-# sits when standing upright (0.294 - trunk COM z of 0.22076). A fixed scalar, not
+# Calibrated from the trunk COM to the head in the trunk's local frame. The
+# geometry is unchanged by the centered HOME pose; forward kinematics now puts
+# this virtual point at 0.296534095899190 m in that pose. A fixed scalar, not
 # read from the head body's live position — this task actuates the neck (head yaw,
 # neck_roll, neck_pitch; see this env's own "all 21 joints actuated" docstring), so
 # tracking the actual head body would let the policy raise/lower "head height" by

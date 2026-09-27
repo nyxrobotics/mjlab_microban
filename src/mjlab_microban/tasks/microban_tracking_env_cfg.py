@@ -16,8 +16,10 @@ different retargeted clip.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, fields
 from pathlib import Path
 
+import numpy as np
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
@@ -29,7 +31,7 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
+from mjlab_microban.robot.microban_constants import HOME_FRAME, MICROBAN_ROBOT_CFG
 from mjlab_microban.tasks.microban_tracking_mdp import controlled_motion_command
 
 
@@ -144,9 +146,71 @@ MICROBAN_END_EFFECTOR_BODY_NAMES: tuple[str, ...] = (
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+TRACKING_HOME_POSE_REVISION = "physical_neutral_shoulder_zero_com_centered_v4"
 DEFAULT_MICROBAN_TRACKING_MOTION_FILE = (
-    _REPOSITORY_ROOT / "data" / "motions" / "microban_twist2.npz"
+    _REPOSITORY_ROOT / "data" / "motions" / "microban_twist2_centered_home.npz"
 )
+
+
+def _require_centered_home_motion(path: Path) -> None:
+    """Reject a motion converted for a different robot HOME, regardless of filename."""
+
+    if set(MICROBAN_JOINT_NAMES) != set(HOME_FRAME.joint_pos):
+        raise ValueError("Training HOME does not define the 21 tracking joints")
+    with np.load(path, allow_pickle=False) as motion:
+        required = {
+            "joint_names",
+            "home_pose_revision",
+            "home_root_pos_xyz_m",
+            "home_root_quat_wxyz",
+            "home_joint_pos_rad",
+        }
+        missing = required.difference(motion.files)
+        if missing:
+            raise ValueError(
+                f"Tracking motion {path} lacks centered-HOME metadata {sorted(missing)}; "
+                "regenerate it with the updated converter"
+            )
+        revision = np.asarray(motion["home_pose_revision"])
+        joint_names = np.asarray(motion["joint_names"])
+        if revision.shape != () or revision.item() != TRACKING_HOME_POSE_REVISION:
+            raise ValueError(f"Tracking motion {path} has a different HOME revision")
+        if joint_names.shape != (21,) or not np.array_equal(
+            joint_names, np.asarray(MICROBAN_JOINT_NAMES)
+        ):
+            raise ValueError(f"Tracking motion {path} has a different joint order")
+        expected = {
+            "home_root_pos_xyz_m": np.asarray(HOME_FRAME.pos, dtype=np.float64),
+            "home_root_quat_wxyz": np.asarray(HOME_FRAME.rot, dtype=np.float64),
+            "home_joint_pos_rad": np.asarray(
+                [HOME_FRAME.joint_pos[name] for name in MICROBAN_JOINT_NAMES],
+                dtype=np.float64,
+            ),
+        }
+        for name, target in expected.items():
+            actual = np.asarray(motion[name])
+            if (
+                actual.shape != target.shape
+                or actual.dtype.kind not in "fiu"
+                or not np.isfinite(actual).all()
+                or not np.allclose(actual, target, rtol=0.0, atol=1.0e-6)
+            ):
+                raise ValueError(f"Tracking motion {path} has invalid {name} for this HOME")
+
+
+@dataclass(kw_only=True)
+class MicrobanTrackingMotionCommandCfg(MotionCommandCfg):
+    """Check centered-home provenance only when the tracking task starts."""
+
+    def build(self, env):
+        path = Path(self.motion_file)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Microban tracking motion is missing: {path}. "
+                "Generate a centered-home NPZ with the updated microban_teleop converter."
+            )
+        _require_centered_home_motion(path)
+        return super().build(env)
 
 
 def _motion_path(motion_file: str | Path | None) -> str:
@@ -283,6 +347,12 @@ def make_microban_tracking_env_cfg(
         motion.velocity_range = {}
         motion.joint_position_range = (0.0, 0.0)
         motion.sampling_mode = "start"
+
+    # Task registration builds all configs eagerly, before a new reference NPZ
+    # exists. Check at environment creation so other tasks remain importable.
+    cfg.commands["motion"] = MicrobanTrackingMotionCommandCfg(
+        **{item.name: getattr(motion, item.name) for item in fields(MotionCommandCfg)}
+    )
 
     return cfg
 

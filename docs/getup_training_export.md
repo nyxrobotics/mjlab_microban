@@ -11,7 +11,7 @@ target clip, in addition to clipping the actuator target itself.
 
 ```bash
 uv sync --locked
-uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096
+uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --agent.logger tensorboard
 ```
 
 The training episode lasts 20 seconds. The robot's automatic get-up attempt
@@ -32,7 +32,8 @@ uv run --locked python -m mjlab_microban.scripts.export_getup_onnx \
 The exporter refuses an existing output unless `--replace` is passed. It loads
 the `Mjlab-Getup-Microban` play environment and actor, checks the checkpoint's
 `microban_getup_contract=v2`, `microban_getup_target_slew_rad_s=0.5`, and
-`microban_getup_angular_velocity_frame=imu_sensor_xyz`
+`microban_getup_angular_velocity_frame=imu_sensor_xyz`, and the complete
+`microban_getup_home_pose` (21 joints plus root position and quaternion)
 training markers, and checks the exported 60-input/18-output ONNX. In
 particular, the last 18 observation normalizer means and standard deviations
 must fit the reachable previous-action range. That range includes each joint's
@@ -40,9 +41,11 @@ simulation soft limits because the post-slew target begins at the measured
 fallen pose, which can be outside the narrower ±1.57 rad policy target clip.
 The exporter also screens finite raw actions at upright, inverted, and sideways
 initial orientations against the robot runtime's 120-action fault threshold.
-Old checkpoints lack the v2 training markers and are rejected before export.
+Old checkpoints, including v2 checkpoints trained with the earlier -10-degree
+hip HOME, lack the current HOME marker and are rejected before resume or export.
 
-The resulting file contains the same v2/0.5 markers, a checkpoint SHA-256,
+The resulting file contains the same v2/0.5 markers, the HOME pose as JSON,
+a checkpoint SHA-256,
 joint order, default pose, and action clips. Its metadata is for the robot
 runtime to verify before enabling automatic recovery. Training and export alone
 do not prove that the learned maneuver stands the physical robot up; inspect
