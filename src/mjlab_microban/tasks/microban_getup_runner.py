@@ -19,6 +19,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
     GetupBamActuatorCfg,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_EPISODE_LENGTH_S
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 
@@ -88,11 +89,18 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Get-up v3 requires its body/neck XC330 actuator model")
         if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
             raise ValueError("Get-up v3 requires body P125 and XC330 0.91 A current limit")
-        # No raw_target_clip_excess requirement here (unlike teleop, which uses
-        # it): see microban_getup_env_cfg.py's own comment for why entangling
-        # the already-100%-guaranteed range-of-motion clip with a learned
-        # reward was solving a problem specific to the (now-removed) v2 rate
-        # limit, not a general get-up requirement.
+        # Required (see microban_getup_env_cfg.py's own comment): removing
+        # this alongside the v2 rate limit was tried and measured to make the
+        # std/entropy runaway markedly worse, not moot -- get-up's own action
+        # space exploits the clip-saturation-is-free property far more than
+        # walking's does, independent of any rate limit.
+        raw_clip_reward = unwrapped.cfg.rewards.get("raw_target_clip_excess")
+        if (
+            raw_clip_reward is None
+            or raw_clip_reward.func is not normalized_target_clip_excess_l1_sum
+            or raw_clip_reward.weight != -2.0
+        ):
+            raise ValueError("Get-up v3 requires the raw target clip-excess reward")
         super().__init__(env, train_cfg, log_dir, device)
 
     def save(self, path: str, infos=None) -> None:

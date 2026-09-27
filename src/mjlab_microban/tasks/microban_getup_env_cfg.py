@@ -73,6 +73,7 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
@@ -291,21 +292,33 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
     )
 
-    # No raw_target_clip_excess reward here (unlike teleop, which uses it). An
-    # earlier version of this task added one at -0.2, then -2.0, to fight a
-    # scalar-Gaussian std/entropy runaway (1.0/25.6 -> ~6.2/58.4 over ~900
-    # iterations, never recovering even after 15,000) -- but that runaway's
-    # actual cause was a since-removed bug: an incorrect 0.5 rad/s rate limit
-    # on the policy's own commanded target (see microban_getup_action.py's
-    # module docstring) made raw-action magnitude beyond "enough to saturate
-    # that cap" free at the plant, breaking the usual entropy-vs-task-reward
-    # trade-off. Without that rate limit, this task is in exactly the same
-    # position as the walking task (microban_velocity_env_cfg.py): a plain
-    # absolute-target clip, same entropy_coef=0.01/std_type="scalar", no
-    # extra reward shaping the raw output -- and that task converges fine.
-    # Entangling the hard, already-100%-guaranteed range-of-motion clip with
-    # an additional learned reward term was solving a problem this task
-    # no longer has, at the cost of extra reward-landscape complexity.
+    # raw_target_clip_excess is REQUIRED here, unlike a first attempt at
+    # removing it once the v2 rate-limit bug (see microban_getup_action.py's
+    # module docstring) was found and fixed. The theory at the time was that
+    # the rate limit was the only reason a scalar-Gaussian std/entropy runaway
+    # happened (raw magnitude beyond "enough to saturate the rate cap" was
+    # free at the plant), and that without it this task would behave like the
+    # walking task (microban_velocity_env_cfg.py, plain clip, same
+    # entropy_coef=0.01/std_type="scalar", no extra reward, converges fine).
+    # Measured directly that this was wrong: with the rate limit removed AND
+    # this reward removed, std/entropy grew WORSE and FASTER than the
+    # original runaway -- 1.0 to 14.4 by iteration 1500 alone, still climbing,
+    # versus the original bug's 1.0 to ~6.2 (then plateaued) over the first
+    # ~900 iterations. The clip alone already makes any raw magnitude beyond
+    # the boundary free at the plant (identical clamped output), independent
+    # of any rate limit -- walking apparently doesn't exploit this because its
+    # needed joint angles rarely approach its clip boundaries, but get-up's
+    # actual recovery motion needs several joints AT or near their limit for
+    # much of an episode, making this exploit far more available/rewarding
+    # here. Restored at the same -2.0 weight that controlled std well (1.1-1.5
+    # through iteration 8000+) under the old, rate-limited action; unverified
+    # yet whether -2.0 is still the right value under the new, unlimited-rate
+    # action -- watch the iteration-0-1500 std trend on the next run.
+    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-2.0,
+        params={"action_name": "joint_pos"},
+    )
 
     # Head height instead of trunk height: trunk-height-alone can't tell "right-side
     # up" from "upside down" (both have the trunk high), and once head height is also
