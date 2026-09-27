@@ -18,6 +18,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
     GETUP_BODY_KP_FW,
     GetupBamActuatorCfg,
 )
+from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_EPISODE_LENGTH_S
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 
@@ -37,6 +38,8 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Get-up v2 requires 18 actions without wrapper clipping")
         if not math.isclose(unwrapped.step_dt, 0.02, rel_tol=0.0, abs_tol=1.0e-9):
             raise ValueError("Get-up v2 requires a 20 ms policy step")
+        if unwrapped.cfg.episode_length_s != GETUP_EPISODE_LENGTH_S:
+            raise ValueError("Get-up v2 requires a 20-second training episode")
         if action.cfg.clip != {r".*": (-1.57, 1.57)}:
             raise ValueError("Get-up v2 requires absolute target clipping at ±1.57 rad")
         if action.cfg.max_target_speed_rad_s != GETUP_TARGET_SLEW_RAD_S:

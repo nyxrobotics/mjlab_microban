@@ -14,6 +14,11 @@ uv sync --locked
 uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096
 ```
 
+The training episode lasts 20 seconds. The robot's automatic get-up attempt
+also allows up to 20 seconds; it hands control back once the upright gravity
+condition remains stable for 20 control ticks. There is no earlier progress
+deadline.
+
 The task is configured for 15,000 training iterations. Select a completed
 checkpoint from the new run directory printed by training, then export it with
 both paths explicit (replace `<new-run>` with that directory name):

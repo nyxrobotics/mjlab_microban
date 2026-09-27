@@ -76,6 +76,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
+GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 
 SCENE_CFG = SceneCfg(
     terrain=TerrainEntityCfg(
@@ -122,6 +123,7 @@ SIM_CFG = SimulationCfg(
 
 def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
+    cfg.episode_length_s = GETUP_EPISODE_LENGTH_S
 
     cfg.viewer = deepcopy(VIEWER_CONFIG)
     cfg.sim = deepcopy(SIM_CFG)
