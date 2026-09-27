@@ -26,6 +26,7 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
+from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 
 class GetupActionObservationContractTest(unittest.TestCase):
@@ -47,7 +48,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
         self.assertEqual(action_cfg.scale, 1.0)
         self.assertEqual(action_cfg.offset, 0.0)
         self.assertTrue(action_cfg.use_default_offset)
-        self.assertEqual(action_cfg.clip, {r".*": (-1.57, 1.57)})
+        self.assertEqual(action_cfg.clip, dict(MICROBAN_BODY_JOINT_SOFT_LIMITS))
         self.assertIsInstance(action_cfg, SlewLimitedGetupJointPositionActionCfg)
         self.assertEqual(action_cfg.max_target_speed_rad_s, 0.5)
 

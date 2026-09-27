@@ -27,6 +27,7 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
+from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 from mjlab_microban.tasks.microban_getup_runner import (
     GETUP_ANGULAR_VELOCITY_FRAME,
     getup_home_pose,
@@ -222,10 +223,19 @@ def _action_contract(
     upper = clip[0, :, 1].astype(np.float64)
     if not np.isfinite(clip).all() or np.any(lower >= upper):
         raise ValueError("Invalid get-up action target clip")
-    if not np.allclose(lower, -1.57, rtol=0, atol=1e-5) or not np.allclose(
-        upper, 1.57, rtol=0, atol=1e-5
+    expected_lower = np.array(
+        [MICROBAN_BODY_JOINT_SOFT_LIMITS[name][0] for name in action.target_names]
+    )
+    expected_upper = np.array(
+        [MICROBAN_BODY_JOINT_SOFT_LIMITS[name][1] for name in action.target_names]
+    )
+    if not np.allclose(lower, expected_lower, rtol=0, atol=1e-5) or not np.allclose(
+        upper, expected_upper, rtol=0, atol=1e-5
     ):
-        raise ValueError("Get-up action target clip differs from robot runtime")
+        raise ValueError(
+            "Get-up action target clip differs from each joint's soft limit "
+            "(MICROBAN_BODY_JOINT_SOFT_LIMITS)"
+        )
     if getattr(action.cfg, "max_target_speed_rad_s", None) != 0.5:
         raise ValueError("Get-up training action must slew at 0.5 rad/s")
     soft_limits = env.scene["robot"].data.soft_joint_pos_limits[0, action.target_ids]

@@ -75,6 +75,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
+from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
@@ -183,11 +184,21 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # moving at once from an already-extreme randomized fallen pose — produced a
     # genuine MuJoCo solver blowup (NaN qpos/qvel) reproduced at 4096 envs within ~70
     # steps of real training, well before hold_airborne's own >=2s cooldown could even
-    # fire once. A flat +-90 deg clip is generic (not per-joint-tuned) but removes the
-    # wild-target tail while still leaving room to discover a get-up motion; matches
+    # fire once. A clip is still needed to remove that wild-target tail (matches
     # HoST's "start with a restrictive action bound" curriculum idea, as a static
-    # bound rather than a scheduled one for now.
-    cfg.actions["joint_pos"].clip = {r".*": (-1.57, 1.57)}
+    # bound rather than a scheduled one for now), but a flat +-90 deg bound for every
+    # joint was never physically meaningful: hip_roll/ankle_roll/ankle_pitch/hip_yaw/
+    # knee/shoulder_roll all have a real MJCF range narrower (or asymmetric) around
+    # +-1.57 rad in at least one direction (e.g. ankle_roll only reaches ~0.55 rad).
+    # With actuator inheritrange="1", MuJoCo itself silently saturates any commanded
+    # target beyond a joint's real range, independent of this action clip — so the
+    # policy's own previous-action observation (the post-clip, pre-that-saturation
+    # value) was lying to it for every one of those joints whenever it tried to push
+    # past what's actually reachable, exactly where get-up most needs precise leg
+    # control. teleop/tracking already solved this with per-joint clips matching each
+    # joint's own soft limit (MICROBAN_BODY_JOINT_SOFT_LIMITS, tracking_env_cfg.py);
+    # reusing it here instead of a blanket bound removes that mismatch.
+    cfg.actions["joint_pos"].clip = dict(MICROBAN_BODY_JOINT_SOFT_LIMITS)
     base_action = cfg.actions["joint_pos"]
     assert isinstance(base_action, JointPositionActionCfg)
     cfg.actions["joint_pos"] = SlewLimitedGetupJointPositionActionCfg(
@@ -283,14 +294,26 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
     )
 
-    # Clipping and the slow actuator slew otherwise make very large raw actions
-    # indistinguishable at the plant. A modest L1 cost keeps PPO from learning
-    # saturated outputs: a single joint 0.5 rad beyond the ±1.57 target clip
-    # costs only about 0.06 before the common dt scale, versus head-height
-    # rewards weighted 36 and 20; a pathological 120 rad command costs ~15.
+    # Clipping and the slow (0.5 rad/s) actuator slew make raw-action magnitude
+    # beyond "enough to saturate the slew cap in the intended direction" free at
+    # the plant: it changes no physical outcome. That breaks the usual
+    # entropy-vs-task-reward trade-off that normally keeps a scalar Gaussian
+    # std bounded -- with std_type="scalar"/entropy_coef=0.01 (same as the
+    # (non-slew-limited) walking task, where it works fine), std/entropy grew
+    # unopposed from 1.0/25.6 to ~6.2/58.4 over the first ~900 iterations of a
+    # from-scratch run and then plateaued there (entropy's pull grows only
+    # log(std), so this L1 excess penalty -- growing ~linearly with std --
+    # still bounds it, just at an equilibrium far above a usable range),
+    # and standing_bonus/standing_pose never recovered from that regime even
+    # after 15,000 iterations. -0.2 was too weak to hold the line here.
+    # 10x'd to -2.0 to pull that equilibrium back down; confirmed on a
+    # from-scratch rerun: std stayed in 1.1-1.5 through iteration 8000+
+    # instead of blowing up (still separately investigating why standing_bonus
+    # itself was slow to climb in that same run -- see the per-joint clip
+    # fix above, landed after that run).
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=-0.2,
+        weight=-2.0,
         params={"action_name": "joint_pos"},
     )
 

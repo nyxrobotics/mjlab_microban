@@ -21,6 +21,7 @@ from mjlab_microban.tasks.microban_getup_actuator import (
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_EPISODE_LENGTH_S
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
+from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 
 GETUP_CONTRACT_VERSION = "v2"
@@ -62,8 +63,11 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Get-up v2 requires a 20 ms policy step")
         if unwrapped.cfg.episode_length_s != GETUP_EPISODE_LENGTH_S:
             raise ValueError("Get-up v2 requires a 20-second training episode")
-        if action.cfg.clip != {r".*": (-1.57, 1.57)}:
-            raise ValueError("Get-up v2 requires absolute target clipping at ±1.57 rad")
+        if action.cfg.clip != dict(MICROBAN_BODY_JOINT_SOFT_LIMITS):
+            raise ValueError(
+                "Get-up v2 requires absolute target clipping at each joint's own "
+                "soft limit (MICROBAN_BODY_JOINT_SOFT_LIMITS)"
+            )
         if action.cfg.max_target_speed_rad_s != GETUP_TARGET_SLEW_RAD_S:
             raise ValueError("Get-up v2 requires target slew at 0.5 rad/s")
         if action.cfg.scale != 1.0 or action.cfg.offset != 0.0 or not action.cfg.use_default_offset:
@@ -85,7 +89,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         if (
             raw_clip_reward is None
             or raw_clip_reward.func is not normalized_target_clip_excess_l1_sum
-            or raw_clip_reward.weight != -0.2
+            or raw_clip_reward.weight != -2.0
         ):
             raise ValueError("Get-up v2 requires the raw target clip-excess reward")
         super().__init__(env, train_cfg, log_dir, device)

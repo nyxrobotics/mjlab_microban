@@ -64,9 +64,9 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
 
 FULL_COLLISION = CollisionCfg(
     geom_names_expr=(r".*_collision",),
-    condim={r"^(left|right)_foot_collision$": 3, r".*_collision": 1},
-    priority={r"^(left|right)_foot_collision$": 1},
-    friction={r"^(left|right)_foot_collision$": (1.0,)},
+    condim={r"^(left|right)_foot_collision_[1-6]$": 3, r".*_collision": 1},
+    priority={r"^(left|right)_foot_collision_[1-6]$": 1},
+    friction={r"^(left|right)_foot_collision_[1-6]$": (1.0,)},
 )
 
 import bam.actuators
