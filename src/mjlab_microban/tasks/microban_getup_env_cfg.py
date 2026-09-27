@@ -440,21 +440,25 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # — this term exists specifically to close that gap, not to duplicate height/upright.
     # "is standing" is gated on head height (HEAD_ASSET_CFG) everywhere below;
     # orientation itself still reads the trunk body specifically (asset_cfg).
-    # Weight raised 5.0 -> 20.0 (matching head_height_sq's own weight; both cap at
-    # 1.0 per step at the peak, so this puts "finish and hold" on equal footing
-    # with "get tall" instead of being a much weaker afterthought). Measured
-    # directly via a 16-env rollout at iteration 4000 of the action_rate_l2 fix
-    # run: mean max height already reaches 118% of target_height (the robot can
-    # physically overshoot standing height, so head_height itself is not the
-    # bottleneck), but only 3/16 envs were still standing in the final second of
-    # the episode -- most rise past the threshold and fall back to ~69% of
-    # target by the end. Raising the "get tall" rewards further (as tried once
-    # before, see head_height's own comment on the 4x/144.0 revert) doesn't
-    # address a sustain problem; raising the term that specifically rewards
-    # staying up might.
+    # 20.0 (4x, matching head_height_sq's own weight) was tried and reverted: a
+    # 16-env rollout at iteration 4000 of the action_rate_l2 fix run showed a
+    # real sustain problem (mean max height already 118% of target -- height
+    # itself is not the bottleneck -- but only 3/16 envs still standing at
+    # episode end), so raising the "stay up" term seemed like the right target,
+    # unlike raising a "get tall" term (already tried once at head_height's own
+    # 4x, see that revert comment). But this ALSO reproduced the same
+    # std/entropy runaway: resumed training held std at 0.85-0.88 for the
+    # first ~100 iterations post-resume, then climbed to 1.49 within the next
+    # 60 (0.94 -> 1.06 -> 1.23 -> 1.36 -> 1.49), the same accelerating shape as
+    # every other large weight increase on a threshold-gated reward has shown
+    # here. Suggests this isn't specific to head_height or standing_bonus --
+    # any sufficiently large increase on a height-threshold-gated term seems to
+    # find the same clip-saturation exploit faster than the fixed -2.0
+    # raw_target_clip_excess weight can counter it. Reverted to 5.0 pending a
+    # smaller step and/or revisiting raw_target_clip_excess's own weight.
     cfg.rewards["standing_bonus"] = RewardTermCfg(
         func=standing_bonus,
-        weight=20.0,
+        weight=5.0,
         params={
             # Own threshold (0.9), higher than standing_pose's (0.8, below) — the
             # payout keeps scaling up to the TRUE target height above that anyway
