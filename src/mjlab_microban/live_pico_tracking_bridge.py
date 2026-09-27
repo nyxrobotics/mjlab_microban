@@ -330,6 +330,7 @@ class OnlineMicrobanRetargeter:
         self.last_weighted_rms_error_m = math.inf
         self.home_qpos = self.model.qpos0.copy()
         self.home_qpos[:3] = np.asarray(HOME_FRAME.pos, dtype=np.float64)
+        self.home_qpos[3:7] = np.asarray(HOME_FRAME.rot, dtype=np.float64)
         for name, value in (HOME_FRAME.joint_pos or {}).items():
             joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
             if joint_id < 0:

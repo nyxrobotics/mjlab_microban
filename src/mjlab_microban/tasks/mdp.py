@@ -772,9 +772,10 @@ def standing_bonus(
     upright_std: float,
     head_asset_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    target_pitch: float = 0.0,
 ) -> torch.Tensor:
     """Dense reward active only once the robot is near-standing (head height above
-    height_threshold AND close to upright), rewarding staying there.
+    height_threshold AND close to the target pitch), rewarding staying there.
 
     HoST's "post-task" mechanism (arXiv:2502.08378): since this only pays out once
     standing is reached, reaching it earlier and holding it accumulates strictly more
@@ -799,9 +800,12 @@ def standing_bonus(
     projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
     gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
     projected_gravity_b_unit = projected_gravity_b / gravity_norm
-    upright_error = torch.square(projected_gravity_b_unit[:, 0]) + torch.square(
-        projected_gravity_b_unit[:, 1]
-    )
+    # Forward trunk pitch gives positive body-frame gravity X. The zero
+    # default preserves the vertical-trunk reward for existing callers.
+    target_gx = math.sin(target_pitch)
+    upright_error = torch.square(
+        projected_gravity_b_unit[:, 0] - target_gx
+    ) + torch.square(projected_gravity_b_unit[:, 1])
     upright_reward = torch.exp(-upright_error / upright_std**2)
 
     is_standing = height > height_threshold

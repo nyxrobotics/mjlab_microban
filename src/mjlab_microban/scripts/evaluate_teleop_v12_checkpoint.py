@@ -62,6 +62,9 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
 )
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    validate_teleop_v12_home_pose,
+)
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
     reject_preview_checkpoint,
@@ -151,6 +154,7 @@ def _load_actor(
         reject_preview_checkpoint(infos)
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
+    validate_teleop_v12_home_pose(infos)
     validate_bilateral_site_order_checkpoint(infos)
     if allow_deadline_fallback:
         validate_deadline_fallback_checkpoint_payload(

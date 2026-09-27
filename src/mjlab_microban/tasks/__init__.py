@@ -48,6 +48,14 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
     MicrobanTeleopV12OnPolicyRunner,
     MicrobanTeleopV12PreviewOnPolicyRunner,
 )
+from mjlab_microban.tasks.microban_teleop_upright_fullbody_env_cfg import (
+    MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID,
+    MicrobanTeleopUprightFullbodyRlCfg,
+    make_microban_teleop_upright_fullbody_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_upright_fullbody_runner import (
+    MicrobanTeleopUprightFullbodyOnPolicyRunner,
+)
 from mjlab_microban.tasks.microban_tracking_env_cfg import (
     MicrobanTrackingRlCfg,
     make_microban_tracking_env_cfg,
@@ -106,6 +114,14 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12RlCfg,
     runner_cls=MicrobanTeleopV12OnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID,
+    env_cfg=make_microban_teleop_upright_fullbody_env_cfg(),
+    play_env_cfg=make_microban_teleop_upright_fullbody_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopUprightFullbodyRlCfg,
+    runner_cls=MicrobanTeleopUprightFullbodyOnPolicyRunner,
 )
 
 register_mjlab_task(

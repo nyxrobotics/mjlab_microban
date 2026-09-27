@@ -83,6 +83,11 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
     preview_hand_tracking_settings,
 )
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    teleop_v12_home_pose_marker,
+    validate_teleop_v12_home_pose,
+)
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     BILATERAL_SITE_ORDER_INFO_KEY,
     MIGRATION_INFO_KEY,
@@ -177,6 +182,25 @@ def validate_teleop_v12_environment_contract(env) -> None:
             "Contract-v12 robot natural joint order drifted: "
             f"{tuple(robot.joint_names)}"
         )
+    home_pose = teleop_v12_home_pose_marker()
+    expected_home = torch.tensor(
+        home_pose["joint_pos_rad"],
+        device=robot.data.default_joint_pos.device,
+        dtype=robot.data.default_joint_pos.dtype,
+    )
+    if not torch.allclose(
+        robot.data.default_joint_pos[0], expected_home, rtol=0.0, atol=1.0e-7
+    ):
+        raise ValueError("Contract-v12 environment HOME pose drifted")
+    expected_root = torch.tensor(
+        [*home_pose["root_pos_xyz_m"], *home_pose["root_quat_wxyz"]],
+        device=robot.data.default_root_state.device,
+        dtype=robot.data.default_root_state.dtype,
+    )
+    if not torch.allclose(
+        robot.data.default_root_state[0, :7], expected_root, rtol=0.0, atol=1.0e-7
+    ):
+        raise ValueError("Contract-v12 environment HOME root pose drifted")
     for group_name in ("actor", "critic"):
         for term_name in ("joint_pos", "joint_vel"):
             term = raw_env.observation_manager.get_term_cfg(group_name, term_name)
@@ -437,6 +461,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
             ),
             "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
             "previous_action_semantics": "raw_actor_output",
             "action_clip": None,
             "trainable_actor_parameters": ["mlp.0.weight"],
@@ -672,6 +697,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
             raise ValueError("Checkpoint is not contract-v12")
+        validate_teleop_v12_home_pose(infos)
         if self.deadline_fallback_resume:
             deadline_fallback = validate_deadline_fallback_resume_payload(
                 payload, checkpoint_sha256=before_sha256

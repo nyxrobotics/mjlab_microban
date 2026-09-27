@@ -20,30 +20,43 @@ assert MICROBAN_XML.exists(), f"XML not found: {MICROBAN_XML}"
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
+HOME_TRUNK_PITCH_RAD = 0.0
+HOME_HIP_PITCH_RAD = float(np.deg2rad(1.198384259489))
+HOME_ANKLE_PITCH_RAD = -HOME_HIP_PITCH_RAD
+
 HOME_FRAME = EntityCfg.InitialStateCfg(
-    pos=(0.0, 0.0, 0.168), #0.1676),
+    # Match all 21 joint angles in the physical robot's A-button NEUTRAL_POSE.
+    # Keep the trunk vertical, cancel hip pitch at the ankles so the soles
+    # stay flat, and put the lowest sole-collision corner on the ground.
+    pos=(0.0, 0.0, 0.170554885633559),
+    rot=(
+        float(np.cos(HOME_TRUNK_PITCH_RAD / 2.0)),
+        0.0,
+        float(np.sin(HOME_TRUNK_PITCH_RAD / 2.0)),
+        0.0,
+    ),
     joint_pos={
         "head": float(np.deg2rad(0.0)),
         "neck_roll": float(np.deg2rad(0.0)),
         "neck_pitch": float(np.deg2rad(0.0)),
         "left_shoulder_roll": float(np.deg2rad(10.0)),
         "right_shoulder_roll": float(np.deg2rad(-10.0)),
-        "left_shoulder_pitch": float(np.deg2rad(0.0)),
-        "right_shoulder_pitch": float(np.deg2rad(0.0)),
+        "left_shoulder_pitch": 0.0,
+        "right_shoulder_pitch": 0.0,
         "left_elbow": float(np.deg2rad(-20.0)),
         "right_elbow": float(np.deg2rad(-20.0)),
         "left_hip_roll": float(np.deg2rad(5.0)),
         "right_hip_roll": float(np.deg2rad(-5.0)),
-        "left_hip_pitch": float(np.deg2rad(-10.0)),
-        "right_hip_pitch": float(np.deg2rad(-10.0)),
+        "left_hip_pitch": HOME_HIP_PITCH_RAD,
+        "right_hip_pitch": HOME_HIP_PITCH_RAD,
         "left_hip_yaw": float(np.deg2rad(0.0)),
         "right_hip_yaw": float(np.deg2rad(0.0)),
         "left_knee": float(np.deg2rad(0.0)),
         "right_knee": float(np.deg2rad(0.0)),
         "left_ankle_roll": float(np.deg2rad(-5.0)),
         "right_ankle_roll": float(np.deg2rad(5.0)),
-        "left_ankle_pitch": float(np.deg2rad(0.0)),
-        "right_ankle_pitch": float(np.deg2rad(0.0)),
+        "left_ankle_pitch": HOME_ANKLE_PITCH_RAD,
+        "right_ankle_pitch": HOME_ANKLE_PITCH_RAD,
     },
     joint_vel={r".*": 0.0},
 )

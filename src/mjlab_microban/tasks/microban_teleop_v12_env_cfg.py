@@ -21,8 +21,11 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 
 MICROBAN_TELEOP_V12_TASK_ID = "Mjlab-Teleop-V12-Microban"
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
+MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
+    "legacy_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v4"
+)
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
-    "legacy_velocity_model14999_staged_mask_reachable_fk_elbow_minus10_raw_actions_v5"
+    "legacy_velocity_model14999_staged_mask_reachable_fk_elbow_minus10_raw_actions_shoulder_zero_v9"
 )
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 1.0e-4
 MICROBAN_TELEOP_V12_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)

@@ -16,7 +16,10 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    MICROBAN_ROBOT_CFG,
+)
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -250,7 +253,7 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    cfg.rewards["upright"].params["pitch"] = np.deg2rad(10.0)
+    cfg.rewards["upright"].params["pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
     

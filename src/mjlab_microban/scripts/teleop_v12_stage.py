@@ -101,6 +101,10 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    validate_teleop_v12_home_pose,
+)
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
 )
@@ -738,6 +742,7 @@ def _checkpoint_identity(
     if payload["infos"].get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     infos = payload["infos"]
+    validate_teleop_v12_home_pose(infos)
     validate_bilateral_site_order_checkpoint(infos)
     reject_preview_checkpoint(infos)
     iteration = payload.get("iter")
@@ -1031,6 +1036,7 @@ def create_gate(
         "completed_updates": completed,
         "canonical_boundary": canonical,
         "checkpoint_kind": _checkpoint_kind(completed, sanitization),
+        TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": tracking_profile,
         "adapter_sanitization": sanitization,
         "reports": {
@@ -1139,6 +1145,7 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "completed_updates": completed,
         "canonical_boundary": canonical,
         "checkpoint_kind": _checkpoint_kind(completed, sanitization),
+        TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": (
             MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
             if deadline_source

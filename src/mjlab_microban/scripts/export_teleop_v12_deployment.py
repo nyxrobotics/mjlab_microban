@@ -75,6 +75,11 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    teleop_v12_home_pose_marker,
+    validate_teleop_v12_home_pose,
+)
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     ACTOR_SWAP_BLOCKS,
     BILATERAL_SITE_ORDER_INFO_KEY,
@@ -97,7 +102,7 @@ FINAL_COMPLETED_UPDATES = 15_000
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
 )
-PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v3"
+PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v4"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0
 RUNTIME_GUARD_SEMANTICS = (
@@ -137,6 +142,8 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "policy_type",
         "microban_teleop_training_contract_version",
         "microban_teleop_recipe_revision",
+        "v12_home_pose_revision",
+        "v12_training_home_pose_json",
         "checkpoint_filename",
         "checkpoint_iteration",
         "checkpoint_iteration_semantics",
@@ -491,6 +498,9 @@ def build_v12_deployment_metadata(
         checkpoint_sha256=checkpoint_sha256,
         expected_tracking_profile=_expected_final_tracking_profile(infos),
     )
+    home_pose = validate_teleop_v12_home_pose(infos)
+    if gate.get(TELEOP_V12_HOME_POSE_INFO_KEY) != home_pose:
+        raise ValueError("Final v12 gate HOME pose does not match its checkpoint")
     if infos.get("trainable_actor_parameters") != ["mlp.0.weight"] or infos.get(
         "trainable_actor_columns"
     ) != list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS):
@@ -540,6 +550,11 @@ def build_v12_deployment_metadata(
     action_defaults = [
         float(defaults[name]) for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES
     ]
+    if (
+        home_pose["joint_names"] != observation_joints
+        or home_pose["joint_pos_rad"] != observation_defaults
+    ):
+        raise ValueError("Final v12 checkpoint HOME pose differs from exporter defaults")
     guard = _runtime_guard(tracking_envelope)
     source = bootstrap.source
     probe = bootstrap.probe
@@ -558,6 +573,8 @@ def build_v12_deployment_metadata(
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ),
         "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        "v12_home_pose_revision": home_pose["revision"],
+        "v12_training_home_pose_json": _json(home_pose),
         "checkpoint_filename": checkpoint.name,
         "checkpoint_iteration": str(FINAL_ITERATION),
         "checkpoint_iteration_semantics": (
@@ -948,6 +965,10 @@ def _run_microban_runtime_validator(
         report.get("status") != "pass"
         or report.get("policy") != str(path.resolve())
         or metadata.get("base_ang_vel_frame") != "imu_sensor_xyz"
+        or metadata.get("v12_home_pose_revision")
+        != teleop_v12_home_pose_marker()["revision"]
+        or metadata.get("v12_training_home_pose_json")
+        != _json(teleop_v12_home_pose_marker())
         or metadata.get("runtime_raw_action_guard_semantics")
         != RUNTIME_GUARD_SEMANTICS
         or metadata.get("physical_motor_target_guard_semantics")

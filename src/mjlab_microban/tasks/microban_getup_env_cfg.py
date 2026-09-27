@@ -32,7 +32,11 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_TRUNK_PITCH_RAD,
+    MICROBAN_ROBOT_CFG,
+)
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -64,7 +68,7 @@ from mjlab_microban.tasks.mdp import (
     extreme_joint_velocity,
 )
 
-STANDING_HEIGHT = 0.168  # trunk height when standing (HOME_FRAME.pos z, microban_constants.py)
+STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 
 SCENE_CFG = SceneCfg(
     terrain=TerrainEntityCfg(
@@ -269,6 +273,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             "height_threshold": HEAD_STANDING_THRESHOLD,
             "upright_std": np.sqrt(0.1),
+            "target_pitch": HOME_TRUNK_PITCH_RAD,
             "head_asset_cfg": HEAD_ASSET_CFG,
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk",)),
         },

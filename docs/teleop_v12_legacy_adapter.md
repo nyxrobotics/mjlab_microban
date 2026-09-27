@@ -1,5 +1,12 @@
 # Microban teleop v12: legacy-preserving policy training
 
+この文書は旧HOME（股ピッチ -10°）で作った配備済みモデルの履歴手順である。
+`pico-v12-centered-home` ブランチでは旧v12学習スクリプトを停止している。
+旧v12タスクの肩ピッチ0°設定とcheckpoint markerは履歴用に分離する。
+共通HOMEの股ピッチは `+1.198384259489°`、足首ピッチは `-1.198384259489°` に更新されているため、このブランチの旧v12タスクで旧checkpointを再開しない。
+実機Aボタン初期姿勢に揃えた新HOME（体幹ピッチ `0°`、肩ピッチ `0°`）で全重みを再学習する場合は
+[`teleop_upright_fullbody_training.md`](teleop_upright_fullbody_training.md)を使う。
+
 この文書は、実績のある joystick 歩行 actor を壊さずに PICO の HMD・手・足の目標を追加する手順を固定する。v12 の canonical policy と、早期確認専用の simulation preview は別物である。preview は実機配備できない。
 
 ## 固定した契約

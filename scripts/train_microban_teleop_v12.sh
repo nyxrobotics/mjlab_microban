@@ -42,6 +42,13 @@ case "${mode}" in
     *) fail "Unknown mode: ${mode}" ;;
 esac
 
+# This checkout has moved the training HOME. The pinned v12 actor freezes all
+# 63 legacy walking inputs, so rerunning that recipe here cannot learn the new
+# stance. Historical v12 reproduction belongs to its original commit.
+if [[ -f "${PROJECT_ROOT}/src/mjlab_microban/tasks/microban_teleop_upright_fullbody_env_cfg.py" ]]; then
+    fail "Historical v12 training is disabled on this upright-HOME checkout. Use scripts/train_microban_teleop_upright_fullbody.sh."
+fi
+
 canary=0
 extra_args=()
 while (( $# > 0 )); do
