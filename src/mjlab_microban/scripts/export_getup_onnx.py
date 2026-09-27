@@ -1,6 +1,6 @@
 """Export a newly trained Microban get-up checkpoint for the robot.
 
-Both paths must be explicit.  The checkpoint's v2 training marker and the
+Both paths must be explicit.  The checkpoint's v3 training marker and the
 exported ONNX normalizer are checked before an artifact is published.
 """
 
@@ -35,8 +35,7 @@ from mjlab_microban.tasks.microban_getup_runner import (
 )
 
 TASK = "Mjlab-Getup-Microban"
-CONTRACT_VERSION = "v2"
-TARGET_SLEW_RAD_S = "0.5"
+CONTRACT_VERSION = "v3"
 OBSERVATION_TERMS = (
     "base_ang_vel",
     "projected_gravity",
@@ -60,18 +59,17 @@ def _sha256(path: Path) -> str:
 
 
 def _require_new_checkpoint(path: Path) -> str:
-    """Require a fresh v2 training checkpoint, not an old actor relabeled v2."""
+    """Require a fresh v3 training checkpoint, not an old actor relabeled v3."""
 
     before = _sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     infos = checkpoint.get("infos")
     if not isinstance(infos, dict) or (
         infos.get("microban_getup_contract") != CONTRACT_VERSION
-        or str(infos.get("microban_getup_target_slew_rad_s")) != TARGET_SLEW_RAD_S
         or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
     ):
         raise ValueError(
-            "Checkpoint lacks the get-up v2 / 0.5 rad/s / IMU-frame training marker; "
+            "Checkpoint lacks the get-up v3 / IMU-frame training marker; "
             "retrain from scratch with the current Mjlab-Getup-Microban task"
         )
     require_current_getup_home_pose(infos)
@@ -151,9 +149,9 @@ def _validate_onnx(
     mean, std = _normalizer_arrays(model)
     action_mean = mean[PREVIOUS_ACTION_START:]
     action_std = std[PREVIOUS_ACTION_START:]
-    # V2 observes the applied post-slew target.  At a fallen reset the slew
-    # starts from a measured joint angle, which can be outside the policy's
-    # narrower target clip.  Include the simulated joint soft limits here.
+    # V3 observes the applied (clipped, unlimited-rate) target directly, which
+    # is always within the action's own clip -- no slew transient to widen the
+    # expected range for.
     minimum = (feedback_lower - default) / scale
     maximum = (feedback_upper - default) / scale
     if (
@@ -236,18 +234,19 @@ def _action_contract(
             "Get-up action target clip differs from each joint's soft limit "
             "(MICROBAN_BODY_JOINT_SOFT_LIMITS)"
         )
-    if getattr(action.cfg, "max_target_speed_rad_s", None) != 0.5:
-        raise ValueError("Get-up training action must slew at 0.5 rad/s")
-    soft_limits = env.scene["robot"].data.soft_joint_pos_limits[0, action.target_ids]
-    soft_limits = soft_limits.detach().cpu().numpy().astype(np.float64)
-    feedback_lower = np.minimum(lower, soft_limits[:, 0])
-    feedback_upper = np.maximum(upper, soft_limits[:, 1])
-    return lower, upper, feedback_lower, feedback_upper, default, scale
+    if hasattr(action.cfg, "max_target_speed_rad_s"):
+        raise ValueError(
+            "Get-up training action must not rate-limit the active policy's "
+            "own target (see microban_getup_action.py's module docstring)"
+        )
+    # No slew transient to widen the expected previous-action range for: the
+    # observed target is always exactly the action's own clip.
+    return lower, upper, lower, upper, default, scale
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path, help="Fresh v2 model_N.pt")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="Fresh v3 model_N.pt")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
@@ -293,7 +292,7 @@ def main() -> None:
                 "action_clip_lower": lower.tolist(),
                 "action_clip_upper": upper.tolist(),
                 "microban_getup_previous_action_semantics": (
-                    "post_slew_applied_target_delta_from_default"
+                    "applied_target_delta_from_default"
                 ),
                 "microban_getup_previous_action_lower": (
                     (feedback_lower - default) / scale
@@ -302,7 +301,6 @@ def main() -> None:
                     (feedback_upper - default) / scale
                 ).tolist(),
                 "microban_getup_contract": CONTRACT_VERSION,
-                "microban_getup_target_slew_rad_s": TARGET_SLEW_RAD_S,
                 "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
                 "microban_getup_home_pose": json.dumps(
                     getup_home_pose(), sort_keys=True, separators=(",", ":")

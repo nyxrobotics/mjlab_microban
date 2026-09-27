@@ -1,9 +1,22 @@
-"""Get-up position action with the same target slew as the robot controller."""
+"""Get-up position action: absolute-target clipping plus held neck joints.
+
+No target-rate slew here. An earlier version of this file added one
+(GETUP_TARGET_SLEW_RAD_S = 0.5, "the same target slew as the robot
+controller"), but that 0.5 rad/s figure belongs to a completely different
+part of the robot runtime: getup.py's _RECOVERY_SLEW_RATE_RAD_S, the
+deliberately slow/gentle return-to-neutral used only when torque is
+switching on from limp. The robot's own ACTIVE get-up policy (once
+armed and actually executing) writes its clipped target directly, every
+tick, with no rate limit at all -- confirmed against getup.py's own
+step()/_step_recover_to_neutral() split. Modeling that same 0.5 rad/s cap
+on the policy's own live output here made a real, physically-fast get-up
+motion impossible to learn or even express: every joint was capped at
+0.01 rad per 20 ms policy step regardless of what the network commanded,
+which is why the trained checkpoint's motion looked passive/unwilling to
+stand rather than merely imperfect.
+"""
 
 from __future__ import annotations
-
-import math
-from dataclasses import dataclass
 
 import torch
 
@@ -12,30 +25,19 @@ from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from mjlab_microban.tasks.microban_getup_actuator import GETUP_NECK_JOINT_NAMES
 
 
-GETUP_TARGET_SLEW_RAD_S = 0.5
+class GetupJointPositionActionCfg(JointPositionActionCfg):
+    """Absolute-target-clipped joint-position action, holding the neck at measured pose."""
+
+    def build(self, env) -> GetupJointPositionAction:
+        return GetupJointPositionAction(self, env)
 
 
-@dataclass(kw_only=True)
-class SlewLimitedGetupJointPositionActionCfg(JointPositionActionCfg):
-    """Clip the absolute policy target, then slew the actuator target toward it."""
+class GetupJointPositionAction(JointPositionAction):
+    """Write the clipped target directly every policy step; hold the neck joints."""
 
-    max_target_speed_rad_s: float = GETUP_TARGET_SLEW_RAD_S
+    cfg: GetupJointPositionActionCfg
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if not math.isfinite(self.max_target_speed_rad_s) or self.max_target_speed_rad_s <= 0.0:
-            raise ValueError("max_target_speed_rad_s must be finite and positive")
-
-    def build(self, env) -> SlewLimitedGetupJointPositionAction:
-        return SlewLimitedGetupJointPositionAction(self, env)
-
-
-class SlewLimitedGetupJointPositionAction(JointPositionAction):
-    """Advance the bounded target once per policy step, not per physics substep."""
-
-    cfg: SlewLimitedGetupJointPositionActionCfg
-
-    def __init__(self, cfg: SlewLimitedGetupJointPositionActionCfg, env) -> None:
+    def __init__(self, cfg: GetupJointPositionActionCfg, env) -> None:
         super().__init__(cfg, env)
         neck_ids, neck_names = self._entity.find_joints(GETUP_NECK_JOINT_NAMES)
         if set(neck_names) != set(GETUP_NECK_JOINT_NAMES):
@@ -56,14 +58,10 @@ class SlewLimitedGetupJointPositionAction(JointPositionAction):
         self._hold_measured_neck(env_ids)
 
     def process_actions(self, actions: torch.Tensor) -> None:
-        previous = self._processed_actions
         # Base implementation applies scale, default-pose offset, then absolute
-        # target clipping. This happens once per 20 ms policy step in mjlab.
+        # target clipping -- and nothing else. No rate limit: the real get-up
+        # policy's own commanded target is written directly, every tick.
         super().process_actions(actions)
-        max_step = self.cfg.max_target_speed_rad_s * self._env.step_dt
-        self._processed_actions = previous + torch.clamp(
-            self._processed_actions - previous, min=-max_step, max=max_step
-        )
         self._has_processed_action[:] = True
         self._hold_measured_neck(slice(None))
 
@@ -79,14 +77,14 @@ class SlewLimitedGetupJointPositionAction(JointPositionAction):
 
     @property
     def effective_previous_action(self) -> torch.Tensor:
-        """Post-clip, post-slew target in default-relative policy coordinates."""
+        """Post-clip target in default-relative policy coordinates."""
         effective = (self._processed_actions - self.offset) / self.scale
         return torch.where(self._has_processed_action, effective, torch.zeros_like(effective))
 
 
-def effective_getup_action_after_target_slew(env, action_name: str = "joint_pos") -> torch.Tensor:
+def effective_getup_action_after_target_clip(env, action_name: str = "joint_pos") -> torch.Tensor:
     """Return the action that actually reached the actuator target pipeline."""
     action = env.action_manager.get_term(action_name)
-    if not isinstance(action, SlewLimitedGetupJointPositionAction):
-        raise TypeError(f"{action_name!r} must be a slew-limited get-up joint-position action")
+    if not isinstance(action, GetupJointPositionAction):
+        raise TypeError(f"{action_name!r} must be a get-up joint-position action")
     return action.effective_previous_action

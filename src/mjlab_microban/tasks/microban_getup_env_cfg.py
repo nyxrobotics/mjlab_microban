@@ -67,14 +67,12 @@ from mjlab_microban.tasks.mdp import (
     hands_released_reward,
 )
 from mjlab_microban.tasks.microban_getup_action import (
-    GETUP_TARGET_SLEW_RAD_S,
-    SlewLimitedGetupJointPositionActionCfg,
-    effective_getup_action_after_target_slew,
+    GetupJointPositionActionCfg,
+    effective_getup_action_after_target_clip,
 )
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
@@ -201,7 +199,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.actions["joint_pos"].clip = dict(MICROBAN_BODY_JOINT_SOFT_LIMITS)
     base_action = cfg.actions["joint_pos"]
     assert isinstance(base_action, JointPositionActionCfg)
-    cfg.actions["joint_pos"] = SlewLimitedGetupJointPositionActionCfg(
+    cfg.actions["joint_pos"] = GetupJointPositionActionCfg(
         entity_name=base_action.entity_name,
         actuator_names=base_action.actuator_names,
         scale=base_action.scale,
@@ -209,7 +207,6 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         preserve_order=base_action.preserve_order,
         use_default_offset=base_action.use_default_offset,
         clip=base_action.clip,
-        max_target_speed_rad_s=GETUP_TARGET_SLEW_RAD_S,
     )
 
     #---------------------------- Commands ---------------------------
@@ -242,15 +239,16 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["critic"].terms["joint_pos"] = deepcopy(cfg.observations["actor"].terms["joint_pos"])
     cfg.observations["critic"].terms["joint_vel"] = deepcopy(cfg.observations["actor"].terms["joint_vel"])
 
-    # The robot clips the absolute policy target, then moves its commanded target
-    # by at most 0.5 rad/s. Observe that actual post-slew target as a delta from
-    # the default pose; the actor's raw output or pre-slew clipped target would
-    # give the network feedback different from the physical controller. At reset,
-    # previous-action feedback stays zero while the slew state starts at the
-    # randomized measured joint pose.
+    # The robot clips the absolute policy target and writes it directly every
+    # tick -- no rate limit on the active get-up policy (see
+    # microban_getup_action.py's module docstring for why an earlier version
+    # of this file had one and why that was wrong). Observe that clipped
+    # target as a delta from the default pose; the actor's raw, pre-clip
+    # output would give the network feedback different from the physical
+    # controller. At reset, previous-action feedback stays zero.
     for group_name in ("actor", "critic"):
         cfg.observations[group_name].terms["actions"] = ObservationTermCfg(
-            func=effective_getup_action_after_target_slew,
+            func=effective_getup_action_after_target_clip,
             params={"action_name": "joint_pos"},
         )
 
@@ -286,36 +284,28 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["angular_momentum"].weight = -0.01
 
     # Penalize changes in the actual actuator target rather than changes in the
-    # raw network output. With the new 0.01 rad/step slew, this term is now small
-    # by construction; its main purpose is continuity with the prior reward set.
+    # raw network output.
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=target_rate_l2,
         weight=-0.3,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
     )
 
-    # Clipping and the slow (0.5 rad/s) actuator slew make raw-action magnitude
-    # beyond "enough to saturate the slew cap in the intended direction" free at
-    # the plant: it changes no physical outcome. That breaks the usual
-    # entropy-vs-task-reward trade-off that normally keeps a scalar Gaussian
-    # std bounded -- with std_type="scalar"/entropy_coef=0.01 (same as the
-    # (non-slew-limited) walking task, where it works fine), std/entropy grew
-    # unopposed from 1.0/25.6 to ~6.2/58.4 over the first ~900 iterations of a
-    # from-scratch run and then plateaued there (entropy's pull grows only
-    # log(std), so this L1 excess penalty -- growing ~linearly with std --
-    # still bounds it, just at an equilibrium far above a usable range),
-    # and standing_bonus/standing_pose never recovered from that regime even
-    # after 15,000 iterations. -0.2 was too weak to hold the line here.
-    # 10x'd to -2.0 to pull that equilibrium back down; confirmed on a
-    # from-scratch rerun: std stayed in 1.1-1.5 through iteration 8000+
-    # instead of blowing up (still separately investigating why standing_bonus
-    # itself was slow to climb in that same run -- see the per-joint clip
-    # fix above, landed after that run).
-    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
-        func=normalized_target_clip_excess_l1_sum,
-        weight=-2.0,
-        params={"action_name": "joint_pos"},
-    )
+    # No raw_target_clip_excess reward here (unlike teleop, which uses it). An
+    # earlier version of this task added one at -0.2, then -2.0, to fight a
+    # scalar-Gaussian std/entropy runaway (1.0/25.6 -> ~6.2/58.4 over ~900
+    # iterations, never recovering even after 15,000) -- but that runaway's
+    # actual cause was a since-removed bug: an incorrect 0.5 rad/s rate limit
+    # on the policy's own commanded target (see microban_getup_action.py's
+    # module docstring) made raw-action magnitude beyond "enough to saturate
+    # that cap" free at the plant, breaking the usual entropy-vs-task-reward
+    # trade-off. Without that rate limit, this task is in exactly the same
+    # position as the walking task (microban_velocity_env_cfg.py): a plain
+    # absolute-target clip, same entropy_coef=0.01/std_type="scalar", no
+    # extra reward shaping the raw output -- and that task converges fine.
+    # Entangling the hard, already-100%-guaranteed range-of-motion clip with
+    # an additional learned reward term was solving a problem this task
+    # no longer has, at the cost of extra reward-landscape complexity.
 
     # Head height instead of trunk height: trunk-height-alone can't tell "right-side
     # up" from "upside down" (both have the trunk high), and once head height is also
