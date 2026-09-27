@@ -5,6 +5,7 @@ from __future__ import annotations
 from math import isclose, radians
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 from mjlab_microban.robot.microban_constants import HOME_FRAME
@@ -20,8 +21,16 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     _set_push_velocity_range,
     _set_teleop_locomotion_stage,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import (
+    normalized_target_clip_excess_l1_sum,
+    normalized_target_near_limit_l1_sum,
+    raw_action_l2,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
+)
+from mjlab_microban.tasks.microban_tracking_env_cfg import (
+    MICROBAN_BODY_JOINT_SOFT_LIMITS,
 )
 
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID = (
@@ -106,6 +115,43 @@ def make_microban_teleop_upright_fullbody_env_cfg(
     cfg.observations["critic"].terms.pop("locomotion_prior", None)
     cfg.rewards.pop("locomotion_prior_action_target", None)
     cfg.rewards.pop("locomotion_prior_joint_position", None)
+
+    # v12 sets clip=None and drops target_clip_excess/target_near_limit/
+    # raw_action_l2 because they assert on an absolute target clip, which the
+    # legacy pretrained v12 actor's raw/unclipped recurrence contract requires
+    # unmet. This task has no such actor (a fresh MLP, trained from scratch),
+    # so nothing requires clip=None here. Restoring the base task's original
+    # clip and reward trio (unchanged weights) because a from-scratch run
+    # without them exhibited the exact runaway get-up hit and fixed the same
+    # way: action std climbed slowly under the step-3000 envelope/tracking
+    # escalation alone (1.23->1.66 across iterations 2800->3800, fell_over
+    # ~0.5, stable), then broke into runaway growth the moment step-4000
+    # restored external pushes alone (std 1.9->2.47 and fell_over 10->14,
+    # still climbing, across iterations 4000->4600) -- get-up's own docstring
+    # (microban_getup_env_cfg.py) describes the identical mechanism: an
+    # unclipped/unpenalized raw action lets the actor grow std for free once
+    # large corrective actions are frequently needed, since excess-beyond-clip
+    # magnitude is invisible to reward but still entropy-rewarding.
+    action = cfg.actions["joint_pos"]
+    action.clip = MICROBAN_BODY_JOINT_SOFT_LIMITS
+    cfg.rewards["target_clip_excess"] = RewardTermCfg(
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-2.0,
+        params={"action_name": "joint_pos"},
+    )
+    cfg.rewards["target_near_limit"] = RewardTermCfg(
+        func=normalized_target_near_limit_l1_sum,
+        weight=-1.0,
+        params={
+            "action_name": "joint_pos",
+            "margin_ratio": 0.05,
+        },
+    )
+    cfg.rewards["raw_action_l2"] = RewardTermCfg(
+        func=raw_action_l2,
+        weight=-0.01,
+        params={"action_name": "joint_pos"},
+    )
 
     # The shared base curriculum's "restore pushes and expand final
     # translation at formal locomotion gate" step (3000) bundles three
