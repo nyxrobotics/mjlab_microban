@@ -13,6 +13,7 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     MicrobanGetupRlCfg,
     make_microban_getup_env_cfg,
 )
+from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
 from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
 from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
     MICROBAN_SAFE_VELOCITY_TASK_ID,
@@ -89,7 +90,7 @@ register_mjlab_task(
     env_cfg=make_microban_getup_env_cfg(),
     play_env_cfg=make_microban_getup_env_cfg(play=True),
     rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=VelocityOnPolicyRunner,
+    runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
 register_mjlab_task(

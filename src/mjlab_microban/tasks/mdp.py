@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import torch
 from mjlab.entity import Entity
+from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -23,10 +24,12 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommandCfg,
 )
 from mjlab.utils.lab_api.math import (
+    quat_apply,
     quat_apply_inverse,
     sample_uniform,
     subtract_frame_transforms,
 )
+from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
@@ -759,11 +762,23 @@ def extreme_joint_velocity(
     return joint_vel.abs().amax(dim=-1) > max_joint_vel
 
 
-def _head_height(
-    env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg
-) -> torch.Tensor:
+_TRUNK_TO_HEAD_OFFSET = 0.07324
+
+
+def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    # Despite the head_asset_cfg name, this no longer reads the actual "head" body
+    # through it — it only uses .name to resolve the robot entity, then computes a
+    # virtual point above the TRUNK's own center of mass/orientation (fixed offset,
+    # matching the standing pose's own trunk-to-head distance). The real head body's
+    # own world Z can read as "tall" even upside-down/inverted if the neck happens to
+    # bend the right way; a point fixed relative to the trunk's own up-axis cannot.
     asset: Entity = env.scene[head_asset_cfg.name]
-    return asset.data.body_link_pos_w[:, head_asset_cfg.body_ids[0], 2]
+    com_pos_w = asset.data.root_com_pos_w
+    com_quat_w = asset.data.root_com_quat_w
+    local_up = torch.zeros_like(com_pos_w)
+    local_up[:, 2] = _TRUNK_TO_HEAD_OFFSET
+    virtual_head_pos_w = com_pos_w + quat_apply(com_quat_w, local_up)
+    return virtual_head_pos_w[:, 2]
 
 
 def standing_bonus(
@@ -1540,3 +1555,338 @@ def stepping_curriculum(
             env.command_manager.get_term_cfg("twist").rel_rotation_envs
         ),
     }
+
+
+class target_rate_l2:
+    """Penalize the commanded joint TARGET (asset.data.joint_pos_target) changing
+    between steps — a drop-in replacement for mjlab's built-in action_rate_l2,
+    which penalizes env.action_manager.action/prev_action instead: those are
+    explicitly the RAW, pre-scale/offset/clip network output (per
+    ActionManager.process_action's own docstring), not what the robot actually
+    ends up commanded to do. Once that raw value saturates past this task's own
+    clip range (measured directly: RMS raw action reaching >100 over an episode,
+    while the actual clipped target stays within +-1.57), action_rate_l2 can
+    penalize a target that ISN'T physically changing at all just because the
+    raw pre-clip number is still swinging — the opposite of what a smoothness
+    penalty is supposed to measure. This reads the same joint_pos_target field
+    home_stillness_reward does, which is bounded by the real clip and reflects
+    what's actually asked of the servo.
+
+    A previous joint_pos_target isn't separately exposed anywhere, so (like
+    home_stillness_reward) this class caches its own (self._prev_target,
+    updated every call) rather than being a plain function.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self._joint_ids = cfg.params["asset_cfg"].joint_ids
+        self._prev_target = asset.data.joint_pos_target[:, self._joint_ids].clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        target = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
+        rate_sq = torch.sum(torch.square(target - self._prev_target), dim=-1)
+        self._prev_target = target.clone()
+        return rate_sq
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused — a stale cross-episode rate spike for one step
+        # right after a reset is a minor, brief inaccuracy, not worth the extra
+        # bookkeeping (matches home_stillness_reward's own reset() reasoning).
+
+
+
+
+class home_stillness_reward:
+    """Reward the commanded joint TARGET (asset.data.joint_pos_target, not the
+    measured joint_pos/joint_vel) holding still near home, but only once actually
+    standing (head height above height_threshold) — a triple AND (standing,
+    target-near-home, target-not-changing) via multiplication/gating, not a
+    penalty gated by any one of these alone.
+
+    Went through several earlier versions of this idea, each found to backfire:
+    1. A hard is_near_home threshold switching a joint-velocity PENALTY on/off:
+       made trembling WORSE on a live rollout — a step function right at the
+       boundary gives a policy sitting near it a reason to keep crossing back and
+       forth (avoiding the penalty on one side costs nothing the reward
+       otherwise cares about), the same hard-gate-creates-instability lesson
+       home_pose_reward's own docstring already describes for its gate.
+    2. Smoothing that penalty into a continuous ramp fixed the boundary problem
+       but kept a different one: as a pure penalty gated by closeness, being FAR
+       from home paid exactly 0 regardless of velocity, while being CLOSE always
+       carried at least the risk of a penalty unless velocity was exactly 0 — a
+       net asymmetric incentive to just not fully converge onto home at all.
+    3. A positive reward using env.action_manager.action (the policy's RAW,
+       pre-scale/offset/clip network output): measured via a live debug rollout
+       to be essentially unbounded (RMS growing past 100 over an episode, no
+       ceiling) — this task's JointPositionActionCfg clips the fully-processed
+       action to (-1.57, 1.57) rad, but that clip is applied to
+       raw*scale+offset, a quantity the action MANAGER never exposes; the RAW
+       action alone has no such bound and drifts arbitrarily, since nothing
+       downstream of that clip pushes back on its scale. Any fixed "worst case"
+       constant for it is meaningless — it measured to either saturate every
+       ramp to exactly 0 or (once loosened far enough to stop doing that)
+       plainly not correspond to anything physical.
+    This version reads asset.data.joint_pos_target instead: the ACTUAL,
+    post-scale/offset/clip position each joint's PD controller is tracking right
+    now (what apply_actions() in mjlab's JointPositionAction writes via
+    set_joint_position_target) — same physical radians and indexing as joint_pos/
+    default_joint_pos, genuinely bounded by the action term's own clip, and
+    exactly "the target value" in the sense meant throughout this reward's
+    design: what the policy is currently asking for, independent of how well the
+    real joint is tracking it.
+
+    A previous joint_pos_target isn't separately exposed anywhere, so this class
+    caches its own (self._prev_target, updated every call) rather than being a
+    plain function like most other reward terms here.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        self._joint_ids = cfg.params["asset_cfg"].joint_ids
+        self._prev_target = asset.data.joint_pos_target[:, self._joint_ids].clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        height_threshold: float,
+        target_pose_worst: float,
+        target_rate_worst: float,
+        head_asset_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        target_pos = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
+        default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+
+        target_offset = target_pos - default_pos
+        target_pose_error = torch.sqrt(torch.mean(torch.square(target_offset), dim=-1))
+        pose_closeness = torch.clamp(1.0 - target_pose_error / target_pose_worst, min=0.0, max=1.0)
+
+        target_rate = torch.sqrt(
+            torch.mean(torch.square((target_pos - self._prev_target) / env.step_dt), dim=-1)
+        )
+        target_stillness = torch.clamp(1.0 - target_rate / target_rate_worst, min=0.0, max=1.0)
+        self._prev_target = target_pos.clone()
+
+        height = _head_height(env, head_asset_cfg)
+        is_standing = height > height_threshold
+
+        reward = pose_closeness * target_stillness
+        return torch.where(is_standing, reward, torch.zeros_like(reward))
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused — a stale cross-episode target_rate spike for one
+        # step right after a reset is harmless, since is_standing gates the whole
+        # term to 0 right at that moment anyway (a just-reset env starts fallen).
+
+
+
+
+class home_pose_reward:
+    """Reward joint angles close to the robot's own default/home pose, gated by a
+    BROAD sigmoid on head height (not a hard on/off threshold, and not the earlier,
+    near-step-function gate this replaced).
+
+    Two independent problems with the previous version of this term (found by
+    surveying HoST arXiv:2502.08378, FRASA arXiv:2410.08655, and HumanUP
+    arXiv:2502.12152 — see microban_getup_env_cfg.py for how this term is wired):
+
+    1. Error shape: summing squared error across ~18 joints then applying ONE
+       exp(-sum/std^2) saturates near 0 whenever several joints are simultaneously
+       off (the normal case for most of a recovery motion), collapsing the gradient
+       into an undifferentiated "far from home" signal that can't tell "1 joint off"
+       from "8 joints off". This uses per-joint standard deviations and the MEAN
+       (not sum) of error^2/std^2 — identical shape to
+       mjlab.tasks.velocity.mdp.rewards.variable_posture, the reward already driving
+       this same robot's walking policy's own standing/walking pose term (see
+       microban_velocity_env_cfg.py's std_standing) — averaging keeps the scale
+       independent of joint count, and per-joint std lets tight/loose joints be
+       tuned individually.
+    2. Gate shape: the previous gate_center/gate_sharpness sat right next to
+       HEAD_STANDING_THRESHOLD with a sharpness making it an almost-literal step
+       function — pose-matching only ever got a nonzero gradient in the last ~1cm
+       of the ascent, by which point the policy had already committed to whichever
+       height/upright/on-feet-satisfying strategy it found first. HoST's own style
+       reward (which this term's whole existence is inspired by) is present
+       "essentially throughout the episode", not gated behind near-completion.
+       Replaced with the same clamp(frac, 0, 1)**power shape head_height_reward
+       uses for its own rising side (see that function): ramps up smoothly as head
+       height approaches gate_target_height, reaching exactly 1.0 (and staying
+       flat, not continuing to depend on height at all) once standing height is
+       reached — unlike head_height_reward, this does NOT fall off again past the
+       target, since matching the home pose is equally good whether the head is
+       exactly at, or a little above, standing height.
+
+    Still gated (not literally dense from frame 1 like FRASA, which trains with an
+    off-policy algorithm less prone to single-critic reward interference — see
+    HoST's own single-critic-vs-multi-critic ablation): with on-policy PPO and a
+    single critic here, giving large pose-matching gradient while the robot is still
+    mid-flip (where large joint excursions from home are the correct behavior) would
+    fight the get-up motion itself. The height gate keeps this a "which of the
+    successful strategies do you converge to" signal, not a "do this instead of
+    getting up" signal — just over a wider window than before.
+
+    ``std`` is re-resolved from ``cfg.params["std"]`` on every call (only the joint
+    NAME list is cached from ``__init__``), not precomputed once into a fixed tensor
+    — this lets a curriculum term tighten it over training (mutating
+    ``env.reward_manager.get_term_cfg("standing_pose").params["std"]`` in place) the
+    same way this term's own weight gets ramped. This matters: verified numerically
+    (see microban_getup_env_cfg.py's HOME_POSE_STD_LOOSE/_TIGHT split) that reusing
+    the walking policy's tight std_standing values (0.1-0.15 rad) from step 0 makes
+    this term saturate to ~0 for the still-imperfect joint configurations a
+    mid-training policy actually reaches — even once the gate is open — MORE
+    aggressively than the old sum-of-squares/std=1.0 kernel did, silently defeating
+    the gate-broadening fix above. Starting loose and tightening in step with the
+    weight ramp avoids that.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+        _, self._joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std: dict[str, float],
+        height_threshold: float,
+        head_asset_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        _, _, std_values = resolve_matching_names_values(
+            data=std,
+            list_of_strings=self._joint_names,
+        )
+        std_t = torch.tensor(std_values, device=env.device, dtype=torch.float32)
+        height = _head_height(env, head_asset_cfg)
+        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+        error_sq = torch.square(joint_pos - default_pos)
+        scaled_error_sq = error_sq / std_t**2
+        # "mean" (default, used by standing_pose): scale-independent of joint count,
+        # matches variable_posture's own shape. "max" (used by hip_pose): gradient
+        # flows ONLY through the single worst joint in this group each step, instead
+        # of being diluted 1/N across N joints — requested because a mean over just
+        # the 4 hip joints still let 3-already-converged joints outvote the one
+        # (left_hip_pitch) still ~90+deg off; this makes the term care about
+        # shrinking whichever hip joint is currently worst, not the group average.
+        if reduction == "max":
+            reduced = torch.amax(scaled_error_sq, dim=-1)
+        elif reduction == "mean":
+            reduced = torch.mean(scaled_error_sq, dim=-1)
+        else:
+            raise ValueError(f"Unknown reduction: {reduction!r}")
+        pose_reward = torch.exp(-reduced)
+        # Simple binary gate at the SAME height_threshold as standing_bonus (pass
+        # HEAD_STANDING_THRESHOLD from the env cfg) — no ramp, no separate minimum
+        # fraction: exactly 0 below it, full pose_reward above it. Simplified from
+        # an earlier smooth-ramp-with-hard-floor version once it became clear the
+        # extra tunable shape (gate_target_height/gate_power/gate_min_frac) wasn't
+        # earning its complexity back over just reusing the one threshold every
+        # other "are we actually standing now" reward already gates on.
+        is_standing = height > height_threshold
+        return torch.where(is_standing, pose_reward, torch.zeros_like(pose_reward))
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # Unused.
+
+
+
+
+def hands_released_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    sensor_name: str,
+    head_asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward NOT bracing on the hands/forearms once past a (deliberately early, not
+    "nearly standing") height threshold.
+
+    Added after watching a live rollout of a training-in-progress checkpoint: the
+    policy reliably props itself up on its hands to roughly half height, then gets
+    stuck there — it never lets go to complete the extension onto its feet alone.
+    Every other reward term here rewards being tall/on-feet/home-postured, but none
+    of them ever penalizes STAYING propped on the hands once there's clearly no need
+    to be (the trunk is already elevated) — so "prop up and stop" is a stable
+    stopping point under the existing reward stack, not just a slow-to-leave one.
+
+    Gated at a LOWER height than standing_bonus/on_feet/foot_flat (which all key off
+    HEAD_STANDING_THRESHOLD, i.e. near-complete) specifically because the failure
+    mode happens well before that point — gating this the same way would never
+    engage during the exact phase where the policy is stuck. height_threshold should
+    be passed in around the "propped up on hands" height observed in practice (much
+    lower than standing height), not the standing threshold itself.
+    """
+    found = env.scene[sensor_name].data.found
+    hands_off_ground = (found <= 0).all(dim=-1).float()
+    height = _head_height(env, head_asset_cfg)
+    is_past_threshold = height > height_threshold
+    return torch.where(is_past_threshold, hands_off_ground, torch.zeros_like(hands_off_ground))
+
+
+
+
+def reset_near_home_fraction(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    rel_near_home_envs: float,
+    joint_noise_range: tuple[float, float],
+    orientation_noise_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """After the fallen-pose reset events (reset_base / reset_robot_joints) have
+    already placed ``env_ids`` in an extreme random fallen configuration — this
+    task's main training distribution — re-place a random fraction of THOSE SAME
+    env_ids back into the home/standing pose plus small noise instead.
+
+    Both FRASA (arXiv:2410.08655, Rhoban's own fall-recovery policy for a similarly
+    small biped — its ``reset_final_p`` fraction) and HumanUP (arXiv:2502.12152 —
+    ``_reset_stand_and_lie_states`` / ``standing_init_prob``) independently use this
+    exact mechanism, found while surveying the fall-recovery RL literature for this
+    task (see microban_getup_env_cfg.py). Without it, the pose-matching reward
+    (home_pose_reward) only ever gets on-policy gradient from whatever pose the
+    get-up policy happens to arrive at organically at the tail of a long, noisy
+    recovery rollout — it never directly practices "stay AT home", only "pass
+    through/near home once". Spawning some episodes already there gives dense,
+    correctly-attributed gradient for stabilizing at exactly the target the pose
+    reward is shaping toward.
+
+    Relies on dict insertion order in ``cfg.events``: this event must be registered
+    AFTER ``reset_base``/``reset_robot_joints`` so it overrides their sampled fallen
+    pose for the selected subset rather than being overwritten by them.
+    """
+    mask = torch.rand(len(env_ids), device=env.device) < rel_near_home_envs
+    near_home_ids = env_ids[mask]
+    if len(near_home_ids) == 0:
+        return
+
+    lo, hi = orientation_noise_range
+    envs_mdp.reset_root_state_uniform(
+        env,
+        near_home_ids,
+        pose_range={
+            "x": (-0.02, 0.02),
+            "y": (-0.02, 0.02),
+            "z": (0.0, 0.005),
+            "roll": (lo, hi),
+            "pitch": (lo, hi),
+            "yaw": (-3.14159, 3.14159),
+        },
+    )
+    envs_mdp.reset_joints_by_offset(
+        env,
+        near_home_ids,
+        position_range=joint_noise_range,
+        velocity_range=(0.0, 0.0),
+        asset_cfg=asset_cfg,
+    )
+
+
+
+
