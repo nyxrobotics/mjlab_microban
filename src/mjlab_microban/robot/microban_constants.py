@@ -21,20 +21,19 @@ def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
 HOME_TRUNK_PITCH_RAD = 0.0
-HOME_HIP_PITCH_RAD = float(np.deg2rad(1.198384259489))
-HOME_ANKLE_PITCH_RAD = -HOME_HIP_PITCH_RAD
 
+# Reverted from a same-day "upright centered" experiment (hip_pitch +1.198deg,
+# ankle_pitch -1.198deg, pos.z 0.170554885633559) back to the original A-button
+# NEUTRAL_POSE match: measured directly that get-up training under the
+# centered pose still couldn't sustain standing after retuning several
+# rewards, and separately judged worse overall. Reverting this shared HOME
+# also reverts everything keyed off it: get-up's HEAD_STANDING_HEIGHT
+# (microban_getup_env_cfg.py) and the independent
+# Mjlab-Teleop-Upright-Fullbody-Microban task's own local pose constants
+# (microban_teleop_upright_fullbody_env_cfg.py) must move with this value,
+# not just this file.
 HOME_FRAME = EntityCfg.InitialStateCfg(
-    # Match all 21 joint angles in the physical robot's A-button NEUTRAL_POSE.
-    # Keep the trunk vertical, cancel hip pitch at the ankles so the soles
-    # stay flat, and put the lowest sole-collision corner on the ground.
-    pos=(0.0, 0.0, 0.170554885633559),
-    rot=(
-        float(np.cos(HOME_TRUNK_PITCH_RAD / 2.0)),
-        0.0,
-        float(np.sin(HOME_TRUNK_PITCH_RAD / 2.0)),
-        0.0,
-    ),
+    pos=(0.0, 0.0, 0.168),
     joint_pos={
         "head": float(np.deg2rad(0.0)),
         "neck_roll": float(np.deg2rad(0.0)),
@@ -47,16 +46,16 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
         "right_elbow": float(np.deg2rad(-20.0)),
         "left_hip_roll": float(np.deg2rad(5.0)),
         "right_hip_roll": float(np.deg2rad(-5.0)),
-        "left_hip_pitch": HOME_HIP_PITCH_RAD,
-        "right_hip_pitch": HOME_HIP_PITCH_RAD,
+        "left_hip_pitch": float(np.deg2rad(-10.0)),
+        "right_hip_pitch": float(np.deg2rad(-10.0)),
         "left_hip_yaw": float(np.deg2rad(0.0)),
         "right_hip_yaw": float(np.deg2rad(0.0)),
         "left_knee": float(np.deg2rad(0.0)),
         "right_knee": float(np.deg2rad(0.0)),
         "left_ankle_roll": float(np.deg2rad(-5.0)),
         "right_ankle_roll": float(np.deg2rad(5.0)),
-        "left_ankle_pitch": HOME_ANKLE_PITCH_RAD,
-        "right_ankle_pitch": HOME_ANKLE_PITCH_RAD,
+        "left_ankle_pitch": float(np.deg2rad(0.0)),
+        "right_ankle_pitch": float(np.deg2rad(0.0)),
     },
     joint_vel={r".*": 0.0},
 )

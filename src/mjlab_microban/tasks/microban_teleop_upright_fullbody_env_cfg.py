@@ -1,4 +1,4 @@
-"""Independent, from-scratch full-body teleop training at the centered HOME."""
+"""Independent, from-scratch full-body teleop training at the shared HOME."""
 
 from __future__ import annotations
 
@@ -24,19 +24,24 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_EXPERIMENT = (
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
     "physical_neutral_full_actor_from_scratch_raw83x18_v4"
 )
+# v5: reverted alongside microban_constants.py's own HOME_FRAME revert (see its
+# comment) -- the "com_centered" experiment (hip_pitch +1.198deg) this task was
+# built for measured worse for get-up and is reverted; this task now trains at
+# the original physical-neutral HOME (hip_pitch -10deg) instead. Bumped so a
+# checkpoint from either pose is never silently accepted under the other.
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_REVISION = (
-    "physical_neutral_shoulder_zero_com_centered_v4"
+    "physical_neutral_shoulder_zero_hip_neg10_v5"
 )
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_HIP_PITCH_RAD = radians(1.198384259489)
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ANKLE_PITCH_RAD = radians(-1.198384259489)
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_HIP_PITCH_RAD = radians(-10.0)
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ANKLE_PITCH_RAD = 0.0
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_SHOULDER_PITCH_RAD = 0.0
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M = 0.170554885633559
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M = 0.168
 
 
 def make_microban_teleop_upright_fullbody_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Use the 83-observation/18-raw-action curriculum with the new HOME."""
+    """Use the 83-observation/18-raw-action curriculum at the shared HOME."""
 
     cfg = make_microban_teleop_v12_env_cfg(play=play)
     joint_pos = cfg.scene.entities["robot"].init_state.joint_pos

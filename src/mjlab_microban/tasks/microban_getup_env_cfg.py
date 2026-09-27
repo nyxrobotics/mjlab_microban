@@ -353,7 +353,8 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # HEAD_STANDING_HEIGHT: the HOME value of the virtual head height actually
     # used by _head_height: trunk COM plus its rotated 0.07324 m local offset.
     # MuJoCo forward kinematics at the physical-neutral HOME gives
-    # 0.296534095899190 m.
+    # 0.293979210265615 m (recomputed after reverting the same-day "upright
+    # centered" HOME experiment -- see microban_constants.py's own comment).
     #
     # A previous version of this constant (0.260) was deliberately LOWERED from this
     # same theoretical value to match what an earlier, imperfect policy happened to
@@ -366,7 +367,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # upright-error metric, which a seated trunk can also satisfy) doesn't
     # distinguish from standing — rather than fully extending its legs. Restored to
     # the true kinematic value so seated no longer satisfies the target.
-    HEAD_STANDING_HEIGHT = 0.296534095899190
+    HEAD_STANDING_HEIGHT = 0.293979210265615
     # Despite the name, _head_height (mdp.py) no longer reads the actual "head" body
     # through this — it only uses .name to resolve the robot entity, then computes a
     # virtual point above the TRUNK's own center of mass/orientation (fixed offset,
