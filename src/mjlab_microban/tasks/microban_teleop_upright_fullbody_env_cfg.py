@@ -16,10 +16,14 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
     MICROBAN_TELEOP_FINAL_TRANSLATION_SIGNED_AXIS_RANGES,
     MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
+    MICROBAN_TELEOP_HAND_TRACKING_STD_M,
     MICROBAN_TELEOP_ISOLATED_AXIS_PROBABILITIES,
     MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S,
+    MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
+    _set_hmd_neck_neutral_probability,
     _set_push_velocity_range,
     _set_teleop_locomotion_stage,
+    set_stepping_parameters,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     normalized_target_clip_excess_l1_sum,
@@ -201,15 +205,136 @@ def make_microban_teleop_upright_fullbody_env_cfg(
                 angular_tracking_std=MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S,
             ),
         }
-        stages.insert(
-            split_index + 1,
+        # Splitting the bundled step-3000 stage stopped the earlier unbounded
+        # action-std runaway (see the raw target-clip-excess fix), but a
+        # rendered play video of the completed crouched-HOME run showed the
+        # robot still falling repeatedly, and log forensics found the
+        # instant-full-strength push at step 4000 alone -- even split off
+        # from the envelope change -- causes a durable ~3-4x regression that
+        # the rest of training never recovers from: fell_over jumps from
+        # 2.37/iter (the best point in the whole run, right before 4000) to
+        # 16-21/iter within 100 iterations and stays in the 11-15 range for
+        # the remaining ~10,000 iterations, with no further trend. Ramp the
+        # push magnitude in three steps instead of one jump, reaching the
+        # same final +-0.5 m/s by step 5400 (still well before the next
+        # base-curriculum stage at 6000).
+        def _insert_stage_sorted(stage: dict) -> None:
+            """Insert a stage keyed by its own step, keeping steps sorted.
+
+            The base list already has its own stages interleaved between the
+            step values this task overrides (e.g. "final pure-yaw isolated
+            axes" at 4500 sits between this task's pushes-ramp steps at 4000
+            and 4700/5400) -- inserting at a fixed offset from an earlier
+            index silently breaks the "steps strictly increasing" contract
+            ResumeSafeStepBasedStagedCurriculum enforces. Insert by value
+            instead.
+            """
+
+            index = next(
+                (i for i, s in enumerate(stages) if s["step"] > stage["step"]),
+                len(stages),
+            )
+            stages.insert(index, stage)
+
+        _insert_stage_sorted(
             {
-                "name": "restore pushes at the formal locomotion gate",
+                "name": "restore pushes at the formal locomotion gate (1 of 3)",
                 "step": 4000 * 24,
+                "apply": lambda env: _set_push_velocity_range(
+                    env, x=(-0.15, 0.15), y=(-0.15, 0.15)
+                ),
+            }
+        )
+        _insert_stage_sorted(
+            {
+                "name": "restore pushes at the formal locomotion gate (2 of 3)",
+                "step": 4700 * 24,
+                "apply": lambda env: _set_push_velocity_range(
+                    env, x=(-0.3, 0.3), y=(-0.3, 0.3)
+                ),
+            }
+        )
+        _insert_stage_sorted(
+            {
+                "name": "restore pushes at the formal locomotion gate (3 of 3)",
+                "step": 5400 * 24,
                 "apply": lambda env: _set_push_velocity_range(
                     env, x=(-0.5, 0.5), y=(-0.5, 0.5)
                 ),
-            },
+            }
+        )
+
+        # The shared base curriculum's step-7000 stage ("enable moving-HMD,
+        # stationary no-step guard, and broad hand tracking") bundles three
+        # more escalations in one atomic apply(): HMD neck motion turning on
+        # (neutral_probability 1.0->0.2), hand-target tracking activating
+        # (reward weight 0->1.0, command rel_active 0->0.7), and the
+        # no-stepping penalty activating (weight 0->-1.0). Log forensics on
+        # the completed crouched-HOME run found this produced the single
+        # worst fall-rate spike in the entire 15,000-iteration run (fell_over
+        # 12.9->28.6/iter within 100 iterations, worse than the push shock
+        # above), the same bundling anti-pattern already fixed once for the
+        # step-3000/4000 stage. Replace it with a task-local, three-step
+        # split: hand tracking alone, then HMD motion ramped in two steps,
+        # then the no-stepping penalty last, all before the next base stage
+        # at 8500.
+        hmd_split_index = next(
+            (
+                index
+                for index, stage in enumerate(stages)
+                if stage["step"] == 7000 * 24
+            ),
+            None,
+        )
+        if hmd_split_index is None:
+            raise ValueError(
+                "Upright full-body curriculum split target (step 7000) not found"
+            )
+        stages[hmd_split_index] = {
+            "name": "enable broad hand tracking (1 of 3)",
+            "step": 7000 * 24,
+            "apply": lambda env: (
+                env.reward_manager.get_term_cfg("hand_target_tracking").__setattr__(
+                    "weight", 1.0
+                ),
+                env.reward_manager.get_term_cfg("hand_target_tracking").params.__setitem__(
+                    "std", MICROBAN_TELEOP_HAND_TRACKING_STD_M
+                ),
+                env.command_manager.get_term_cfg("hand_target").__setattr__(
+                    "rel_active", 0.7
+                ),
+            ),
+        }
+        _insert_stage_sorted(
+            {
+                "name": "ramp moving-HMD toward final probability (2 of 3)",
+                "step": 7500 * 24,
+                "apply": lambda env: _set_hmd_neck_neutral_probability(
+                    env, neutral_probability=0.6
+                ),
+            }
+        )
+        _insert_stage_sorted(
+            {
+                "name": (
+                    "reach final moving-HMD probability and enable stationary "
+                    "no-step guard (3 of 3)"
+                ),
+                "step": 8000 * 24,
+                "apply": lambda env: (
+                    _set_hmd_neck_neutral_probability(
+                        env,
+                        neutral_probability=(
+                            MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY
+                        ),
+                    ),
+                    set_stepping_parameters(
+                        env,
+                        air_time_weight=3.0,
+                        no_stepping_penalty_weight=-1.0,
+                    ),
+                ),
+            }
         )
     return cfg
 
