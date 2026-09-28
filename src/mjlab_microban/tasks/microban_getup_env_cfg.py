@@ -58,6 +58,7 @@ from mjlab_microban.tasks.mdp import (
     home_pose_reward,
     hold_airborne,
     standing_bonus,
+    standing_stability_reward,
     on_feet_reward,
     standing_torque_penalty,
     home_stillness_reward,
@@ -541,6 +542,28 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "height_threshold": HEAD_STANDING_THRESHOLD,
             "head_asset_cfg": HEAD_ASSET_CFG,
             "asset_cfg": SceneEntityCfg("robot", actuator_names=(dofs_filter,)),
+        },
+    )
+
+    # New term, added after surveying HoST/FRASA/HumanUP specifically for the
+    # "reaches standing height but falls right back down" failure mode (see
+    # standing_stability_reward's own docstring): HoST names this exact
+    # failure and fixes it with a post-standing reward on measured trunk
+    # velocity, distinct from standing_bonus's height-only sustain signal.
+    # Weight 15.0: same order of magnitude as standing_bonus (20.0), on the
+    # same 0-1-ish per-step scale and the same is_standing gate -- meant to
+    # matter as much as "stay tall" once standing, not as an afterthought.
+    # Not curriculum-ramped (unlike the pose-matching terms below): it's
+    # fully gated off during the ascent itself, so it can't compete with
+    # "learn to stand at all" the way full-strength pose-matching did.
+    cfg.rewards["standing_stability"] = RewardTermCfg(
+        func=standing_stability_reward,
+        weight=15.0,
+        params={
+            "height_threshold": HEAD_STANDING_THRESHOLD,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "lin_vel_std": 0.8,
+            "ang_vel_std": 3.0,
         },
     )
 

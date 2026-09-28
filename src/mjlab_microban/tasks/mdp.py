@@ -851,6 +851,50 @@ def standing_torque_penalty(
     return torch.where(is_standing, total + peak, torch.zeros_like(total))
 
 
+def standing_stability_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    lin_vel_std: float,
+    ang_vel_std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward LOW measured trunk linear+angular velocity, but only once standing.
+
+    HoST (arXiv:2502.08378) names this exact failure mode directly: a policy
+    that reaches standing height via fast/ballistic motion, with nothing
+    penalizing HOW it arrived, is still carrying real momentum right at the
+    height threshold and falls back over almost immediately after -- their
+    own ablation shows this specific failure (reach height, don't sustain it)
+    is what a dedicated post-standing "arrive and stay calm" term fixes,
+    distinct from a height-based sustain bonus like standing_bonus (which
+    only cares THAT height is maintained, not how calmly it was reached).
+    Nothing else in this reward set penalizes MEASURED (not commanded-target)
+    trunk velocity: action_rate_l2/home_stillness both act on the commanded
+    target, which can already be smooth while the actual body is still
+    rocking or mid-fall.
+
+    Measured directly (16-env rollout, iteration 10500 of a from-scratch
+    run): mean max head height 124% of target_height (genuine overshoot,
+    real upward momentum still to bleed off at the moment of crossing) but
+    only 1/16 envs still standing a second later -- exactly HoST's diagnosed
+    shape. lin_vel_std/ang_vel_std are a reasoned starting guess (this
+    robot's scale, not yet a measured calibration the way most other
+    thresholds in this file are) -- watch whether this saturates near 0 (too
+    strict, no gradient) or near 1 (too loose, no signal) on the first run
+    and retune from there.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+    is_standing = height > height_threshold
+    lin_speed = torch.linalg.norm(asset.data.root_com_lin_vel_w, dim=-1)
+    ang_speed = torch.linalg.norm(asset.data.root_com_ang_vel_w, dim=-1)
+    stability = torch.exp(-((lin_speed / lin_vel_std) ** 2)) * torch.exp(
+        -((ang_speed / ang_vel_std) ** 2)
+    )
+    return torch.where(is_standing, stability, torch.zeros_like(stability))
+
+
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,
