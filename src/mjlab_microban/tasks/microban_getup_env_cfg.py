@@ -992,14 +992,18 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     # earlier in this reward set's history.
                     "name": "enable home stillness",
                     "reward_term_name": ["standing_pose", "hip_roll_pose"],
-                    # Doubled to 240.0 alongside standing_pose's own weight
-                    # doubling (240.0 -> 480.0) to keep gating on roughly the
-                    # same relative "how converged" bar, not a now-trivially-
-                    # already-exceeded absolute number. Same threshold reused
-                    # for hip_roll_pose (untested at this exact value for that
-                    # term specifically, but same weight scale so a reasonable
-                    # starting assumption).
-                    "threshold": 240.0,
+                    # 240.0 (half of standing_pose's final 480.0 weight, the
+                    # same "half your own max" heuristic used to pick it
+                    # historically) never reaches: measured directly (current
+                    # multi-critic + lowered-height-target run) that
+                    # standing_pose/hip_roll_pose hover at 16-60 with only
+                    # occasional peaks near 55-60, nowhere near 240, matching
+                    # the same stale-threshold-after-a-weight-change pattern
+                    # already found and fixed for pose_curriculum's own stage
+                    # 1 (see its threshold's comment). Lowered to 30,
+                    # comfortably inside the observed peaks, so home_stillness
+                    # (still fully OFF otherwise) gets a chance to help.
+                    "threshold": 30.0,
                     # 50.0 -> 100.0: doubled per explicit request to push harder
                     # on reducing velocity/trembling once standing.
                     "apply": lambda env: env.reward_manager.get_term_cfg("home_stillness").__setattr__(
