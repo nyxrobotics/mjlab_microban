@@ -28,7 +28,7 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
-from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp import MotionCommandCfg, bad_anchor_pos
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
@@ -396,8 +396,24 @@ def make_microban_tracking_env_cfg(
     # Final (deployment/eval) position tolerances. Training starts far looser
     # (see the threshold curriculum below) and tightens to exactly these
     # values, so play mode and the end of a training run share one number.
+    #
+    # anchor_pos uses the FULL 3D distance (bad_anchor_pos), not the upstream
+    # default's Z-only variant (bad_anchor_pos_z_only). A from-scratch run
+    # under the Z-only check converged to a frozen, non-translating pose: the
+    # robot held a plausible relative limb shape (motion_body_pos/ori, weight
+    # 1.0 each) and matched the reference's own gentle velocity (motion_body_
+    # lin_vel/ang_vel, weight 1.0 each, easily satisfied since the reference
+    # itself moves at ~0.08 m/s) indefinitely without ever terminating, because
+    # nothing checked whether the root was still horizontally keeping up with
+    # the reference -- only its height was checked. The lower-weighted global
+    # root position/orientation reward (0.5 each) decayed toward its exp-bound
+    # floor as the gap grew, but that capped, bounded cost was cheaper than
+    # risking termination by actually attempting to walk. Checking the full
+    # 3D anchor distance closes this: a frozen robot now actually terminates
+    # once its root falls behind the reference's own translation.
     MICROBAN_TRACKING_FINAL_ANCHOR_POS_THRESHOLD_M = 0.08
     MICROBAN_TRACKING_FINAL_EE_BODY_POS_THRESHOLD_M = 0.08
+    cfg.terminations["anchor_pos"].func = bad_anchor_pos
     cfg.terminations["anchor_pos"].params["threshold"] = (
         MICROBAN_TRACKING_FINAL_ANCHOR_POS_THRESHOLD_M
     )
