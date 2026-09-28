@@ -15,6 +15,19 @@ Keep the existing production branch and its checkpoints/artifacts for the
 currently deployed robot.
 Do not resume any old-HOME checkpoint or relabel an old ONNX file.
 
+### Foot-contact correction (2026-09-28)
+
+Earlier runs on this branch used a collision-name expression that missed the
+twelve `left/right_foot_collision_[1-6]` boxes. Those boxes therefore had
+`condim=1` instead of the intended frictional `condim=3`. The expression is
+corrected in `microban_constants.py`; all twelve boxes now compile with
+`condim=3` and priority 1. Checkpoints saved before this correction, including
+the `2026-09-27_18-18-25_centered_home_v4_legacy_walk_15000` run and its
+`2026-09-27_23-51-48_centered_home_v4_legacy_walk_resume_30000` continuation,
+were trained under the earlier contact model. Do not compare or resume them as
+if they had used the corrected contact model; start a fresh run for a controlled
+HOME comparison.
+
 ### How the HOME pose was chosen
 
 The calculation uses `src/mjlab_microban/robot/microban/robot.xml`, including
