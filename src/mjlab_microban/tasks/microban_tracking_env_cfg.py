@@ -37,7 +37,10 @@ from mjlab_microban.tasks.microban_policy_export import (
     guarded_teleop_actor_raw_bounds,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import ResumeSafeStepBasedStagedCurriculum
-from mjlab_microban.tasks.microban_tracking_mdp import controlled_motion_command
+from mjlab_microban.tasks.microban_tracking_mdp import (
+    bad_anchor_ori_full,
+    controlled_motion_command,
+)
 
 # Stable model/export contracts.  Retargeting must emit these exact orders.
 MICROBAN_JOINT_NAMES: tuple[str, ...] = (
@@ -423,6 +426,32 @@ def make_microban_tracking_env_cfg(
             "body_names": MICROBAN_END_EFFECTOR_BODY_NAMES,
         }
     )
+
+    # anchor_ori's upstream bad_anchor_ori compares only the Z component of
+    # each side's rotated gravity vector. Gravity is parallel to the world
+    # yaw axis, so ANY yaw rotation leaves the whole projected-gravity vector
+    # -- not just its Z component -- unchanged: that check is mathematically
+    # yaw-invariant, not just empirically loose. A policy can face any
+    # heading, including 180 degrees backwards, or spin freely, without ever
+    # triggering it, as long as its lean magnitude matches the reference.
+    # Every "relative" reward term (motion_body_pos/ori) is independently
+    # yaw-corrected by construction, and the velocity terms only see
+    # instantaneous rate, so nothing else penalizes a persistent wrong
+    # heading either, other than the capped, exp-bounded, never-retuned
+    # motion_global_root_ori reward (still left at the generic default
+    # std=0.4, unlike every position/velocity std here). Switched to the
+    # full geodesic rotation angle (bad_anchor_ori_full, quat_error_
+    # magnitude) so tilt and yaw are both enforced. Threshold derived to
+    # match the old check's tilt strictness for a pure-tilt (no yaw) case:
+    # the old threshold=0.8 on a pure lean of angle theta from vertical
+    # satisfies 1 - cos(theta) = 0.8, i.e. theta = acos(0.2) ~= 78.5 degrees;
+    # using that same angle as a full rotation-angle bound keeps pure-tilt
+    # behavior unchanged while now also bounding yaw to the same margin.
+    cfg.terminations["anchor_ori"].func = bad_anchor_ori_full
+    cfg.terminations["anchor_ori"].params = {
+        "command_name": cfg.terminations["anchor_ori"].params["command_name"],
+        "threshold": math.acos(0.2),
+    }
 
     cfg.viewer.body_name = "trunk"
     cfg.viewer.distance = 1.2

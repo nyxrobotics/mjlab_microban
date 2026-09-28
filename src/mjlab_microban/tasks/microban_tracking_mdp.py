@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.tracking.mdp import MotionCommand
+from mjlab.utils.lab_api.math import quat_error_magnitude
 from rsl_rl.algorithms import PPO
 
 from mjlab_microban.tasks.microban_teleop_mdp import (
@@ -135,6 +136,35 @@ def motion_anchor_planar_position_error_l1(
     command = cast(MotionCommand, env.command_manager.get_term(command_name))
     error_xy = command.anchor_pos_w[:, :2] - command.robot_anchor_pos_w[:, :2]
     return torch.abs(error_xy).sum(dim=-1)
+
+
+def bad_anchor_ori_full(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    threshold: float,
+) -> torch.Tensor:
+    """Reject full 3-DOF anchor orientation error, not just tilt.
+
+    Upstream's bad_anchor_ori compares only the Z component of each
+    quaternion's rotated gravity vector.  Gravity is parallel to the world
+    yaw axis, so a yaw rotation leaves the ENTIRE projected-gravity vector
+    unchanged, not just its Z component: that check is mathematically
+    yaw-invariant.  A policy could face 180 degrees the wrong way, or spin
+    freely, and never trigger it, as long as its lean magnitude matched the
+    reference.  Every "relative" reward term is independently yaw-corrected
+    by construction (see commands.py's use of yaw_quat() in
+    update_relative_body_poses), and the velocity reward terms only see
+    instantaneous rate, not accumulated offset -- so nothing else penalizes
+    a persistent wrong heading either, other than the capped, exp-bounded
+    motion_global_root_ori reward.
+
+    Uses the full geodesic rotation angle (quat_error_magnitude) instead,
+    catching tilt and yaw together.
+    """
+
+    command = cast(MotionCommand, env.command_manager.get_term(command_name))
+    error = quat_error_magnitude(command.anchor_quat_w, command.robot_anchor_quat_w)
+    return error > threshold
 
 
 def motion_anchor_planar_velocity_error_l1(
