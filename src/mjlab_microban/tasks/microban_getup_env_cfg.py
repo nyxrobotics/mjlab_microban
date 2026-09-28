@@ -357,18 +357,31 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # 0.293979210265615 m (recomputed after reverting the same-day "upright
     # centered" HOME experiment -- see microban_constants.py's own comment).
     #
-    # A previous version of this constant (0.260) was deliberately LOWERED from this
-    # same theoretical value to match what an earlier, imperfect policy happened to
-    # converge to in practice ("no point rewarding height the motion doesn't
-    # actually reach") — but that reasoning is circular: capping the target at
-    # whatever height the policy already reaches guarantees the policy never has to
-    # reach any higher. Confirmed as a real cause (not just theoretically) by
-    # watching a live rollout of a training-in-progress checkpoint: it settles into
-    # a stable SEATED posture — which a 0.260m head-height bar (and the
-    # upright-error metric, which a seated trunk can also satisfy) doesn't
-    # distinguish from standing — rather than fully extending its legs. Restored to
-    # the true kinematic value so seated no longer satisfies the target.
-    HEAD_STANDING_HEIGHT = 0.293979210265615
+    # Reverted to 0.260 (an earlier, lower value) after the true kinematic
+    # 0.294ish target measurably failed to sustain across FOUR independent
+    # fixes tried against it (action_rate_l2 weight, HOME_FRAME revert,
+    # standing_stability_reward, multi-critic PPO, pose_curriculum threshold)
+    # -- final-episode head height stuck at 0.15-0.20m (53-69% of 0.294)
+    # regardless, with a rollout confirming the actual final pose isn't even
+    # a coherent seated fallback, just chaotic joint-limit-slamming (see
+    # pose_curriculum's own comment). 0.260 has real prior evidence behind it
+    # specifically: this task's own documented best-ever result (94.5%
+    # standing success, see standing_pose's comment on "this task's own
+    # prior documented baseline") was achieved AT this height, before it was
+    # raised to the "true" value.
+    #
+    # The reason it was raised before was a genuine, confirmed failure mode:
+    # at 0.260, a policy found a stable SEATED posture that a 0.260m bar (and
+    # a since-REMOVED separate upright-error check a seated trunk could also
+    # satisfy) didn't distinguish from standing. That specific loophole looks
+    # substantially narrower now: the upright check is gone entirely (see
+    # this file's own comment on deleting cfg.rewards["upright"]), and
+    # on_feet_reward/hands_released_reward (both added after that regression)
+    # separately require foot contact and released hands, neither of which
+    # a seated posture satisfies. Not proven safe against every possible new
+    # exploit at this lower bar -- watch specifically for a return to a
+    # seated-like final pose, not just the height number, on the next run.
+    HEAD_STANDING_HEIGHT = 0.260
     # Despite the name, _head_height (mdp.py) no longer reads the actual "head" body
     # through this — it only uses .name to resolve the robot entity, then computes a
     # virtual point above the TRUNK's own center of mass/orientation (fixed offset,
