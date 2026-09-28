@@ -915,21 +915,33 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                     # standing_pose starts at a fraction of its final weight
                     # (see that reward term's own comment) so full-strength
                     # pose-matching pressure doesn't compete with just learning
-                    # to reliably stand at all in the first place. standing_bonus
-                    # (max 5.0) plateaued at 0.03-0.96 for the full 20000
-                    # iterations of an all-weights-final run — 2.0 is
-                    # comfortably past that observed ceiling, so reaching it
-                    # actually means "reliably standing", not just noise.
+                    # to reliably stand at all in the first place.
                     "name": "ramp up pose matching",
                     "reward_term_name": "standing_bonus",
-                    # Briefly lowered to 0.1 while head_height/head_height_sq
-                    # were quadrupled (standing_bonus measured stuck at 0.02-0.08
-                    # for 12500 iterations under that config, never breaking
-                    # out) — restored to 2.0 now that head_height/head_height_sq
-                    # are reverted to their original, validated weights (see
-                    # those terms' own comments): every earlier run at THIS
-                    # weight reliably reached 2.0 within ~1000-1600 iterations.
-                    "threshold": 2.0,
+                    # 2.0 (this threshold's long-standing value) was calibrated
+                    # when standing_bonus's own weight was 5.0 -- "reliably
+                    # reached 2.0" there meant a raw (pre-weight) achievement
+                    # of >=0.4. Weight is now 20.0 (see that reward's own
+                    # comment, raised for the standing_stability_reward
+                    # addition), so the SAME raw 0.4 achievement would log as
+                    # 8.0, not 2.0 -- but measured directly that this never
+                    # happens: standing_bonus has hovered at 0.6-1.8 (raw
+                    # 0.03-0.09) for 5600+ iterations of the current
+                    # multi-critic run, well under even the old weight's raw
+                    # bar, and pose_curriculum has never advanced past stage 0
+                    # as a result -- confirmed via a rollout that the final
+                    # pose at episode end is NOT a coherent stand or even a
+                    # consistent seated fallback, but wildly asymmetric leg
+                    # joints pinned at their own clip limits (hip_pitch
+                    # +-81deg, knee -36/+126deg, ankle_pitch -83.8/+28.7deg —
+                    # exactly MICROBAN_BODY_JOINT_SOFT_LIMITS' own bounds),
+                    # different every env: nothing has ever pulled joints back
+                    # toward a sane home configuration because this gate never
+                    # opened. Lowered to 1.0, comfortably inside the observed
+                    # 0.6-1.8 range, so pose-matching gets a chance to correct
+                    # this rather than waiting on a bar the current reward mix
+                    # doesn't appear to clear.
+                    "threshold": 1.0,
                     # standing_pose weight history, each measured directly
                     # before moving on (hip_pose and, later, limb_symmetry/
                     # foot_flat were ramped alongside it at various points — both
