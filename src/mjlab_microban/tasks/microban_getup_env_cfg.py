@@ -1011,6 +1011,15 @@ MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(
         obs_normalization=True,
     ),
     algorithm=RslRlPpoAlgorithmCfg(
+        # MultiCriticPPO (not the default "PPO" string): see that module's own
+        # docstring. Added after HoST/FRASA/HumanUP survey specifically for
+        # the reach-but-don't-sustain failure mode measured on this task
+        # (max height 113-125% of target, but only 1-3/16 rollout envs still
+        # standing at episode end, unmoved across ~10000+ iterations and
+        # several single-critic reward-weight experiments) -- HoST's own
+        # ablation shows a single critic across many competing reward terms
+        # is a plausible root cause, not any one term's weight.
+        class_name="mjlab_microban.tasks.microban_getup_multicritic:MultiCriticPPO",
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
