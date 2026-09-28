@@ -1,5 +1,8 @@
 # Static HOME diagnostic
 
+For a continuous, single-run **learned** HOME experiment with all 21 joints
+perturbed, see [Learning a disturbance-resistant HOME](learned_home.md).
+
 `optimize_static_home.py` measures how a MuJoCo robot holds symmetric hip and
 ankle pitch HOME candidates under repeatable joint and body perturbations. It
 uses a fixed 21-joint position target, not the walking policy. The script does
