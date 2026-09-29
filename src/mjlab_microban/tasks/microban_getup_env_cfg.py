@@ -153,7 +153,11 @@ SIM_CFG = SimulationCfg(
 )
 
 
-def make_microban_getup_env_cfg(play: bool = False, reward_set: str = "v42") -> ManagerBasedRlEnvCfg:
+def make_microban_getup_env_cfg(
+    play: bool = False,
+    reward_set: str = "v42",
+    imu_delay_max_lag: int = 0,
+) -> ManagerBasedRlEnvCfg:
     if reward_set not in GETUP_REWARD_SETS:
         raise ValueError(f"Unknown get-up reward set {reward_set!r}; expected one of {GETUP_REWARD_SETS}")
     cfg = make_velocity_env_cfg()
@@ -232,10 +236,18 @@ def make_microban_getup_env_cfg(play: bool = False, reward_set: str = "v42") -> 
     del cfg.observations["critic"].terms["foot_air_time"]
     del cfg.observations["critic"].terms["foot_contact"]
     del cfg.observations["critic"].terms["foot_contact_forces"]
-    # IMU terms keep the base config's noise (gyro +-0.2, gravity +-0.05) and
-    # no delay, as every standing policy was trained. The walking task's
-    # tighter noise plus 0-3 tick delay (0e33eb3) is not used here: with
-    # it the robot's own get-up policy dropped from 63/64 to 29/64.
+    # IMU terms keep the base config's noise (gyro +-0.2, gravity +-0.05).
+    # imu_delay_max_lag > 0 adds the walking task's simulated IMU latency
+    # (0..N policy ticks, resampled every 64 steps). The first standing v4
+    # policy, trained without it, dropped from 53/54 to 34/62 fallen-start
+    # stands under 0-3 ticks, so the robot-bound policy is fine-tuned with it.
+    if imu_delay_max_lag:
+        for name in ("base_ang_vel", "projected_gravity"):
+            term = deepcopy(cfg.observations["actor"].terms[name])
+            term.delay_min_lag = 0
+            term.delay_max_lag = imu_delay_max_lag
+            term.delay_update_period = 64
+            cfg.observations["actor"].terms[name] = term
     cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
         func=velocity_mdp.joint_pos_rel,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},

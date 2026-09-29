@@ -103,6 +103,16 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
+# Redesign reward set plus the walking task's 0-3 tick simulated IMU latency,
+# for fine-tuning a standing policy toward the robot.
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Redesign-ImuDelay",
+    env_cfg=make_microban_getup_env_cfg(reward_set="redesign", imu_delay_max_lag=3),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign", imu_delay_max_lag=3),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+
 register_mjlab_task(
     task_id="Mjlab-Tracking-Microban",
     env_cfg=make_microban_tracking_env_cfg(),

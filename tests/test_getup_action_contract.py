@@ -50,6 +50,16 @@ class GetupActionObservationContractTest(unittest.TestCase):
             for name in ("base_ang_vel", "projected_gravity"):
                 self.assertEqual(cfg.observations["actor"].terms[name].delay_max_lag, 0)
 
+    def test_imu_delay_is_opt_in_and_actor_only(self) -> None:
+        cfg = make_microban_getup_env_cfg(reward_set="redesign", imu_delay_max_lag=3)
+        for name in ("base_ang_vel", "projected_gravity"):
+            self.assertEqual(cfg.observations["actor"].terms[name].delay_max_lag, 3)
+            self.assertEqual(cfg.observations["critic"].terms[name].delay_max_lag, 0)
+        # The shared default term config must not be mutated for other tasks.
+        self.assertEqual(
+            make_microban_getup_env_cfg().observations["actor"].terms["base_ang_vel"].delay_max_lag, 0
+        )
+
     def test_unknown_reward_set_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             make_microban_getup_env_cfg(reward_set="nope")
