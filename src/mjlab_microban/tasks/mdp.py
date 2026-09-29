@@ -895,6 +895,49 @@ def standing_stability_reward(
     return torch.where(is_standing, stability, torch.zeros_like(stability))
 
 
+def upright_balance_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    tilt_std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward LOW trunk tilt (from projected gravity), but only once standing.
+
+    Added after a direct sanity-check experiment: start the robot EXACTLY at
+    its true standing pose and command it to hold EXACTLY that fixed joint
+    configuration (no learned policy, no correction) for several seconds.
+    Result: holds for ~1s (tilt drifting slowly, ~0.1deg -> ~3deg, joint
+    tracking error staying under a few degrees -- not an actuator-gain
+    problem), then catastrophically topples (47deg tilt by 2s, 92deg -- fully
+    fallen -- by 4s). Standing upright is an inherently unstable equilibrium
+    here, like any real inverted-pendulum-style biped: it requires
+    CONTINUOUS ACTIVE CORRECTION, not just reaching/holding a fixed target
+    pose. Neither standing_bonus (height) nor standing_stability_reward
+    (velocity) catches the early drift phase: in that same experiment, head
+    height barely moved until tilt already exceeded ~40 degrees -- height is
+    a real but LATE, insensitive proxy for balance, and velocity picks up
+    only once already properly falling. Nothing else in this reward set
+    rewards low tilt as a dense, continuously-available signal from the
+    start of the standing phase.
+
+    Reuses projected_gravity_b (the same quantity the actor already
+    observes) rather than introducing a separate tilt computation: at
+    perfectly upright this is (0, 0, -1), so its horizontal-plane norm is
+    exactly 0 and grows smoothly with tilt angle (sin of the tilt angle, for
+    small-to-moderate tilt) -- the same signal the policy could in principle
+    already use to self-correct, just not yet rewarded for acting on.
+    tilt_std is a reasoned starting guess (not yet a measured calibration):
+    watch for saturation near 0 or 1 on the first run.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    height = _head_height(env, head_asset_cfg)
+    is_standing = height > height_threshold
+    tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+    balance = torch.exp(-((tilt / tilt_std) ** 2))
+    return torch.where(is_standing, balance, torch.zeros_like(balance))
+
+
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,

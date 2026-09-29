@@ -59,6 +59,7 @@ from mjlab_microban.tasks.mdp import (
     hold_airborne,
     standing_bonus,
     standing_stability_reward,
+    upright_balance_reward,
     on_feet_reward,
     standing_torque_penalty,
     home_stillness_reward,
@@ -577,6 +578,25 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "head_asset_cfg": HEAD_ASSET_CFG,
             "lin_vel_std": 0.8,
             "ang_vel_std": 3.0,
+        },
+    )
+
+    # New term, added after a direct sanity-check experiment (see
+    # upright_balance_reward's own docstring): holding the EXACT correct
+    # standing joint targets, with no learned policy at all, still topples
+    # within ~1-2 seconds -- standing upright is an inherently unstable
+    # equilibrium here that needs continuous active correction, and nothing
+    # else in this reward set gives that a dense, EARLY signal (head height
+    # barely drops until tilt is already 40+ degrees, past recoverable).
+    # Weight 15.0, matching standing_stability's own order of magnitude and
+    # gate.
+    cfg.rewards["upright_balance"] = RewardTermCfg(
+        func=upright_balance_reward,
+        weight=15.0,
+        params={
+            "height_threshold": HEAD_STANDING_THRESHOLD,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "tilt_std": 0.15,
         },
     )
 
