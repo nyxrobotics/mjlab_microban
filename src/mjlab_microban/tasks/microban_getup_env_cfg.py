@@ -282,10 +282,24 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # standing) already lives inside standing_bonus, gated to only apply there.
     del cfg.rewards["upright"]
 
-    cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk",)
-    cfg.rewards["body_ang_vel"].weight = -0.05
+    # Dropped for the same reason as "upright" just above, found while
+    # auditing for other unnecessary/entangled reward terms (permission to
+    # freely delete/change granted explicitly): body_ang_vel ran ungated for
+    # the whole episode too, at a small but real, trunk-rotation-penalizing
+    # weight -- exactly what the recovery motion itself needs plenty of.
+    # Measured (2026-09-29 balance_recovery run) contributing a small,
+    # steady -0.02 to -0.03 per step throughout, a persistent (if mild) drag
+    # on the same motion "upright" was already found to fight. Now that
+    # upright_balance_reward/balance_recovery_reward exist and are correctly
+    # gated to only the post-standing phase, this always-on version isn't
+    # needed for post-standing stability either.
+    del cfg.rewards["body_ang_vel"]
 
-    cfg.rewards["angular_momentum"].weight = -0.01
+    # Dropped too: measured contributing exactly -0.0000 every single step of
+    # the same run above -- this term does nothing at its current weight
+    # (-0.01, the base config's own default), on this task, at this scale.
+    # Not a cautious "maybe it matters a little" case -- genuinely inert.
+    del cfg.rewards["angular_momentum"]
 
     # Penalize changes in the actual actuator target rather than changes in the
     # raw network output (see target_rate_l2's own docstring for why).

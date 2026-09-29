@@ -45,8 +45,6 @@ GETUP_REWARD_GROUPS: dict[str, tuple[str, ...]] = {
         "self_collisions",
         "raw_target_clip_excess",
         "hands_released",
-        "body_ang_vel",
-        "angular_momentum",
     ),
     "regu": ("action_rate_l2", "joint_torques_l2"),
     "post": (
