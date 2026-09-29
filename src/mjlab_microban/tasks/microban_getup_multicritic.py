@@ -53,6 +53,7 @@ GETUP_REWARD_GROUPS: dict[str, tuple[str, ...]] = {
         "standing_bonus",
         "standing_stability",
         "upright_balance",
+        "balance_recovery",
         "standing_torque",
         "home_stillness",
         "standing_pose",

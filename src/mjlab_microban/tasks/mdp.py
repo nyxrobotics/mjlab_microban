@@ -938,6 +938,61 @@ def upright_balance_reward(
     return torch.where(is_standing, balance, torch.zeros_like(balance))
 
 
+class balance_recovery_reward:
+    """Reward DECREASING tilt (recovering toward upright), penalize tilt that's
+    GROWING -- directional, unlike upright_balance_reward (rewards low tilt
+    regardless of trend) or standing_stability_reward (rewards low angular
+    speed regardless of direction).
+
+    Surveyed further specifically for the "gates upright but doesn't
+    correct drift" gap upright_balance_reward alone doesn't close: a
+    push-recovery paper (arXiv:2104.14534, iCub whole-body push recovery,
+    reward included horizontal CoM velocity DIRECTED toward the support
+    center, not just low velocity) makes the point directly -- a robot
+    drifting steadily toward a fall at low angular speed scores identically
+    under a speed-only or tilt-magnitude-only reward to one holding still,
+    right up until it's moving fast enough for those to notice. That's
+    exactly the window the static-hold sanity check found nothing else
+    catches (tilt drifting slowly, 0.1deg -> 3deg over the first second,
+    before the sudden 2nd-second collapse). Rewarding the SIGN of tilt's own
+    change gives a gradient specifically in that early, still-correctable
+    window, independent of how fast or slow the drift currently is.
+
+    Implemented as tanh((previous tilt - current tilt) / delta_scale):
+    positive when shrinking, negative when growing, bounded to (-1, 1) so a
+    single-step physics glitch can't produce an outsized spike (matching
+    this reward set's general preference for bounded shapes). Caches only
+    the previous tilt (like target_rate_l2/home_stillness_reward cache
+    their own prior values) rather than being a plain function.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        asset_cfg = cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG)
+        asset: Entity = env.scene[asset_cfg.name]
+        self._prev_tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1).clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        height_threshold: float,
+        head_asset_cfg: SceneEntityCfg,
+        delta_scale: float,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        height = _head_height(env, head_asset_cfg)
+        is_standing = height > height_threshold
+        tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+        recovery = torch.tanh((self._prev_tilt - tilt) / delta_scale)
+        self._prev_tilt = tilt.clone()
+        return torch.where(is_standing, recovery, torch.zeros_like(recovery))
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        del env_ids  # A stale one-step delta right after a reset is a minor,
+        # brief inaccuracy, not worth the extra bookkeeping (matches
+        # target_rate_l2/home_stillness_reward's own reset() reasoning).
+
+
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,

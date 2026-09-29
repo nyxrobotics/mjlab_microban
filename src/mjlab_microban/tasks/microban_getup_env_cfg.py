@@ -60,6 +60,7 @@ from mjlab_microban.tasks.mdp import (
     standing_bonus,
     standing_stability_reward,
     upright_balance_reward,
+    balance_recovery_reward,
     on_feet_reward,
     standing_torque_penalty,
     home_stillness_reward,
@@ -608,6 +609,33 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # training actually is" mistake this file's own standing_pose
             # comment already describes once.
             "tilt_std": 0.3,
+        },
+    )
+
+    # New term, added after a broader literature search specifically on
+    # active balance/push-recovery RL (beyond HoST/FRASA/HumanUP, which are
+    # all about the get-up motion itself, not sustained balance per se) —
+    # arXiv:2104.14534 (iCub whole-body push recovery) rewards CoM velocity
+    # DIRECTED toward the support center, not just low velocity: a policy
+    # drifting steadily toward a fall at low angular speed scores identically
+    # to one holding still under standing_stability_reward (which only sees
+    # speed, not direction) or upright_balance_reward (which only sees
+    # current tilt, not its trend) -- exactly the slow-drift window (tilt
+    # 0.1deg -> 3deg over ~1s) the static-hold sanity check found nothing
+    # else catches. This rewards the SIGN of tilt's own change: shrinking is
+    # good, growing is bad, regardless of current magnitude or speed.
+    # Weight 15.0 matches the other post-standing balance terms' order of
+    # magnitude; delta_scale=0.02 is a reasoned guess from the sanity
+    # check's own measured drift rate, not yet a verified calibration --
+    # watch for tanh saturation (mostly +-1) or flatlining (mostly ~0) on
+    # the first run.
+    cfg.rewards["balance_recovery"] = RewardTermCfg(
+        func=balance_recovery_reward,
+        weight=15.0,
+        params={
+            "height_threshold": HEAD_STANDING_THRESHOLD,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "delta_scale": 0.02,
         },
     )
 
