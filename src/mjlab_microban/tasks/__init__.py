@@ -93,6 +93,16 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
+# Same v4 action contract, redesigned reward set (see
+# microban_getup_env_cfg._add_redesign_rewards).
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Redesign",
+    env_cfg=make_microban_getup_env_cfg(reward_set="redesign"),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign"),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+
 register_mjlab_task(
     task_id="Mjlab-Tracking-Microban",
     env_cfg=make_microban_tracking_env_cfg(),

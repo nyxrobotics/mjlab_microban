@@ -43,9 +43,6 @@ class GetupJointPositionAction(JointPositionAction):
         if set(neck_names) != set(GETUP_NECK_JOINT_NAMES):
             raise ValueError("Get-up action requires all three head/neck joints")
         self._neck_target_ids = torch.tensor(neck_ids, dtype=torch.long, device=self.device)
-        # The first policy observation after an episode reset has no previous
-        # policy action, even though the target state must begin at measured pose.
-        self._has_processed_action = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         super().reset(env_ids)
@@ -54,7 +51,6 @@ class GetupJointPositionAction(JointPositionAction):
         # Reset events have already written the randomized fallen joint state.
         # Seeding the target there avoids an instant jump to the default pose.
         self._processed_actions[env_ids] = self._entity.data.joint_pos[:, self._target_ids][env_ids]
-        self._has_processed_action[env_ids] = False
         self._hold_measured_neck(env_ids)
 
     def process_actions(self, actions: torch.Tensor) -> None:
@@ -62,7 +58,6 @@ class GetupJointPositionAction(JointPositionAction):
         # target clipping -- and nothing else. No rate limit: the real get-up
         # policy's own commanded target is written directly, every tick.
         super().process_actions(actions)
-        self._has_processed_action[:] = True
         self._hold_measured_neck(slice(None))
 
     def _hold_measured_neck(self, env_ids: torch.Tensor | slice) -> None:
@@ -75,16 +70,16 @@ class GetupJointPositionAction(JointPositionAction):
             measured, joint_ids=self._neck_target_ids, env_ids=setter_ids
         )
 
-    @property
-    def effective_previous_action(self) -> torch.Tensor:
-        """Post-clip target in default-relative policy coordinates."""
-        effective = (self._processed_actions - self.offset) / self.scale
-        return torch.where(self._has_processed_action, effective, torch.zeros_like(effective))
 
+def raw_getup_action(env, action_name: str = "joint_pos") -> torch.Tensor:
+    """Return the policy's own previous raw output (zero right after a reset).
 
-def effective_getup_action_after_target_clip(env, action_name: str = "joint_pos") -> torch.Tensor:
-    """Return the action that actually reached the actuator target pipeline."""
+    The v4 get-up contract observes this rather than the post-clip target.
+    Every policy that stood up (including the one run on the robot) was
+    trained observing its raw output; the post-clip variant never stood.
+    The robot reproduces it exactly: it is the ONNX model's own last output.
+    """
     action = env.action_manager.get_term(action_name)
     if not isinstance(action, GetupJointPositionAction):
         raise TypeError(f"{action_name!r} must be a get-up joint-position action")
-    return action.effective_previous_action
+    return action.raw_action

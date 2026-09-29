@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for get-up previous-action feedback."""
+"""Contract tests for the get-up v4 action and previous-action feedback."""
 
 from __future__ import annotations
 
@@ -18,25 +18,41 @@ import torch
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
     GetupJointPositionActionCfg,
-    effective_getup_action_after_target_clip,
+    raw_getup_action,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import (
+    GETUP_ACTION_CLIP,
+    GETUP_REWARD_SETS,
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
 
 
 class GetupActionObservationContractTest(unittest.TestCase):
-    def test_actor_and_critic_observe_effective_post_clip_action(self) -> None:
-        cfg = make_microban_getup_env_cfg()
+    def test_actor_and_critic_observe_raw_previous_action(self) -> None:
+        for reward_set in GETUP_REWARD_SETS:
+            cfg = make_microban_getup_env_cfg(reward_set=reward_set)
+            for group_name in ("actor", "critic"):
+                term = cfg.observations[group_name].terms["actions"]
+                self.assertIs(term.func, raw_getup_action)
+                self.assertEqual(term.params, {"action_name": "joint_pos"})
+                self.assertEqual(term.delay_max_lag, 0)
 
-        for group_name in ("actor", "critic"):
-            term = cfg.observations[group_name].terms["actions"]
-            self.assertIs(term.func, effective_getup_action_after_target_clip)
-            self.assertEqual(term.params, {"action_name": "joint_pos"})
+    def test_no_clip_excess_penalty_pushes_or_imu_delay(self) -> None:
+        # Every standing policy was trained without these (see the env
+        # module docstring); the v4 runner rejects the penalty outright.
+        for reward_set in GETUP_REWARD_SETS:
+            cfg = make_microban_getup_env_cfg(reward_set=reward_set)
+            self.assertNotIn("raw_target_clip_excess", cfg.rewards)
+            self.assertNotIn("push_robot", cfg.events)
+            for name in ("base_ang_vel", "projected_gravity"):
+                self.assertEqual(cfg.observations["actor"].terms[name].delay_max_lag, 0)
+
+    def test_unknown_reward_set_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            make_microban_getup_env_cfg(reward_set="nope")
 
     def test_current_clip_and_default_offset_are_runtime_reconstructible(self) -> None:
         cfg = make_microban_getup_env_cfg()
@@ -51,7 +67,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
         self.assertEqual(action_cfg.scale, 1.0)
         self.assertEqual(action_cfg.offset, 0.0)
         self.assertTrue(action_cfg.use_default_offset)
-        self.assertEqual(action_cfg.clip, dict(MICROBAN_BODY_JOINT_SOFT_LIMITS))
+        self.assertEqual(action_cfg.clip, dict(GETUP_ACTION_CLIP))
         self.assertIsInstance(action_cfg, GetupJointPositionActionCfg)
         self.assertFalse(hasattr(action_cfg, "max_target_speed_rad_s"))
 
@@ -83,7 +99,6 @@ class GetupActionObservationContractTest(unittest.TestCase):
         action._target_ids = torch.arange(default_pose.shape[-1])
         action._raw_actions = torch.zeros_like(raw)
         action._processed_actions = torch.zeros_like(raw)
-        action._has_processed_action = torch.zeros(1, 1, dtype=torch.bool)
         action._neck_target_ids = torch.arange(default_pose.shape[-1], measured_all.shape[-1])
         action._scale = action_cfg.scale
         # JointPositionAction replaces cfg.offset with default_joint_pos when
@@ -97,36 +112,27 @@ class GetupActionObservationContractTest(unittest.TestCase):
         # The first actor observation must have zero previous action, even
         # though process_actions hasn't run yet.
         action.reset()
-        torch.testing.assert_close(
-            effective_getup_action_after_target_clip(env), torch.zeros_like(raw)
-        )
+        torch.testing.assert_close(raw_getup_action(env), torch.zeros_like(raw))
         torch.testing.assert_close(target_all[:, -3:], measured_all[:, -3:])
         measured_all[:, -3:] += 0.05
         action.process_actions(raw)
         # Neck joints are held at whatever's currently measured, every tick.
         torch.testing.assert_close(target_all[:, -3:], measured_all[:, -3:])
 
-        # No slew: the observed target is exactly the clipped target, in the
-        # very same tick the raw action arrives.
+        # No slew: the target is the clipped absolute target in the very same
+        # tick, and the observation is the raw output itself, not the target.
         expected_target = torch.clamp(
             raw * action_cfg.scale + default_pose,
             min=lower,
             max=upper,
         )
-        expected_effective = (
-            expected_target - default_pose
-        ) / action_cfg.scale
-        effective = effective_getup_action_after_target_clip(env)
-        torch.testing.assert_close(effective, expected_effective)
-        runtime_target = default_pose + effective * action_cfg.scale
-        torch.testing.assert_close(runtime_target, expected_target)
+        torch.testing.assert_close(action._processed_actions, expected_target)
+        torch.testing.assert_close(raw_getup_action(env), raw)
         # raw spans [-4, 4], well past the +-1.57 clip, so this is a real check.
         self.assertTrue(bool(torch.any(raw.abs() > upper.abs()).item()))
 
         action.reset()
-        torch.testing.assert_close(
-            effective_getup_action_after_target_clip(env), torch.zeros_like(raw)
-        )
+        torch.testing.assert_close(raw_getup_action(env), torch.zeros_like(raw))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Export a newly trained Microban get-up checkpoint for the robot.
 
-Both paths must be explicit.  The checkpoint's v3 training marker and the
+Both paths must be explicit.  The checkpoint's v4 training marker and the
 exported ONNX normalizer are checked before an artifact is published.
 """
 
@@ -27,15 +27,18 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
+from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD
 from mjlab_microban.tasks.microban_getup_runner import (
     GETUP_ANGULAR_VELOCITY_FRAME,
+    GETUP_CONTRACT_VERSION,
     getup_home_pose,
     require_current_getup_home_pose,
 )
 
 TASK = "Mjlab-Getup-Microban"
-CONTRACT_VERSION = "v3"
+CONTRACT_VERSION = GETUP_CONTRACT_VERSION
+# The robot's getup.py feeds back the ONNX model's own last raw output.
+PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 OBSERVATION_TERMS = (
     "base_ang_vel",
     "projected_gravity",
@@ -45,9 +48,6 @@ OBSERVATION_TERMS = (
 )
 OBSERVATION_WIDTH = 60
 ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
-PREVIOUS_ACTION_START = OBSERVATION_WIDTH - ACTION_WIDTH
-_STATS_TOLERANCE_RAD = 0.05
-_RUNTIME_MAX_RAW_ACTION = 120.0
 
 
 def _sha256(path: Path) -> str:
@@ -59,7 +59,7 @@ def _sha256(path: Path) -> str:
 
 
 def _require_new_checkpoint(path: Path) -> str:
-    """Require a fresh v3 training checkpoint, not an old actor relabeled v3."""
+    """Require a fresh v4 training checkpoint, not an old actor relabeled v4."""
 
     before = _sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -69,7 +69,7 @@ def _require_new_checkpoint(path: Path) -> str:
         or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
     ):
         raise ValueError(
-            "Checkpoint lacks the get-up v3 / IMU-frame training marker; "
+            "Checkpoint lacks the get-up v4 / IMU-frame training marker; "
             "retrain from scratch with the current Mjlab-Getup-Microban task"
         )
     require_current_getup_home_pose(infos)
@@ -121,14 +121,7 @@ def _normalizer_arrays(model: onnx.ModelProto) -> tuple[np.ndarray, np.ndarray]:
     return mean[0], std[0]
 
 
-def _validate_onnx(
-    path: Path,
-    *,
-    feedback_lower: np.ndarray,
-    feedback_upper: np.ndarray,
-    default: np.ndarray,
-    scale: np.ndarray,
-) -> None:
+def _validate_onnx(path: Path) -> None:
     model = onnx.load(str(path))
     onnx.checker.check_model(model)
     for initializer in model.graph.initializer:
@@ -146,29 +139,13 @@ def _validate_onnx(
     ) != ("actions", (1, ACTION_WIDTH)):
         raise ValueError("Get-up ONNX must have one actions output of shape [1, 18]")
 
-    mean, std = _normalizer_arrays(model)
-    action_mean = mean[PREVIOUS_ACTION_START:]
-    action_std = std[PREVIOUS_ACTION_START:]
-    # V3 observes the applied (clipped, unlimited-rate) target directly, which
-    # is always within the action's own clip -- no slew transient to widen the
-    # expected range for.
-    minimum = (feedback_lower - default) / scale
-    maximum = (feedback_upper - default) / scale
-    if (
-        np.any(action_mean < minimum - _STATS_TOLERANCE_RAD)
-        or np.any(action_mean > maximum + _STATS_TOLERANCE_RAD)
-        or np.any(action_std > (maximum - minimum) / 2 + _STATS_TOLERANCE_RAD)
-    ):
-        raise ValueError(
-            "ONNX previous-action normalizer contradicts the reachable applied-target "
-            f"range (max |mean|={np.max(np.abs(action_mean)):.3g}, "
-            f"max std={np.max(action_std):.3g}, "
-            f"max permitted |action|={np.max(np.maximum(np.abs(minimum), np.abs(maximum))):.3g})"
-        )
+    # Finite, positive normalizer. No range check on the previous-action
+    # slots: v4 observes the raw output, which is unbounded by design (a
+    # standing policy drives it to hundreds of radians to saturate the clip).
+    _normalizer_arrays(model)
 
-    # Screen a small set of physically meaningful initial orientations.  This
-    # catches a model that passes the statistics gate yet immediately triggers
-    # the deployment runtime's raw-action fault threshold.
+    # Screen a small set of physically meaningful initial orientations for
+    # non-finite output, the runtime's only actor fault.
     evaluator = ReferenceEvaluator(model)
     for gravity in ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)):
         observation = np.zeros((1, OBSERVATION_WIDTH), dtype=np.float32)
@@ -176,17 +153,13 @@ def _validate_onnx(
         outputs = evaluator.run(None, {"obs": observation})
         if len(outputs) != 1 or outputs[0].shape != (1, ACTION_WIDTH):
             raise ValueError("ONNX action inference returned the wrong shape")
-        actions = outputs[0]
-        if not np.isfinite(actions).all() or np.max(np.abs(actions)) > _RUNTIME_MAX_RAW_ACTION:
+        if not np.isfinite(outputs[0]).all():
             raise ValueError(
-                "Get-up actor produces invalid raw actions for a canonical "
-                f"orientation: gravity={gravity}, max_abs={np.max(np.abs(actions)):.3g}"
+                f"Get-up actor produces non-finite raw actions for gravity={gravity}"
             )
 
 
-def _action_contract(
-    env: ManagerBasedRlEnv,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
     action = env.action_manager.get_term("joint_pos")
     if tuple(action.target_names) != MICROBAN_TELEOP_ACTION_JOINT_NAMES:
         raise ValueError("Get-up action joint order differs from the robot runtime")
@@ -221,32 +194,21 @@ def _action_contract(
     upper = clip[0, :, 1].astype(np.float64)
     if not np.isfinite(clip).all() or np.any(lower >= upper):
         raise ValueError("Invalid get-up action target clip")
-    expected_lower = np.array(
-        [MICROBAN_BODY_JOINT_SOFT_LIMITS[name][0] for name in action.target_names]
-    )
-    expected_upper = np.array(
-        [MICROBAN_BODY_JOINT_SOFT_LIMITS[name][1] for name in action.target_names]
-    )
-    if not np.allclose(lower, expected_lower, rtol=0, atol=1e-5) or not np.allclose(
-        upper, expected_upper, rtol=0, atol=1e-5
+    if not np.allclose(lower, -GETUP_ACTION_CLIP_RAD, rtol=0, atol=1e-5) or not np.allclose(
+        upper, GETUP_ACTION_CLIP_RAD, rtol=0, atol=1e-5
     ):
-        raise ValueError(
-            "Get-up action target clip differs from each joint's soft limit "
-            "(MICROBAN_BODY_JOINT_SOFT_LIMITS)"
-        )
+        raise ValueError("Get-up action target clip differs from the flat v4 +-1.57 rad clip")
     if hasattr(action.cfg, "max_target_speed_rad_s"):
         raise ValueError(
             "Get-up training action must not rate-limit the active policy's "
             "own target (see microban_getup_action.py's module docstring)"
         )
-    # No slew transient to widen the expected previous-action range for: the
-    # observed target is always exactly the action's own clip.
-    return lower, upper, lower, upper, default, scale
+    return lower, upper
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path, help="Fresh v3 model_N.pt")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="Fresh v4 model_N.pt")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
@@ -270,7 +232,7 @@ def main() -> None:
     wrapped = RslRlVecEnvWrapper(env)
     temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp.onnx")
     try:
-        lower, upper, feedback_lower, feedback_upper, default, scale = _action_contract(env)
+        lower, upper = _action_contract(env)
         runner = load_runner_cls(TASK)(wrapped, asdict(agent_cfg), device=args.device)
         runner.load(
             str(checkpoint), load_cfg={"actor": True}, strict=True,
@@ -278,28 +240,14 @@ def main() -> None:
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         runner.export_policy_to_onnx(str(temporary.parent), temporary.name)
-        _validate_onnx(
-            temporary,
-            feedback_lower=feedback_lower,
-            feedback_upper=feedback_upper,
-            default=default,
-            scale=scale,
-        )
+        _validate_onnx(temporary)
         metadata = get_base_metadata(env, run_path=checkpoint.parent.name)
         metadata.update(
             {
                 "action_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
                 "action_clip_lower": lower.tolist(),
                 "action_clip_upper": upper.tolist(),
-                "microban_getup_previous_action_semantics": (
-                    "applied_target_delta_from_default"
-                ),
-                "microban_getup_previous_action_lower": (
-                    (feedback_lower - default) / scale
-                ).tolist(),
-                "microban_getup_previous_action_upper": (
-                    (feedback_upper - default) / scale
-                ).tolist(),
+                "microban_getup_previous_action_semantics": PREVIOUS_ACTION_SEMANTICS,
                 "microban_getup_contract": CONTRACT_VERSION,
                 "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
                 "microban_getup_home_pose": json.dumps(
@@ -310,13 +258,7 @@ def main() -> None:
             }
         )
         attach_metadata_to_onnx(str(temporary), metadata)
-        _validate_onnx(
-            temporary,
-            feedback_lower=feedback_lower,
-            feedback_upper=feedback_upper,
-            default=default,
-            scale=scale,
-        )
+        _validate_onnx(temporary)
         if _sha256(checkpoint) != checkpoint_sha256:
             raise ValueError("Checkpoint changed during export")
         if args.replace:

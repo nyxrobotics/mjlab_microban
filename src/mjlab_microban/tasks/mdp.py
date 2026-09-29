@@ -781,24 +781,15 @@ def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torc
     return virtual_head_pos_w[:, 2]
 
 
-_STANDING_GATE_SOFTNESS = 0.03
-# Shared soft gate for the balance-specific post-standing rewards
-# (standing_stability_reward, upright_balance_reward, balance_recovery_reward)
-# -- a smooth sigmoid ramp around height_threshold instead of a hard
-# torch.where(height > height_threshold, ...) cutoff. Found via a direct
-# comparison against this robot's own already-working walking task
-# (microban_velocity_env_cfg.py): its analogous balance rewards
-# (upright/body_ang_vel) are never gated at all. get-up's hard gate has a
-# specific, plausible flaw a hard boolean can't avoid: the instant height
-# drops even slightly below threshold -- exactly when the robot is
-# starting to topple and correction matters most -- ALL balance signal
-# cuts to zero at once, rather than fading out. 0.03 (~13% of
-# HEAD_STANDING_THRESHOLD) is a reasoned guess, not yet a measured
-# calibration -- watch whether it's too wide (rewards near-standing envs
-# almost as much as fully standing ones, diluting the signal) or too
-# narrow (still close to a hard cutoff) on the first run.
 def _standing_gate(height: torch.Tensor, height_threshold: float) -> torch.Tensor:
-    return torch.sigmoid((height - height_threshold) / _STANDING_GATE_SOFTNESS)
+    """Hard 0/1 standing gate for the post-standing rewards.
+
+    A soft sigmoid version (softness 0.03 m) was measured paying these
+    terms 37% of full weight while propped on one forearm at 0.205 m head
+    height -- i.e. rewarding the robot for holding still in the exact
+    local optimum it could not leave. Hard gates cannot leak that way.
+    """
+    return (height > height_threshold).float()
 
 
 def standing_bonus(
@@ -904,12 +895,7 @@ def standing_stability_reward(
     strict, no gradient) or near 1 (too loose, no signal) on the first run
     and retune from there.
 
-    Gated with _standing_gate (a soft ramp), not a hard threshold -- see
-    that helper's own comment for why: a direct comparison against this
-    robot's own already-working walking task found its analogous balance
-    rewards aren't gated at all, and a hard cutoff here specifically
-    zeroes all balance signal at the exact moment (height first dropping
-    below threshold) correction matters most.
+    Hard-gated with _standing_gate (see that helper for why not soft).
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
@@ -957,8 +943,7 @@ def upright_balance_reward(
     tilt_std is a reasoned starting guess (not yet a measured calibration):
     watch for saturation near 0 or 1 on the first run.
 
-    Gated with _standing_gate (a soft ramp), not a hard threshold -- see
-    that helper's own comment for why.
+    Hard-gated with _standing_gate (see that helper for why not soft).
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
@@ -966,61 +951,6 @@ def upright_balance_reward(
     tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
     balance = torch.exp(-((tilt / tilt_std) ** 2))
     return gate * balance
-
-
-class balance_recovery_reward:
-    """Reward DECREASING tilt (recovering toward upright), penalize tilt that's
-    GROWING -- directional, unlike upright_balance_reward (rewards low tilt
-    regardless of trend) or standing_stability_reward (rewards low angular
-    speed regardless of direction).
-
-    Surveyed further specifically for the "gates upright but doesn't
-    correct drift" gap upright_balance_reward alone doesn't close: a
-    push-recovery paper (arXiv:2104.14534, iCub whole-body push recovery,
-    reward included horizontal CoM velocity DIRECTED toward the support
-    center, not just low velocity) makes the point directly -- a robot
-    drifting steadily toward a fall at low angular speed scores identically
-    under a speed-only or tilt-magnitude-only reward to one holding still,
-    right up until it's moving fast enough for those to notice. That's
-    exactly the window the static-hold sanity check found nothing else
-    catches (tilt drifting slowly, 0.1deg -> 3deg over the first second,
-    before the sudden 2nd-second collapse). Rewarding the SIGN of tilt's own
-    change gives a gradient specifically in that early, still-correctable
-    window, independent of how fast or slow the drift currently is.
-
-    Implemented as tanh((previous tilt - current tilt) / delta_scale):
-    positive when shrinking, negative when growing, bounded to (-1, 1) so a
-    single-step physics glitch can't produce an outsized spike (matching
-    this reward set's general preference for bounded shapes). Caches only
-    the previous tilt (like target_rate_l2/home_stillness_reward cache
-    their own prior values) rather than being a plain function.
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        asset_cfg = cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG)
-        asset: Entity = env.scene[asset_cfg.name]
-        self._prev_tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1).clone()
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        height_threshold: float,
-        head_asset_cfg: SceneEntityCfg,
-        delta_scale: float,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ) -> torch.Tensor:
-        asset: Entity = env.scene[asset_cfg.name]
-        height = _head_height(env, head_asset_cfg)
-        gate = _standing_gate(height, height_threshold)
-        tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
-        recovery = torch.tanh((self._prev_tilt - tilt) / delta_scale)
-        self._prev_tilt = tilt.clone()
-        return gate * recovery
-
-    def reset(self, env_ids: torch.Tensor) -> None:
-        del env_ids  # A stale one-step delta right after a reset is a minor,
-        # brief inaccuracy, not worth the extra bookkeeping (matches
-        # target_rate_l2/home_stillness_reward's own reset() reasoning).
 
 
 def standing_pose_reward(
@@ -1173,41 +1103,6 @@ def _feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
     """True where neither foot has ground contact (bool, shape [B])."""
     found = env.scene[sensor_name].data.found
     return (found <= 0).all(dim=-1)
-
-
-def push_if_standing(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    velocity_range: dict[str, tuple[float, float]],
-    height_threshold: float,
-    head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> None:
-    """envs_mdp.push_by_setting_velocity, but only for envs already near
-    standing height -- a kick applied while still mid-recovery (already the
-    harder, not-yet-reliable half of this task) risks derailing that
-    entirely, unlike the walking task's own push_robot event, which can
-    afford to fire unconditionally because every episode there already
-    starts standing.
-
-    Found by directly comparing this task against the walking task's own
-    already-working-on-hardware setup: walking trains its quiet-standing
-    behavior under continuous, unconditional ±0.5 m/s horizontal pushes
-    every 1-3s throughout training (microban_velocity_env_cfg.py), while
-    get-up had disabled push_robot entirely ("no external pushes needed
-    while learning to stand up"). A broader literature search on active
-    push-recovery RL (beyond the fall-recovery-specific HoST/FRASA/HumanUP
-    survey) independently flagged training under disturbance as likely
-    necessary for genuine active-balance robustness, not reward shape
-    alone -- this is that mechanism, reintroduced but gated so it can't
-    fight the recovery motion itself.
-    """
-    height = _head_height(env, head_asset_cfg)
-    is_standing = height[env_ids] > height_threshold
-    standing_env_ids = env_ids[is_standing]
-    if standing_env_ids.numel() == 0:
-        return
-    envs_mdp.push_by_setting_velocity(env, standing_env_ids, velocity_range, asset_cfg)
 
 
 class hold_airborne:

@@ -12,25 +12,26 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
-    effective_getup_action_after_target_clip,
+    raw_getup_action,
 )
 from mjlab_microban.tasks.microban_getup_actuator import (
     GETUP_BODY_KP_FW,
     GetupBamActuatorCfg,
 )
-from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_EPISODE_LENGTH_S
-from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
-from mjlab_microban.tasks.microban_tracking_env_cfg import MICROBAN_BODY_JOINT_SOFT_LIMITS
+from mjlab_microban.tasks.microban_getup_env_cfg import (
+    GETUP_ACTION_CLIP,
+    GETUP_EPISODE_LENGTH_S,
+)
 
 
-# v3: removed the v2-era target-rate slew limit on the active get-up policy's
-# own commanded target. That limit modeled getup.py's _RECOVERY_SLEW_RATE_RAD_S
-# (the torque-off->on return-to-neutral speed) but was mistakenly also applied
-# to the policy's own live output, which the real robot never rate-limits (see
-# microban_getup_action.py's module docstring). Old v2 checkpoints/ONNX are
-# incompatible: their previous-action observation semantics (post-slew target)
-# no longer match this task's (post-clip, unlimited-rate target).
-GETUP_CONTRACT_VERSION = "v3"
+# v4: flat +-1.57 rad absolute target clip on every body joint, the policy's
+# RAW previous output as previous-action feedback, and no clip-excess
+# penalty -- the contract every standing get-up policy was trained under
+# (see microban_getup_env_cfg.py's module docstring). v3
+# (per-joint soft-limit clip, post-clip feedback) never produced a stand.
+# Old v3 checkpoints/ONNX are incompatible: their previous-action input
+# meant the applied target, not the raw output.
+GETUP_CONTRACT_VERSION = "v4"
 GETUP_ANGULAR_VELOCITY_FRAME = "imu_sensor_xyz"
 
 
@@ -62,49 +63,37 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         unwrapped = env.unwrapped
         action = unwrapped.action_manager.get_term("joint_pos")
         if not isinstance(action, GetupJointPositionAction):
-            raise ValueError("Get-up v3 requires the get-up joint-position action")
+            raise ValueError("Get-up v4 requires the get-up joint-position action")
         if env.clip_actions is not None or env.num_actions != 18:
-            raise ValueError("Get-up v3 requires 18 actions without wrapper clipping")
+            raise ValueError("Get-up v4 requires 18 actions without wrapper clipping")
         if not math.isclose(unwrapped.step_dt, 0.02, rel_tol=0.0, abs_tol=1.0e-9):
-            raise ValueError("Get-up v3 requires a 20 ms policy step")
+            raise ValueError("Get-up v4 requires a 20 ms policy step")
         if unwrapped.cfg.episode_length_s != GETUP_EPISODE_LENGTH_S:
-            raise ValueError("Get-up v3 requires a 20-second training episode")
-        if action.cfg.clip != dict(MICROBAN_BODY_JOINT_SOFT_LIMITS):
-            raise ValueError(
-                "Get-up v3 requires absolute target clipping at each joint's own "
-                "soft limit (MICROBAN_BODY_JOINT_SOFT_LIMITS)"
-            )
+            raise ValueError("Get-up v4 requires a 20-second training episode")
+        if action.cfg.clip != dict(GETUP_ACTION_CLIP):
+            raise ValueError("Get-up v4 requires the flat +-1.57 rad absolute target clip")
         if action.cfg.scale != 1.0 or action.cfg.offset != 0.0 or not action.cfg.use_default_offset:
-            raise ValueError("Get-up v3 requires unit-scale default-relative actions")
+            raise ValueError("Get-up v4 requires unit-scale default-relative actions")
         gyro_term = unwrapped.cfg.observations["actor"].terms["base_ang_vel"]
         if gyro_term.func is not builtin_sensor or gyro_term.params != {"sensor_name": "robot/imu_ang_vel"}:
-            raise ValueError("Get-up v3 requires raw IMU-sensor-frame angular velocity")
+            raise ValueError("Get-up v4 requires raw IMU-sensor-frame angular velocity")
         for group in ("actor", "critic"):
             term = unwrapped.cfg.observations[group].terms["actions"]
-            if term.func is not effective_getup_action_after_target_clip:
-                raise ValueError(f"Get-up v3 requires post-clip {group} action feedback")
+            if term.func is not raw_getup_action:
+                raise ValueError(f"Get-up v4 requires raw previous-action {group} feedback")
+            if term.delay_max_lag != 0:
+                raise ValueError(f"Get-up v4 requires undelayed {group} action feedback")
         robot_cfg = unwrapped.cfg.scene.entities["robot"]
         actuator_cfgs = robot_cfg.articulation.actuators if robot_cfg.articulation else ()
         if len(actuator_cfgs) != 1 or not isinstance(actuator_cfgs[0], GetupBamActuatorCfg):
-            raise ValueError("Get-up v3 requires its body/neck XC330 actuator model")
+            raise ValueError("Get-up v4 requires its body/neck XC330 actuator model")
         if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
-            raise ValueError("Get-up v3 requires body P125 and XC330 0.91 A current limit")
-        # Required (see microban_getup_env_cfg.py's own comment): removing
-        # this alongside the v2 rate limit was tried and measured to make the
-        # std/entropy runaway markedly worse, not moot -- get-up's own action
-        # space exploits the clip-saturation-is-free property far more than
-        # walking's does, independent of any rate limit. Only its presence/
-        # func is checked, not one fixed weight: it's meant to scale with how
-        # hard other reward terms push toward the clip boundary (see its own
-        # comment on -2.0 -> -4.0), not stay pinned at whatever value happened
-        # to work for a weaker version of those terms.
-        raw_clip_reward = unwrapped.cfg.rewards.get("raw_target_clip_excess")
-        if (
-            raw_clip_reward is None
-            or raw_clip_reward.func is not normalized_target_clip_excess_l1_sum
-            or raw_clip_reward.weight >= 0.0
-        ):
-            raise ValueError("Get-up v3 requires the raw target clip-excess reward")
+            raise ValueError("Get-up v4 requires body P125 and XC330 0.91 A current limit")
+        if "raw_target_clip_excess" in unwrapped.cfg.rewards:
+            raise ValueError(
+                "Get-up v4 must not penalize raw output beyond the clip: standing "
+                "needs targets far past the joint angle for torque at P125"
+            )
         super().__init__(env, train_cfg, log_dir, device)
 
     def save(self, path: str, infos=None) -> None:
@@ -120,11 +109,11 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         infos = checkpoint.get("infos")
         if not isinstance(infos, dict):
-            raise ValueError("Checkpoint lacks get-up v3 training metadata; start a fresh run")
+            raise ValueError("Checkpoint lacks get-up v4 training metadata; start a fresh run")
         if (
             infos.get("microban_getup_contract") != GETUP_CONTRACT_VERSION
             or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
         ):
-            raise ValueError("Checkpoint lacks the get-up v3 action and IMU-frame contract; start a fresh run")
+            raise ValueError("Checkpoint lacks the get-up v4 action and IMU-frame contract; start a fresh run")
         require_current_getup_home_pose(infos)
         return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
