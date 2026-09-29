@@ -596,7 +596,18 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             "height_threshold": HEAD_STANDING_THRESHOLD,
             "head_asset_cfg": HEAD_ASSET_CFG,
-            "tilt_std": 0.15,
+            # 0.15 (initial guess) recalibrated to 0.3 after finding HoST's own
+            # published, validated gated tilt term: exp(-5*tilt^2) -- for
+            # small angles where tilt (a horizontal projected-gravity norm)
+            # approximates the tilt angle in radians, this is equivalent to
+            # this reward's own exp(-(tilt/std)^2) shape at std=1/sqrt(5)
+            # =~0.447. Split the difference rather than matching it exactly
+            # (different robot/task), but 0.15 was likely too strict to give
+            # much gradient except very close to perfectly upright -- the
+            # same "technically-correct but too unforgiving for where
+            # training actually is" mistake this file's own standing_pose
+            # comment already describes once.
+            "tilt_std": 0.3,
         },
     )
 
