@@ -781,6 +781,26 @@ def _head_height(env: ManagerBasedRlEnv, head_asset_cfg: SceneEntityCfg) -> torc
     return virtual_head_pos_w[:, 2]
 
 
+_STANDING_GATE_SOFTNESS = 0.03
+# Shared soft gate for the balance-specific post-standing rewards
+# (standing_stability_reward, upright_balance_reward, balance_recovery_reward)
+# -- a smooth sigmoid ramp around height_threshold instead of a hard
+# torch.where(height > height_threshold, ...) cutoff. Found via a direct
+# comparison against this robot's own already-working walking task
+# (microban_velocity_env_cfg.py): its analogous balance rewards
+# (upright/body_ang_vel) are never gated at all. get-up's hard gate has a
+# specific, plausible flaw a hard boolean can't avoid: the instant height
+# drops even slightly below threshold -- exactly when the robot is
+# starting to topple and correction matters most -- ALL balance signal
+# cuts to zero at once, rather than fading out. 0.03 (~13% of
+# HEAD_STANDING_THRESHOLD) is a reasoned guess, not yet a measured
+# calibration -- watch whether it's too wide (rewards near-standing envs
+# almost as much as fully standing ones, diluting the signal) or too
+# narrow (still close to a hard cutoff) on the first run.
+def _standing_gate(height: torch.Tensor, height_threshold: float) -> torch.Tensor:
+    return torch.sigmoid((height - height_threshold) / _STANDING_GATE_SOFTNESS)
+
+
 def standing_bonus(
     env: ManagerBasedRlEnv,
     height_threshold: float,
@@ -883,16 +903,23 @@ def standing_stability_reward(
     thresholds in this file are) -- watch whether this saturates near 0 (too
     strict, no gradient) or near 1 (too loose, no signal) on the first run
     and retune from there.
+
+    Gated with _standing_gate (a soft ramp), not a hard threshold -- see
+    that helper's own comment for why: a direct comparison against this
+    robot's own already-working walking task found its analogous balance
+    rewards aren't gated at all, and a hard cutoff here specifically
+    zeroes all balance signal at the exact moment (height first dropping
+    below threshold) correction matters most.
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
-    is_standing = height > height_threshold
+    gate = _standing_gate(height, height_threshold)
     lin_speed = torch.linalg.norm(asset.data.root_com_lin_vel_w, dim=-1)
     ang_speed = torch.linalg.norm(asset.data.root_com_ang_vel_w, dim=-1)
     stability = torch.exp(-((lin_speed / lin_vel_std) ** 2)) * torch.exp(
         -((ang_speed / ang_vel_std) ** 2)
     )
-    return torch.where(is_standing, stability, torch.zeros_like(stability))
+    return gate * stability
 
 
 def upright_balance_reward(
@@ -929,13 +956,16 @@ def upright_balance_reward(
     already use to self-correct, just not yet rewarded for acting on.
     tilt_std is a reasoned starting guess (not yet a measured calibration):
     watch for saturation near 0 or 1 on the first run.
+
+    Gated with _standing_gate (a soft ramp), not a hard threshold -- see
+    that helper's own comment for why.
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
-    is_standing = height > height_threshold
+    gate = _standing_gate(height, height_threshold)
     tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
     balance = torch.exp(-((tilt / tilt_std) ** 2))
-    return torch.where(is_standing, balance, torch.zeros_like(balance))
+    return gate * balance
 
 
 class balance_recovery_reward:
@@ -981,11 +1011,11 @@ class balance_recovery_reward:
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         height = _head_height(env, head_asset_cfg)
-        is_standing = height > height_threshold
+        gate = _standing_gate(height, height_threshold)
         tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
         recovery = torch.tanh((self._prev_tilt - tilt) / delta_scale)
         self._prev_tilt = tilt.clone()
-        return torch.where(is_standing, recovery, torch.zeros_like(recovery))
+        return gate * recovery
 
     def reset(self, env_ids: torch.Tensor) -> None:
         del env_ids  # A stale one-step delta right after a reset is a minor,
@@ -1143,6 +1173,41 @@ def _feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
     """True where neither foot has ground contact (bool, shape [B])."""
     found = env.scene[sensor_name].data.found
     return (found <= 0).all(dim=-1)
+
+
+def push_if_standing(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    velocity_range: dict[str, tuple[float, float]],
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """envs_mdp.push_by_setting_velocity, but only for envs already near
+    standing height -- a kick applied while still mid-recovery (already the
+    harder, not-yet-reliable half of this task) risks derailing that
+    entirely, unlike the walking task's own push_robot event, which can
+    afford to fire unconditionally because every episode there already
+    starts standing.
+
+    Found by directly comparing this task against the walking task's own
+    already-working-on-hardware setup: walking trains its quiet-standing
+    behavior under continuous, unconditional ±0.5 m/s horizontal pushes
+    every 1-3s throughout training (microban_velocity_env_cfg.py), while
+    get-up had disabled push_robot entirely ("no external pushes needed
+    while learning to stand up"). A broader literature search on active
+    push-recovery RL (beyond the fall-recovery-specific HoST/FRASA/HumanUP
+    survey) independently flagged training under disturbance as likely
+    necessary for genuine active-balance robustness, not reward shape
+    alone -- this is that mechanism, reintroduced but gated so it can't
+    fight the recovery motion itself.
+    """
+    height = _head_height(env, head_asset_cfg)
+    is_standing = height[env_ids] > height_threshold
+    standing_env_ids = env_ids[is_standing]
+    if standing_env_ids.numel() == 0:
+        return
+    envs_mdp.push_by_setting_velocity(env, standing_env_ids, velocity_range, asset_cfg)
 
 
 class hold_airborne:

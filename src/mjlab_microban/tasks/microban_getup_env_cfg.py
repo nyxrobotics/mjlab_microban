@@ -45,6 +45,7 @@ from mjlab.envs.mdp import dr
 from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from mjlab.tasks.velocity import mdp as velocity_mdp
@@ -61,6 +62,7 @@ from mjlab_microban.tasks.mdp import (
     standing_stability_reward,
     upright_balance_reward,
     balance_recovery_reward,
+    push_if_standing,
     on_feet_reward,
     standing_torque_penalty,
     home_stillness_reward,
@@ -227,11 +229,38 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     del cfg.observations["critic"].terms["foot_air_time"]
     del cfg.observations["critic"].terms["foot_contact"]
     del cfg.observations["critic"].terms["foot_contact_forces"]
-    # projected_gravity/base_ang_vel keep the base config's defaults. joint_pos/
-    # joint_vel/actions are filtered to dofs_filter (matching the action space, same
-    # as the walking policy) rather than left at all 21 joints — "actions" naturally
-    # shrinks to 18 with the action space above, so filtering joint_pos/joint_vel too
-    # keeps everything consistent rather than mixing 21- and 18-wide state.
+    # projected_gravity/base_ang_vel tightened to match the walking task's own
+    # noise/delay (Unoise +-0.01/+-0.03, 0-3 tick simulated delay) instead of
+    # the wider base-config defaults (+-0.05/+-0.2, no delay) this task had
+    # been leaving them at. Found while comparing against walking's own
+    # already-working setup: the new balance rewards (upright_balance_reward,
+    # balance_recovery_reward) specifically target ~0.1-3 degree tilt drift,
+    # and +-0.05 rad (~2.9 degrees) of noise on projected_gravity alone is
+    # the same order of magnitude as that whole signal -- plausibly swamping
+    # exactly what those rewards are trying to teach. Walking evidently
+    # trains a robust real-hardware policy fine under the TIGHTER noise, so
+    # this isn't a case of "needs to be looser for sim-to-real margin".
+    cfg.observations["actor"].terms["projected_gravity"] = deepcopy(
+        cfg.observations["actor"].terms["projected_gravity"]
+    )
+    cfg.observations["actor"].terms["projected_gravity"].noise = Unoise(n_min=-0.01, n_max=0.01)
+    cfg.observations["actor"].terms["projected_gravity"].delay_min_lag = 0
+    cfg.observations["actor"].terms["projected_gravity"].delay_max_lag = 3
+    cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
+
+    cfg.observations["actor"].terms["base_ang_vel"] = deepcopy(
+        cfg.observations["actor"].terms["base_ang_vel"]
+    )
+    cfg.observations["actor"].terms["base_ang_vel"].noise = Unoise(n_min=-0.03, n_max=0.03)
+    cfg.observations["actor"].terms["base_ang_vel"].delay_min_lag = 0
+    cfg.observations["actor"].terms["base_ang_vel"].delay_max_lag = 3
+    cfg.observations["actor"].terms["base_ang_vel"].delay_update_period = 64
+
+    # joint_pos/joint_vel/actions are filtered to dofs_filter (matching the action
+    # space, same as the walking policy) rather than left at all 21 joints —
+    # "actions" naturally shrinks to 18 with the action space above, so filtering
+    # joint_pos/joint_vel too keeps everything consistent rather than mixing
+    # 21- and 18-wide state.
     cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
         func=velocity_mdp.joint_pos_rel,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(dofs_filter,))},
@@ -908,7 +937,24 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    del cfg.events["push_robot"]  # no external pushes needed while learning to stand up
+    # Re-gated (was: del cfg.events["push_robot"] entirely) after directly
+    # comparing against the walking task's own already-working setup: walking
+    # trains its quiet-standing robustness under continuous, unconditional
+    # +-0.5 m/s horizontal pushes every 1-3s throughout training; get-up had
+    # none at all. A broader active-balance/push-recovery literature search
+    # independently flagged disturbance training as likely necessary (see
+    # push_if_standing's own docstring for both). Gated on already being
+    # near standing height (unlike walking, which can push unconditionally
+    # since every episode there already starts standing) so a kick can't
+    # derail the still-fragile recovery motion itself. Same velocity_range
+    # and interval as walking's own tuning, for a direct comparison.
+    cfg.events["push_robot"].func = push_if_standing
+    cfg.events["push_robot"].params["velocity_range"] = {
+        "x": (-0.5, 0.5),
+        "y": (-0.5, 0.5),
+    }
+    cfg.events["push_robot"].params["height_threshold"] = HEAD_STANDING_THRESHOLD
+    cfg.events["push_robot"].params["head_asset_cfg"] = HEAD_ASSET_CFG
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = (
         r".*left_foot_collision.*",
