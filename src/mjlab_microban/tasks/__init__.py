@@ -113,6 +113,19 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
+# Stance fine-tuning (feet together, legs straight) on top of the delay task.
+for _reward_set, _task_id in (
+    ("posture", "Mjlab-Getup-Microban-Posture-ImuDelay"),
+    ("posture_strong", "Mjlab-Getup-Microban-PostureStrong-ImuDelay"),
+):
+    register_mjlab_task(
+        task_id=_task_id,
+        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set, imu_delay_max_lag=3),
+        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set, imu_delay_max_lag=3),
+        rl_cfg=MicrobanGetupRlCfg,
+        runner_cls=MicrobanGetupOnPolicyRunner,
+    )
+
 register_mjlab_task(
     task_id="Mjlab-Tracking-Microban",
     env_cfg=make_microban_tracking_env_cfg(),

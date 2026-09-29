@@ -28,6 +28,7 @@ from mjlab.utils.lab_api.math import (
     quat_apply_inverse,
     sample_uniform,
     subtract_frame_transforms,
+    yaw_quat,
 )
 from mjlab.utils.lab_api.string import resolve_matching_names_values
 
@@ -951,6 +952,32 @@ def upright_balance_reward(
     tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
     balance = torch.exp(-((tilt / tilt_std) ** 2))
     return gate * balance
+
+
+def feet_stance_reward(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    target_lateral: float,
+    scale: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward a HOME-like stance (feet side by side at HOME's width), once standing.
+
+    Measures the two foot bodies' separation in the trunk's heading frame:
+    error = | |lateral| - target_lateral | + |fore-aft| (metres), reward =
+    exp(-error / scale). The L1-exponential kernel keeps a usable gradient
+    from far off (the first standing v4 policy stood 20 cm wide and 7.5 cm
+    staggered against HOME's 9.4 cm / 0: reward 0.16 at scale 0.1, where a
+    Gaussian of similar width is already ~0.01). Hard-gated with
+    _standing_gate. asset_cfg names the two feet; their order is irrelevant.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    feet = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    separation = quat_apply_inverse(yaw_quat(asset.data.root_link_quat_w), feet[:, 0] - feet[:, 1])
+    error = torch.abs(torch.abs(separation[:, 1]) - target_lateral) + torch.abs(separation[:, 0])
+    gate = _standing_gate(_head_height(env, head_asset_cfg), height_threshold)
+    return gate * torch.exp(-error / scale)
 
 
 def standing_pose_reward(

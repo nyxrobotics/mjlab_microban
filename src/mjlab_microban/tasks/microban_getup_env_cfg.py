@@ -81,6 +81,7 @@ from mjlab_microban.tasks.mdp import (
     head_height_reward,
     home_pose_reward,
     standing_bonus,
+    feet_stance_reward,
     standing_stability_reward,
     upright_balance_reward,
     on_feet_reward,
@@ -103,7 +104,18 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("v42", "redesign")
+GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_strong")
+# Final (post-curriculum) standing_pose / hip_pose weights per reward set,
+# and the feet_stance weight (0 = term absent).
+_POSE_FINAL_WEIGHTS = {
+    "v42": (30.0, 15.0),
+    "redesign": (30.0, 15.0),
+    "posture": (120.0, 60.0),
+    "posture_strong": (240.0, 120.0),
+}
+_FEET_STANCE_WEIGHTS = {"v42": 0.0, "redesign": 0.0, "posture": 10.0, "posture_strong": 20.0}
+# Lateral distance between the two foot bodies at HOME, by forward kinematics.
+HOME_FEET_LATERAL_M = 0.094
 
 # Virtual head height (trunk COM + 0.07324 m along the trunk's up axis, see
 # mdp._head_height) at HOME: 0.29398 m by MuJoCo forward kinematics. Kneeling
@@ -290,6 +302,9 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
+    if reward_set in ("posture", "posture_strong"):
+        _add_posture_rewards(cfg, _FEET_STANCE_WEIGHTS[reward_set])
+    standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
     # No "fell over" exit: starting fallen is the whole point.
@@ -393,8 +408,8 @@ def make_microban_getup_env_cfg(
                     "reward_term_name": "standing_bonus",
                     "threshold": 2.0,
                     "apply": lambda env: (
-                        env.reward_manager.get_term_cfg("standing_pose").__setattr__("weight", 30.0),
-                        env.reward_manager.get_term_cfg("hip_pose").__setattr__("weight", 15.0),
+                        env.reward_manager.get_term_cfg("standing_pose").__setattr__("weight", standing_pose_final),
+                        env.reward_manager.get_term_cfg("hip_pose").__setattr__("weight", hip_pose_final),
                     ),
                 },
                 {
@@ -602,6 +617,34 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
             "head_asset_cfg": HEAD_ASSET_CFG,
             "lin_vel_std": float(1.0 / np.sqrt(5.0)),
             "ang_vel_std": float(1.0 / np.sqrt(2.0)),
+        },
+    )
+
+
+def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, feet_stance_weight: float) -> None:
+    """Pull a standing policy's stance toward HOME: feet together, legs straight.
+
+    For fine-tuning a policy that already stands. The first robot-bound v4
+    policy stood with feet 20 cm apart and 7.5 cm staggered (HOME: 9.4 cm, 0),
+    right hip yawed +56 deg, a hip_roll pinned at its 25 deg stop and ~30 deg
+    of knee bend: a wide base that eases balance under IMU delay. At the
+    redesign set's final pose weights (30/15, std 0.6 rad) nothing outweighed
+    that. So: a direct stance-geometry term, hip_yaw added to hip_pose, and
+    larger final pose weights (see _POSE_FINAL_WEIGHTS; the 09-26 lineage
+    reached ~6 deg RMS from HOME at 120-480).
+    """
+    cfg.rewards["hip_pose"].params["asset_cfg"] = SceneEntityCfg(
+        "robot", joint_names=(r".*hip_yaw.*", r".*hip_roll.*", r".*hip_pitch.*")
+    )
+    cfg.rewards["feet_stance"] = RewardTermCfg(
+        func=feet_stance_reward,
+        weight=feet_stance_weight,
+        params={
+            "height_threshold": STANDING_GATE_HEIGHT,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "target_lateral": HOME_FEET_LATERAL_M,
+            "scale": 0.1,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("foot", "foot_2")),
         },
     )
 
