@@ -120,6 +120,21 @@ def make_microban_teleop_upright_fullbody_env_cfg(
     cfg.rewards.pop("locomotion_prior_action_target", None)
     cfg.rewards.pop("locomotion_prior_joint_position", None)
 
+    # push_robot's interval is inherited unchanged from the upstream velocity
+    # task default (1.0-3.0 s). A completed 15,000-iteration crouched-HOME run
+    # still showed a durable fall-rate regression once pushes reach full
+    # strength even with a 3-step magnitude ramp (see the curriculum split
+    # below). Comparing against two more mature humanoid whole-body-control
+    # research recipes (TWIST2's G1 legged_gym config, and Teleopit's
+    # near-stock mjlab tracking config) found neither ramps push MAGNITUDE at
+    # all -- both apply a fixed full-strength push from iteration 0 -- but
+    # Teleopit/stock mjlab uses a push interval of 4.0-6.0 s, roughly 2-4x
+    # longer than this task's inherited 1.0-3.0 s, giving the policy
+    # substantially more time to recover balance between pushes. Widened to
+    # match, independent of (and in addition to) the existing magnitude ramp.
+    if "push_robot" in cfg.events:
+        cfg.events["push_robot"].interval_range_s = (4.0, 6.0)
+
     # v12 sets clip=None and drops target_clip_excess/target_near_limit/
     # raw_action_l2 because they assert on an absolute target clip, which the
     # legacy pretrained v12 actor's raw/unclipped recurrence contract requires
