@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import isclose, radians
+from math import isclose
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -46,18 +46,27 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_EXPERIMENT = (
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
     "physical_neutral_full_actor_from_scratch_raw83x18_v4"
 )
-# v5: reverted alongside microban_constants.py's own HOME_FRAME revert (see its
-# comment) -- the "com_centered" experiment (hip_pitch +1.198deg) this task was
-# built for measured worse for get-up and is reverted; this task now trains at
-# the original physical-neutral HOME (hip_pitch -10deg) instead. Bumped so a
-# checkpoint from either pose is never silently accepted under the other.
+# v5: reverted alongside microban_constants.py's own HOME_FRAME revert -- the
+# "com_centered" experiment (hip_pitch +1.198deg) this task was built for
+# measured worse and is reverted; this task now trains at the original
+# physical-neutral HOME (hip_pitch -10deg) instead. Bumped so a checkpoint
+# from either pose is never silently accepted under the other.
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_REVISION = (
     "physical_neutral_shoulder_zero_hip_neg10_v5"
 )
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_HIP_PITCH_RAD = radians(-10.0)
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ANKLE_PITCH_RAD = 0.0
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_SHOULDER_PITCH_RAD = 0.0
-MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M = 0.168
+# Derived from HOME_FRAME directly rather than hardcoded a second time: this
+# is the one shared source of truth for the pose, so it cannot drift out of
+# sync with microban_constants.py the way a hardcoded copy could.
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_HIP_PITCH_RAD = HOME_FRAME.joint_pos[
+    "left_hip_pitch"
+]
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ANKLE_PITCH_RAD = HOME_FRAME.joint_pos[
+    "left_ankle_pitch"
+]
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_SHOULDER_PITCH_RAD = HOME_FRAME.joint_pos[
+    "left_shoulder_pitch"
+]
+MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M = float(HOME_FRAME.pos[2])
 
 
 def make_microban_teleop_upright_fullbody_env_cfg(
