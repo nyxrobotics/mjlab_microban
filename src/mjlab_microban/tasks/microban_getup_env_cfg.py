@@ -99,20 +99,27 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_limits")
+GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_limits", "posture_ft", "posture_ft_strong")
+# Reward sets that must only fine-tune an already-standing checkpoint.
+GETUP_FINETUNE_REWARD_SETS = ("posture", "posture_limits", "posture_ft", "posture_ft_strong")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
     "redesign": (30.0, 15.0),
     "posture": (240.0, 120.0),
     "posture_limits": (240.0, 120.0),
+    "posture_ft": (240.0, 120.0),
+    "posture_ft_strong": (240.0, 120.0),
 }
+# Weight of the penalty on raw output beyond the flat clip (absent if 0).
+_CLIP_EXCESS_WEIGHTS = {"posture_ft": -0.2, "posture_ft_strong": -1.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -301,8 +308,23 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "posture_limits"):
+    if reward_set in GETUP_FINETUNE_REWARD_SETS:
         _add_posture_rewards(cfg, limit_penalty=reward_set == "posture_limits")
+    if reward_set in _CLIP_EXCESS_WEIGHTS:
+        # Fine-tuning only. A standing policy drove the raw output of the
+        # joints it braces on their stops to hundreds of radians (previous-
+        # action normalizer std 110-200 on exactly those four joints). Past
+        # the clip, nudging that output changes nothing physical, so the
+        # pose/stance terms get no gradient there at all. A linear barrier
+        # beyond the FLAT +-1.57 rad clip pulls the output back to the clip
+        # edge without limiting torque (the target may still sit at the
+        # edge). Not for from-scratch runs: every penalty variant tried from
+        # scratch (with the old per-joint clip) never stood.
+        cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
+            func=normalized_target_clip_excess_l1_sum,
+            weight=_CLIP_EXCESS_WEIGHTS[reward_set],
+            params={"action_name": "joint_pos"},
+        )
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------

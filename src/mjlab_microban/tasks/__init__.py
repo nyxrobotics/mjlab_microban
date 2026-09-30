@@ -117,6 +117,8 @@ register_mjlab_task(
 for _reward_set, _task_id in (
     ("posture", "Mjlab-Getup-Microban-Posture-ImuDelay"),
     ("posture_limits", "Mjlab-Getup-Microban-PostureLimits-ImuDelay"),
+    ("posture_ft", "Mjlab-Getup-Microban-PostureFT-ImuDelay"),
+    ("posture_ft_strong", "Mjlab-Getup-Microban-PostureFTStrong-ImuDelay"),
 ):
     register_mjlab_task(
         task_id=_task_id,

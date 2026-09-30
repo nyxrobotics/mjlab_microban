@@ -24,10 +24,10 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
 )
 
 
-# v4: flat +-1.57 rad absolute target clip on every body joint, the policy's
-# RAW previous output as previous-action feedback, and no clip-excess
-# penalty -- the contract every standing get-up policy was trained under
-# (see microban_getup_env_cfg.py's module docstring). v3
+# v4: flat +-1.57 rad absolute target clip on every body joint and the
+# policy's RAW previous output as previous-action feedback -- the contract
+# every standing get-up policy was trained under (see
+# microban_getup_env_cfg.py's module docstring). v3
 # (per-joint soft-limit clip, post-clip feedback) never produced a stand.
 # Old v3 checkpoints/ONNX are incompatible: their previous-action input
 # meant the applied target, not the raw output.
@@ -89,11 +89,6 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Get-up v4 requires its body/neck XC330 actuator model")
         if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
             raise ValueError("Get-up v4 requires body P125 and XC330 0.91 A current limit")
-        if "raw_target_clip_excess" in unwrapped.cfg.rewards:
-            raise ValueError(
-                "Get-up v4 must not penalize raw output beyond the clip: standing "
-                "needs targets far past the joint angle for torque at P125"
-            )
         super().__init__(env, train_cfg, log_dir, device)
 
     def save(self, path: str, infos=None) -> None:
