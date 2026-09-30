@@ -14,6 +14,7 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
+from mjlab_microban.tasks.microban_getup_symmetry import with_getup_symmetry
 from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
 from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
     MICROBAN_SAFE_VELOCITY_TASK_ID,
@@ -120,6 +121,15 @@ register_mjlab_task(
     env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
     play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
     rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+# Same, with left/right mirror data augmentation in PPO (HiFAR/HumanUP):
+# a mirror-symmetric policy cannot settle into a braced asymmetric stance.
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Posture-Sym",
+    env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
+    rl_cfg=with_getup_symmetry(MicrobanGetupRlCfg),
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 for _reward_set, _task_id in (
