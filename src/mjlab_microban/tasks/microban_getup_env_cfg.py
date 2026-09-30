@@ -86,6 +86,7 @@ from mjlab_microban.tasks.mdp import (
     home_pose_reward,
     standing_bonus,
     feet_stance_reward,
+    standing_joint_vel_l2,
     standing_stability_reward,
     upright_balance_reward,
     on_feet_reward,
@@ -102,19 +103,25 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign")
+GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
     "redesign": (30.0, 15.0),
     "posture": (240.0, 120.0),
+    "calm": (240.0, 120.0),
+    "calm_strong": (240.0, 120.0),
 }
+# Standing-gated measured joint-velocity penalty of the fine-tuning "calm"
+# sets (see _add_calm_rewards).
+_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -303,8 +310,10 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set == "posture":
+    if reward_set in ("posture", "calm", "calm_strong"):
         _add_posture_rewards(cfg)
+    if reward_set in _CALM_JOINT_VEL_WEIGHTS:
+        _add_calm_rewards(cfg, _CALM_JOINT_VEL_WEIGHTS[reward_set])
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
@@ -663,6 +672,36 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
                 "asset_cfg": feet_cfg,
             },
         )
+
+
+def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, joint_vel_weight: float) -> None:
+    """Fine-tuning only: stop the HOME-stance policy trembling.
+
+    Trained to 15000 iterations, the two-stage policy kept trembling at
+    0.75-0.87 rad/s with ~78 % of targets on the clip and action std ~10:
+    under that much exploration noise, bang-bang is the robust way to hold
+    a stance. A linear ankle PD holds the same stance under the same IMU
+    delay, so a calm solution exists. A penalty on the commanded target rate
+    (with a std reset) changed nothing in 1000 iterations, so this penalizes
+    the measured joint velocity while standing instead. Resume with a reset
+    action std (0.5) and low entropy, as in the docs.
+    """
+    cfg.rewards["standing_joint_vel"] = RewardTermCfg(
+        func=standing_joint_vel_l2,
+        weight=joint_vel_weight,
+        params={
+            "height_threshold": STANDING_GATE_HEIGHT,
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
+        },
+    )
+    # Brings raw output back to the clip edge, where a small change moves
+    # the target (it may still sit at the edge for full torque).
+    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-0.2,
+        params={"action_name": "joint_pos"},
+    )
 
 
 MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(

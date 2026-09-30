@@ -106,6 +106,18 @@ register_mjlab_task(
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
+# Experimental stage 3: stop the stage-2 policy trembling (_add_calm_rewards).
+for _reward_set, _task_id in (
+    ("calm", "Mjlab-Getup-Microban-Calm-ImuDelay"),
+    ("calm_strong", "Mjlab-Getup-Microban-CalmStrong-ImuDelay"),
+):
+    register_mjlab_task(
+        task_id=_task_id,
+        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set, imu_delay_max_lag=3),
+        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set, imu_delay_max_lag=3),
+        rl_cfg=MicrobanGetupRlCfg,
+        runner_cls=MicrobanGetupOnPolicyRunner,
+    )
 # Reference variants of the same contract: the 09-25 recipe ("v42"), and the
 # first v4 set that stood, with a wide braced stance ("redesign").
 for _reward_set, _task_id in (

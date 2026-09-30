@@ -982,6 +982,25 @@ def feet_stance_reward(
     return gate * torch.exp(-error / scale)
 
 
+def standing_joint_vel_l2(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sum of squared MEASURED joint velocities, counted only once standing.
+
+    Targets the trembling directly. The HOME-stance policy holds its stance
+    by bang-bang targets (~78 % on the clip) and trembles at ~0.8 rad/s;
+    home_stillness and a commanded-target-rate penalty both read the
+    commanded target, which flips every step, so they sat near zero or
+    changed nothing. Measured velocity is what shakes the robot.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    vel_sq = torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=-1)
+    return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * vel_sq
+
+
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,
