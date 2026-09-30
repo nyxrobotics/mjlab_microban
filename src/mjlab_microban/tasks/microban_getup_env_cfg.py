@@ -94,7 +94,6 @@ from mjlab_microban.tasks.mdp import (
     extreme_joint_velocity,
     reset_near_home_fraction,
     hands_released_reward,
-    target_rate_l2,
 )
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionActionCfg,
@@ -103,25 +102,19 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign", "smooth", "smooth_strong")
+GETUP_REWARD_SETS = ("posture", "v42", "redesign")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
     "redesign": (30.0, 15.0),
     "posture": (240.0, 120.0),
-    "smooth": (240.0, 120.0),
-    "smooth_strong": (240.0, 120.0),
 }
-# Standing-gated commanded-target-rate penalty weight of the fine-tuning
-# "smooth" sets (see _add_smooth_rewards).
-_SMOOTH_TARGET_RATE_WEIGHTS = {"smooth": -0.2, "smooth_strong": -1.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -310,10 +303,8 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "smooth", "smooth_strong"):
+    if reward_set == "posture":
         _add_posture_rewards(cfg)
-    if reward_set in _SMOOTH_TARGET_RATE_WEIGHTS:
-        _add_smooth_rewards(cfg, sensors, _SMOOTH_TARGET_RATE_WEIGHTS[reward_set])
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
@@ -672,39 +663,6 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
                 "asset_cfg": feet_cfg,
             },
         )
-
-
-def _add_smooth_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str], target_rate_weight: float) -> None:
-    """Fine-tuning only: calm the HOME stance of a policy that already has it.
-
-    The two-stage policy stands in HOME but bang-bangs: 81 % of its joint
-    targets sit on the +-1.57 rad clip, joints tremble at ~0.75 rad/s and
-    both feet are down only ~1.5/2 of the time -- unchanged from 2500 to
-    3500 iterations. A linear ankle PD holds the same stance under the same
-    delay (see the 09-30 feasibility study), so smoother control exists:
-    * target_rate_l2 on the commanded target, gated to standing;
-    * raw_target_clip_excess beyond the FLAT clip, so the raw output comes
-      back to the clip edge where a small change moves the target (it can
-      still sit at the edge for full torque);
-    * on_feet (both feet down) 2 -> 10.
-    Resume with a reset (small) action std; see docs/getup_training_export.md.
-    """
-    cfg.rewards["standing_target_rate"] = RewardTermCfg(
-        func=target_rate_l2,
-        weight=target_rate_weight,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
-            "height_threshold": STANDING_GATE_HEIGHT,
-            "head_asset_cfg": HEAD_ASSET_CFG,
-        },
-    )
-    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
-        func=normalized_target_clip_excess_l1_sum,
-        weight=-0.2,
-        params={"action_name": "joint_pos"},
-    )
-    cfg.rewards["on_feet"].weight = 10.0
-    del sensors  # Unused; kept for a uniform _add_*_rewards signature.
 
 
 MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(
