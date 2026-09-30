@@ -107,8 +107,8 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
 GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_limits", "posture_ft", "posture_ft_strong")
-# Reward sets that must only fine-tune an already-standing checkpoint.
-GETUP_FINETUNE_REWARD_SETS = ("posture", "posture_limits", "posture_ft", "posture_ft_strong")
+# Reward sets that add the HOME-stance terms (_add_posture_rewards).
+GETUP_POSTURE_REWARD_SETS = ("posture", "posture_limits", "posture_ft", "posture_ft_strong")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
@@ -308,7 +308,7 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in GETUP_FINETUNE_REWARD_SETS:
+    if reward_set in GETUP_POSTURE_REWARD_SETS:
         _add_posture_rewards(cfg, limit_penalty=reward_set == "posture_limits")
     if reward_set in _CLIP_EXCESS_WEIGHTS:
         # Fine-tuning only. A standing policy drove the raw output of the
@@ -643,9 +643,13 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
 
 
 def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, limit_penalty: bool) -> None:
-    """Pull a standing policy's stance toward HOME: feet side by side, together.
+    """Pull the standing stance toward HOME: feet side by side, together.
 
-    For fine-tuning a policy that already stands. The first robot-bound v4
+    Active from step 0 (every term is gated on standing height). Fine-tuning
+    an already-standing policy with these did not change its stance: three
+    rounds, ~5000 iterations, the braced asymmetric stance stayed. The
+    stance forms when standing first emerges, so train with these from
+    scratch. The first robot-bound v4
     policy stood with feet 20 cm apart and 7.5 cm staggered (HOME: 9.4 cm, 0),
     right hip yawed +56 deg and an ankle and a hip_roll braced on their
     stops: a wide base that eases balance under IMU delay. A single summed
