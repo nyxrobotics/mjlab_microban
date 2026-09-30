@@ -116,7 +116,7 @@ register_mjlab_task(
 # Stance fine-tuning (feet together, legs straight) on top of the delay task.
 for _reward_set, _task_id in (
     ("posture", "Mjlab-Getup-Microban-Posture-ImuDelay"),
-    ("posture_strong", "Mjlab-Getup-Microban-PostureStrong-ImuDelay"),
+    ("posture_limits", "Mjlab-Getup-Microban-PostureLimits-ImuDelay"),
 ):
     register_mjlab_task(
         task_id=_task_id,

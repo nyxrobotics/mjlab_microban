@@ -958,26 +958,45 @@ def feet_stance_reward(
     env: ManagerBasedRlEnv,
     height_threshold: float,
     head_asset_cfg: SceneEntityCfg,
-    target_lateral: float,
+    axis: str,
+    target: float,
     scale: float,
     asset_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """Reward a HOME-like stance (feet side by side at HOME's width), once standing.
+    """Reward one axis of a HOME-like stance, once standing.
 
-    Measures the two foot bodies' separation in the trunk's heading frame:
-    error = | |lateral| - target_lateral | + |fore-aft| (metres), reward =
-    exp(-error / scale). The L1-exponential kernel keeps a usable gradient
-    from far off (the first standing v4 policy stood 20 cm wide and 7.5 cm
-    staggered against HOME's 9.4 cm / 0: reward 0.16 at scale 0.1, where a
-    Gaussian of similar width is already ~0.01). Hard-gated with
-    _standing_gate. asset_cfg names the two feet; their order is irrelevant.
+    Measures the two foot bodies' separation in the trunk's heading frame
+    along ``axis`` ("lateral" or "fore_aft"): error = | |separation| - target |
+    (metres), reward = exp(-error / scale). One term per axis, on purpose: a
+    single summed-error term let a policy narrow its stance from 20 to 12 cm
+    by staggering one foot forward (7.5 -> 13 cm), barely changing the sum.
+    The L1-exponential kernel keeps a usable gradient from far off. Hard-gated
+    with _standing_gate. asset_cfg names the two feet; order is irrelevant.
     """
+    column = {"fore_aft": 0, "lateral": 1}[axis]
     asset: Entity = env.scene[asset_cfg.name]
     feet = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
     separation = quat_apply_inverse(yaw_quat(asset.data.root_link_quat_w), feet[:, 0] - feet[:, 1])
-    error = torch.abs(torch.abs(separation[:, 1]) - target_lateral) + torch.abs(separation[:, 0])
+    error = torch.abs(torch.abs(separation[:, column]) - target)
     gate = _standing_gate(_head_height(env, head_asset_cfg), height_threshold)
     return gate * torch.exp(-error / scale)
+
+
+def standing_joint_limits_penalty(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sum of soft-joint-limit violation (rad), counted only once standing.
+
+    The always-on dof_pos_limits (-1.0) must stay light: getting up needs
+    joints at their limits. Once standing, though, a policy was measured
+    bracing an ankle and a hip_roll hard against their stops (asymmetric,
+    std 0.0 deg) -- a stiffness crutch that also kept the stance splayed.
+    """
+    violation = envs_mdp.rewards.joint_pos_limits(env, asset_cfg)
+    return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * violation
 
 
 def standing_pose_reward(

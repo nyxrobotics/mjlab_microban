@@ -82,6 +82,7 @@ from mjlab_microban.tasks.mdp import (
     home_pose_reward,
     standing_bonus,
     feet_stance_reward,
+    standing_joint_limits_penalty,
     standing_stability_reward,
     upright_balance_reward,
     on_feet_reward,
@@ -104,16 +105,14 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_strong")
-# Final (post-curriculum) standing_pose / hip_pose weights per reward set,
-# and the feet_stance weight (0 = term absent).
+GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_limits")
+# Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
     "redesign": (30.0, 15.0),
-    "posture": (120.0, 60.0),
-    "posture_strong": (240.0, 120.0),
+    "posture": (240.0, 120.0),
+    "posture_limits": (240.0, 120.0),
 }
-_FEET_STANCE_WEIGHTS = {"v42": 0.0, "redesign": 0.0, "posture": 10.0, "posture_strong": 20.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -302,8 +301,8 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "posture_strong"):
-        _add_posture_rewards(cfg, _FEET_STANCE_WEIGHTS[reward_set])
+    if reward_set in ("posture", "posture_limits"):
+        _add_posture_rewards(cfg, limit_penalty=reward_set == "posture_limits")
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
@@ -621,32 +620,49 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
     )
 
 
-def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, feet_stance_weight: float) -> None:
-    """Pull a standing policy's stance toward HOME: feet together, legs straight.
+def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, limit_penalty: bool) -> None:
+    """Pull a standing policy's stance toward HOME: feet side by side, together.
 
     For fine-tuning a policy that already stands. The first robot-bound v4
     policy stood with feet 20 cm apart and 7.5 cm staggered (HOME: 9.4 cm, 0),
-    right hip yawed +56 deg, a hip_roll pinned at its 25 deg stop and ~30 deg
-    of knee bend: a wide base that eases balance under IMU delay. At the
-    redesign set's final pose weights (30/15, std 0.6 rad) nothing outweighed
-    that. So: a direct stance-geometry term, hip_yaw added to hip_pose, and
-    larger final pose weights (see _POSE_FINAL_WEIGHTS; the 09-26 lineage
-    reached ~6 deg RMS from HOME at 120-480).
+    right hip yawed +56 deg and an ankle and a hip_roll braced on their
+    stops: a wide base that eases balance under IMU delay. A single summed
+    feet-error term (first attempt) narrowed it to ~12 cm but staggered the
+    feet to ~13 cm, so lateral width and fore-aft stagger are separate terms
+    here, stagger weighted double. hip_yaw joins hip_pose, and the final pose
+    weights are 240/120 (the 09-26 lineage reached ~6 deg RMS from HOME at
+    120-480). limit_penalty also penalizes soft-limit violation once standing.
     """
+    feet_cfg = SceneEntityCfg("robot", body_names=("foot", "foot_2"))
     cfg.rewards["hip_pose"].params["asset_cfg"] = SceneEntityCfg(
         "robot", joint_names=(r".*hip_yaw.*", r".*hip_roll.*", r".*hip_pitch.*")
     )
-    cfg.rewards["feet_stance"] = RewardTermCfg(
-        func=feet_stance_reward,
-        weight=feet_stance_weight,
-        params={
-            "height_threshold": STANDING_GATE_HEIGHT,
-            "head_asset_cfg": HEAD_ASSET_CFG,
-            "target_lateral": HOME_FEET_LATERAL_M,
-            "scale": 0.1,
-            "asset_cfg": SceneEntityCfg("robot", body_names=("foot", "foot_2")),
-        },
-    )
+    for name, axis, target, weight in (
+        ("feet_lateral", "lateral", HOME_FEET_LATERAL_M, 10.0),
+        ("feet_fore_aft", "fore_aft", 0.0, 20.0),
+    ):
+        cfg.rewards[name] = RewardTermCfg(
+            func=feet_stance_reward,
+            weight=weight,
+            params={
+                "height_threshold": STANDING_GATE_HEIGHT,
+                "head_asset_cfg": HEAD_ASSET_CFG,
+                "axis": axis,
+                "target": target,
+                "scale": 0.05,
+                "asset_cfg": feet_cfg,
+            },
+        )
+    if limit_penalty:
+        cfg.rewards["standing_joint_limits"] = RewardTermCfg(
+            func=standing_joint_limits_penalty,
+            weight=-20.0,
+            params={
+                "height_threshold": STANDING_GATE_HEIGHT,
+                "head_asset_cfg": HEAD_ASSET_CFG,
+                "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
+            },
+        )
 
 
 MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(
