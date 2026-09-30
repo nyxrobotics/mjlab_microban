@@ -45,6 +45,10 @@ plus sensor noise): stage 1 at 2000 stood 26/62 under delay (52/53 without);
 stage 2 at 2500 stood 61/62 (median 2.7 s to stand), feet 10.0 cm apart
 (HOME 9.4 cm) with 0.3 cm stagger, every leg joint within 3.3 deg of HOME,
 and no falls after 0.2 m/s fore-aft kicks while standing.
+Stage 1 reproduced with `--agent.seed 7`: 53/53 fallen starts standing at
+1500 (no delay), feet 9.8 cm apart with 0.2 cm stagger. The robot candidate
+is stage 2 at 3500 (61/62 and 54/54 under 0-3 tick delay plus noise, 61/62
+even under 0-5 ticks).
 Training the delay from scratch was much slower (standing_bonus ~0.2 at
 iteration 1400), hence the two stages.
 
