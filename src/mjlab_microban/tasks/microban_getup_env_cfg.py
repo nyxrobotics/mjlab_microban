@@ -34,13 +34,17 @@ redesign/ reports):
   and in 63/64 once the v4 clip, raw feedback and no-delay are restored,
   so the current robot model, actuator model and HOME still support it.
 
-Two reward sets share this contract:
+Reward sets sharing this contract:
 
-* "v42": the exact reward recipe of 2026-09-25_18-47-14, the from-scratch
-  run that stood by iteration ~1200 and became the robot's policy.
-* "redesign": the same core, minus the terms measured to hurt, plus HoST's
+* "posture" (default): "redesign" plus HOME-stance terms (see
+  _add_posture_rewards). Stands from fallen starts with feet together and
+  straight legs; fine-tuned under simulated IMU delay for the robot.
+* "redesign": the v42 core, minus the terms measured to hurt, plus HoST's
   post-standing terms -- every standing term gated above kneeling/squatting
-  height (see _add_redesign_rewards).
+  height (see _add_redesign_rewards). Stands, but in a wide braced stance.
+* "v42": the exact reward recipe of 2026-09-25_18-47-14, the from-scratch
+  run behind the robot's 09-26 policy. In the current code it had not
+  stood by iteration 1500 (09-25: 30/64 at 1500).
 """
 
 import numpy as np
@@ -82,7 +86,6 @@ from mjlab_microban.tasks.mdp import (
     home_pose_reward,
     standing_bonus,
     feet_stance_reward,
-    standing_joint_limits_penalty,
     standing_stability_reward,
     upright_balance_reward,
     on_feet_reward,
@@ -99,27 +102,19 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_actuator import (
     make_getup_robot_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("v42", "redesign", "posture", "posture_limits", "posture_ft", "posture_ft_strong")
-# Reward sets that add the HOME-stance terms (_add_posture_rewards).
-GETUP_POSTURE_REWARD_SETS = ("posture", "posture_limits", "posture_ft", "posture_ft_strong")
+GETUP_REWARD_SETS = ("posture", "v42", "redesign")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
     "redesign": (30.0, 15.0),
     "posture": (240.0, 120.0),
-    "posture_limits": (240.0, 120.0),
-    "posture_ft": (240.0, 120.0),
-    "posture_ft_strong": (240.0, 120.0),
 }
-# Weight of the penalty on raw output beyond the flat clip (absent if 0).
-_CLIP_EXCESS_WEIGHTS = {"posture_ft": -0.2, "posture_ft_strong": -1.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -173,7 +168,7 @@ SIM_CFG = SimulationCfg(
 
 def make_microban_getup_env_cfg(
     play: bool = False,
-    reward_set: str = "v42",
+    reward_set: str = "posture",
     imu_delay_max_lag: int = 0,
 ) -> ManagerBasedRlEnvCfg:
     if reward_set not in GETUP_REWARD_SETS:
@@ -308,23 +303,8 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in GETUP_POSTURE_REWARD_SETS:
-        _add_posture_rewards(cfg, limit_penalty=reward_set == "posture_limits")
-    if reward_set in _CLIP_EXCESS_WEIGHTS:
-        # Fine-tuning only. A standing policy drove the raw output of the
-        # joints it braces on their stops to hundreds of radians (previous-
-        # action normalizer std 110-200 on exactly those four joints). Past
-        # the clip, nudging that output changes nothing physical, so the
-        # pose/stance terms get no gradient there at all. A linear barrier
-        # beyond the FLAT +-1.57 rad clip pulls the output back to the clip
-        # edge without limiting torque (the target may still sit at the
-        # edge). Not for from-scratch runs: every penalty variant tried from
-        # scratch (with the old per-joint clip) never stood.
-        cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
-            func=normalized_target_clip_excess_l1_sum,
-            weight=_CLIP_EXCESS_WEIGHTS[reward_set],
-            params={"action_name": "joint_pos"},
-        )
+    if reward_set == "posture":
+        _add_posture_rewards(cfg)
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
@@ -642,22 +622,26 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
     )
 
 
-def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, limit_penalty: bool) -> None:
-    """Pull the standing stance toward HOME: feet side by side, together.
+def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
+    """HOME stance: feet side by side at HOME's width, legs straight.
 
-    Active from step 0 (every term is gated on standing height). Fine-tuning
-    an already-standing policy with these did not change its stance: three
-    rounds, ~5000 iterations, the braced asymmetric stance stayed. The
-    stance forms when standing first emerges, so train with these from
-    scratch. The first robot-bound v4
-    policy stood with feet 20 cm apart and 7.5 cm staggered (HOME: 9.4 cm, 0),
-    right hip yawed +56 deg and an ankle and a hip_roll braced on their
-    stops: a wide base that eases balance under IMU delay. A single summed
-    feet-error term (first attempt) narrowed it to ~12 cm but staggered the
-    feet to ~13 cm, so lateral width and fore-aft stagger are separate terms
-    here, stagger weighted double. hip_yaw joins hip_pose, and the final pose
-    weights are 240/120 (the 09-26 lineage reached ~6 deg RMS from HOME at
-    120-480). limit_penalty also penalizes soft-limit violation once standing.
+    On top of _add_redesign_rewards. Active from step 0 (every term is
+    gated on standing height): the stance forms when standing first
+    emerges and could not be changed afterwards -- three fine-tuning rounds
+    (~5000 iterations: per-axis stance terms, pose 240/120, a standing
+    joint-limit penalty, a clip-excess barrier with std reset) left the
+    "redesign" policy's braced stance as it was (feet 12-20 cm apart and
+    7-13 cm staggered, an ankle and a hip_roll pressed on their stops).
+    Trained from scratch with these terms it stood by ~2000 iterations with
+    feet 10.1 cm apart, 0.2 cm stagger, every leg joint within 3.5 deg of
+    HOME, and took fore-aft kicks of 0.2 m/s without falling (0/63; the
+    braced stance: 40/61 fell).
+
+    * feet_lateral / feet_fore_aft: foot separation in the trunk heading
+      frame, separate terms because a single summed error was satisfied by
+      narrowing the stance while staggering the feet.
+    * hip_pose also covers hip_yaw (the braced stance yawed a hip +56 deg).
+    * Final pose weights 240/120 (see _POSE_FINAL_WEIGHTS).
     """
     feet_cfg = SceneEntityCfg("robot", body_names=("foot", "foot_2"))
     cfg.rewards["hip_pose"].params["asset_cfg"] = SceneEntityCfg(
@@ -677,16 +661,6 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg, limit_penalty: bool) -> None
                 "target": target,
                 "scale": 0.05,
                 "asset_cfg": feet_cfg,
-            },
-        )
-    if limit_penalty:
-        cfg.rewards["standing_joint_limits"] = RewardTermCfg(
-            func=standing_joint_limits_penalty,
-            weight=-20.0,
-            params={
-                "height_threshold": STANDING_GATE_HEIGHT,
-                "head_asset_cfg": HEAD_ASSET_CFG,
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
             },
         )
 

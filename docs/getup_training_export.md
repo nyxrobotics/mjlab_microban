@@ -1,7 +1,8 @@
 # Microban get-up v4: train and export
 
-Run these commands on the training PC from this repository. Start a **new**
-training run; do not resume or initialize from an earlier get-up checkpoint.
+Run these commands on the training PC from this repository. Start stage 1
+as a **new** training run; stage 2 resumes only from that stage-1 run, never
+from a checkpoint of an earlier contract.
 
 v4 is the action contract every get-up policy that ever stood up was trained
 under (see `microban_getup_env_cfg.py`'s module docstring for the evidence):
@@ -9,7 +10,8 @@ under (see `microban_getup_env_cfg.py`'s module docstring for the evidence):
 * absolute target = default pose + raw action, clipped at a flat ±1.57 rad on
   all 18 body joints (not each joint's soft limit);
 * the policy observes its own previous **raw** output (not the clipped target);
-* no penalty on raw output beyond the clip, and no simulated IMU delay.
+* no penalty on raw output beyond the clip (the IMU delay comes in only in
+  the stage-2 fine-tune below).
 
 At the robot's RL servo gain (P=125) standing is active balance that needs
 targets far past the joint angle to produce useful torque, so a trained
@@ -23,14 +25,33 @@ policy's own target. Their checkpoints and ONNX files are rejected.
 The actor reads angular velocity in the IMU sensor's own axes, matching the
 unrotated BMI088 gyroscope values sent to the robot's get-up actor.
 
+Train in two stages (a fresh stage-1 run, then resume it for stage 2):
+
 ```bash
 uv sync --locked
-uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --agent.logger tensorboard
+# Stage 1: HOME-stance rewards, from scratch. Stands with feet together and
+# straight legs by ~2000 iterations.
+uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --agent.logger tensorboard \
+  --agent.max-iterations 2000
+# Stage 2: same rewards under the walking task's 0-3 tick simulated IMU
+# latency, resumed from stage 1 (~500 iterations suffice).
+uv run --locked train Mjlab-Getup-Microban-ImuDelay --env.scene.num-envs 4096 --agent.logger tensorboard \
+  --agent.max-iterations 1000 --agent.resume True \
+  --agent.load-run <stage-1-run> --agent.load-checkpoint model_2000.pt
 ```
 
-`Mjlab-Getup-Microban` uses the reward set that stood from scratch on
-2026-09-25 (`reward_set="v42"`); `Mjlab-Getup-Microban-Redesign` uses the same
-contract with the redesigned reward set. Both export identically.
+Reference numbers (2026-09-30, 64 envs, fallen starts, 0-3 tick IMU delay
+plus sensor noise): stage 1 at 2000 stood 26/62 under delay (52/53 without);
+stage 2 at 2500 stood 61/62 (median 2.7 s to stand), feet 10.0 cm apart
+(HOME 9.4 cm) with 0.3 cm stagger, every leg joint within 3.3 deg of HOME,
+and no falls after 0.2 m/s fore-aft kicks while standing.
+Training the delay from scratch was much slower (standing_bonus ~0.2 at
+iteration 1400), hence the two stages.
+
+Other registered variants of the same contract: `Mjlab-Getup-Microban-V42`
+(the 2026-09-25 recipe), `Mjlab-Getup-Microban-Redesign` (stands, but in a
+wide braced stance), and `Mjlab-Getup-Microban-Sym` (stage 1 with left/right
+mirror data augmentation).
 
 The training episode lasts 20 seconds. The robot's automatic get-up attempt
 also allows up to 20 seconds; it hands control back once the upright gravity

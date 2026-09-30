@@ -86,65 +86,47 @@ register_mjlab_task(
     runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
+# Get-up (v4 action contract, see microban_getup_env_cfg.py). The robot
+# policy is trained in two stages:
+#   1. Mjlab-Getup-Microban from scratch: HOME-stance reward set ("posture");
+#      stands from fallen starts with a HOME stance by ~2000 iterations.
+#   2. Mjlab-Getup-Microban-ImuDelay, resumed from stage 1: the same rewards
+#      under the walking task's 0-3 tick simulated IMU latency (~500 iters).
 register_mjlab_task(
     task_id="Mjlab-Getup-Microban",
-    env_cfg=make_microban_getup_env_cfg(),
-    play_env_cfg=make_microban_getup_env_cfg(play=True),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-
-# Same v4 action contract, redesigned reward set (see
-# microban_getup_env_cfg._add_redesign_rewards).
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Redesign",
-    env_cfg=make_microban_getup_env_cfg(reward_set="redesign"),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign"),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-
-# Redesign reward set plus the walking task's 0-3 tick simulated IMU latency,
-# for fine-tuning a standing policy toward the robot.
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Redesign-ImuDelay",
-    env_cfg=make_microban_getup_env_cfg(reward_set="redesign", imu_delay_max_lag=3),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign", imu_delay_max_lag=3),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-
-# HOME-stance reward sets (feet together, legs straight); see
-# microban_getup_env_cfg._add_posture_rewards.
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Posture",
     env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
     play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-# Same, with left/right mirror data augmentation in PPO (HiFAR/HumanUP):
-# a mirror-symmetric policy cannot settle into a braced asymmetric stance.
 register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Posture-Sym",
+    task_id="Mjlab-Getup-Microban-ImuDelay",
+    env_cfg=make_microban_getup_env_cfg(reward_set="posture", imu_delay_max_lag=3),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", imu_delay_max_lag=3),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+# Reference variants of the same contract: the 09-25 recipe ("v42"), and the
+# first v4 set that stood, with a wide braced stance ("redesign").
+for _reward_set, _task_id in (
+    ("v42", "Mjlab-Getup-Microban-V42"),
+    ("redesign", "Mjlab-Getup-Microban-Redesign"),
+):
+    register_mjlab_task(
+        task_id=_task_id,
+        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set),
+        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set),
+        rl_cfg=MicrobanGetupRlCfg,
+        runner_cls=MicrobanGetupOnPolicyRunner,
+    )
+# Stage 1 with left/right mirror data augmentation in PPO (HiFAR/HumanUP).
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Sym",
     env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
     play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
     rl_cfg=with_getup_symmetry(MicrobanGetupRlCfg),
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-for _reward_set, _task_id in (
-    ("posture", "Mjlab-Getup-Microban-Posture-ImuDelay"),
-    ("posture_limits", "Mjlab-Getup-Microban-PostureLimits-ImuDelay"),
-    ("posture_ft", "Mjlab-Getup-Microban-PostureFT-ImuDelay"),
-    ("posture_ft_strong", "Mjlab-Getup-Microban-PostureFTStrong-ImuDelay"),
-):
-    register_mjlab_task(
-        task_id=_task_id,
-        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set, imu_delay_max_lag=3),
-        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set, imu_delay_max_lag=3),
-        rl_cfg=MicrobanGetupRlCfg,
-        runner_cls=MicrobanGetupOnPolicyRunner,
-    )
 
 register_mjlab_task(
     task_id="Mjlab-Tracking-Microban",

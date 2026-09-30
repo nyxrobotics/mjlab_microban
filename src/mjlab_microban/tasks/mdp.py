@@ -982,23 +982,6 @@ def feet_stance_reward(
     return gate * torch.exp(-error / scale)
 
 
-def standing_joint_limits_penalty(
-    env: ManagerBasedRlEnv,
-    height_threshold: float,
-    head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Sum of soft-joint-limit violation (rad), counted only once standing.
-
-    The always-on dof_pos_limits (-1.0) must stay light: getting up needs
-    joints at their limits. Once standing, though, a policy was measured
-    bracing an ankle and a hip_roll hard against their stops (asymmetric,
-    std 0.0 deg) -- a stiffness crutch that also kept the stance splayed.
-    """
-    violation = envs_mdp.rewards.joint_pos_limits(env, asset_cfg)
-    return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * violation
-
-
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,
