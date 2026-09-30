@@ -106,6 +106,18 @@ register_mjlab_task(
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
+# Experimental stage 3: calm the stage-2 stance (see _add_smooth_rewards).
+for _reward_set, _task_id in (
+    ("smooth", "Mjlab-Getup-Microban-Smooth-ImuDelay"),
+    ("smooth_strong", "Mjlab-Getup-Microban-SmoothStrong-ImuDelay"),
+):
+    register_mjlab_task(
+        task_id=_task_id,
+        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set, imu_delay_max_lag=3),
+        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set, imu_delay_max_lag=3),
+        rl_cfg=MicrobanGetupRlCfg,
+        runner_cls=MicrobanGetupOnPolicyRunner,
+    )
 # Reference variants of the same contract: the 09-25 recipe ("v42"), and the
 # first v4 set that stood, with a wide braced stance ("redesign").
 for _reward_set, _task_id in (

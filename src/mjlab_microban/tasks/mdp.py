@@ -1782,11 +1782,16 @@ class target_rate_l2:
         self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        height_threshold: float | None = None,
+        head_asset_cfg: SceneEntityCfg | None = None,
     ) -> torch.Tensor:
+        """With height_threshold/head_asset_cfg, counts only once standing."""
         asset: Entity = env.scene[asset_cfg.name]
         target = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
         rate_sq = torch.sum(torch.square(target - self._prev_target), dim=-1)
         self._prev_target = target.clone()
+        if height_threshold is not None:
+            rate_sq = rate_sq * _standing_gate(_head_height(env, head_asset_cfg), height_threshold)
         return rate_sq
 
     def reset(self, env_ids: torch.Tensor) -> None:
