@@ -112,6 +112,8 @@ for _reward_set, _task_id in (
     ("calm_strong", "Mjlab-Getup-Microban-CalmStrong-ImuDelay"),
     ("calm_narrow", "Mjlab-Getup-Microban-CalmNarrow-ImuDelay"),
     ("calm_roll", "Mjlab-Getup-Microban-CalmRoll-ImuDelay"),
+    ("calm_arms", "Mjlab-Getup-Microban-CalmArms-ImuDelay"),
+    ("calm_effort", "Mjlab-Getup-Microban-CalmEffort-ImuDelay"),
 ):
     register_mjlab_task(
         task_id=_task_id,

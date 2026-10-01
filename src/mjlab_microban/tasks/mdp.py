@@ -1001,6 +1001,27 @@ def standing_joint_vel_l2(
     return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * vel_sq
 
 
+def standing_target_error_l1(
+    env: ManagerBasedRlEnv,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sum of |commanded target - measured angle| (rad), counted once standing.
+
+    Proportional to each servo's P-term effort, so it catches a joint pressed
+    into its stop: there the measured angle cannot move (a pose reward on it
+    has no gradient), but the commanded target -- and this term -- can. The
+    calm get-up policy held its right shoulder_roll target 1.57 rad past the
+    0-deg stop at 0.44 Nm while standing.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    error = torch.abs(
+        asset.data.joint_pos_target[:, asset_cfg.joint_ids] - asset.data.joint_pos[:, asset_cfg.joint_ids]
+    )
+    return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * torch.sum(error, dim=-1)
+
+
 def standing_pose_reward(
     env: ManagerBasedRlEnv,
     gate_center: float,
