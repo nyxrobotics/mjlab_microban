@@ -111,7 +111,7 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort")
+GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
@@ -123,10 +123,11 @@ _POSE_FINAL_WEIGHTS = {
     "calm_roll": (240.0, 120.0),
     "calm_arms": (240.0, 120.0),
     "calm_effort": (240.0, 120.0),
+    "calm_effort_strong": (240.0, 120.0),
 }
 # Standing-gated measured joint-velocity penalty of the fine-tuning "calm"
 # sets (see _add_calm_rewards).
-_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0, "calm_narrow": -4.0, "calm_roll": -4.0, "calm_arms": -4.0, "calm_effort": -4.0}
+_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0, "calm_narrow": -4.0, "calm_roll": -4.0, "calm_arms": -4.0, "calm_effort": -4.0, "calm_effort_strong": -4.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -315,15 +316,15 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort"):
+    if reward_set in ("posture", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong"):
         _add_posture_rewards(cfg)
     if reward_set in _CALM_JOINT_VEL_WEIGHTS:
         _add_calm_rewards(cfg, _CALM_JOINT_VEL_WEIGHTS[reward_set])
-    if reward_set in ("calm_narrow", "calm_roll", "calm_arms", "calm_effort"):
+    if reward_set in ("calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong"):
         # calm_strong calmed the stance (0.9 -> 0.47 rad/s) by rolling the
         # hips and ankles out to a 12.4 cm base (HOME 9.4 cm); pull it back.
         cfg.rewards["feet_lateral"].weight = 30.0
-    if reward_set in ("calm_roll", "calm_arms", "calm_effort"):
+    if reward_set in ("calm_roll", "calm_arms", "calm_effort", "calm_effort_strong"):
         # feet_lateral x3 alone did not narrow it (13.3 cm at 19000: hip_roll
         # -15/+18 deg, ankle_roll -20/-28 deg vs HOME +-5). Hold the roll
         # joints themselves near HOME with a tight (8.6 deg) std.
@@ -337,14 +338,14 @@ def make_microban_getup_env_cfg(
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll.*", r".*ankle_roll.*")),
             },
         )
-    if reward_set in ("calm_arms", "calm_effort"):
+    if reward_set in ("calm_arms", "calm_effort", "calm_effort_strong"):
         # The calm policy (calm_roll, W2c model_22996) presses its right arm
         # into the shoulder_roll stop at 0 deg (HOME -10) at 0.44 Nm while
         # standing -- half its 18-joint total, a steady load on one servo.
         cfg.rewards["roll_pose"].params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=(r".*hip_roll.*", r".*ankle_roll.*", r".*shoulder_roll.*")
         )
-    if reward_set == "calm_effort":
+    if reward_set in ("calm_effort", "calm_effort_strong"):
         # calm_arms fixed the left shoulder but not the right one: pinned on
         # its stop, its measured angle cannot respond, so roll_pose has no
         # gradient there. Penalize the target-vs-measured error instead.
@@ -357,6 +358,12 @@ def make_microban_getup_env_cfg(
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
             },
         )
+    if reward_set == "calm_effort_strong":
+        # calm_effort still held the right shoulder_roll target on the clip:
+        # raw output 5.3 against the 1.75 that reaches the clip edge, so the
+        # target -- and standing_target_error -- could not move. A 10x
+        # clip-excess barrier pulls the raw output back to the clip edge.
+        cfg.rewards["raw_target_clip_excess"].weight = -2.0
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------
