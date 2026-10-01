@@ -337,16 +337,33 @@ def make_microban_getup_env_cfg(
         "yaw": (-3.14159, 3.14159),
     }
     cfg.events["reset_robot_joints"].params["position_range"] = (-3.14159, 3.14159)
-    # 10 % of resets start near HOME instead (FRASA's reset_final_p,
+    # 20 % of resets start near HOME instead (FRASA's reset_final_p,
     # HumanUP's standing_init_prob). Added after reset_base/reset_robot_joints
     # so it overrides their sample for the selected envs.
+    #
+    # Widened from +-5 deg to +-34 deg (and the fraction doubled from 10% to
+    # 20%) so this reset distribution also covers "clearly tipping but not
+    # yet fallen" states, not just small near-home jitter. The robot's own
+    # fall-detection trigger (scheduler.py's _update_getup_override) only
+    # hands control to this policy once already substantially tilted, and
+    # training only ever sampled either that fully-fallen regime or a ~5 deg
+    # near-home jitter -- nothing in between. A policy that has only ever
+    # practiced "already flat" or "basically upright" has no practiced
+    # response for "tipping, still recoverable": it either falls all the way
+    # (never having learned to catch itself) or holds still (never having
+    # learned to actively brace). Roll and pitch are independent, so this can
+    # compound to a larger total tilt at the corners of the sampled range;
+    # that is intentional headroom into "about to fall", not just "near
+    # home". The 80%-weighted fully-fallen distribution remains the dominant
+    # training regime, preserving the already-validated stand-from-flat
+    # capability.
     cfg.events["reset_near_home"] = EventTermCfg(
         mode="reset",
         func=reset_near_home_fraction,
         params={
-            "rel_near_home_envs": 0.1,
+            "rel_near_home_envs": 0.2,
             "joint_noise_range": (-0.05, 0.05),
-            "orientation_noise_range": (-0.09, 0.09),  # ~+-5 deg roll/pitch
+            "orientation_noise_range": (-0.6, 0.6),  # ~+-34 deg roll/pitch
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
