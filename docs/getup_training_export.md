@@ -52,6 +52,32 @@ even under 0-5 ticks).
 Training the delay from scratch was much slower (standing_bonus ~0.2 at
 iteration 1400), hence the two stages.
 
+### Stage 3: stop the standing tremble (calm fine-tune)
+
+The stage-2 policy stands, but holds the stance with bang-bang targets
+(~80 % on the clip) and trembles at ~0.77 rad/s. Its action std has grown to
+~10, and under that much noise bang-bang is the robust way to stand. Reset
+the std to 0.5 and fine-tune with the calm reward set (standing-gated joint
+velocity penalty, tight roll-joint pose, feet width, a clip-excess barrier):
+
+```bash
+uv run --locked python -m mjlab_microban.scripts.reset_getup_action_std \
+  --checkpoint logs/rsl_rl/mjlab_microban_getup/<stage-2-run>/model_<N>.pt \
+  --out-run <stage-2-run>_std05
+uv run --locked train Mjlab-Getup-Microban-CalmRoll-ImuDelay --env.scene.num-envs 4096 \
+  --agent.logger tensorboard --agent.max-iterations 8000 --agent.algorithm.entropy-coef 0.001 \
+  --agent.resume True --agent.load-run <stage-2-run>_std05 --agent.load-checkpoint model_<N>.pt
+```
+
+Reproduced on 2026-10-01/02 from stage 2 at 3500 (seed 42): tremble 0.77 ->
+0.55 -> 0.29 -> 0.08 rad/s after 2500 / 4500 / 5500 iterations; at 11499,
+0.06-0.07 rad/s, fallen starts stood 60/62, 53/54, 57/60, 54/55 (four seeds)
+and 59/62 under 0-5 tick delay, feet 9.4 cm apart, tilt ~4 deg, falls after a
+0.3 m/s fore-aft kick 2/62. Standing effort drops ~7x (0.9 Nm over 18 joints).
+Known leftover: the right shoulder_roll target stays on the clip, pressing
+the arm into its 0-deg stop at ~0.44 Nm while standing (see
+`calm_effort_strong`, still experimental).
+
 Other registered variants of the same contract: `Mjlab-Getup-Microban-V42`
 (the 2026-09-25 recipe), `Mjlab-Getup-Microban-Redesign` (stands, but in a
 wide braced stance), and `Mjlab-Getup-Microban-Sym` (stage 1 with left/right
