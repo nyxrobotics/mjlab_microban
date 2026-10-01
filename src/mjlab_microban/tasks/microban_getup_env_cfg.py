@@ -110,7 +110,7 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong")
+GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong", "calm_narrow")
 # Final (post-curriculum) standing_pose / hip_pose weights per reward set.
 _POSE_FINAL_WEIGHTS = {
     "v42": (30.0, 15.0),
@@ -118,10 +118,11 @@ _POSE_FINAL_WEIGHTS = {
     "posture": (240.0, 120.0),
     "calm": (240.0, 120.0),
     "calm_strong": (240.0, 120.0),
+    "calm_narrow": (240.0, 120.0),
 }
 # Standing-gated measured joint-velocity penalty of the fine-tuning "calm"
 # sets (see _add_calm_rewards).
-_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0}
+_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0, "calm_narrow": -4.0}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -310,10 +311,14 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "calm", "calm_strong"):
+    if reward_set in ("posture", "calm", "calm_strong", "calm_narrow"):
         _add_posture_rewards(cfg)
     if reward_set in _CALM_JOINT_VEL_WEIGHTS:
         _add_calm_rewards(cfg, _CALM_JOINT_VEL_WEIGHTS[reward_set])
+    if reward_set == "calm_narrow":
+        # calm_strong calmed the stance (0.9 -> 0.47 rad/s) by rolling the
+        # hips and ankles out to a 12.4 cm base (HOME 9.4 cm); pull it back.
+        cfg.rewards["feet_lateral"].weight = 30.0
     standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
 
     #---------------------------- Terminations ----------------------

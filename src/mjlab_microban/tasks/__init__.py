@@ -110,6 +110,7 @@ register_mjlab_task(
 for _reward_set, _task_id in (
     ("calm", "Mjlab-Getup-Microban-Calm-ImuDelay"),
     ("calm_strong", "Mjlab-Getup-Microban-CalmStrong-ImuDelay"),
+    ("calm_narrow", "Mjlab-Getup-Microban-CalmNarrow-ImuDelay"),
 ):
     register_mjlab_task(
         task_id=_task_id,
