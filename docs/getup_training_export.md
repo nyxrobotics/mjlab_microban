@@ -106,6 +106,12 @@ delay plus noise): fallen starts stood 60/62, 52/54, 57/60, 52/55 (four
 seeds) and 59/62 under 0-5 ticks; standing tremble 0.05-0.06 rad/s, effort
 0.55 Nm over 18 joints (right shoulder 0.10 Nm); falls after a 0.3 m/s
 fore-aft kick 1/62, after 0.4 m/s fore-aft / lateral kicks 19/59 / 19/57.
+Stages 4-5 were reproduced with `--agent.seed 7` from the same stage-3
+checkpoint, in one uninterrupted run each (6500 + 3000 iterations): fallen
+starts 61/62, 53/54, 56/60, 54/55 and 60/62 under 0-5 ticks; tremble 0.06
+rad/s; effort 0.46 Nm (no joint above 0.08 Nm, the shoulder stop no longer
+pressed); falls after a 0.3 m/s fore-aft kick 1/62, after 0.4 m/s fore-aft /
+lateral kicks 23/62 / 17/59.
 
 Other registered variants of the same contract: `Mjlab-Getup-Microban-V42`
 (the 2026-09-25 recipe), `Mjlab-Getup-Microban-Redesign` (stands, but in a
