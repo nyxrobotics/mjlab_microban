@@ -111,32 +111,13 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = 1.57
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong",
-    "calm_push", "calm_push_soft",
-)
-# Fine-tuning sets that also push the robot while it stands (see the push
-# event below): lateral push tolerance fell when the effort penalty was added.
-_PUSH_REWARD_SETS = ("calm_push", "calm_push_soft")
-# Final (post-curriculum) standing_pose / hip_pose weights per reward set.
-_POSE_FINAL_WEIGHTS = {
-    "v42": (30.0, 15.0),
-    "redesign": (30.0, 15.0),
-    "posture": (240.0, 120.0),
-    "calm": (240.0, 120.0),
-    "calm_strong": (240.0, 120.0),
-    "calm_narrow": (240.0, 120.0),
-    "calm_roll": (240.0, 120.0),
-    "calm_arms": (240.0, 120.0),
-    "calm_effort": (240.0, 120.0),
-    "calm_effort_strong": (240.0, 120.0),
-    "calm_push": (240.0, 120.0),
-    "calm_push_soft": (240.0, 120.0),
-}
-# Standing-gated measured joint-velocity penalty of the fine-tuning "calm"
-# sets (see _add_calm_rewards).
-_CALM_JOINT_VEL_WEIGHTS = {"calm": -1.0, "calm_strong": -4.0, "calm_narrow": -4.0, "calm_roll": -4.0, "calm_arms": -4.0, "calm_effort": -4.0, "calm_effort_strong": -4.0,
-    "calm_push": -4.0, "calm_push_soft": -4.0,
-}
+GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
+# Fine-tuning stages after stage 2 (see docs/getup_training_export.md). Each
+# adds to the one before; see _add_calm_rewards for what each stage adds.
+_CALM_STAGE = {"calm_roll": 3, "calm_effort_strong": 4, "calm_push": 5}
+# Final (post-curriculum) standing_pose / hip_pose weights; 240/120 for the
+# HOME-stance sets (posture and every calm stage).
+_POSE_FINAL_WEIGHTS = {"v42": (30.0, 15.0), "redesign": (30.0, 15.0)}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics.
 HOME_FEET_LATERAL_M = 0.094
 
@@ -325,60 +306,12 @@ def make_microban_getup_env_cfg(
         _add_v42_rewards(cfg, sensors)
     else:
         _add_redesign_rewards(cfg, sensors)
-    if reward_set in ("posture", "calm", "calm_strong", "calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong", "calm_push", "calm_push_soft"):
+    calm_stage = _CALM_STAGE.get(reward_set, 0)
+    if reward_set == "posture" or calm_stage:
         _add_posture_rewards(cfg)
-    if reward_set in _CALM_JOINT_VEL_WEIGHTS:
-        _add_calm_rewards(cfg, _CALM_JOINT_VEL_WEIGHTS[reward_set])
-    if reward_set in ("calm_narrow", "calm_roll", "calm_arms", "calm_effort", "calm_effort_strong", "calm_push", "calm_push_soft"):
-        # calm_strong calmed the stance (0.9 -> 0.47 rad/s) by rolling the
-        # hips and ankles out to a 12.4 cm base (HOME 9.4 cm); pull it back.
-        cfg.rewards["feet_lateral"].weight = 30.0
-    if reward_set in ("calm_roll", "calm_arms", "calm_effort", "calm_effort_strong", "calm_push", "calm_push_soft"):
-        # feet_lateral x3 alone did not narrow it (13.3 cm at 19000: hip_roll
-        # -15/+18 deg, ankle_roll -20/-28 deg vs HOME +-5). Hold the roll
-        # joints themselves near HOME with a tight (8.6 deg) std.
-        cfg.rewards["roll_pose"] = RewardTermCfg(
-            func=home_pose_reward,
-            weight=60.0,
-            params={
-                "height_threshold": STANDING_GATE_HEIGHT,
-                "std": {r".*": 0.15},
-                "head_asset_cfg": HEAD_ASSET_CFG,
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll.*", r".*ankle_roll.*")),
-            },
-        )
-    if reward_set in ("calm_arms", "calm_effort", "calm_effort_strong", "calm_push", "calm_push_soft"):
-        # The calm policy (calm_roll, W2c model_22996) presses its right arm
-        # into the shoulder_roll stop at 0 deg (HOME -10) at 0.44 Nm while
-        # standing -- half its 18-joint total, a steady load on one servo.
-        cfg.rewards["roll_pose"].params["asset_cfg"] = SceneEntityCfg(
-            "robot", joint_names=(r".*hip_roll.*", r".*ankle_roll.*", r".*shoulder_roll.*")
-        )
-    if reward_set in ("calm_effort", "calm_effort_strong", "calm_push", "calm_push_soft"):
-        # calm_arms fixed the left shoulder but not the right one: pinned on
-        # its stop, its measured angle cannot respond, so roll_pose has no
-        # gradient there. Penalize the target-vs-measured error instead.
-        cfg.rewards["standing_target_error"] = RewardTermCfg(
-            func=standing_target_error_l1,
-            weight=-2.0,
-            params={
-                "height_threshold": STANDING_GATE_HEIGHT,
-                "head_asset_cfg": HEAD_ASSET_CFG,
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
-            },
-        )
-    if reward_set in ("calm_effort_strong", "calm_push", "calm_push_soft"):
-        # calm_effort still held the right shoulder_roll target on the clip:
-        # raw output 5.3 against the 1.75 that reaches the clip edge, so the
-        # target -- and standing_target_error -- could not move. A 10x
-        # clip-excess barrier pulls the raw output back to the clip edge.
-        cfg.rewards["raw_target_clip_excess"].weight = -2.0
-    if reward_set == "calm_push_soft":
-        # The -2 effort penalty also discourages the large target offsets
-        # (torque) a push recovery needs: lateral 0.4 m/s kicks felled 25-27/60
-        # vs 14/63 before it. Keep the shoulder fix with a 4x lighter weight.
-        cfg.rewards["standing_target_error"].weight = -0.5
-    standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS[reward_set]
+    if calm_stage:
+        _add_calm_rewards(cfg, calm_stage)
+    standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS.get(reward_set, (240.0, 120.0))
 
     #---------------------------- Terminations ----------------------
     # No "fell over" exit: starting fallen is the whole point.
@@ -421,7 +354,7 @@ def make_microban_getup_env_cfg(
     # task's +-0.5 m/s pushes (tried in 0e33eb3) knocked every stand over
     # into a worse-scoring posture, so standing attempts stopped paying.
     del cfg.events["push_robot"]
-    if reward_set in _PUSH_REWARD_SETS:
+    if _CALM_STAGE.get(reward_set, 0) >= 5:
         # Fine-tuning only: modest horizontal kicks every 3-6 s (ankle balance
         # absorbs ~0.2 m/s; walking's +-0.5 broke learning from scratch).
         cfg.events["push_robot"] = EventTermCfg(
@@ -747,21 +680,36 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         )
 
 
-def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, joint_vel_weight: float) -> None:
-    """Fine-tuning only: stop the HOME-stance policy trembling.
+def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, stage: int) -> None:
+    """Fine-tuning stages 3-5: a calm, low-effort, push-tolerant HOME stance.
 
-    Trained to 15000 iterations, the two-stage policy kept trembling at
-    0.75-0.87 rad/s with ~78 % of targets on the clip and action std ~10:
-    under that much exploration noise, bang-bang is the robust way to hold
-    a stance. A linear ankle PD holds the same stance under the same IMU
-    delay, so a calm solution exists. A penalty on the commanded target rate
-    (with a std reset) changed nothing in 1000 iterations, so this penalizes
-    the measured joint velocity while standing instead. Resume with a reset
-    action std (0.5) and low entropy, as in the docs.
+    Resume each stage from the previous one; stage 3 starts from a stage-2
+    checkpoint with its action std reset to 0.5 and entropy 0.001
+    (scripts/reset_getup_action_std.py, docs/getup_training_export.md).
+
+    Stage 3 (calm_roll). The stage-2 policy holds its stance with bang-bang
+    targets (~80 % on the clip) under action std ~10 and trembles at ~0.8
+    rad/s, although a linear ankle PD holds the same stance under the same
+    IMU delay. A commanded-target-rate penalty changed nothing, so penalize
+    the MEASURED joint velocity while standing. On its own that calmed the
+    stance by splaying it (feet 12-13 cm, hip/ankle roll 15-28 deg), so also
+    triple feet_lateral and hold the roll joints near HOME with a tight
+    (8.6 deg) roll_pose. Plus a light barrier on raw output beyond the flat
+    clip. Measured: tremble 0.77 -> 0.07 rad/s.
+    Stage 4 (calm_effort_strong). The stage-3 policy presses its right arm
+    into the 0-deg shoulder_roll stop at 0.44 Nm while standing. Its target
+    sits on the clip and its measured angle cannot move, so a pose term has
+    no gradient. So: add shoulder_roll to roll_pose, penalize the
+    target-vs-measured error (the P-term effort), and raise the clip-excess
+    barrier 10x so the raw output comes back to where the target responds.
+    Measured: shoulder 0.44 -> 0.10 Nm; total standing effort 0.9 -> 0.5 Nm.
+    Stage 5 (calm_push). The effort penalty also cost push tolerance, so
+    kick the robot with +-0.3 m/s every 3-6 s (the push event in the env
+    cfg). Measured: 0.3 m/s fore-aft kicks fell 1/62 (stage 4: 3-7).
     """
     cfg.rewards["standing_joint_vel"] = RewardTermCfg(
         func=standing_joint_vel_l2,
-        weight=joint_vel_weight,
+        weight=-4.0,
         params={
             "height_threshold": STANDING_GATE_HEIGHT,
             "head_asset_cfg": HEAD_ASSET_CFG,
@@ -772,9 +720,33 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, joint_vel_weight: float) -> Non
     # the target (it may still sit at the edge for full torque).
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=-0.2,
+        weight=-0.2 if stage < 4 else -2.0,
         params={"action_name": "joint_pos"},
     )
+    cfg.rewards["feet_lateral"].weight = 30.0
+    roll_joints = (r".*hip_roll.*", r".*ankle_roll.*")
+    if stage >= 4:
+        roll_joints += (r".*shoulder_roll.*",)
+    cfg.rewards["roll_pose"] = RewardTermCfg(
+        func=home_pose_reward,
+        weight=60.0,
+        params={
+            "height_threshold": STANDING_GATE_HEIGHT,
+            "std": {r".*": 0.15},
+            "head_asset_cfg": HEAD_ASSET_CFG,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=roll_joints),
+        },
+    )
+    if stage >= 4:
+        cfg.rewards["standing_target_error"] = RewardTermCfg(
+            func=standing_target_error_l1,
+            weight=-2.0,
+            params={
+                "height_threshold": STANDING_GATE_HEIGHT,
+                "head_asset_cfg": HEAD_ASSET_CFG,
+                "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
+            },
+        )
 
 
 MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(

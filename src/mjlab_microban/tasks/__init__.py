@@ -106,17 +106,12 @@ register_mjlab_task(
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-# Experimental stage 3: stop the stage-2 policy trembling (_add_calm_rewards).
+# Stages 3-5: calm, low-effort, push-tolerant fine-tunes, each resumed from
+# the previous stage (see microban_getup_env_cfg._add_calm_rewards).
 for _reward_set, _task_id in (
-    ("calm", "Mjlab-Getup-Microban-Calm-ImuDelay"),
-    ("calm_strong", "Mjlab-Getup-Microban-CalmStrong-ImuDelay"),
-    ("calm_narrow", "Mjlab-Getup-Microban-CalmNarrow-ImuDelay"),
     ("calm_roll", "Mjlab-Getup-Microban-CalmRoll-ImuDelay"),
-    ("calm_arms", "Mjlab-Getup-Microban-CalmArms-ImuDelay"),
-    ("calm_effort", "Mjlab-Getup-Microban-CalmEffort-ImuDelay"),
     ("calm_effort_strong", "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay"),
     ("calm_push", "Mjlab-Getup-Microban-CalmPush-ImuDelay"),
-    ("calm_push_soft", "Mjlab-Getup-Microban-CalmPushSoft-ImuDelay"),
 ):
     register_mjlab_task(
         task_id=_task_id,

@@ -74,9 +74,38 @@ Reproduced on 2026-10-01/02 from stage 2 at 3500 (seed 42): tremble 0.77 ->
 0.06-0.07 rad/s, fallen starts stood 60/62, 53/54, 57/60, 54/55 (four seeds)
 and 59/62 under 0-5 tick delay, feet 9.4 cm apart, tilt ~4 deg, falls after a
 0.3 m/s fore-aft kick 2/62. Standing effort drops ~7x (0.9 Nm over 18 joints).
-Known leftover: the right shoulder_roll target stays on the clip, pressing
-the arm into its 0-deg stop at ~0.44 Nm while standing (see
-`calm_effort_strong`, still experimental).
+
+
+### Stages 4 and 5: release the shoulder, then train push recovery
+
+The stage-3 policy presses its right arm into the 0-deg shoulder_roll stop
+at ~0.44 Nm while standing. Its raw output keeps the target on the clip, so
+neither a pose term nor an effort term can move it. Stage 4
+(`Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay`) adds shoulder_roll to the
+roll pose term, penalizes |target - measured| while standing, and raises the
+clip-excess barrier 10x. That effort penalty also cost push tolerance, so
+stage 5 (`Mjlab-Getup-Microban-CalmPush-ImuDelay`) adds +-0.3 m/s kicks every
+3-6 s. Resume each stage from the previous one (keep `--agent.algorithm.entropy-coef
+0.001`; no further std reset):
+
+```bash
+uv run --locked train Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay ... \
+  --agent.max-iterations 6500 --agent.resume True --agent.load-run <stage-3-run> ...
+uv run --locked train Mjlab-Getup-Microban-CalmPush-ImuDelay ... \
+  --agent.max-iterations 3000 --agent.resume True --agent.load-run <stage-4-run> ...
+```
+
+The robot's current policy (`src/agents/getup.onnx`, 2026-10-02) came from
+exactly this chain: stage 1 `2026-09-30_11-03-25_v4_S1_posture_scratch`
+(2000) -> stage 2 `2026-09-30_12-20-47_v4_S1D_posture_delay_ft` (3500, std
+reset) -> stage 3 `2026-10-01_18-46-39_v4_stage3_calmroll_repro_s42` (11499)
+-> stage 4 `..._v4_stage4_effort_from_repro` / `_cont` / `_cont2` (18000)
+-> stage 5 `2026-10-02_05-56-18_v4_calm_push` (model_20999,
+`artifacts/getup_v4_calm_push_20999.onnx`). Measured (64 envs, 0-3 tick IMU
+delay plus noise): fallen starts stood 60/62, 52/54, 57/60, 52/55 (four
+seeds) and 59/62 under 0-5 ticks; standing tremble 0.05-0.06 rad/s, effort
+0.55 Nm over 18 joints (right shoulder 0.10 Nm); falls after a 0.3 m/s
+fore-aft kick 1/62, after 0.4 m/s fore-aft / lateral kicks 19/59 / 19/57.
 
 Other registered variants of the same contract: `Mjlab-Getup-Microban-V42`
 (the 2026-09-25 recipe), `Mjlab-Getup-Microban-Redesign` (stands, but in a
@@ -84,9 +113,11 @@ wide braced stance), and `Mjlab-Getup-Microban-Sym` (stage 1 with left/right
 mirror data augmentation).
 
 The training episode lasts 20 seconds. The robot's automatic get-up attempt
-also allows up to 20 seconds; it hands control back once the upright gravity
-condition remains stable for 20 control ticks. There is no earlier progress
-deadline.
+also allows up to 20 seconds. Once the upright gravity condition holds for 20
+control ticks, the robot runtime keeps the get-up actor running as the
+standing balancer until a walk move that can itself balance takes over (see
+the robot repository's `docs/pico_teleop_resilience.md`). There is no earlier
+progress deadline.
 
 Select a completed checkpoint from the new run directory printed by
 training, then export it with both paths explicit (replace `<new-run>` and
