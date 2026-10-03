@@ -20,8 +20,19 @@ assert MICROBAN_XML.exists(), f"XML not found: {MICROBAN_XML}"
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
+# Shared reference pose of every policy (walking, tracking, get-up): trunk
+# vertical, knees straight, and opposite hip/ankle pitches that keep the soles
+# flat with the mass-weighted COM over the centre of the sole contact patches
+# (31 mm to the toe and to the heel; the earlier hip -10 deg pose leaned the
+# trunk 10 deg forward and left 24 mm to the toe).
+HOME_PITCH_RAD = float(np.deg2rad(1.198384259489))
+# Every policy commands target = clip(HOME + action, -1.57, 1.57) on all body
+# joints and observes its own raw previous output.
+POLICY_TARGET_CLIP_RAD = 1.57
+
 HOME_FRAME = EntityCfg.InitialStateCfg(
-    pos=(0.0, 0.0, 0.168),
+    # The lowest sole collision corner is on the ground at this z.
+    pos=(0.0, 0.0, 0.170554885633559),
     joint_pos={
         "head": float(np.deg2rad(0.0)),
         "neck_roll": float(np.deg2rad(0.0)),
@@ -34,16 +45,16 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
         "right_elbow": float(np.deg2rad(-20.0)),
         "left_hip_roll": float(np.deg2rad(5.0)),
         "right_hip_roll": float(np.deg2rad(-5.0)),
-        "left_hip_pitch": float(np.deg2rad(-10.0)),
-        "right_hip_pitch": float(np.deg2rad(-10.0)),
+        "left_hip_pitch": HOME_PITCH_RAD,
+        "right_hip_pitch": HOME_PITCH_RAD,
         "left_hip_yaw": float(np.deg2rad(0.0)),
         "right_hip_yaw": float(np.deg2rad(0.0)),
         "left_knee": float(np.deg2rad(0.0)),
         "right_knee": float(np.deg2rad(0.0)),
         "left_ankle_roll": float(np.deg2rad(-5.0)),
         "right_ankle_roll": float(np.deg2rad(5.0)),
-        "left_ankle_pitch": float(np.deg2rad(0.0)),
-        "right_ankle_pitch": float(np.deg2rad(0.0)),
+        "left_ankle_pitch": -HOME_PITCH_RAD,
+        "right_ankle_pitch": -HOME_PITCH_RAD,
     },
     joint_vel={r".*": 0.0},
 )

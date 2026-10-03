@@ -16,7 +16,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
+from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, POLICY_TARGET_CLIP_RAD
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -167,6 +167,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     assert isinstance(joint_pos_action, JointPositionActionCfg)
     joint_pos_action.scale = 1.0
     cfg.actions["joint_pos"].actuator_names = (dofs_filter,)
+    # Absolute target clip shared with get-up and tracking; the "actions"
+    # observation and action_rate_l2 still see the raw policy output.
+    joint_pos_action.clip = {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)}
 
     #---------------------------- Observations ----------------------
     del cfg.observations["actor"].terms["base_lin_vel"]
@@ -250,7 +253,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    cfg.rewards["upright"].params["pitch"] = np.deg2rad(10.0)
+    # HOME keeps the trunk vertical.
+    cfg.rewards["upright"].params["pitch"] = 0.0
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
     

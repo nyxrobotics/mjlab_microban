@@ -78,7 +78,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME
+from mjlab_microban.robot.microban_constants import HOME_FRAME, POLICY_TARGET_CLIP_RAD
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     reward_based_staged_curriculum,
@@ -109,7 +109,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_exce
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Flat absolute target clip on all 18 body joints (see module docstring).
-GETUP_ACTION_CLIP_RAD = 1.57
+GETUP_ACTION_CLIP_RAD = POLICY_TARGET_CLIP_RAD
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
 GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
 # Fine-tuning stages after stage 2 (see docs/getup_training_export.md). Each
@@ -122,11 +122,11 @@ _POSE_FINAL_WEIGHTS = {"v42": (30.0, 15.0), "redesign": (30.0, 15.0)}
 HOME_FEET_LATERAL_M = 0.094
 
 # Virtual head height (trunk COM + 0.07324 m along the trunk's up axis, see
-# mdp._head_height) at HOME: 0.29398 m by MuJoCo forward kinematics. Kneeling
+# mdp._head_height) at HOME: 0.29653 m by MuJoCo forward kinematics. Kneeling
 # upright reaches 0.226-0.239 and the deepest flat-foot squat 0.222-0.227,
-# so the 0.9x standing gate (0.2646) is above both. 0.260 was tried on 09-28
+# so the 0.9x standing gate (0.2669) is above both. 0.260 was tried on 09-28
 # and made a forearm-propped tripod (0.205) earn 91 % of the height reward.
-HEAD_STANDING_HEIGHT = 0.294
+HEAD_STANDING_HEIGHT = 0.2965
 STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # Despite the name, _head_height only uses .name to resolve the robot entity.
 HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))
