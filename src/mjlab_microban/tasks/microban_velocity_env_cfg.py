@@ -104,7 +104,7 @@ SIM_CFG = SimulationCfg(
     # njmax=1024,
 )
 
-def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microban_velocity_env_cfg(play: bool = False, target_clip: bool = True) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
 
     cfg.viewer = deepcopy(VIEWER_CONFIG)
@@ -169,7 +169,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.actions["joint_pos"].actuator_names = (dofs_filter,)
     # Absolute target clip shared with get-up and tracking; the "actions"
     # observation and action_rate_l2 still see the raw policy output.
-    joint_pos_action.clip = {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)}
+    if target_clip:
+        joint_pos_action.clip = {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)}
 
     #---------------------------- Observations ----------------------
     del cfg.observations["actor"].terms["base_lin_vel"]
