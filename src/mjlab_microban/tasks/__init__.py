@@ -142,12 +142,22 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
-# Stage 1 with the pre-957ab42 near-home reset (10 %, +-5 deg): ablation of
-# the widened "tipping" reset, which trained a wide braced stance.
+# Stage 1 with the near-home reset written out (10 %, +-5 deg); identical to
+# Mjlab-Getup-Microban since that became the default again (kept: the
+# 2026-10-03 servo-range stage-1 run was trained under this id).
 register_mjlab_task(
     task_id="Mjlab-Getup-Microban-NearHome5deg",
     env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.1, 0.09)),
     play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.1, 0.09)),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+
+# Stage 1 with 957ab42's wide "tipping" near-home reset (20 %, +-34 deg).
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Tipping",
+    env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.2, 0.6)),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.2, 0.6)),
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
