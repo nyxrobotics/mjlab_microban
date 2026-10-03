@@ -151,6 +151,16 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
+# Stage 1 with the pre-957ab42 near-home reset (10 %, +-5 deg): ablation of
+# the widened "tipping" reset, which trained a wide braced stance.
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-NearHome5deg",
+    env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.1, 0.09)),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.1, 0.09)),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+
 register_mjlab_task(
     task_id="Mjlab-Tracking-Microban",
     env_cfg=make_microban_tracking_env_cfg(),

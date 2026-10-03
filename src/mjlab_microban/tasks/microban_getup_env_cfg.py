@@ -173,7 +173,9 @@ def make_microban_getup_env_cfg(
     play: bool = False,
     reward_set: str = "posture",
     imu_delay_max_lag: int = 0,
+    near_home_reset: tuple[float, float] = (0.2, 0.6),
 ) -> ManagerBasedRlEnvCfg:
+    """near_home_reset: (fraction of resets near HOME, max roll/pitch noise in rad)."""
     if reward_set not in GETUP_REWARD_SETS:
         raise ValueError(f"Unknown get-up reward set {reward_set!r}; expected one of {GETUP_REWARD_SETS}")
     cfg = make_velocity_env_cfg()
@@ -361,9 +363,10 @@ def make_microban_getup_env_cfg(
         mode="reset",
         func=reset_near_home_fraction,
         params={
-            "rel_near_home_envs": 0.2,
+            "rel_near_home_envs": near_home_reset[0],
             "joint_noise_range": (-0.05, 0.05),
-            "orientation_noise_range": (-0.6, 0.6),  # ~+-34 deg roll/pitch
+            # Default +-0.6 rad (~+-34 deg) roll/pitch.
+            "orientation_noise_range": (-near_home_reset[1], near_home_reset[1]),
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
