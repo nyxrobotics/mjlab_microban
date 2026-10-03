@@ -20,6 +20,11 @@ from pathlib import Path
 
 import torch
 
+from mjlab_microban.tasks.microban_getup_runner import (
+    GETUP_CONTRACT_VERSION,
+    require_getup_checkpoint_contract,
+)
+
 STD_KEY = "distribution.std_param"
 
 
@@ -37,6 +42,11 @@ def main() -> None:
     actor = checkpoint.get("actor_state_dict")
     if not isinstance(actor, dict) or STD_KEY not in actor:
         raise ValueError(f"{source} has no {STD_KEY} (scalar-std actor expected)")
+    # The copy leaves its run directory (and params/env.yaml) behind, so
+    # validate the contract here and stamp a v4-stamped v5 run as v5.
+    infos = checkpoint.get("infos")
+    require_getup_checkpoint_contract(source, infos, require_recorded_env=True)
+    infos["microban_getup_contract"] = GETUP_CONTRACT_VERSION
     old = float(actor[STD_KEY].mean())
     actor[STD_KEY] = torch.full_like(actor[STD_KEY], args.std)
     # Adam moments were accumulated for the old std; start them fresh.

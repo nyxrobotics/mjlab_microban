@@ -74,7 +74,7 @@ class GetupJointPositionAction(JointPositionAction):
 def raw_getup_action(env, action_name: str = "joint_pos") -> torch.Tensor:
     """Return the policy's own previous raw output (zero right after a reset).
 
-    The v4 get-up contract observes this rather than the post-clip target.
+    The get-up contract (v4 and v5) observes this rather than the post-clip target.
     Every policy that stood up (including the one run on the robot) was
     trained observing its raw output; the post-clip variant never stood.
     The robot reproduces it exactly: it is the ONNX model's own last output.

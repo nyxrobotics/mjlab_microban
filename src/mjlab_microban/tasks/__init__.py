@@ -86,7 +86,7 @@ register_mjlab_task(
     runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
-# Get-up (v4 action contract, see microban_getup_env_cfg.py). The robot
+# Get-up (v5 action contract, see microban_getup_runner.py). The robot
 # policy is trained in two stages:
 #   1. Mjlab-Getup-Microban from scratch: HOME-stance reward set ("posture");
 #      stands from fallen starts with a HOME stance by ~2000 iterations.

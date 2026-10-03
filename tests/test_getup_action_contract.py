@@ -6,10 +6,15 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the get-up v4 action and previous-action feedback."""
+"""Contract tests for the get-up v5 action and previous-action feedback.
+
+v5 (2026-10-03): target = centered HOME + raw action, bounded only by the
+servo goal range (+-pi); the policy observes its own raw previous output.
+"""
 
 from __future__ import annotations
 
+import math
 import unittest
 from types import SimpleNamespace
 
@@ -20,8 +25,10 @@ from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionActionCfg,
     raw_getup_action,
 )
+from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_ACTION_CLIP,
+    GETUP_ACTION_CLIP_RAD,
     GETUP_REWARD_SETS,
     make_microban_getup_env_cfg,
 )
@@ -42,7 +49,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
 
     def test_no_clip_excess_penalty_pushes_or_imu_delay(self) -> None:
         # Every standing policy was trained without these (see the env
-        # module docstring); the v4 runner rejects the penalty outright.
+        # module docstring); the v5 runner rejects the penalty outright.
         # From-scratch sets only; fine-tuning sets may add a clip-excess
         # barrier (see microban_getup_env_cfg.py).
         for reward_set in ("posture", "v42", "redesign"):
@@ -80,6 +87,9 @@ class GetupActionObservationContractTest(unittest.TestCase):
         self.assertEqual(action_cfg.offset, 0.0)
         self.assertTrue(action_cfg.use_default_offset)
         self.assertEqual(action_cfg.clip, dict(GETUP_ACTION_CLIP))
+        # v5: the only bound is the servo's one-turn goal range.
+        self.assertEqual(GETUP_ACTION_CLIP, {r".*": (-math.pi, math.pi)})
+        self.assertEqual(dict(cfg.scene.entities["robot"].init_state.joint_pos), dict(HOME_FRAME.joint_pos))
         self.assertIsInstance(action_cfg, GetupJointPositionActionCfg)
         self.assertFalse(hasattr(action_cfg, "max_target_speed_rad_s"))
 
@@ -89,8 +99,8 @@ class GetupActionObservationContractTest(unittest.TestCase):
             dtype=torch.float32,
         )
         raw = torch.linspace(-4.0, 4.0, default_pose.shape[-1]).unsqueeze(0)
-        lower = torch.full_like(default_pose, -1.57)
-        upper = torch.full_like(default_pose, 1.57)
+        lower = torch.full_like(default_pose, -GETUP_ACTION_CLIP_RAD)
+        upper = torch.full_like(default_pose, GETUP_ACTION_CLIP_RAD)
 
         measured = torch.full_like(default_pose, 2.0)
         measured_all = torch.cat(
@@ -140,7 +150,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
         )
         torch.testing.assert_close(action._processed_actions, expected_target)
         torch.testing.assert_close(raw_getup_action(env), raw)
-        # raw spans [-4, 4], well past the +-1.57 clip, so this is a real check.
+        # raw spans [-4, 4], past the +-pi clip, so this is a real check.
         self.assertTrue(bool(torch.any(raw.abs() > upper.abs()).item()))
 
         action.reset()

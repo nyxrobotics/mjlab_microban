@@ -1,7 +1,9 @@
 """Export a newly trained Microban get-up checkpoint for the robot.
 
-Both paths must be explicit.  The checkpoint's v4 training marker and the
-exported ONNX normalizer are checked before an artifact is published.
+Both paths must be explicit.  The checkpoint's v5 contract (decided from the
+run's recorded params/env.yaml: centered HOME, +-pi servo-range clip, raw
+previous-action feedback) and the exported ONNX normalizer are checked before
+an artifact is published.
 """
 
 from __future__ import annotations
@@ -27,12 +29,13 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
+from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD
 from mjlab_microban.tasks.microban_getup_runner import (
     GETUP_ANGULAR_VELOCITY_FRAME,
     GETUP_CONTRACT_VERSION,
     getup_home_pose,
-    require_current_getup_home_pose,
+    require_getup_checkpoint_contract,
 )
 
 TASK = "Mjlab-Getup-Microban"
@@ -58,26 +61,28 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _require_new_checkpoint(path: Path) -> str:
-    """Require a fresh v4 training checkpoint, not an old actor relabeled v4."""
+def _require_new_checkpoint(path: Path) -> tuple[str, str]:
+    """Require a v5 training checkpoint; return its SHA-256 and stamped contract.
+
+    Validity comes from the run's recorded env, so a run trained under v5 but
+    stamped "v4" by a runner loaded before the version bump still exports
+    (as v5), while a +-1.57 clip or old-HOME v4 run is refused.
+    """
 
     before = _sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    infos = checkpoint.get("infos")
-    if not isinstance(infos, dict) or (
-        infos.get("microban_getup_contract") != CONTRACT_VERSION
-        or infos.get("microban_getup_angular_velocity_frame") != GETUP_ANGULAR_VELOCITY_FRAME
-    ):
-        raise ValueError(
-            "Checkpoint lacks the get-up v4 / IMU-frame training marker; "
-            "retrain from scratch with the current Mjlab-Getup-Microban task"
-        )
-    require_current_getup_home_pose(infos)
+    stamp = require_getup_checkpoint_contract(
+        path, checkpoint.get("infos"), require_recorded_env=True
+    )
     if not isinstance(checkpoint.get("actor_state_dict"), dict):
         raise ValueError("Checkpoint has no actor_state_dict")
     if _sha256(path) != before:
         raise ValueError("Checkpoint changed during inspection")
-    return before
+    return before, stamp
+
+
+def _full_precision_csv(values: np.ndarray) -> str:
+    return ",".join(repr(float(value)) for value in values)
 
 
 def _tensor_shape(value: onnx.ValueInfoProto) -> tuple[int | str, ...]:
@@ -140,7 +145,7 @@ def _validate_onnx(path: Path) -> None:
         raise ValueError("Get-up ONNX must have one actions output of shape [1, 18]")
 
     # Finite, positive normalizer. No range check on the previous-action
-    # slots: v4 observes the raw output, which is unbounded by design (a
+    # slots: v5 observes the raw output, which is unbounded by design (a
     # standing policy drives it to hundreds of radians to saturate the clip).
     _normalizer_arrays(model)
 
@@ -194,10 +199,16 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
     upper = clip[0, :, 1].astype(np.float64)
     if not np.isfinite(clip).all() or np.any(lower >= upper):
         raise ValueError("Invalid get-up action target clip")
-    if not np.allclose(lower, -GETUP_ACTION_CLIP_RAD, rtol=0, atol=1e-5) or not np.allclose(
-        upper, GETUP_ACTION_CLIP_RAD, rtol=0, atol=1e-5
+    if GETUP_ACTION_CLIP_RAD != SERVO_TARGET_RANGE_RAD or SERVO_TARGET_RANGE_RAD != float(np.pi):
+        raise ValueError("Get-up action clip is not the servo goal range (+-pi)")
+    if not np.allclose(lower, -SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6) or not np.allclose(
+        upper, SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6
     ):
-        raise ValueError("Get-up action target clip differs from the flat v4 +-1.57 rad clip")
+        raise ValueError("Get-up action target clip differs from the v5 servo range (+-pi)")
+    # The env holds the clip as float32 (3.1415927 > pi); publish the exact
+    # float64 bound so the robot's "not wider than the servo range" check holds.
+    lower = np.full(ACTION_WIDTH, -SERVO_TARGET_RANGE_RAD, dtype=np.float64)
+    upper = np.full(ACTION_WIDTH, SERVO_TARGET_RANGE_RAD, dtype=np.float64)
     if hasattr(action.cfg, "max_target_speed_rad_s"):
         raise ValueError(
             "Get-up training action must not rate-limit the active policy's "
@@ -208,7 +219,7 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path, help="Fresh v4 model_N.pt")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="v5 model_N.pt (in its run directory with params/env.yaml)")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
@@ -223,7 +234,7 @@ def main() -> None:
         raise ValueError("Expected a .pt checkpoint and .onnx output")
     if output.exists() and not args.replace:
         raise FileExistsError(f"Output already exists: {output} (use --replace explicitly)")
-    checkpoint_sha256 = _require_new_checkpoint(checkpoint)
+    checkpoint_sha256, checkpoint_stamp = _require_new_checkpoint(checkpoint)
 
     env_cfg = load_env_cfg(TASK, play=True)
     env_cfg.scene.num_envs = 1
@@ -245,14 +256,19 @@ def main() -> None:
         metadata.update(
             {
                 "action_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
-                "action_clip_lower": lower.tolist(),
-                "action_clip_upper": upper.tolist(),
+                # Full precision: mjlab's list formatter rounds to 3 decimals,
+                # which would publish 3.142 > pi.
+                "action_clip_lower": _full_precision_csv(lower),
+                "action_clip_upper": _full_precision_csv(upper),
                 "microban_getup_previous_action_semantics": PREVIOUS_ACTION_SEMANTICS,
                 "microban_getup_contract": CONTRACT_VERSION,
                 "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
                 "microban_getup_home_pose": json.dumps(
                     getup_home_pose(), sort_keys=True, separators=(",", ":")
                 ),
+                # The contract string the training runner stamped ("v4" for
+                # v5 runs started before the version bump).
+                "microban_getup_checkpoint_contract_stamp": checkpoint_stamp,
                 "checkpoint_sha256": checkpoint_sha256,
                 "checkpoint_filename": checkpoint.name,
             }
