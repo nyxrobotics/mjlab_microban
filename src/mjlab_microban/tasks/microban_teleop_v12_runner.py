@@ -255,14 +255,14 @@ def validate_teleop_v12_environment_contract(env) -> None:
         raise ValueError("Contract-v12 action offset drifted from the default pose")
     clip = getattr(action, "_clip", None)
     if clip is None or action.cfg.clip is None:
-        raise ValueError("Contract-v12 action term must apply the shared target clip")
+        raise ValueError("Contract-v12 action term must saturate at the servo goal range")
     expected_clip = torch.tensor(
         MICROBAN_TELEOP_V12_ACTION_CLIP, device=clip.device, dtype=clip.dtype
     ).expand(MICROBAN_TELEOP_ACTION_WIDTH, 2)
     if tuple(clip.shape[1:]) != (MICROBAN_TELEOP_ACTION_WIDTH, 2) or not bool(
         torch.all(clip == expected_clip.unsqueeze(0)).item()
     ):
-        raise ValueError("Contract-v12 action target clip drifted from +-1.57 rad")
+        raise ValueError("Contract-v12 action target bound drifted from the servo goal range (+-pi)")
 
 
 def _atomic_torch_save(payload: object, destination: Path) -> None:

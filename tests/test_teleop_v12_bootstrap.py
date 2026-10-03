@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,7 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MicrobanTeleopV12RlCfg,
     make_microban_teleop_v12_env_cfg,
 )
@@ -275,9 +277,14 @@ class TeleopV12BootstrapTest(unittest.TestCase):
 
     def test_v12_environment_and_runner_config_use_raw_legacy_semantics(self) -> None:
         cfg = make_microban_teleop_v12_env_cfg(play=True)
+        # No software clip: only the servo's one-turn goal range bounds the
+        # absolute target.
         self.assertEqual(
-            cfg.actions["joint_pos"].clip, {r".*": (-1.57, 1.57)}
+            cfg.actions["joint_pos"].clip, {r".*": (-math.pi, math.pi)}
         )
+        self.assertEqual(MICROBAN_TELEOP_V12_ACTION_CLIP, [-math.pi, math.pi])
+        self.assertIn("servo_range_pi", MICROBAN_TELEOP_V12_RECIPE_REVISION)
+        self.assertNotIn("1p57", MICROBAN_TELEOP_V12_RECIPE_REVISION)
         self.assertNotIn("target_clip_excess", cfg.rewards)
         self.assertNotIn("target_near_limit", cfg.rewards)
         self.assertNotIn("raw_action_l2", cfg.rewards)

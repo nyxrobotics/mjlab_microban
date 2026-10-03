@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from copy import deepcopy
@@ -202,7 +203,7 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
             "seed": 42,
             "steps": 300,
             "settle_steps": 50,
-            "action_clip": [-1.57, 1.57],
+            "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },
@@ -381,7 +382,7 @@ def _tracking_report(
                 FINAL_PROFILE,
                 DEADLINE_FINAL_FALLBACK_PROFILE,
             ),
-            "action_clip": [-1.57, 1.57],
+            "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),

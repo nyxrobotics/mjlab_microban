@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Contract-v12 3000/7000/10000/15000 stage driver at the centered HOME with the
-# shared +-1.57 rad target clip.  The frozen locomotion actor is a centered-HOME
+# target = HOME + raw action, saturated only at the servo's +-pi goal range
+# (no software clip).  The frozen locomotion actor is a centered-HOME
 # Mjlab-Velocity-Microban checkpoint chosen with --source on a fresh start.
 set -euo pipefail
 

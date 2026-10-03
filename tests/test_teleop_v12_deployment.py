@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -387,12 +388,25 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
     ]
     assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
     assert metadata["action_clip_semantics"] == (
-        "absolute_joint_position_radians_all_body_joints"
+        "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
+        "all_body_joints_radians"
     )
-    assert metadata["action_clip_lower"] == [-1.57] * 18
-    assert metadata["action_clip_upper"] == [1.57] * 18
+    assert metadata["action_target_semantics"] == (
+        "default_joint_pos_plus_raw_action_times_scale_saturated_at_action_clip"
+    )
+    assert metadata["runtime_action_semantics"] == (
+        "raw_default_plus_scale_then_servo_goal_range_saturation_v3"
+    )
+    # Written at full precision: a 3-decimal "3.142" would be wider than the
+    # servo goal range the robot enforces.
+    for key, sign in (("action_clip_lower", -1.0), ("action_clip_upper", 1.0)):
+        assert isinstance(metadata[key], str)
+        assert deployment._wire_metadata_value(metadata[key]) == metadata[key]
+        assert [float(value) for value in metadata[key].split(",")] == [
+            sign * math.pi
+        ] * 18
     assert metadata["physical_motor_target_guard_semantics"] == (
-        "finite_target_then_absolute_clip_1p57_v2"
+        "finite_target_then_servo_goal_range_saturation_pi_v3"
     )
 
 

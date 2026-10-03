@@ -234,7 +234,7 @@ def _load_actor(
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")
     if infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP:
-        raise ValueError("Checkpoint action clip must be the shared +-1.57 clip")
+        raise ValueError("Checkpoint action clip must be the servo goal range (+-pi)")
     if infos.get("adapter_gradient_schedule_revision") != (
         TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
     ):

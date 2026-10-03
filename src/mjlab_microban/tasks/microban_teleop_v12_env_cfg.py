@@ -12,7 +12,7 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
-from mjlab_microban.robot.microban_constants import POLICY_TARGET_CLIP_RAD
+from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
@@ -27,19 +27,22 @@ MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
 )
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
     "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_target_clip_1p57_v10"
+    "raw_prev_action_servo_range_pi_v11"
 )
-# Shared target rule of every Microban policy: target = clip(HOME + raw_action,
-# -1.57, +1.57) on all 18 body joints; the previous-action observation stays the
-# raw actor output.  The JSON-safe marker is what checkpoints, gate reports,
-# provenance and deployment metadata record.
-MICROBAN_TELEOP_V12_ACTION_CLIP = [-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD]
+# Shared target rule of every Microban policy: target = HOME + raw_action on all
+# 18 body joints with no software clip.  The only bound is the servo's one-turn
+# goal range, modelled as an absolute target saturation at +-pi (the robot
+# saturates its goal writes at the same range).  The previous-action
+# observation stays the raw actor output.  The JSON-safe marker is what
+# checkpoints, gate reports, provenance and deployment metadata record.
+MICROBAN_TELEOP_V12_ACTION_CLIP = [-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD]
 
 
 def teleop_v12_action_clip_cfg() -> dict[str, tuple[float, float]]:
-    """Return the JointPositionAction clip dict for the shared target clip."""
+    """Return the JointPositionAction clip dict for the servo goal range."""
 
-    return {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)}
+    return {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
+
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 1.0e-4
 MICROBAN_TELEOP_V12_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)
 
@@ -106,7 +109,7 @@ def _apply_preview_hand_tracking_stage(
 def make_microban_teleop_v12_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Build teleop with the source actor's raw recurrence and shared clip."""
+    """Build teleop with the source actor's raw recurrence and servo-range bound."""
 
     cfg = make_microban_teleop_env_cfg(play=play)
     cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
@@ -118,7 +121,7 @@ def make_microban_teleop_v12_env_cfg(
     cfg.observations["critic"].terms["actions"] = raw_previous_action
 
     # These terms call the soft-limit target-clip helper of the bounded-action
-    # contracts.  They do not describe the shared +-1.57 rad clip used here.  The
+    # contracts.  They do not describe the +-pi servo goal range used here.  The
     # measured joint-state soft-limit guard remains enabled as a reward only; it
     # does not filter or stop an action.
     for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):

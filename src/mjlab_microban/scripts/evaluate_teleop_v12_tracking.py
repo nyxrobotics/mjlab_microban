@@ -1,6 +1,7 @@
 """Hash-bound staged HMD/hand/foot exposure and tracking gate for v12.
 
-The raw legacy action contract intentionally has no target clip.  This gate
+The raw action contract intentionally has no software target clip (the target
+saturates only at the servo's +-pi goal range).  This gate
 therefore rejects falls, non-finite values, broken raw-action recurrence, and
 actual 21-joint soft-limit violations; hypothetical raw target excess is only
 reported.  It also records per-joint source/v12/delta action envelopes for the
@@ -582,7 +583,7 @@ def _evaluate_scenario(
         action_term.cfg.clip != teleop_v12_action_clip_cfg()
         or wrapped.clip_actions is not None
     ):
-        raise ValueError("V12 tracking gate requires raw actions with only the shared +-1.57 clip")
+        raise ValueError("V12 tracking gate requires raw actions bounded only by the servo goal range (+-pi)")
     foot = env.command_manager.get_term("foot_target")
     hand = env.command_manager.get_term("hand_target")
     expects_foot = any(

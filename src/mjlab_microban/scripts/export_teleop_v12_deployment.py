@@ -103,18 +103,31 @@ FINAL_COMPLETED_UPDATES = 15_000
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
 )
-PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v5_centered_home_clip"
+PACKAGER_REVISION = (
+    "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
+)
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0
 RUNTIME_GUARD_SEMANTICS = (
     "finite_float32_then_per_joint_absmax_else_hold_previous_targets_v1"
 )
-PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS = "finite_target_then_absolute_clip_1p57_v2"
-ACTION_TARGET_SEMANTICS = (
-    "clip_default_joint_pos_plus_raw_action_times_scale_to_action_clip"
+# Every Microban policy commands target = HOME + raw_action * scale with no
+# software clip.  The only bound is the servo's one-turn goal range, which the
+# robot applies where it writes goals and which training models as an absolute
+# target saturation at action_clip_lower/upper = -/+pi on all 18 body joints.
+PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS = (
+    "finite_target_then_servo_goal_range_saturation_pi_v3"
 )
-ACTION_CLIP_SEMANTICS = "absolute_joint_position_radians_all_body_joints"
-RUNTIME_ACTION_SEMANTICS = "raw_default_plus_scale_then_absolute_target_clip_v2"
+ACTION_TARGET_SEMANTICS = (
+    "default_joint_pos_plus_raw_action_times_scale_saturated_at_action_clip"
+)
+ACTION_CLIP_SEMANTICS = (
+    "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
+    "all_body_joints_radians"
+)
+RUNTIME_ACTION_SEMANTICS = (
+    "raw_default_plus_scale_then_servo_goal_range_saturation_v3"
+)
 # A chain bootstrapped after the bilateral site-order fix never needed the
 # historical model-9200 swap migration; it records this marker instead.
 LR_ORDER_NO_MIGRATION_REVISION = "none_corrected_site_order_from_bootstrap_v1"
@@ -426,6 +439,12 @@ def _require_final_gate(
         )
     if checkpoint.name != f"model_{FINAL_ITERATION}.pt":
         raise ValueError("Final contract-v12 checkpoint must be named model_14999.pt")
+
+
+def _full_precision_csv(values: list[float]) -> str:
+    """CSV of shortest round-trip floats (no 3-decimal rounding)."""
+
+    return ",".join(repr(float(value)) for value in values)
 
 
 def _wire_metadata_value(value: list | str | float) -> str:
@@ -788,10 +807,16 @@ def build_v12_deployment_metadata(
         "previous_action_semantics": "raw_actor_output",
         "action_target_semantics": ACTION_TARGET_SEMANTICS,
         "action_clip_semantics": ACTION_CLIP_SEMANTICS,
-        "action_clip_lower": [MICROBAN_TELEOP_V12_ACTION_CLIP[0]]
-        * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
-        "action_clip_upper": [MICROBAN_TELEOP_V12_ACTION_CLIP[1]]
-        * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+        # Full precision: MjLab's 3-decimal CSV would write 3.142, wider than
+        # pi, which a robot checking "never wider than the servo range" rejects.
+        "action_clip_lower": _full_precision_csv(
+            [MICROBAN_TELEOP_V12_ACTION_CLIP[0]]
+            * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+        ),
+        "action_clip_upper": _full_precision_csv(
+            [MICROBAN_TELEOP_V12_ACTION_CLIP[1]]
+            * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+        ),
         "action_distribution_semantics": ("unbounded_gaussian_deterministic_mean_raw"),
         "runtime_action_semantics": RUNTIME_ACTION_SEMANTICS,
         "physical_motor_target_guard_semantics": (

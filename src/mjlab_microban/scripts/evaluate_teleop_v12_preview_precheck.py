@@ -196,7 +196,7 @@ def _evaluate_targeted_scenario(
         action_term.cfg.clip != teleop_v12_action_clip_cfg()
         or wrapped.clip_actions is not None
     ):
-        raise ValueError("Preview precheck requires raw actions with only the shared +-1.57 clip")
+        raise ValueError("Preview precheck requires raw actions bounded only by the servo goal range (+-pi)")
     action_slice = _action_observation_slice(env)
     hmd_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
     hmd = hmd_cfg.func

@@ -4,8 +4,9 @@ This is a bounded feasibility probe, not a deployment gate.  It intentionally
 changes only two teleop execution details needed to preserve the legacy actor's
 closed-loop contract:
 
-* the joint-position action term applies only the shared absolute target clip
-  of every Microban policy, clip(HOME + raw_action, -1.57, +1.57); and
+* the joint-position action term applies only the shared target rule of every
+  Microban policy, HOME + raw_action with no software clip, saturated at the
+  servo's +-pi goal range; and
 * the previous-action observation is the raw 18-value actor output.
 
 The 21 joint positions and velocities are mapped by resolved joint name into
@@ -277,7 +278,7 @@ def _evaluate_scenario(
         or wrapped.clip_actions is not None
     ):
         raise ValueError(
-            "Probe must pass raw actions with only the shared +-1.57 target clip"
+            "Probe must pass raw actions bounded only by the servo goal range (+-pi)"
         )
     if tuple(action.target_names) != teleop_layout.action_names:
         raise ValueError("Teleop action order drifted after layout capture")
