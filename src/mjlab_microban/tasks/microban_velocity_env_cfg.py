@@ -16,7 +16,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, POLICY_TARGET_CLIP_RAD
+from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_TARGET_RANGE_RAD
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -104,7 +104,7 @@ SIM_CFG = SimulationCfg(
     # njmax=1024,
 )
 
-def make_microban_velocity_env_cfg(play: bool = False, target_clip: bool = True) -> ManagerBasedRlEnvCfg:
+def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
 
     cfg.viewer = deepcopy(VIEWER_CONFIG)
@@ -167,10 +167,10 @@ def make_microban_velocity_env_cfg(play: bool = False, target_clip: bool = True)
     assert isinstance(joint_pos_action, JointPositionActionCfg)
     joint_pos_action.scale = 1.0
     cfg.actions["joint_pos"].actuator_names = (dofs_filter,)
-    # Absolute target clip shared with get-up and tracking; the "actions"
-    # observation and action_rate_l2 still see the raw policy output.
-    if target_clip:
-        joint_pos_action.clip = {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)}
+    # No software clip: the target saturates only at the servo's +-pi goal
+    # range, as on the robot. The "actions" observation and action_rate_l2
+    # see the raw policy output.
+    joint_pos_action.clip = {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
 
     #---------------------------- Observations ----------------------
     del cfg.observations["actor"].terms["base_lin_vel"]

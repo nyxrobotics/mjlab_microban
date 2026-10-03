@@ -7,8 +7,8 @@ Usage::
         --output artifacts/<name>.onnx [--replace]
 
 Both paths must be explicit.  The walking contract is the one shared by every
-Microban policy: target = clip(HOME + raw_action * 1.0, -1.57, +1.57) on the 18
-body joints, with the centered HOME, and the previous-action observation is the
+Microban policy: target = HOME + raw_action * 1.0 on the 18 body joints, with
+no software clip, saturated only at the servo's one-turn goal range (+-pi rad), with the centered HOME, and the previous-action observation is the
 policy's own raw (unclipped) output.  The checkpoint's run directory must have
 recorded that same HOME and clip, the live play env must match it, and the
 exported ONNX is checked against the torch actor before an artifact is published.
@@ -39,14 +39,14 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, POLICY_TARGET_CLIP_RAD
+from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 
 TASK = "Mjlab-Velocity-Microban"
-CONTRACT_VERSION = "v2_centered_home_clip157"
+CONTRACT_VERSION = "v3_centered_home_servo_range"
 # WalkMove feeds back the ONNX model's own last raw output (mjlab last_action).
 PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 ACTION_SCALE = 1.0
@@ -155,10 +155,10 @@ def build_walk_metadata(
     upper = [float(value) for value in action_clip_upper]
     if len(lower) != ACTION_WIDTH or len(upper) != ACTION_WIDTH:
         raise ValueError("Action clip must have one bound per action joint")
-    if lower != [-POLICY_TARGET_CLIP_RAD] * ACTION_WIDTH or upper != [
-        POLICY_TARGET_CLIP_RAD
+    if lower != [-SERVO_TARGET_RANGE_RAD] * ACTION_WIDTH or upper != [
+        SERVO_TARGET_RANGE_RAD
     ] * ACTION_WIDTH:
-        raise ValueError("Walking action clip differs from the shared +-1.57 rad clip")
+        raise ValueError("Walking action clip differs from the servo goal range (+-pi)")
     if len(checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in checkpoint_sha256):
         raise ValueError("checkpoint_sha256 must be a lowercase SHA-256 hex digest")
     if not checkpoint_filename.endswith(".pt") or not run_dir or int(iteration) < 0:
@@ -236,10 +236,10 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
             raise ValueError(f"Run was not trained from the centered HOME root {key}")
     clip = action.get("clip")
     if clip is None or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [
-        -POLICY_TARGET_CLIP_RAD,
-        POLICY_TARGET_CLIP_RAD,
+        -SERVO_TARGET_RANGE_RAD,
+        SERVO_TARGET_RANGE_RAD,
     ]:
-        raise ValueError(f"Run was not trained with the +-1.57 rad target clip: {clip}")
+        raise ValueError(f"Run was not trained with the servo goal range (+-pi) as its target clip: {clip}")
     if (
         float(action.get("scale")) != ACTION_SCALE
         or float(action.get("offset")) != 0.0
@@ -394,14 +394,14 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"Unexpected walking action clip shape {clip.shape}")
     lower = clip[0, :, 0].astype(np.float64)
     upper = clip[0, :, 1].astype(np.float64)
-    if not np.allclose(lower, -POLICY_TARGET_CLIP_RAD, rtol=0, atol=1e-6) or not np.allclose(
-        upper, POLICY_TARGET_CLIP_RAD, rtol=0, atol=1e-6
+    if not np.allclose(lower, -SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6) or not np.allclose(
+        upper, SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6
     ):
-        raise ValueError("Walking action target clip differs from the shared +-1.57 rad clip")
+        raise ValueError("Walking action target clip differs from the servo goal range (+-pi)")
     # Report the configured value, not its float32 copy.
     return (
-        np.full(ACTION_WIDTH, -POLICY_TARGET_CLIP_RAD),
-        np.full(ACTION_WIDTH, POLICY_TARGET_CLIP_RAD),
+        np.full(ACTION_WIDTH, -SERVO_TARGET_RANGE_RAD),
+        np.full(ACTION_WIDTH, SERVO_TARGET_RANGE_RAD),
     )
 
 

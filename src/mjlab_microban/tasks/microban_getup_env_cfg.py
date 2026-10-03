@@ -33,6 +33,9 @@ redesign/ reports):
 * The model_46000 policy the robot ran stands in 0/64 envs of the v3 task
   and in 63/64 once the v4 clip, raw feedback and no-delay are restored,
   so the current robot model, actuator model and HOME still support it.
+* 2026-10-03: every policy now shares one target rule, HOME + raw with no
+  software clip; only the servo's one-turn range (+-pi) bounds the target,
+  which keeps even more torque authority than +-1.57.
 
 Reward sets sharing this contract:
 
@@ -78,7 +81,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, POLICY_TARGET_CLIP_RAD
+from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     reward_based_staged_curriculum,
@@ -108,8 +111,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_exce
 
 STANDING_HEIGHT = float(HOME_FRAME.pos[2])
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
-# Flat absolute target clip on all 18 body joints (see module docstring).
-GETUP_ACTION_CLIP_RAD = POLICY_TARGET_CLIP_RAD
+# Servo goal range on all 18 body joints (see module docstring).
+GETUP_ACTION_CLIP_RAD = SERVO_TARGET_RANGE_RAD
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
 GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
 # Fine-tuning stages after stage 2 (see docs/getup_training_export.md). Each
@@ -223,10 +226,10 @@ def make_microban_getup_env_cfg(
     #---------------------------- Actions ---------------------------
     # 18 body joints; the robot holds head/neck at their measured angles with
     # P gain 400 during get-up, which the get-up action/actuator reproduce.
-    # Absolute target = default pose + raw action, clipped at +-1.57 rad. The
-    # clip exists to remove early exploration's multi-radian tail (which
-    # blew up the solver when unclipped); it is deliberately NOT each joint's
-    # soft limit -- see the module docstring for the measured reason.
+    # Absolute target = default pose + raw action, saturated at the servo's
+    # +-pi goal range. That bound also removes early exploration's
+    # multi-radian tail (which blew up the solver when unbounded); it is
+    # deliberately NOT each joint's soft limit -- see the module docstring.
     cfg.actions["joint_pos"].actuator_names = (DOFS_FILTER,)
     cfg.actions["joint_pos"].scale = 1.0
     base_action = cfg.actions["joint_pos"]

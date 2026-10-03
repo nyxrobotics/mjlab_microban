@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the walking ONNX metadata (v2 centered HOME, +-1.57 clip)."""
+"""Contract tests for the walking ONNX metadata (v3 centered HOME, servo-range target bound)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import onnx
 from mjlab.envs.mdp.observations import last_action
 from onnx import TensorProto, helper
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, POLICY_TARGET_CLIP_RAD
+from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.scripts.export_walk_onnx import (
     ACTION_JOINT_NAMES,
     OBSERVATION_TERMS,
@@ -65,11 +65,11 @@ def _base(**overrides: object) -> dict[str, object]:
 
 def _build(base: dict[str, object] | None = None, **overrides: object) -> dict[str, str]:
     kwargs: dict[str, object] = {
-        "action_clip_lower": [-POLICY_TARGET_CLIP_RAD] * 18,
-        "action_clip_upper": [POLICY_TARGET_CLIP_RAD] * 18,
+        "action_clip_lower": [-SERVO_TARGET_RANGE_RAD] * 18,
+        "action_clip_upper": [SERVO_TARGET_RANGE_RAD] * 18,
         "checkpoint_sha256": SHA,
         "checkpoint_filename": "model_500.pt",
-        "run_dir": "2026-10-03_11-12-20_chome_clip157_walk",
+        "run_dir": "2026-10-03_13-40-19_chome_servo_walk",
         "iteration": 500,
     }
     kwargs.update(overrides)
@@ -93,7 +93,7 @@ actions:
     clip:
       .*: !!python/tuple
       - {lower!r}
-      - 1.57
+      - {upper!r}
     scale: 1.0
     offset: 0.0
     use_default_offset: true
@@ -108,7 +108,7 @@ observations:
 """
 
 
-def _env_yaml(path: Path, *, hip_pitch: float | None = None, lower: float = -1.57) -> Path:
+def _env_yaml(path: Path, *, hip_pitch: float | None = None, lower: float = -SERVO_TARGET_RANGE_RAD) -> Path:
     joints = dict(HOME_FRAME.joint_pos)
     if hip_pitch is not None:
         joints["left_hip_pitch"] = hip_pitch
@@ -116,6 +116,7 @@ def _env_yaml(path: Path, *, hip_pitch: float | None = None, lower: float = -1.5
         _ENV_YAML.format(
             z=HOME_FRAME.pos[2],
             lower=lower,
+            upper=SERVO_TARGET_RANGE_RAD,
             joints="\n".join(f"          {name}: {value!r}" for name, value in joints.items()),
         )
     )
@@ -132,7 +133,7 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         action = cfg.actions["joint_pos"]
         self.assertEqual(action.scale, 1.0)
         self.assertTrue(action.use_default_offset)
-        self.assertEqual(action.clip, {r".*": (-POLICY_TARGET_CLIP_RAD, POLICY_TARGET_CLIP_RAD)})
+        self.assertEqual(action.clip, {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)})
         self.assertEqual(cfg.scene.entities["robot"].init_state.joint_pos, HOME_FRAME.joint_pos)
         self.assertEqual(tuple(cfg.observations["actor"].terms), OBSERVATION_TERMS)
         previous = cfg.observations["actor"].terms["actions"]
@@ -155,17 +156,17 @@ class WalkExportMetadataContractTest(unittest.TestCase):
             self.assertEqual(len(metadata[key].split(",")), len(JOINT_NAMES))
         # v2 additions.
         self.assertEqual(metadata["action_joint_names"].split(","), list(ROBOT_OBSERVATION_DOF_ORDER))
-        self.assertEqual([float(v) for v in metadata["action_clip_lower"].split(",")], [-1.57] * 18)
-        self.assertEqual([float(v) for v in metadata["action_clip_upper"].split(",")], [1.57] * 18)
+        self.assertEqual([float(v) for v in metadata["action_clip_lower"].split(",")], [-SERVO_TARGET_RANGE_RAD] * 18)
+        self.assertEqual([float(v) for v in metadata["action_clip_upper"].split(",")], [SERVO_TARGET_RANGE_RAD] * 18)
         self.assertEqual(metadata["previous_action_semantics"], "raw_policy_output")
-        self.assertEqual(metadata["walk_contract_version"], "v2_centered_home_clip157")
+        self.assertEqual(metadata["walk_contract_version"], "v3_centered_home_servo_range")
         home = json.loads(metadata["home_pose"])
         self.assertEqual(home["joint_pos_rad"], dict(HOME_FRAME.joint_pos))
         self.assertEqual(home["root_pos_m"], list(HOME_FRAME.pos))
         self.assertEqual(home["root_quat_wxyz"], list(HOME_FRAME.rot))
         self.assertEqual(metadata["checkpoint_filename"], "model_500.pt")
         self.assertEqual(metadata["checkpoint_sha256"], SHA)
-        self.assertEqual(metadata["run_dir"], "2026-10-03_11-12-20_chome_clip157_walk")
+        self.assertEqual(metadata["run_dir"], "2026-10-03_13-40-19_chome_servo_walk")
         self.assertEqual(metadata["run_path"], metadata["run_dir"])
         self.assertEqual(metadata["iteration"], "500")
         self.assertTrue(all(isinstance(value, str) for value in metadata.values()))
@@ -198,8 +199,8 @@ class WalkExportMetadataContractTest(unittest.TestCase):
             lambda: _build(_base(observation_names=list(OBSERVATION_TERMS[:-1]))),
             lambda: _build(_base(action_scale=0.5)),
             lambda: _build(_base(command_names=["base_velocity"])),
-            lambda: _build(action_clip_lower=[-3.14] * 18),
-            lambda: _build(action_clip_upper=[1.57] * 17),
+            lambda: _build(action_clip_lower=[-1.57] * 18),
+            lambda: _build(action_clip_upper=[SERVO_TARGET_RANGE_RAD] * 17),
             lambda: _build(checkpoint_sha256="not-a-digest"),
             lambda: _build(iteration=-1),
         )
@@ -213,7 +214,7 @@ class WalkExportMetadataContractTest(unittest.TestCase):
             require_recorded_walk_contract(_env_yaml(root / "ok.yaml"))
             for bad in (
                 _env_yaml(root / "old_home.yaml", hip_pitch=-0.17453292519943295),
-                _env_yaml(root / "old_clip.yaml", lower=-3.14),
+                _env_yaml(root / "old_clip.yaml", lower=-1.57),
             ):
                 with self.assertRaises(ValueError):
                     require_recorded_walk_contract(bad)

@@ -78,15 +78,6 @@ register_mjlab_task(
     runner_cls=VelocityOnPolicyRunner,
 )
 
-# A/B control for the shared target clip: the same walking task without it.
-register_mjlab_task(
-    task_id="Mjlab-Velocity-Microban-NoClip",
-    env_cfg=make_microban_velocity_env_cfg(target_clip=False),
-    play_env_cfg=make_microban_velocity_env_cfg(play=True, target_clip=False),
-    rl_cfg=MicrobanVelocityRlCfg,
-    runner_cls=VelocityOnPolicyRunner,
-)
-
 register_mjlab_task(
     task_id=MICROBAN_SAFE_VELOCITY_TASK_ID,
     env_cfg=make_microban_safe_velocity_env_cfg(),

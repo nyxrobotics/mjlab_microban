@@ -26,9 +26,15 @@ def get_spec() -> mujoco.MjSpec:
 # (31 mm to the toe and to the heel; the earlier hip -10 deg pose leaned the
 # trunk 10 deg forward and left 24 mm to the toe).
 HOME_PITCH_RAD = float(np.deg2rad(1.198384259489))
-# Every policy commands target = clip(HOME + action, -1.57, 1.57) on all body
-# joints and observes its own raw previous output.
-POLICY_TARGET_CLIP_RAD = 1.57
+# Every policy commands target = HOME + action on all body joints, with no
+# software clip, and observes its own raw previous output. The only bound is
+# the servo's own goal-position range: one turn, [-pi, pi) rad. The robot
+# saturates goals there when it writes them, and training models the same
+# saturation as an absolute target clip. (A +-1.57 rad clip was tried on
+# 2026-10-03: it caps the XC330's torque at ~70 % of its current limit, which
+# saturates at a 2.0-2.8 rad target error, and walking stopped improving at
+# 16 % timeouts while the unclipped run reached 83 % in half the iterations.)
+SERVO_TARGET_RANGE_RAD = float(np.pi)
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     # The lowest sole collision corner is on the ground at this z.
