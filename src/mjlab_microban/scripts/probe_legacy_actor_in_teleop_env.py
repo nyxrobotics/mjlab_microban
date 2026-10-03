@@ -4,7 +4,8 @@ This is a bounded feasibility probe, not a deployment gate.  It intentionally
 changes only two teleop execution details needed to preserve the legacy actor's
 closed-loop contract:
 
-* the joint-position action term has no target clip; and
+* the joint-position action term applies only the shared absolute target clip
+  of every Microban policy, clip(HOME + raw_action, -1.57, +1.57); and
 * the previous-action observation is the raw 18-value actor output.
 
 The 21 joint positions and velocities are mapped by resolved joint name into
@@ -33,8 +34,6 @@ from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
 from mjlab_microban.legacy_velocity_diagnostics import (
-    DEFAULT_LEGACY_VELOCITY_CHECKPOINT,
-    DEFAULT_LEGACY_VELOCITY_SHA256,
     TwistScenario,
     checkpoint_sha256,
     default_scenarios,
@@ -44,6 +43,10 @@ from mjlab_microban.legacy_velocity_diagnostics import (
 from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+    teleop_v12_action_clip_cfg,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     MicrobanVelocityRlCfg,
@@ -190,7 +193,7 @@ def _teleop_cfg(*, seed: int, steps: int) -> Any:
     cfg.auto_reset = False
     cfg.episode_length_s = (steps + 2) * cfg.decimation * cfg.sim.mujoco.timestep
     _configure_fixed_twist(cfg.commands["twist"])
-    cfg.actions["joint_pos"].clip = None
+    cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
     raw_action_term = ObservationTermCfg(
         func=velocity_mdp.last_action,
         params={"action_name": "joint_pos"},
@@ -269,8 +272,13 @@ def _evaluate_scenario(
 
     robot = env.scene["robot"]
     action = env.action_manager.get_term("joint_pos")
-    if action.cfg.clip is not None or wrapped.clip_actions is not None:
-        raise ValueError("Probe must pass legacy raw actions without clipping")
+    if (
+        action.cfg.clip != teleop_v12_action_clip_cfg()
+        or wrapped.clip_actions is not None
+    ):
+        raise ValueError(
+            "Probe must pass raw actions with only the shared +-1.57 target clip"
+        )
     if tuple(action.target_names) != teleop_layout.action_names:
         raise ValueError("Teleop action order drifted after layout capture")
 
@@ -617,7 +625,7 @@ def run_probe(
             "steps": steps,
             "settle_steps": settle_steps,
             "step_dt_s": teleop_env.step_dt,
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "foot_target": "exact_zero_inactive",
             "hand_target": "exact_zero_inactive",
@@ -684,8 +692,8 @@ def run_probe(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_LEGACY_VELOCITY_CHECKPOINT)
-    parser.add_argument("--expected-sha256", default=DEFAULT_LEGACY_VELOCITY_SHA256)
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=300)

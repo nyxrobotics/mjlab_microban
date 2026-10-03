@@ -78,6 +78,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     deadline_post_canary_resume_source as build_deadline_post_canary_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
@@ -252,8 +253,16 @@ def validate_teleop_v12_environment_contract(env) -> None:
         offset, expected_offset
     ):
         raise ValueError("Contract-v12 action offset drifted from the default pose")
-    if getattr(action, "_clip", None) is not None:
-        raise ValueError("Contract-v12 action term must not clip raw actor output")
+    clip = getattr(action, "_clip", None)
+    if clip is None or action.cfg.clip is None:
+        raise ValueError("Contract-v12 action term must apply the shared target clip")
+    expected_clip = torch.tensor(
+        MICROBAN_TELEOP_V12_ACTION_CLIP, device=clip.device, dtype=clip.dtype
+    ).expand(MICROBAN_TELEOP_ACTION_WIDTH, 2)
+    if tuple(clip.shape[1:]) != (MICROBAN_TELEOP_ACTION_WIDTH, 2) or not bool(
+        torch.all(clip == expected_clip.unsqueeze(0)).item()
+    ):
+        raise ValueError("Contract-v12 action target clip drifted from +-1.57 rad")
 
 
 def _atomic_torch_save(payload: object, destination: Path) -> None:
@@ -463,7 +472,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
             TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
             "previous_action_semantics": "raw_actor_output",
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "trainable_actor_parameters": ["mlp.0.weight"],
             "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
             "adapter_gradient_schedule_revision": (
@@ -800,7 +809,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                         ),
                     )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
-            infos.get("action_clip", object()) is not None
+            infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP
         ):
             raise ValueError("Checkpoint raw-action semantics drifted")
         if infos.get("adapter_gradient_schedule_revision") != (

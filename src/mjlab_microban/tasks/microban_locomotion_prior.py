@@ -304,6 +304,23 @@ def _load_locomotion_prior(
     )
 
 
+def _disabled_locomotion_prior_arrays(
+    leg_joint_count: int, *, device: str | torch.device
+) -> _LocomotionPriorArrays:
+    frames = MICROBAN_LOCOMOTION_PRIOR_END_FRAME + 1
+    zeros = lambda *shape: torch.zeros(shape, dtype=torch.float32, device=device)
+    quat = zeros(frames, 4)
+    quat[:, 0] = 1.0
+    return _LocomotionPriorArrays(
+        joint_pos=zeros(frames, leg_joint_count),
+        joint_vel=zeros(frames, leg_joint_count),
+        root_pos=zeros(frames, 3),
+        root_quat=quat,
+        root_lin_vel=zeros(frames, 3),
+        root_ang_vel=zeros(frames, 3),
+    )
+
+
 class LocomotionPriorCommand(CommandTerm):
     """Per-environment, non-looping motion reference latched only on reset."""
 
@@ -330,11 +347,21 @@ class LocomotionPriorCommand(CommandTerm):
             dtype=torch.long,
             device=self.device,
         )
-        self.arrays = _load_locomotion_prior(
-            Path(cfg.motion_file).expanduser().resolve(),
-            expected_sha256=cfg.expected_sha256,
-            device=self.device,
-        )
+        if cfg.enabled:
+            self.arrays = _load_locomotion_prior(
+                Path(cfg.motion_file).expanduser().resolve(),
+                expected_sha256=cfg.expected_sha256,
+                device=self.device,
+            )
+            self.arrays_are_placeholder = False
+        else:
+            # A disabled prior only keeps the 39-wide critic term for topology
+            # stability; its command is exact zero and never reads the motion.
+            # Do not require the (local, gitignored) walk004 artifact for it.
+            self.arrays = _disabled_locomotion_prior_arrays(
+                len(MICROBAN_LOCOMOTION_PRIOR_LEG_JOINT_NAMES), device=self.device
+            )
+            self.arrays_are_placeholder = True
         self.phase = torch.full(
             (self.num_envs,),
             float(MICROBAN_LOCOMOTION_PRIOR_START_FRAME),
@@ -751,6 +778,10 @@ def set_locomotion_prior_enabled(
     cfg = env.command_manager.get_term_cfg(command_name)
     if not isinstance(cfg, LocomotionPriorCommandCfg):
         raise TypeError("Locomotion prior command config type mismatch")
+    if enabled and getattr(command, "arrays_are_placeholder", False):
+        raise RuntimeError(
+            "Locomotion prior was built disabled without its motion artifact"
+        )
     cfg.enabled = bool(enabled)
     command.cfg.enabled = bool(enabled)
     if not enabled:

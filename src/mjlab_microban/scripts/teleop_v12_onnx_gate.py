@@ -23,11 +23,14 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
 )
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    TELEOP_V12_BOOTSTRAP_INFO_KEY,
+)
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    inspect_legacy_velocity_checkpoint,
+    load_bootstrap_source_state,
+    validate_bootstrap_provenance,
     sha256_file,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
@@ -66,9 +69,12 @@ def run_gate(
         and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
         else ONNX_PARITY_TOLERANCE
     )
-    _source_identity, source_state = inspect_legacy_velocity_checkpoint(
-        "repo://checkpoints/xc330_velocity/model_14999.pt",
-        LEGACY_VELOCITY_CHECKPOINT_SHA256,
+    # The frozen velocity source is whatever this checkpoint was bootstrapped
+    # from; its recorded SHA-256 is re-verified before the tensors are used.
+    source_state = load_bootstrap_source_state(
+        validate_bootstrap_provenance(
+            infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
+        )
     )
     source = _legacy_model()
     source.load_state_dict(source_state, strict=True)

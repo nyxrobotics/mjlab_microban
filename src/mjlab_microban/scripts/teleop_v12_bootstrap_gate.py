@@ -19,23 +19,20 @@ from tensordict import TensorDict
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    PINNED_LEGACY_TELEOP_PROBE_SHA256,
     bootstrap_legacy_actor,
     inspect_legacy_velocity_checkpoint,
     serialize_bootstrap_provenance,
     sha256_file,
 )
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CHECKPOINT = ROOT / "checkpoints/xc330_velocity/model_14999.pt"
-DEFAULT_PROBE_RECEIPT = (
-    ROOT / "artifacts/legacy_teleop_probe/model_14999_teleop83_raw_9x300.json"
-)
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts/teleop_v12_bootstrap"
 PRISTINE_PARITY_TOLERANCE = 2.0e-5
 ONNX_PARITY_TOLERANCE = 2.0e-5
@@ -209,7 +206,7 @@ def run_gate(
         "contract": {
             "observation_width": 83,
             "action_width": 18,
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "normalizer": "frozen_empirical",
             "trainable_actor_parameter": "mlp.0.weight",
@@ -243,14 +240,10 @@ def run_gate(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument(
-        "--checkpoint-sha256", default=LEGACY_VELOCITY_CHECKPOINT_SHA256
-    )
-    parser.add_argument("--probe-receipt", type=Path, default=DEFAULT_PROBE_RECEIPT)
-    parser.add_argument(
-        "--probe-receipt-sha256", default=PINNED_LEGACY_TELEOP_PROBE_SHA256
-    )
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint-sha256", required=True)
+    parser.add_argument("--probe-receipt", type=Path, required=True)
+    parser.add_argument("--probe-receipt-sha256", required=True)
     parser.add_argument(
         "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR
     )

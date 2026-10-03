@@ -14,6 +14,9 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+)
 from mjlab_microban.legacy_velocity_diagnostics import (
     default_scenarios,
     publish_json_atomic,
@@ -230,8 +233,8 @@ def _load_actor(
     expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")
-    if infos.get("action_clip", object()) is not None:
-        raise ValueError("Checkpoint action clip must be None")
+    if infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP:
+        raise ValueError("Checkpoint action clip must be the shared +-1.57 clip")
     if infos.get("adapter_gradient_schedule_revision") != (
         TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
     ):
@@ -417,7 +420,7 @@ def run_evaluation(
             "seed": seed,
             "steps": steps,
             "settle_steps": settle_steps,
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },

@@ -54,13 +54,16 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_mdp import HmdNeckTargetMotion
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
 )
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    TELEOP_V12_BOOTSTRAP_INFO_KEY,
+)
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    inspect_legacy_velocity_checkpoint,
+    load_bootstrap_source_state,
+    validate_bootstrap_provenance,
     sha256_file,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
@@ -75,6 +78,8 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    teleop_v12_action_clip_cfg,
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     make_microban_teleop_v12_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
@@ -573,8 +578,11 @@ def _evaluate_scenario(
     observations = _patch_initial_command_observation(wrapped.get_observations(), env)
     robot = env.scene["robot"]
     action_term = env.action_manager.get_term("joint_pos")
-    if action_term.cfg.clip is not None or wrapped.clip_actions is not None:
-        raise ValueError("V12 tracking gate requires raw, unclipped actions")
+    if (
+        action_term.cfg.clip != teleop_v12_action_clip_cfg()
+        or wrapped.clip_actions is not None
+    ):
+        raise ValueError("V12 tracking gate requires raw actions with only the shared +-1.57 clip")
     foot = env.command_manager.get_term("foot_target")
     hand = env.command_manager.get_term("hand_target")
     expects_foot = any(
@@ -994,9 +1002,12 @@ def run_evaluation(
     if profile is not None and profile != required:
         raise ValueError(f"Checkpoint requires tracking profile {required}")
     profile = required
-    _source_identity, source_state = inspect_legacy_velocity_checkpoint(
-        "repo://checkpoints/xc330_velocity/model_14999.pt",
-        LEGACY_VELOCITY_CHECKPOINT_SHA256,
+    # The frozen velocity source is whatever this checkpoint was bootstrapped
+    # from; its recorded SHA-256 is re-verified before the tensors are used.
+    source_state = load_bootstrap_source_state(
+        validate_bootstrap_provenance(
+            infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
+        )
     )
     source_policy = _legacy_model().to(device)
     source_policy.load_state_dict(source_state, strict=True)
@@ -1050,7 +1061,7 @@ def run_evaluation(
             "settle_steps": settle_steps,
             "moving_hmd": "forced_non_neutral",
             "perturbation": perturbation,
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),

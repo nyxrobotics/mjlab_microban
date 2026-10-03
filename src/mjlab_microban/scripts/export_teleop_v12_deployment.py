@@ -72,6 +72,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     validate_deadline_post_canary_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
@@ -102,13 +103,21 @@ FINAL_COMPLETED_UPDATES = 15_000
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
 )
-PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v4"
+PACKAGER_REVISION = "microban_teleop_v12_final_deployment_packager_v5_centered_home_clip"
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0
 RUNTIME_GUARD_SEMANTICS = (
     "finite_float32_then_per_joint_absmax_else_hold_previous_targets_v1"
 )
-PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS = "finite_target_no_software_clip_v1"
+PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS = "finite_target_then_absolute_clip_1p57_v2"
+ACTION_TARGET_SEMANTICS = (
+    "clip_default_joint_pos_plus_raw_action_times_scale_to_action_clip"
+)
+ACTION_CLIP_SEMANTICS = "absolute_joint_position_radians_all_body_joints"
+RUNTIME_ACTION_SEMANTICS = "raw_default_plus_scale_then_absolute_target_clip_v2"
+# A chain bootstrapped after the bilateral site-order fix never needed the
+# historical model-9200 swap migration; it records this marker instead.
+LR_ORDER_NO_MIGRATION_REVISION = "none_corrected_site_order_from_bootstrap_v1"
 
 _FOOT_LOWER = (-0.03, -0.03, 0.0) * 2
 _FOOT_UPPER = (0.03, 0.03, 0.05) * 2
@@ -172,17 +181,7 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "v12_legacy_probe_settle_steps",
         "v12_legacy_probe_seed",
         "v12_bilateral_site_order_revision",
-        "v12_lr_order_migration_schema_version",
         "v12_lr_order_migration_revision",
-        "v12_lr_order_migration_strategy",
-        "v12_lr_order_source_checkpoint_sha256",
-        "v12_lr_order_source_checkpoint_iteration",
-        "v12_lr_order_source_completed_updates",
-        "v12_lr_order_source_common_step_counter",
-        "v12_lr_order_actor_swap_blocks_json",
-        "v12_lr_order_critic_swap_blocks_json",
-        "v12_lr_order_foot_adapter_at_source",
-        "v12_lr_order_migration_marker_sha256",
         "v12_source_to_target_columns_json",
         "v12_extra_observation_columns_json",
         "v12_actor_topology_json",
@@ -250,6 +249,8 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "previous_action_semantics",
         "action_target_semantics",
         "action_clip_semantics",
+        "action_clip_lower",
+        "action_clip_upper",
         "action_distribution_semantics",
         "runtime_action_semantics",
         "physical_motor_target_guard_semantics",
@@ -330,8 +331,13 @@ def _canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _require_deployable_lr_order_lineage(infos: Mapping[str, Any]) -> dict[str, Any]:
-    """Require the exact authenticated recovery used by the canonical v12 run."""
+def _require_deployable_lr_order_lineage(
+    infos: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Require corrected site order; a migrated lineage must be the pinned one.
+
+    A chain bootstrapped with the corrected site order returns ``None``.
+    """
 
     marker = validate_bilateral_site_order_checkpoint(infos)
     if infos.get(BILATERAL_SITE_ORDER_INFO_KEY) != (
@@ -341,9 +347,7 @@ def _require_deployable_lr_order_lineage(infos: Mapping[str, Any]) -> dict[str, 
             "Final checkpoint does not carry the corrected bilateral site-order revision"
         )
     if marker is None:
-        raise ValueError(
-            "Final checkpoint lacks the authenticated model-9200 bilateral migration"
-        )
+        return None
     marker = validate_lr_order_migration_marker(marker)
     expected = {
         "schema_version": 1,
@@ -559,11 +563,47 @@ def build_v12_deployment_metadata(
     source = bootstrap.source
     probe = bootstrap.probe
     lr_order_migration = _require_deployable_lr_order_lineage(infos)
-    if dict(lr_order_migration) != dict(
-        validate_lr_order_migration_marker(lr_order_migration)
-    ):
-        raise RuntimeError("Bilateral migration marker changed during validation")
-    lr_source_clock = lr_order_migration["source_clock"]
+    if lr_order_migration is None:
+        lr_order_metadata: dict[str, str] = {
+            "v12_lr_order_migration_revision": LR_ORDER_NO_MIGRATION_REVISION,
+        }
+    else:
+        if dict(lr_order_migration) != dict(
+            validate_lr_order_migration_marker(lr_order_migration)
+        ):
+            raise RuntimeError("Bilateral migration marker changed during validation")
+        lr_source_clock = lr_order_migration["source_clock"]
+        lr_order_metadata = {
+            "v12_lr_order_migration_schema_version": str(
+                lr_order_migration["schema_version"]
+            ),
+            "v12_lr_order_migration_revision": str(lr_order_migration["revision"]),
+            "v12_lr_order_migration_strategy": str(lr_order_migration["strategy"]),
+            "v12_lr_order_source_checkpoint_sha256": str(
+                lr_order_migration["source_checkpoint_sha256"]
+            ),
+            "v12_lr_order_source_checkpoint_iteration": str(
+                lr_source_clock["iteration"]
+            ),
+            "v12_lr_order_source_completed_updates": str(
+                lr_source_clock["completed_updates"]
+            ),
+            "v12_lr_order_source_common_step_counter": str(
+                lr_source_clock["common_step_counter"]
+            ),
+            "v12_lr_order_actor_swap_blocks_json": _json(
+                lr_order_migration["actor_swap_blocks"]
+            ),
+            "v12_lr_order_critic_swap_blocks_json": _json(
+                lr_order_migration["critic_swap_blocks"]
+            ),
+            "v12_lr_order_foot_adapter_at_source": (
+                "inactive_exact_zero_left_untouched"
+            ),
+            "v12_lr_order_migration_marker_sha256": _canonical_json_sha256(
+                lr_order_migration
+            ),
+        }
     packager_source = Path(__file__).resolve()
 
     metadata: dict[str, list | str | float] = {
@@ -606,31 +646,7 @@ def build_v12_deployment_metadata(
         "v12_legacy_probe_settle_steps": str(probe.settle_steps),
         "v12_legacy_probe_seed": str(probe.seed),
         "v12_bilateral_site_order_revision": (MICROBAN_BILATERAL_SITE_ORDER_REVISION),
-        "v12_lr_order_migration_schema_version": str(
-            lr_order_migration["schema_version"]
-        ),
-        "v12_lr_order_migration_revision": str(lr_order_migration["revision"]),
-        "v12_lr_order_migration_strategy": str(lr_order_migration["strategy"]),
-        "v12_lr_order_source_checkpoint_sha256": str(
-            lr_order_migration["source_checkpoint_sha256"]
-        ),
-        "v12_lr_order_source_checkpoint_iteration": str(lr_source_clock["iteration"]),
-        "v12_lr_order_source_completed_updates": str(
-            lr_source_clock["completed_updates"]
-        ),
-        "v12_lr_order_source_common_step_counter": str(
-            lr_source_clock["common_step_counter"]
-        ),
-        "v12_lr_order_actor_swap_blocks_json": _json(
-            lr_order_migration["actor_swap_blocks"]
-        ),
-        "v12_lr_order_critic_swap_blocks_json": _json(
-            lr_order_migration["critic_swap_blocks"]
-        ),
-        "v12_lr_order_foot_adapter_at_source": ("inactive_exact_zero_left_untouched"),
-        "v12_lr_order_migration_marker_sha256": _canonical_json_sha256(
-            lr_order_migration
-        ),
+        **lr_order_metadata,
         "v12_source_to_target_columns_json": _json(
             [list(pair) for pair in bootstrap.source_to_target_columns]
         ),
@@ -770,12 +786,14 @@ def build_v12_deployment_metadata(
         "locomotion_command_units": ["m_s", "m_s", "rad_s"],
         "locomotion_command_frame": "robot_body_forward_left_yaw_up",
         "previous_action_semantics": "raw_actor_output",
-        "action_target_semantics": ("default_joint_pos_plus_raw_action_times_scale"),
-        "action_clip_semantics": "none",
+        "action_target_semantics": ACTION_TARGET_SEMANTICS,
+        "action_clip_semantics": ACTION_CLIP_SEMANTICS,
+        "action_clip_lower": [MICROBAN_TELEOP_V12_ACTION_CLIP[0]]
+        * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+        "action_clip_upper": [MICROBAN_TELEOP_V12_ACTION_CLIP[1]]
+        * len(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
         "action_distribution_semantics": ("unbounded_gaussian_deterministic_mean_raw"),
-        "runtime_action_semantics": (
-            "raw_unbounded_default_plus_scale_no_target_clip_v1"
-        ),
+        "runtime_action_semantics": RUNTIME_ACTION_SEMANTICS,
         "physical_motor_target_guard_semantics": (
             PHYSICAL_MOTOR_TARGET_GUARD_SEMANTICS
         ),

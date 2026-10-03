@@ -99,6 +99,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     validate_deadline_post_canary_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -210,7 +211,7 @@ def _validate_locomotion_report(
             "seed": 42,
             "steps": 300,
             "settle_steps": 50,
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },
@@ -409,7 +410,7 @@ def _validate_tracking_report(
                 FINAL_PROFILE,
                 DEADLINE_FINAL_FALLBACK_PROFILE,
             ),
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": teleop_v12_target_normalizer_metadata()[

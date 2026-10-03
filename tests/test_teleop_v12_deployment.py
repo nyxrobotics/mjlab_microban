@@ -22,14 +22,12 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_ACTOR_STATE_KEYS,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    PINNED_LEGACY_TELEOP_PROBE_SHA256,
     LegacyTeleopProbeIdentity,
     LegacyVelocitySourceIdentity,
     TeleopV12BootstrapProvenance,
@@ -47,11 +45,24 @@ from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     MIGRATION_INFO_KEY,
     MIGRATION_REVISION,
 )
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
+)
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    teleop_v12_home_pose_marker,
+)
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD,
 )
+
+
+# Synthetic identities: the velocity source is chosen per chain.
+LEGACY_VELOCITY_CHECKPOINT_SHA256 = "1" * 64
+PINNED_LEGACY_TELEOP_PROBE_SHA256 = "2" * 64
 
 
 def _sha(path: Path) -> str:
@@ -60,9 +71,9 @@ def _sha(path: Path) -> str:
 
 def _bootstrap() -> TeleopV12BootstrapProvenance:
     return TeleopV12BootstrapProvenance(
-        schema_version=1,
+        schema_version=2,
         source=LegacyVelocitySourceIdentity(
-            path="repo://checkpoints/xc330_velocity/model_14999.pt",
+            path="/runs/velocity/model_14999.pt",
             sha256=LEGACY_VELOCITY_CHECKPOINT_SHA256,
             iteration=14_999,
             normalizer_count=1_474_560_000,
@@ -81,7 +92,7 @@ def _bootstrap() -> TeleopV12BootstrapProvenance:
         target_actor_topology=TELEOP_V12_ACTOR_TOPOLOGY,
         normalizer_eps=LEGACY_VELOCITY_NORMALIZER_EPS,
         previous_action_semantics="raw_actor_output",
-        action_clip=None,
+        action_clip=list(MICROBAN_TELEOP_V12_ACTION_CLIP),
         frozen_tensors=tuple(
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
@@ -175,6 +186,7 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
         "status": "pass",
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": 14_999,
         "completed_updates": 15_000,
@@ -234,6 +246,8 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         },
     }
     infos = {
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "trainable_actor_parameters": ["mlp.0.weight"],
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         "active_actor_columns_at_save": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
@@ -372,6 +386,45 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, -10.0, -10.0],
     ]
     assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
+    assert metadata["action_clip_semantics"] == (
+        "absolute_joint_position_radians_all_body_joints"
+    )
+    assert metadata["action_clip_lower"] == [-1.57] * 18
+    assert metadata["action_clip_upper"] == [1.57] * 18
+    assert metadata["physical_motor_target_guard_semantics"] == (
+        "finite_target_then_absolute_clip_1p57_v2"
+    )
+
+
+def test_fresh_corrected_chain_needs_no_lr_order_migration(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model_14999.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate, locomotion, tracking, onnx_report, infos = _evidence(tmp_path)
+    infos.pop(MIGRATION_INFO_KEY)
+    gate["checkpoint_sha256"] = _sha(checkpoint)
+    metadata = deployment.build_v12_deployment_metadata(
+        checkpoint=checkpoint,
+        checkpoint_sha256=_sha(checkpoint),
+        gate_path=gate_path,
+        gate=gate,
+        infos=infos,
+        bootstrap=_bootstrap(),
+        locomotion=locomotion,
+        tracking=tracking,
+        onnx_report=onnx_report,
+        packager_parity={
+            "reference_maximum_absolute_error": 1.0e-6,
+            "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
+        },
+        microban_source_identity=_microban_identity(),
+    )
+    assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
+    assert metadata["v12_lr_order_migration_revision"] == (
+        deployment.LR_ORDER_NO_MIGRATION_REVISION
+    )
+    assert "v12_lr_order_migration_strategy" not in metadata
 
 
 def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
@@ -384,7 +437,6 @@ def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
 
     for case, mutate in (
         ("raw_pre_fix", lambda value: value.clear()),
-        ("fresh_without_migration", lambda value: value.pop(MIGRATION_INFO_KEY)),
         (
             "missing_top_level_revision",
             lambda value: value.pop(BILATERAL_SITE_ORDER_INFO_KEY),
@@ -408,6 +460,10 @@ def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
             (TypeError, ValueError), match="bilateral|predates|migration"
         ):
             deployment._require_deployable_lr_order_lineage(changed)
+
+    fresh = deepcopy(infos)
+    fresh.pop(MIGRATION_INFO_KEY)
+    assert deployment._require_deployable_lr_order_lineage(fresh) is None
 
 
 def test_hashed_report_loader_rejects_changed_evidence(tmp_path: Path) -> None:
