@@ -28,8 +28,9 @@ def get_spec() -> mujoco.MjSpec:
 # root pitched +10 deg (nose down) the soles are flat (normal x < 1e-15), the
 # COM is 30.96 mm from the heel edge and 30.96 mm from the toe edge (|offset|
 # < 1e-14 m), the lowest sole corner touches z = 0 at root z 0.170430569776,
-# the virtual head (trunk COM + 0.07324 m along the trunk axis) is at 0.29562
-# m and the foot bodies are 0.09278 m apart laterally. Hip/ankle roll (+-5 deg)
+# the virtual head (trunk COM + 0.07324 m along the trunk inertial frame's up
+# axis, mdp._head_height) is at 0.29527 m and the foot bodies are 0.09412 m
+# apart laterally. Hip/ankle roll (+-5 deg)
 # leaves each sole rolled 0.076 deg, as in every earlier HOME. For reference:
 # the earlier hip -10 deg pose had the same lean but 23.8/38.1 mm toe/heel
 # margins; the centered upright HOME (hip +1.198, ankle -1.198 deg) kept the
