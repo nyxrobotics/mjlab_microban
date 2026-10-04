@@ -673,7 +673,10 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["no_stepping"].params["foot_target_command_name"] = "foot_target"
 
     # Six foot XYZ offsets, and six hand XYZ offsets plus left/right active
-    # flags.  All offsets are expressed in the trunk frame and measured in metres.
+    # flags, in metres.  All offsets are expressed in the HOME-levelled trunk
+    # frame R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): level at HOME (x forward,
+    # y left, z up), the frame the PICO bridge sends and the twist uses, so a
+    # world-vertical foot lift at HOME reads (0, 0, dz).
     cfg.commands["foot_target"] = ResetFixedFootTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_single_support_envs=0.0,
@@ -685,10 +688,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             0.012,
         ),
         both_feet_reach_xy_range=(-0.01, 0.01),
+        trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
     cfg.commands["hand_target"] = ResetFixedHandTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_active=0.0,
+        trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
     # This command is privileged: it is appended only to the critic below and
     # never changes the actor's deployment-stable 83-value observation schema.

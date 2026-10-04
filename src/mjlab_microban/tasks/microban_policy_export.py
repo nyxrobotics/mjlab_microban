@@ -41,7 +41,10 @@ from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
 from mjlab_microban.robot.microban_hand_fk import (
+    MICROBAN_HAND_TARGET_FRAME,
+    MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
     MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
     MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
     microban_hand_fk_metadata,
@@ -1897,8 +1900,10 @@ def deterministic_teleop_parity_inputs(
     lower, upper = _representative_observation_bounds()
     midpoint = (lower + upper) * np.float32(0.5)
     neutral = np.zeros(MICROBAN_TELEOP_OBSERVATION_WIDTH, dtype=np.float32)
-    # A level robot observes gravity along -Z in the body frame.
-    neutral[5] = -1.0
+    # Standing at HOME the trunk leans HOME_TRUNK_PITCH_RAD forward, so the
+    # body-frame gravity is (sin, 0, -cos) of that lean.
+    neutral[3] = math.sin(HOME_TRUNK_PITCH_RAD)
+    neutral[5] = -math.cos(HOME_TRUNK_PITCH_RAD)
     rows = [neutral, lower, upper, midpoint]
     rng = np.random.default_rng(seed)
     if sample_count > len(rows):
@@ -2183,6 +2188,27 @@ def _command_target_bounds(
     )
 
 
+# PICO foot/hand target columns are offsets in the trunk frame with HOME's
+# forward lean rotated out, R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): level at HOME,
+# x forward, y left, z up (the twist uses the same frame).
+MICROBAN_TELEOP_TARGET_FRAME = MICROBAN_HAND_TARGET_FRAME
+if MICROBAN_HAND_TARGET_FRAME_PITCH_RAD != HOME_TRUNK_PITCH_RAD:
+    raise RuntimeError("Hand target frame lean differs from the shared HOME lean")
+
+
+def teleop_target_frame(env: ManagerBasedRlEnv) -> str:
+    """Return the foot/hand target frame label after checking both commands."""
+
+    for name in ("foot_target", "hand_target"):
+        pitch = getattr(env.command_manager.get_term_cfg(name), "trunk_pitch", None)
+        if pitch != HOME_TRUNK_PITCH_RAD:
+            raise ValueError(
+                f"{name} must be defined in the HOME-levelled frame "
+                f"(trunk_pitch={HOME_TRUNK_PITCH_RAD!r}), got {pitch!r}"
+            )
+    return MICROBAN_TELEOP_TARGET_FRAME
+
+
 def get_microban_teleop_metadata(
     env: ManagerBasedRlEnv,
     run_path: str,
@@ -2199,6 +2225,7 @@ def get_microban_teleop_metadata(
     """
 
     validate_microban_teleop_observation_contract(env)
+    target_frame = teleop_target_frame(env)
 
     robot: Entity = env.scene["robot"]
     action = env.action_manager.get_term("joint_pos")
@@ -2432,7 +2459,7 @@ def get_microban_teleop_metadata(
             "left_xyz_then_right_xyz_trunk_frame_offset_from_episode_reset_"
             "reference_metres_periodic_command_resampling_does_not_move_reference"
         ),
-        "foot_target_frame": "robot_trunk_xyz_forward_left_up",
+        "foot_target_frame": target_frame,
         "foot_target_units": "metres",
         "foot_target_lower": foot_target_lower,
         "foot_target_upper": foot_target_upper,
@@ -2448,7 +2475,7 @@ def get_microban_teleop_metadata(
             "trunk_frame_offset_from_episode_reset_reference_metres_"
             "periodic_command_resampling_does_not_move_reference"
         ),
-        "hand_target_frame": "robot_trunk_xyz_forward_left_up",
+        "hand_target_frame": target_frame,
         "hand_target_units": "metres",
         "hand_target_lower": hand_target_lower,
         "hand_target_upper": hand_target_upper,

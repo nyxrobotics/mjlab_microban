@@ -53,7 +53,8 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
-    microban_hand_offsets_from_arm_joints,
+    MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M,
+    microban_hand_target_offsets_from_arm_joints,
 )
 from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
     FULLBODY_VISUAL_GATE,
@@ -219,8 +220,12 @@ SIMULTANEOUS_FEET_UPPER_M = tuple(
     value * TARGET_SAFETY_MARGIN for value in (0.01, 0.01, 0.02)
 )
 FOOT_INACTIVE_Z_MAX_M = MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
-HAND_LOWER_M = tuple(value * TARGET_SAFETY_MARGIN for value in (-0.08, -0.08, -0.08))
-HAND_UPPER_M = tuple(value * TARGET_SAFETY_MARGIN for value in (0.08, 0.08, 0.08))
+# Hands use the receiver's own live limit (0.9 * 0.08 m): the HOME-levelled
+# reachable hand box reaches 70.6 mm forward, past 0.8 * 0.08 m.
+HAND_LOWER_M = tuple(
+    -value for value in MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M
+)
+HAND_UPPER_M = tuple(MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M)
 # Diagnostic-only component bound for the mapper's raw, absolute controller
 # positions in the current HMD frame.  It matches the mapper's 2.5 m norm
 # rejection threshold and never participates in actuator command validation.
@@ -1670,7 +1675,9 @@ class LivePicoSimulationPolicy:
                         primary_command.arm_joint_target,
                         dtype=torch.float64,
                     )
-                    expected_hands = microban_hand_offsets_from_arm_joints(
+                    # Hand targets are HOME-levelled-frame offsets: the
+                    # mapper must send the arm FK rotated by the HOME lean.
+                    expected_hands = microban_hand_target_offsets_from_arm_joints(
                         arm_joint_target
                     )
                     commanded_hands = torch.tensor(

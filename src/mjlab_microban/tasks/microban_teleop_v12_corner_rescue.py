@@ -27,7 +27,7 @@ import torch
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG,
-    microban_hand_offsets_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
 )
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
@@ -267,8 +267,10 @@ class CornerPairHandTargetCommand(ResetFixedHandTargetCommand):
         selected_targets = pair_targets[choice[choice != 0] - 1]
         self.is_active[pair_ids] = True
         self.sampled_arm_joint_pos_rad[pair_ids] = selected_targets
-        self.hand_target_offset_b[pair_ids] = microban_hand_offsets_from_arm_joints(
-            selected_targets
+        self.hand_target_offset_b[pair_ids] = (
+            microban_hand_target_offsets_from_arm_joints(
+                selected_targets, trunk_pitch=self.cfg.trunk_pitch
+            )
         )
 
 
@@ -515,6 +517,7 @@ def make_microban_teleop_v12_corner_rescue_env_cfg(play: bool = False):
     cfg.commands["hand_target"] = CornerPairHandTargetCommandCfg(
         resampling_time_range=existing.resampling_time_range,
         rel_active=existing.rel_active,
+        trunk_pitch=existing.trunk_pitch,
     )
     if not play:
         curriculum = cfg.curriculum.get("staged_curriculum")

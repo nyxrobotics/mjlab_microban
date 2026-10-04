@@ -411,7 +411,16 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, 30.0, -10.0],
         [25.0, -10.0, -10.0],
     ]
-    assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
+    assert hand_target_fk["normalizer_abs_bound_m"] == [0.0707, 0.0388, 0.0495]
+    assert hand_target_fk["target_frame"] == (
+        "robot_home_levelled_trunk_xyz_forward_left_up"
+    )
+    assert metadata["foot_target_frame"] == (
+        "robot_home_levelled_trunk_xyz_forward_left_up"
+    )
+    assert metadata["hand_target_frame"] == (
+        "robot_home_levelled_trunk_xyz_forward_left_up"
+    )
     assert metadata["action_clip_semantics"] == (
         "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
         "all_body_joints_radians"

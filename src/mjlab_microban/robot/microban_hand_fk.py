@@ -4,6 +4,12 @@ The constants below are the ``body`` and ``site`` transforms from
 ``robot/microban/robot.xml``.  Every arm joint is a hinge about its local +Z
 axis.  Joint tensors and results use the fixed side order ``(left, right)`` and
 joint order ``(shoulder_pitch, shoulder_roll, elbow)``.
+
+The FK itself is in the trunk frame.  PICO hand targets are offsets in the
+HOME-levelled trunk frame ``R_trunk * R_y(-HOME_TRUNK_PITCH_RAD)`` (gravity
+level at HOME, x forward, y left, z up), so a trunk-frame FK offset ``v`` is the
+target ``R_y(HOME_TRUNK_PITCH_RAD) @ v`` (``microban_hand_target_offsets_from_
+arm_joints``).  The AABB, normalizer and evaluation offsets describe targets.
 """
 
 from __future__ import annotations
@@ -12,9 +18,16 @@ import math
 
 import torch
 
+from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
+
+# v3 (2026-10-04): targets are expressed in the HOME-levelled trunk frame of
+# the forward-lean HOME (trunk pitched HOME_TRUNK_PITCH_RAD forward).
 MICROBAN_HAND_FK_REVISION = (
-    "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_v2"
+    "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_"
+    "home_levelled_lean10_v3"
 )
+MICROBAN_HAND_TARGET_FRAME = "robot_home_levelled_trunk_xyz_forward_left_up"
+MICROBAN_HAND_TARGET_FRAME_PITCH_RAD = HOME_TRUNK_PITCH_RAD
 MICROBAN_HAND_SIDE_ORDER = ("left", "right")
 MICROBAN_ARM_JOINT_ORDER = ("shoulder_pitch", "shoulder_roll", "elbow")
 
@@ -43,24 +56,38 @@ MICROBAN_ARM_HOME_JOINT_RAD = tuple(
 )
 
 # A 401^3 grid per side over the complete joint box produced these exact-FK
-# extrema in trunk-frame metres.  The bilateral chains mirror only Y.
+# extrema in metres.  The bilateral chains mirror only Y.  The trunk-frame
+# AABB is the raw FK; the target AABB is the same grid rotated into the
+# HOME-levelled target frame (R_y(+10 deg): x' = cos*x + sin*z,
+# z' = -sin*x + cos*z), which is what the policy observes.
 MICROBAN_HAND_FK_BOUND_GRID_POINTS_PER_AXIS = 401
-MICROBAN_HAND_FK_OFFSET_AABB_MIN_M = (
+MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MIN_M = (
     (-0.06120170602356862, -0.0034550417440758485, -0.0035619649312883805),
     (-0.06120170602356864, -0.0387512193701912, -0.0035619649312883944),
 )
-MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
+MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MAX_M = (
     (0.06289464331528255, 0.0387512193701912, 0.060477220857479266),
     (0.06289464331528258, 0.0034550417440758485, 0.060477220857479225),
 )
+MICROBAN_HAND_FK_OFFSET_AABB_MIN_M = (
+    (-0.05976319909948816, -0.0034550417440758485, -0.0012919613069190107),
+    (-0.05976319909948818, -0.0387512193701912, -0.0012919613069190233),
+)
+MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
+    (0.07062154916197355, 0.0387512193701912, 0.049485269073683856),
+    (0.07062154916197358, 0.0034550417440758485, 0.04948526907368383),
+)
 
-# Conservative outward rounding of the per-axis maximum absolute grid values.
-# These are actor-normalizer denominators, not the wire protocol's ±0.08 m
-# command envelope.  The reachable joint/FK subset also remains strictly
-# inside the receiver's independently validated ±0.064 m live margin.
-MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0630, 0.0388, 0.0605)
+# Conservative outward rounding (0.1 mm) of the per-axis maximum absolute
+# target-frame grid values.  These are actor-normalizer denominators, not the
+# wire protocol's +-0.08 m command envelope.  The lean moves reach from
+# trunk-z into levelled-x: forward-up hands reach x = 70.6 mm (trunk frame:
+# 62.9 mm), so the receiver's live margin is 0.9 * 0.08 = 72 mm (it was
+# 0.8 * 0.08 = 64 mm, which the levelled reach exceeds); the reachable subset
+# stays strictly inside it.
+MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0707, 0.0388, 0.0495)
 MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M = (0.08, 0.08, 0.08)
-MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = (0.064, 0.064, 0.064)
+MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = (0.072, 0.072, 0.072)
 
 # Named points shared by the v12 evaluator and training contract.  Each tuple is
 # one left-arm (pitch, roll, elbow) pose in degrees; the right pose mirrors only
@@ -189,16 +216,49 @@ def microban_hand_offsets_from_arm_joints(
     return microban_hand_positions_from_arm_joints(joint_positions_rad) - default
 
 
+def rotate_trunk_offsets_to_home_levelled(
+    offsets: torch.Tensor, trunk_pitch: float
+) -> torch.Tensor:
+    """Express trunk-frame ``[..., 3]`` vectors in the HOME-levelled frame.
+
+    The levelled frame is ``R_trunk * R_y(-trunk_pitch)``, so a trunk-frame
+    vector ``v`` reads ``R_y(trunk_pitch) @ v`` there.  ``trunk_pitch = 0``
+    returns the input unchanged.
+    """
+
+    if trunk_pitch == 0.0:
+        return offsets
+    cosine = math.cos(trunk_pitch)
+    sine = math.sin(trunk_pitch)
+    x, y, z = offsets.unbind(dim=-1)
+    return torch.stack((cosine * x + sine * z, y, -sine * x + cosine * z), dim=-1)
+
+
+def microban_hand_target_offsets_from_arm_joints(
+    joint_positions_rad: torch.Tensor,
+    *,
+    trunk_pitch: float = MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
+) -> torch.Tensor:
+    """Return HOME-levelled hand target offsets for ``[..., 2, 3]`` joints."""
+
+    return rotate_trunk_offsets_to_home_levelled(
+        microban_hand_offsets_from_arm_joints(joint_positions_rad), trunk_pitch
+    )
+
+
 def sample_microban_reachable_hand_targets(
     is_active: torch.Tensor,
     *,
     generator: torch.Generator | None = None,
     dtype: torch.dtype = torch.float32,
+    trunk_pitch: float = MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Uniformly sample the arm joint box and return joints plus reachable offsets.
 
-    Inactive hands are set to the exact HOME joint tuple before FK, producing an
-    exact-zero offset instead of sampling a Cartesian point that will be ignored.
+    Offsets are FK offsets rotated into the HOME-levelled frame of a trunk
+    leaning ``trunk_pitch`` forward (0 keeps the trunk frame).  Inactive hands
+    are set to the exact HOME joint tuple before FK, producing an exact-zero
+    offset instead of sampling a Cartesian point that will be ignored.
     """
 
     if not isinstance(is_active, torch.Tensor) or is_active.dtype != torch.bool:
@@ -230,7 +290,9 @@ def sample_microban_reachable_hand_targets(
         sampled[active_env, active_side] = lower[active_side] + random * (
             upper[active_side] - lower[active_side]
         )
-    offsets = microban_hand_offsets_from_arm_joints(sampled)
+    offsets = microban_hand_target_offsets_from_arm_joints(
+        sampled, trunk_pitch=trunk_pitch
+    )
     offsets = torch.where(is_active.unsqueeze(-1), offsets, torch.zeros_like(offsets))
     return sampled, offsets
 
@@ -238,7 +300,7 @@ def sample_microban_reachable_hand_targets(
 def microban_reachable_hand_evaluation_offsets() -> tuple[
     tuple[str, tuple[tuple[float, float, float], tuple[float, float, float]]], ...
 ]:
-    """Return named left/right reachable offsets as JSON-safe Python tuples."""
+    """Return named left/right reachable target offsets (HOME-levelled frame)."""
 
     result = []
     for name, left_degrees in MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG:
@@ -250,7 +312,7 @@ def microban_reachable_hand_evaluation_offsets() -> tuple[
             ),
             dtype=torch.float64,
         )
-        offsets = microban_hand_offsets_from_arm_joints(torch.deg2rad(joints))
+        offsets = microban_hand_target_offsets_from_arm_joints(torch.deg2rad(joints))
         left = tuple(float(value) for value in offsets[0].tolist())
         right = tuple(float(value) for value in offsets[1].tolist())
         result.append((name, (left, right)))
@@ -262,12 +324,20 @@ def microban_hand_fk_metadata() -> dict[str, object]:
 
     return {
         "revision": MICROBAN_HAND_FK_REVISION,
+        "target_frame": MICROBAN_HAND_TARGET_FRAME,
+        "target_frame_trunk_pitch_rad": MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
         "side_order": list(MICROBAN_HAND_SIDE_ORDER),
         "joint_order": list(MICROBAN_ARM_JOINT_ORDER),
         "joint_lower_deg": [list(side) for side in MICROBAN_ARM_JOINT_LOWER_DEG],
         "joint_upper_deg": [list(side) for side in MICROBAN_ARM_JOINT_UPPER_DEG],
         "home_joint_deg": [list(side) for side in MICROBAN_ARM_HOME_JOINT_DEG],
         "bound_grid_points_per_axis": MICROBAN_HAND_FK_BOUND_GRID_POINTS_PER_AXIS,
+        "trunk_offset_aabb_min_m": [
+            list(side) for side in MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MIN_M
+        ],
+        "trunk_offset_aabb_max_m": [
+            list(side) for side in MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MAX_M
+        ],
         "offset_aabb_min_m": [
             list(side) for side in MICROBAN_HAND_FK_OFFSET_AABB_MIN_M
         ],
@@ -288,5 +358,8 @@ def microban_hand_fk_metadata() -> dict[str, object]:
             for name, offsets in microban_reachable_hand_evaluation_offsets()
         ],
         "source": "src/mjlab_microban/robot/microban/robot.xml",
-        "sampling": "uniform_independent_joint_box_then_exact_fk_offset_from_home",
+        "sampling": (
+            "uniform_independent_joint_box_then_exact_fk_offset_from_home_"
+            "rotated_into_home_levelled_frame"
+        ),
     }

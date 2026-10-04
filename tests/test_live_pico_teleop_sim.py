@@ -28,7 +28,7 @@ from tensordict import TensorDict
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
     MICROBAN_ARM_JOINT_UPPER_RAD,
-    microban_hand_offsets_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
 )
 from mjlab_microban.scripts.live_pico_teleop_sim import (
     ARM_TRACKING_HOLD_MAX_S,
@@ -136,7 +136,7 @@ def _controller_arm_mapper_command(
     zero_pair = {"left": (0.0, 0.0, 0.0), "right": (0.0, 0.0, 0.0)}
     if arm_tracking_enabled:
         assert arm_joint_target is not None
-        hand_values = microban_hand_offsets_from_arm_joints(
+        hand_values = microban_hand_target_offsets_from_arm_joints(
             torch.tensor(arm_joint_target, dtype=torch.float64)
         ).tolist()
         hand_target = {"left": hand_values[0], "right": hand_values[1]}
@@ -335,7 +335,7 @@ class ControllerOnlyPreviewTests(unittest.TestCase):
                     side: list(MICROBAN_ARM_HOME_JOINT_RAD[index])
                     for index, side in enumerate(("left", "right"))
                 }
-                hands = microban_hand_offsets_from_arm_joints(
+                hands = microban_hand_target_offsets_from_arm_joints(
                     torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
                 ).tolist()
                 return {

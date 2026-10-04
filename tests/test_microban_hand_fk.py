@@ -9,6 +9,7 @@ import mujoco
 import numpy as np
 import torch
 
+from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
     MICROBAN_ARM_JOINT_LOWER_RAD,
@@ -16,6 +17,10 @@ from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_HAND_FK_BOUND_GRID_POINTS_PER_AXIS,
     MICROBAN_HAND_FK_OFFSET_AABB_MAX_M,
     MICROBAN_HAND_FK_OFFSET_AABB_MIN_M,
+    MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MAX_M,
+    MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MIN_M,
+    MICROBAN_HAND_TARGET_FRAME,
+    MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
     MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
     MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M,
     MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
@@ -24,7 +29,9 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
     microban_hand_offsets_from_arm_joints,
     microban_hand_positions_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
     microban_reachable_hand_evaluation_offsets,
+    rotate_trunk_offsets_to_home_levelled,
     sample_microban_reachable_hand_targets,
 )
 
@@ -108,7 +115,7 @@ class MicrobanHandFkTest(unittest.TestCase):
         self.assertTrue(bool((joints <= upper).all().item()))
         torch.testing.assert_close(
             offsets,
-            microban_hand_offsets_from_arm_joints(joints),
+            microban_hand_target_offsets_from_arm_joints(joints),
             rtol=0.0,
             atol=0.0,
         )
@@ -163,6 +170,83 @@ class MicrobanHandFkTest(unittest.TestCase):
         )
         self.assertIn("uniform_independent_joint_box", metadata["sampling"])
 
+    def test_target_frame_is_the_home_levelled_trunk_frame(self) -> None:
+        self.assertEqual(MICROBAN_HAND_TARGET_FRAME_PITCH_RAD, HOME_TRUNK_PITCH_RAD)
+        self.assertEqual(
+            MICROBAN_HAND_TARGET_FRAME,
+            "robot_home_levelled_trunk_xyz_forward_left_up",
+        )
+        metadata = microban_hand_fk_metadata()
+        self.assertEqual(metadata["target_frame"], MICROBAN_HAND_TARGET_FRAME)
+        self.assertEqual(
+            metadata["target_frame_trunk_pitch_rad"], HOME_TRUNK_PITCH_RAD
+        )
+        # Trunk z (forward-up at the lean HOME) reads forward and up in the
+        # levelled frame: R_y(+lean) @ (0, 0, 1) = (sin, 0, cos).
+        rotated = rotate_trunk_offsets_to_home_levelled(
+            torch.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]], dtype=torch.float64),
+            HOME_TRUNK_PITCH_RAD,
+        )
+        sine = np.sin(HOME_TRUNK_PITCH_RAD)
+        cosine = np.cos(HOME_TRUNK_PITCH_RAD)
+        np.testing.assert_allclose(
+            rotated.numpy(),
+            [[sine, 0.0, cosine], [cosine, 0.0, -sine]],
+            rtol=0.0,
+            atol=1.0e-15,
+        )
+        # Zero lean is the plain trunk frame, and the trunk-frame sampler
+        # returns the raw FK offsets.
+        joints, offsets = sample_microban_reachable_hand_targets(
+            torch.ones(64, 2, dtype=torch.bool),
+            generator=torch.Generator().manual_seed(7),
+            dtype=torch.float64,
+            trunk_pitch=0.0,
+        )
+        torch.testing.assert_close(
+            offsets, microban_hand_offsets_from_arm_joints(joints), rtol=0.0, atol=0.0
+        )
+
+    def test_target_aabb_is_the_rotated_joint_box_fk(self) -> None:
+        points = 61
+        lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64)
+        upper = torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD, dtype=torch.float64)
+        home = torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
+        for side in range(2):
+            axes = [
+                torch.linspace(lower[side, k], upper[side, k], points, dtype=torch.float64)
+                for k in range(3)
+            ]
+            grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+            joints = home.expand(grid.shape[0], -1, -1).clone()
+            joints[:, side] = grid
+            trunk = microban_hand_offsets_from_arm_joints(joints)[:, side]
+            target = microban_hand_target_offsets_from_arm_joints(joints)[:, side]
+            for values, minimum, maximum in (
+                (
+                    trunk,
+                    MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MIN_M[side],
+                    MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MAX_M[side],
+                ),
+                (
+                    target,
+                    MICROBAN_HAND_FK_OFFSET_AABB_MIN_M[side],
+                    MICROBAN_HAND_FK_OFFSET_AABB_MAX_M[side],
+                ),
+            ):
+                minimum = torch.tensor(minimum, dtype=torch.float64)
+                maximum = torch.tensor(maximum, dtype=torch.float64)
+                # The recorded 401-point extrema bound this coarser grid and
+                # lie within 0.2 mm of it.
+                self.assertTrue(bool((values >= minimum - 1.0e-12).all().item()))
+                self.assertTrue(bool((values <= maximum + 1.0e-12).all().item()))
+                torch.testing.assert_close(
+                    values.amin(dim=0), minimum, rtol=0.0, atol=2.0e-4
+                )
+                torch.testing.assert_close(
+                    values.amax(dim=0), maximum, rtol=0.0, atol=2.0e-4
+                )
+
     def test_grid_aabb_fits_normalizer_and_runtime_live_margin(self) -> None:
         minimum = torch.tensor(MICROBAN_HAND_FK_OFFSET_AABB_MIN_M)
         maximum = torch.tensor(MICROBAN_HAND_FK_OFFSET_AABB_MAX_M)
@@ -170,7 +254,14 @@ class MicrobanHandFkTest(unittest.TestCase):
         normalizer = torch.tensor(MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M)
         live_limit = torch.tensor(MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M)
         self.assertTrue(bool((observed_abs_max <= normalizer).all().item()))
+        # Outward 0.1 mm rounding: the normalizer is no looser than needed.
+        self.assertTrue(bool((normalizer - observed_abs_max < 1.0e-4).all().item()))
         self.assertTrue(bool((normalizer < live_limit).all().item()))
+        # Every named evaluation pose is sendable through the live receiver.
+        for _name, offsets in microban_reachable_hand_evaluation_offsets():
+            self.assertTrue(
+                bool((torch.tensor(offsets).abs() < live_limit).all().item())
+            )
 
     def test_named_evaluation_offsets_are_exact_fk_and_bilateral(self) -> None:
         offsets_by_name = dict(microban_reachable_hand_evaluation_offsets())
@@ -189,7 +280,7 @@ class MicrobanHandFkTest(unittest.TestCase):
                     dtype=torch.float64,
                 )
             )
-            expected = microban_hand_offsets_from_arm_joints(joints)
+            expected = microban_hand_target_offsets_from_arm_joints(joints)
             actual = torch.tensor(offsets_by_name[name], dtype=torch.float64)
             torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
             torch.testing.assert_close(actual[0, (0, 2)], actual[1, (0, 2)])

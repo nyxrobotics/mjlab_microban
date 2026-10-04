@@ -56,6 +56,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
+    MICROBAN_TELEOP_TARGET_FRAME,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
@@ -834,7 +835,7 @@ def build_v12_deployment_metadata(
         "control_hz": 50.0,
         "foot_target_lower": list(_FOOT_LOWER),
         "foot_target_upper": list(_FOOT_UPPER),
-        "foot_target_frame": "robot_trunk_xyz_forward_left_up",
+        "foot_target_frame": MICROBAN_TELEOP_TARGET_FRAME,
         "foot_target_units": "metres",
         "foot_target_semantics": (
             "left_xyz_then_right_xyz_trunk_frame_offset_from_episode_reset_"
@@ -850,7 +851,7 @@ def build_v12_deployment_metadata(
         "hand_target_lower": list(_HAND_LOWER),
         "hand_target_upper": list(_HAND_UPPER),
         "hand_target_fk": _json(microban_hand_fk_metadata()),
-        "hand_target_frame": "robot_trunk_xyz_forward_left_up",
+        "hand_target_frame": MICROBAN_TELEOP_TARGET_FRAME,
         "hand_target_units": "metres",
         "hand_target_semantics": (
             "left_xyz_then_right_xyz_then_left_right_active_flags_"
@@ -1026,6 +1027,8 @@ def _run_microban_runtime_validator(
         report.get("status") != "pass"
         or report.get("policy") != str(path.resolve())
         or metadata.get("base_ang_vel_frame") != "imu_sensor_xyz"
+        or metadata.get("foot_target_frame") != MICROBAN_TELEOP_TARGET_FRAME
+        or metadata.get("hand_target_frame") != MICROBAN_TELEOP_TARGET_FRAME
         or metadata.get("v12_home_pose_revision")
         != teleop_v12_home_pose_marker()["revision"]
         or metadata.get("v12_training_home_pose_json")

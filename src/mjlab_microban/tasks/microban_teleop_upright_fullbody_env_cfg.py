@@ -43,8 +43,10 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID = (
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_EXPERIMENT = (
     "mjlab_microban_teleop_upright_fullbody"
 )
+# v5 (2026-10-04): inherits v12's HOME-levelled foot/hand targets and the
+# level-headset neutral HMD neck pose.
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
-    "physical_neutral_full_actor_from_scratch_raw83x18_v4"
+    "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_v5"
 )
 # v5: reverted alongside microban_constants.py's own HOME_FRAME revert -- the
 # "com_centered" experiment (hip_pitch +1.198deg) this task was built for

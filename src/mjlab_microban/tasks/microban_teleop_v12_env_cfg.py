@@ -12,7 +12,10 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
-from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
@@ -28,9 +31,14 @@ MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
 MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
     "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
 )
+# v15 (2026-10-04): foot/hand targets are offsets in the HOME-levelled trunk
+# frame R_trunk * R_y(-HOME_TRUNK_PITCH_RAD) (reachable-FK hand samples rotated
+# into it, normalizer re-derived) and the neutral HMD neck pose is the level
+# headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  v13 used the leaning trunk
+# frame and neck_pitch 0.
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_v13"
+    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_v15"
 )
 # Opt-in successor recipe: identical to v11 except that the inherited HOME
 # pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
@@ -41,8 +49,19 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = (
 # the v11 recipe (and the corner rescue), so it needs its own fresh chain.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v14"
+    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+    "active_hand_arm_pose_release_v16"
 )
+# The robot's hmd_head move keeps the camera at the headset's world attitude,
+# so on the forward-lean HOME a level headset holds neck_pitch at
+# -HOME_TRUNK_PITCH_RAD (and that is also where an active hmd_head sits with
+# no head command).  V12 resets and neutral waypoints use this pose; random
+# waypoints keep covering the full runtime range.  Absolute joint angles.
+MICROBAN_TELEOP_V12_HMD_NEUTRAL_POSITION_RAD = {
+    "head": 0.0,
+    "neck_roll": 0.0,
+    "neck_pitch": -HOME_TRUNK_PITCH_RAD,
+}
 # Shared target rule of every Microban policy: target = HOME + raw_action on all
 # 18 body joints with no software clip.  The only bound is the servo's one-turn
 # goal range, modelled as an absolute target saturation at +-pi (the robot
@@ -140,6 +159,12 @@ def make_microban_teleop_v12_env_cfg(
     # does not filter or stop an action.
     for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):
         cfg.rewards.pop(reward_name, None)
+
+    hmd_event = cfg.events.get("hmd_neck_target_motion")
+    if hmd_event is not None:
+        hmd_event.params["neutral_position_rad"] = dict(
+            MICROBAN_TELEOP_V12_HMD_NEUTRAL_POSITION_RAD
+        )
     return cfg
 
 

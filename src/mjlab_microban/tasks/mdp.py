@@ -429,7 +429,8 @@ class UniformVelocityCommandWithRotationCfg(UniformVelocityCommandCfg):
 class FootTargetCommand(CommandTerm):
     """Live per-env target offset (dx, dy, dz) for each foot, relative to that foot's
     own position measured right after reset (i.e. the robot's default/home stance),
-    expressed in the trunk frame.
+    expressed in the trunk frame with the HOME lean rotated out
+    (``cfg.trunk_pitch``; level at HOME, x forward, y left, z up).
 
     This drives the "whole-body tracking" leg behavior: trained alongside the existing
     velocity command so ONE policy learns both walking and holding a commanded foot
@@ -454,7 +455,8 @@ class FootTargetCommand(CommandTerm):
             label="FootTargetCommand",
         )
 
-        # Offset target (dx, dy, dz) per env, per foot (left, right), in the trunk frame.
+        # Offset target (dx, dy, dz) per env, per foot (left, right), in the
+        # HOME-levelled trunk frame (see current_foot_pos_b).
         self.foot_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
         self.is_single_support_env = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
@@ -473,9 +475,13 @@ class FootTargetCommand(CommandTerm):
         return self.foot_target_offset_b.view(self.num_envs, -1)
 
     def current_foot_pos_b(self) -> torch.Tensor:
-        """Live foot positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        """Live foot positions (left, right) in the HOME-levelled trunk frame
+        (``_home_levelled_quat`` with ``cfg.trunk_pitch``; 0 = the trunk frame).
+        Shape (N, 2, 3)."""
         trunk_pos_w = self.robot.data.root_link_pos_w
-        trunk_quat_w = self.robot.data.root_link_quat_w
+        trunk_quat_w = _home_levelled_quat(
+            self.robot.data.root_link_quat_w, self.cfg.trunk_pitch
+        )
         foot_pos_w = self.robot.data.site_pos_w[:, self._foot_asset_cfg.site_ids, :]
         num_feet = foot_pos_w.shape[1]
         pos_b, _ = subtract_frame_transforms(
@@ -548,6 +554,10 @@ class FootTargetCommandCfg(CommandTermCfg):
     """Fraction of environments that get a single-leg-stance target (one foot lifted)."""
     lift_height_range: tuple[float, float] = (0.01, 0.05)
     reach_xy_range: tuple[float, float] = (-0.03, 0.03)
+    trunk_pitch: float = 0.0
+    """HOME forward trunk lean (rad).  Offsets are expressed in the trunk frame
+    with this lean rotated out, R_trunk * R_y(-trunk_pitch), which is level at
+    HOME.  0 keeps the plain trunk frame."""
 
     def build(self, env: ManagerBasedRlEnv) -> FootTargetCommand:
         return FootTargetCommand(self, env)
@@ -555,7 +565,8 @@ class FootTargetCommandCfg(CommandTermCfg):
 
 class HandTargetCommand(CommandTerm):
     """Live per-env, per-hand target offset (dx, dy, dz), relative to that hand's own
-    position measured right after reset, in the trunk frame.
+    position measured right after reset, in the HOME-levelled trunk frame
+    (``cfg.trunk_pitch``; see current_hand_pos_b).
 
     Activation is PER HAND (independent left/right), matching the real controller UX:
     each hand's tracking is meant to be enabled by that hand's own controller trigger,
@@ -612,9 +623,13 @@ class HandTargetCommand(CommandTerm):
         )
 
     def current_hand_pos_b(self) -> torch.Tensor:
-        """Live hand positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        """Live hand positions (left, right) in the HOME-levelled trunk frame
+        (``_home_levelled_quat`` with ``cfg.trunk_pitch``; 0 = the trunk frame).
+        Shape (N, 2, 3)."""
         trunk_pos_w = self.robot.data.root_link_pos_w
-        trunk_quat_w = self.robot.data.root_link_quat_w
+        trunk_quat_w = _home_levelled_quat(
+            self.robot.data.root_link_quat_w, self.cfg.trunk_pitch
+        )
         hand_pos_w = self.robot.data.site_pos_w[:, self._hand_asset_cfg.site_ids, :]
         num_hands = hand_pos_w.shape[1]
         pos_b, _ = subtract_frame_transforms(
@@ -644,8 +659,12 @@ class HandTargetCommand(CommandTerm):
         r = torch.empty(len(env_ids), 2, device=self.device)
         self.is_active[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_active
 
+        # FK offsets are trunk-frame; rotate them by R_y(trunk_pitch) into the
+        # HOME-levelled frame the targets and current_hand_pos_b use.
         sampled_joints, offsets = sample_microban_reachable_hand_targets(
-            self.is_active[env_ids], dtype=self.hand_target_offset_b.dtype
+            self.is_active[env_ids],
+            dtype=self.hand_target_offset_b.dtype,
+            trunk_pitch=self.cfg.trunk_pitch,
         )
         self.sampled_arm_joint_pos_rad[env_ids] = sampled_joints
         self.hand_target_offset_b[env_ids] = offsets
@@ -664,6 +683,10 @@ class HandTargetCommandCfg(CommandTermCfg):
     """Per-hand probability of being active at each resample (independent left/right,
     matching each controller's own trigger). Inactive hands contribute nothing to the
     tracking reward, so the policy learns that arm is free to move naturally."""
+    trunk_pitch: float = 0.0
+    """HOME forward trunk lean (rad).  Offsets are expressed in the trunk frame
+    with this lean rotated out, R_trunk * R_y(-trunk_pitch), and the FK samples
+    are rotated by R_y(trunk_pitch) into it.  0 keeps the plain trunk frame."""
 
     def build(self, env: ManagerBasedRlEnv) -> HandTargetCommand:
         return HandTargetCommand(self, env)
@@ -674,7 +697,8 @@ class HandTargetCommandCfg(CommandTermCfg):
 
 def foot_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target foot
-    offset, in the trunk frame. Lets the actor see what leg-tracking target (if any) is
+    offset, in the command's HOME-levelled trunk frame. Lets the actor see what
+    leg-tracking target (if any) is
     currently commanded, alongside the velocity command."""
     command: FootTargetCommand = env.command_manager.get_term(command_name)
     return command.command
@@ -682,7 +706,7 @@ def foot_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Ten
 
 def hand_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target hand
-    offset, in the trunk frame."""
+    offset, in the command's HOME-levelled trunk frame."""
     command: HandTargetCommand = env.command_manager.get_term(command_name)
     return command.command
 
