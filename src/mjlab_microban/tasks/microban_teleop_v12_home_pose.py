@@ -80,9 +80,24 @@ def validate_teleop_v12_home_pose(
         MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
     )
 
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
+    )
+
     recipe = infos.get("microban_teleop_recipe_revision")
     rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
-    if allow_hand_pose_release_recipe and recipe == (
+    final_rescue = infos.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY)
+    if recipe == MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION:
+        # Like the corner rescue: the current recipe with only the command
+        # sampler changed; its marker must name the current recipe.
+        if not (
+            isinstance(final_rescue, Mapping)
+            and final_rescue.get("source_recipe_revision")
+            == MICROBAN_TELEOP_V12_RECIPE_REVISION
+        ):
+            raise ValueError("Checkpoint recipe does not match the current HOME pose")
+    elif allow_hand_pose_release_recipe and recipe == (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     ):
         if rescue is not None:

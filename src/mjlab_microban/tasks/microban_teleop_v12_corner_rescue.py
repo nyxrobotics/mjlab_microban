@@ -486,6 +486,18 @@ def validate_corner_rescue_canonical_lineage(
         raise TypeError("Contract-v12 checkpoint iteration must be an integer")
     recipe = infos.get("microban_teleop_recipe_revision")
     marker = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    # Imported here: the final-rescue module imports this one.
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
+        validate_final_rescue_consumable,
+    )
+
+    if recipe == MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION:
+        # The final-scenario rescue (model14900 -> model14999) is consumable
+        # only as its final model14999. Its marker re-validates the inherited
+        # corner-rescue lineage, which stays the result for every caller.
+        validate_final_rescue_consumable(infos, iteration=iteration)
+        return None if marker is None else validate_corner_rescue_lineage_marker(marker)
     if recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION:
         if iteration != MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
             raise ValueError(

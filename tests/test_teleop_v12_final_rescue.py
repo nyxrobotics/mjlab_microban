@@ -119,3 +119,72 @@ def test_env_cfg_installs_only_command_samplers_and_drops_15000_stage():
         assert cfg.commands[name].final_rescue_mix == "v2"
     stages = cfg.curriculum["staged_curriculum"].params["stages"]
     assert max(int(stage["step"]) for stage in stages) == 12_000 * 24
+
+
+def _consumable_infos(**overrides):
+    from mjlab_microban.tasks.microban_teleop_v12_actor import (
+        TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_ACTIVE_COLUMNS,
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+        TELEOP_V12_HOME_POSE_INFO_KEY,
+        teleop_v12_home_pose_marker,
+    )
+
+    infos = {
+        "microban_teleop_training_contract_version": "12",
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
+        "adapter_gradient_schedule_revision": TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+        "env_state": {"common_step_counter": 15_000 * 24},
+        "active_actor_columns_at_save": list(MICROBAN_TELEOP_V12_FINAL_RESCUE_ACTIVE_COLUMNS),
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(),
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+    }
+    infos.update(overrides)
+    return infos
+
+
+def test_lineage_accepts_only_the_final_rescue_model14999():
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        validate_corner_rescue_canonical_lineage,
+    )
+
+    infos = _consumable_infos()
+    assert validate_corner_rescue_canonical_lineage(infos, iteration=14_999) is None
+    for iteration in (14_900, 14_998, 15_000):
+        with pytest.raises(ValueError):
+            validate_corner_rescue_canonical_lineage(infos, iteration=iteration)
+    tampered = _consumable_infos()
+    tampered["microban_teleop_v12_final_scenario_rescue"] = dict(
+        _marker(), sampler_mix="v2"
+    )
+    with pytest.raises(ValueError):
+        validate_corner_rescue_canonical_lineage(tampered, iteration=14_999)
+    with pytest.raises(ValueError):
+        # A final rescue must not claim a corner lineage its marker does not name.
+        validate_corner_rescue_canonical_lineage(
+            _consumable_infos(**{MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: {"revision": "x"}}),
+            iteration=14_999,
+        )
+
+
+def test_home_pose_accepts_final_rescue_only_with_a_canonical_source():
+    from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+        validate_teleop_v12_home_pose,
+    )
+
+    validate_teleop_v12_home_pose(_consumable_infos())
+    marker = dict(_marker(), source_recipe_revision="some_other_recipe")
+    with pytest.raises(ValueError):
+        validate_teleop_v12_home_pose(
+            _consumable_infos(microban_teleop_v12_final_scenario_rescue=marker)
+        )
+    with pytest.raises(ValueError):
+        validate_teleop_v12_home_pose(
+            _consumable_infos(microban_teleop_v12_final_scenario_rescue=None)
+        )
