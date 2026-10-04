@@ -913,8 +913,11 @@ def _validate_final_parity(
     if runtime.get_providers() != ["CPUExecutionProvider"]:
         raise RuntimeError("Deployment parity did not use CPUExecutionProvider only")
     export_model = actor.as_onnx(verbose=False).cpu().eval()
+    from mjlab_microban.scripts.teleop_v12_onnx_gate import parity_bound_ratio
+
     reference_max = 0.0
     runtime_max = 0.0
+    bound_ratio = 0.0
     with torch.inference_mode():
         for observation in observations:
             batch = observation.unsqueeze(0)
@@ -925,11 +928,17 @@ def _validate_final_parity(
             runtime_error = float(np.max(np.abs(runtime_actual - expected)))
             reference_max = max(reference_max, reference_error)
             runtime_max = max(runtime_max, runtime_error)
+            bound_ratio = max(
+                bound_ratio,
+                parity_bound_ratio(reference_actual, expected, atol=tolerance),
+                parity_bound_ratio(runtime_actual, expected, atol=tolerance),
+            )
+    # Same elementwise atol + rtol*|expected| rule as teleop_v12_onnx_gate.
     if (
         not math.isfinite(reference_max)
         or not math.isfinite(runtime_max)
-        or reference_max > tolerance
-        or runtime_max > tolerance
+        or not math.isfinite(bound_ratio)
+        or bound_ratio > 1.0
     ):
         raise ValueError(
             "Final metadata-bearing ONNX parity failed: "

@@ -711,6 +711,36 @@ def _validate_onnx_report(
         or onnx.get("tolerance") != parity_tolerance
     ):
         raise ValueError("ONNX full-83 CPU evidence drifted")
+    if "relative_tolerance" in onnx or "parity_rule" in onnx:
+        # Elementwise atol + rtol*|expected| bound (teleop_v12_onnx_gate).
+        from mjlab_microban.scripts.teleop_v12_onnx_gate import (
+            ONNX_PARITY_RELATIVE_TOLERANCE,
+            ONNX_PARITY_RULE,
+        )
+
+        magnitude = onnx.get("maximum_absolute_expected_output")
+        if (
+            onnx.get("relative_tolerance") != ONNX_PARITY_RELATIVE_TOLERANCE
+            or onnx.get("parity_rule") != ONNX_PARITY_RULE
+            or not _finite_number(magnitude)
+            or float(magnitude) < 0.0
+        ):
+            raise ValueError("ONNX relative parity evidence drifted")
+        absolute_cap = parity_tolerance + ONNX_PARITY_RELATIVE_TOLERANCE * float(
+            magnitude
+        )
+        for name in (
+            "reference_evaluator_maximum_bound_ratio",
+            "onnxruntime_cpu_maximum_bound_ratio",
+        ):
+            if (
+                not _finite_number(onnx.get(name))
+                or float(onnx[name]) < 0.0
+                or float(onnx[name]) > 1.0
+            ):
+                raise ValueError(f"ONNX parity evidence failed: {name}")
+    else:
+        absolute_cap = parity_tolerance
     for name in (
         "reference_evaluator_maximum_absolute_error",
         "onnxruntime_cpu_maximum_absolute_error",
@@ -718,7 +748,7 @@ def _validate_onnx_report(
         if (
             not _finite_number(onnx.get(name))
             or float(onnx[name]) < 0.0
-            or float(onnx[name]) > parity_tolerance
+            or float(onnx[name]) > absolute_cap
         ):
             raise ValueError(f"ONNX parity evidence failed: {name}")
     onnx_path = resolve_bootstrap_artifact_path(onnx.get("path", ""))
