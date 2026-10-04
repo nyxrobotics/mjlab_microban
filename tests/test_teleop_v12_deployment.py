@@ -231,7 +231,10 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
             "learned_minus_source": summary(-1.0, 1.0),
             "scenario_count": 12,
             "step_count": 3_600,
-        }
+        },
+        "runtime_smoke_observations": [
+            [0.0] * 5 + [-1.0] + [0.001 * row] * 77 for row in range(16)
+        ],
     }
     onnx_report = {
         "gate": "microban_teleop_v12_checkpoint_onnx",
@@ -742,3 +745,20 @@ def test_runtime_rejection_preserves_last_known_good_output(
     assert output.read_bytes() == b"last-known-good"
     assert not list(tmp_path.glob(".*.tmp"))
     assert not list(tmp_path.glob(".*.captured"))
+
+
+def test_runtime_smoke_corpus_comes_from_the_final_tracking_report():
+    from mjlab_microban.scripts.export_teleop_v12_deployment import _runtime_smoke_corpus
+
+    rows = [[0.0] * 5 + [-1.0] + [0.0] * 77 for _ in range(16)]
+    assert _runtime_smoke_corpus({"runtime_smoke_observations": rows}) == rows
+    for bad in (
+        {},
+        {"runtime_smoke_observations": rows[:7]},
+        {"runtime_smoke_observations": rows * 5},
+        {"runtime_smoke_observations": [row[:82] for row in rows]},
+        {"runtime_smoke_observations": [[float("nan")] * 83] + rows[1:]},
+        {"runtime_smoke_observations": [[True] * 83] + rows[1:]},
+    ):
+        with pytest.raises(ValueError):
+            _runtime_smoke_corpus(bad)

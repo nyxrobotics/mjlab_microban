@@ -248,6 +248,9 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "runtime_raw_action_guard_multiplier",
         "runtime_raw_action_guard_absmax_json",
         "runtime_raw_action_guard_semantics",
+        "v12_runtime_smoke_corpus_semantics",
+        "v12_runtime_smoke_observations_json",
+        "v12_runtime_smoke_observations_sha256",
         "observation_schema_version",
         "observation_width",
         "action_width",
@@ -336,6 +339,44 @@ def _load_json(path: Path, *, expected_sha256: str | None = None) -> dict[str, A
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+RUNTIME_SMOKE_CORPUS_SEMANTICS = (
+    "final_tracking_rollout_actor_observations_first_scored_and_last_step_v1"
+)
+RUNTIME_SMOKE_CORPUS_MIN_ROWS = 8
+RUNTIME_SMOKE_CORPUS_MAX_ROWS = 64
+
+
+def _runtime_smoke_corpus(tracking: Mapping[str, Any]) -> list[list[float]]:
+    """Real actor observations from the final tracking rollouts.
+
+    The robot's startup ONNX self-test runs these through ONNX Runtime and
+    compares the outputs with the runtime guard, which comes from the raw
+    actions of the same rollouts.
+    """
+
+    rows = tracking.get("runtime_smoke_observations")
+    if (
+        not isinstance(rows, list)
+        or not RUNTIME_SMOKE_CORPUS_MIN_ROWS <= len(rows) <= RUNTIME_SMOKE_CORPUS_MAX_ROWS
+    ):
+        raise ValueError("Final tracking report lacks a runtime smoke corpus")
+    corpus: list[list[float]] = []
+    for row in rows:
+        if (
+            not isinstance(row, list)
+            or len(row) != 83
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in row
+            )
+        ):
+            raise ValueError("Final tracking runtime smoke corpus is malformed")
+        corpus.append([float(value) for value in row])
+    return corpus
 
 
 def _canonical_json_sha256(value: object) -> str:
@@ -588,6 +629,7 @@ def build_v12_deployment_metadata(
     ):
         raise ValueError("Final v12 checkpoint HOME pose differs from exporter defaults")
     guard = _runtime_guard(tracking_envelope)
+    smoke_corpus_json = _json(_runtime_smoke_corpus(tracking))
     source = bootstrap.source
     probe = bootstrap.probe
     lr_order_migration = _require_deployable_lr_order_lineage(infos)
@@ -788,6 +830,11 @@ def build_v12_deployment_metadata(
         "runtime_raw_action_guard_multiplier": str(RUNTIME_GUARD_MULTIPLIER),
         "runtime_raw_action_guard_absmax_json": _json(guard),
         "runtime_raw_action_guard_semantics": RUNTIME_GUARD_SEMANTICS,
+        "v12_runtime_smoke_corpus_semantics": RUNTIME_SMOKE_CORPUS_SEMANTICS,
+        "v12_runtime_smoke_observations_json": smoke_corpus_json,
+        "v12_runtime_smoke_observations_sha256": hashlib.sha256(
+            smoke_corpus_json.encode("ascii")
+        ).hexdigest(),
         "observation_schema_version": "2",
         "observation_width": "83",
         "action_width": "18",
