@@ -67,9 +67,10 @@ def test_scenario_commands_mirror_the_final_evaluator():
 
 
 @pytest.mark.parametrize("mix", sorted(MICROBAN_TELEOP_V12_FINAL_RESCUE_MIXES))
-def test_mix_keeps_ten_percent_ordinary(mix):
+def test_mix_keeps_at_least_ten_percent_ordinary(mix):
     probabilities = final_rescue_mix_probabilities(mix)
-    assert probabilities["ordinary"] == 0.10
+    assert probabilities["ordinary"] >= 0.10
+    assert probabilities["ordinary"] == {"v4": 0.50, "v5": 0.70}.get(mix, 0.10)
     assert math.isclose(sum(probabilities.values()), 1.0)
 
 

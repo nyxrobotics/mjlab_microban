@@ -18,7 +18,7 @@ usage() {
 Usage:
   scripts/train_microban_teleop_v12_final_rescue.sh MODEL_14900 \
     PARENT_TRACKING_REPORT FAILED_FINAL_GATE_TRACKING_REPORT \
-    [--mix v1|v2|v3] [--agent.run-name NAME]
+    [--mix v1|v2|v3|v4|v5] [--agent.run-name NAME]
 
 MODEL_14900 must be a canonical contract-v12 model_14900.pt (all 20 adapter
 columns active, Adam step 298020). PARENT_TRACKING_REPORT must be its canonical
@@ -27,8 +27,8 @@ FAILED_FINAL_GATE_TRACKING_REPORT must be the final-profile tracking report of
 model_14999 of the same run, failing only accuracy checks. The launcher
 validates all three on CPU, stages the immutable bytes under
 final_rescue_seed_<sha16>/ and runs exactly 99 updates to model_14999 with the
-10 % ordinary / 90 % evaluator-scenario (mixed_backward_right,
-max_keypoints_right) command replay of the selected mix.
+ordinary / evaluator-scenario (mixed_backward_right, max_keypoints_right)
+command replay of the selected mix (v1-v3: 10 % ordinary; v4: 50 %; v5: 70 %).
 EOF_USAGE
 }
 

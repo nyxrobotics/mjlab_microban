@@ -131,13 +131,28 @@ _SCENARIO_HAND_POSE_NAMES = {
     "max_keypoints_right": ("B", "F"),
 }
 MICROBAN_TELEOP_V12_FINAL_RESCUE_ORDINARY_PROBABILITY = 0.10
-# Registered mixes (ordinary share fixed at 10 %, like the corner rescue's
-# 90 % replay).  The launcher selects one by name; the marker records it.
+# Registered mixes.  v1-v3 keep the corner rescue's 10 % ordinary share; the
+# launcher selects one by name and the marker records its probabilities.
 MICROBAN_TELEOP_V12_FINAL_RESCUE_MIXES: dict[str, dict[str, float]] = {
     "v1": {"mixed_backward_right": 0.50, "max_keypoints_right": 0.40},
     "v2": {"mixed_backward_right": 0.65, "max_keypoints_right": 0.25},
     "v3": {"mixed_backward_right": 0.35, "max_keypoints_right": 0.55},
+    "v4": {"mixed_backward_right": 0.30, "max_keypoints_right": 0.20},
+    "v5": {"mixed_backward_right": 0.20, "max_keypoints_right": 0.10},
 }
+# v1 (90 % replay) made mixed_backward_right worse (hand RMS 0.039 -> 0.058)
+# and lost push robustness (falls), so v4/v5 keep half or more of the
+# ordinary command distribution.
+MICROBAN_TELEOP_V12_FINAL_RESCUE_MIX_ORDINARY_PROBABILITY: dict[str, float] = {
+    "v4": 0.50,
+    "v5": 0.70,
+}
+
+
+def _mix_ordinary_probability(name: str) -> float:
+    return MICROBAN_TELEOP_V12_FINAL_RESCUE_MIX_ORDINARY_PROBABILITY.get(
+        name, MICROBAN_TELEOP_V12_FINAL_RESCUE_ORDINARY_PROBABILITY
+    )
 # A parent/failed-gate report may fail only accuracy checks; every safety,
 # coverage, ablation and locomotion check must pass.
 MICROBAN_TELEOP_V12_FINAL_RESCUE_RESCUABLE_CHECKS = frozenset(
@@ -151,7 +166,7 @@ MICROBAN_TELEOP_V12_FINAL_RESCUE_RESCUABLE_CHECKS = frozenset(
 
 for _name, _mix in MICROBAN_TELEOP_V12_FINAL_RESCUE_MIXES.items():
     if tuple(_mix) != MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS or not math.isclose(
-        sum(_mix.values()) + MICROBAN_TELEOP_V12_FINAL_RESCUE_ORDINARY_PROBABILITY,
+        sum(_mix.values()) + _mix_ordinary_probability(_name),
         1.0,
     ):
         raise RuntimeError(f"Final rescue mix {_name} is malformed")
@@ -177,7 +192,7 @@ def final_rescue_mix_probabilities(name: str) -> dict[str, float]:
 
     mix = MICROBAN_TELEOP_V12_FINAL_RESCUE_MIXES[validate_final_rescue_mix(name)]
     return {
-        "ordinary": MICROBAN_TELEOP_V12_FINAL_RESCUE_ORDINARY_PROBABILITY,
+        "ordinary": _mix_ordinary_probability(name),
         **mix,
     }
 
