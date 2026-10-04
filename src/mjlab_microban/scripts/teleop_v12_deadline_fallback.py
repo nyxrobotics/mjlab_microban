@@ -1,4 +1,4 @@
-"""Create a hash-bound promotion receipt for the one deadline fallback."""
+"""Create hash-bound promotion receipts for the recorded deadline fallback."""
 
 from __future__ import annotations
 
@@ -30,17 +30,15 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     validate_bootstrap_provenance,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_STRICT_REPORT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_REVISION,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_REVISION,
-    deadline_fallback_marker,
-    deadline_post_canary_marker,
     validate_deadline_fallback_canary_payload,
     validate_deadline_fallback_checkpoint_payload,
+    validate_deadline_fallback_marker,
+    validate_deadline_post_canary_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
@@ -71,7 +69,7 @@ def _checkpoint_identity(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = torch.load(resolved, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Deadline fallback checkpoint payload is malformed")
-    marker = validate_deadline_fallback_checkpoint_payload(
+    corner_marker = validate_deadline_fallback_checkpoint_payload(
         payload, checkpoint_sha256=digest
     )
     infos = payload["infos"]
@@ -88,15 +86,13 @@ def _checkpoint_identity(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             "iteration": iteration,
             "completed_updates": iteration + 1,
         },
-        marker,
+        corner_marker,
     )
 
 
 def _canary_checkpoint_identity(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     resolved = path.expanduser().resolve(strict=True)
     digest = sha256_file(resolved)
-    if digest != MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256:
-        raise ValueError("Deadline canary checkpoint SHA-256 mismatch")
     payload = torch.load(resolved, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Deadline canary checkpoint payload is malformed")
@@ -131,14 +127,18 @@ def _validate_deadline_post_canary_receipt_structure(
     fallback = receipt.get("fallback_tracking_report")
     stage = receipt.get("full_stage_gate")
     promotion = receipt.get("promotion")
+    lineage = validate_deadline_fallback_marker(receipt.get("lineage"))
+    authorization = validate_deadline_post_canary_marker(
+        receipt.get("post_canary_authorization")
+    )
+    strict_failed = authorization["canonical_failed_checks"]
     if (
-        checkpoint_sha256 != MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
+        authorization["parent_checkpoint"]["sha256"] != checkpoint_sha256
         or receipt.get("schema_version") != DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION
         or receipt.get("gate") != DEADLINE_POST_CANARY_RECEIPT_GATE
         or receipt.get("status") != "pass"
         or receipt.get("revision") != MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_REVISION
-        or receipt.get("lineage") != deadline_fallback_marker()
-        or receipt.get("post_canary_authorization") != deadline_post_canary_marker()
+        or receipt.get("lineage") != lineage
         or not isinstance(checkpoint, Mapping)
         or checkpoint.get("sha256") != checkpoint_sha256
         or checkpoint.get("iteration") != 10_099
@@ -150,10 +150,10 @@ def _validate_deadline_post_canary_receipt_structure(
     if (
         not isinstance(strict, Mapping)
         or strict.get("sha256")
-        != MICROBAN_TELEOP_V12_DEADLINE_CANARY_STRICT_REPORT_SHA256
+        != authorization["canonical_strict_tracking_report_sha256"]
         or strict.get("profile") != FOOT_ACTIVATION_CANARY_PROFILE
-        or strict.get("status") != "fail"
-        or strict.get("failed_checks") != ["hand_tracking_rms"]
+        or strict.get("status") != ("fail" if strict_failed else "pass")
+        or strict.get("failed_checks") != strict_failed
         or not isinstance(strict.get("path"), str)
         or not strict["path"]
     ):
@@ -206,7 +206,7 @@ def _validate_deadline_post_canary_receipt_structure(
 def validate_deadline_post_canary_receipt_payload(
     receipt: Mapping[str, Any], *, checkpoint_sha256: str, receipt_sha256: str
 ) -> dict[str, Any]:
-    """Validate a receipt behind the pinned serialized receipt hash."""
+    """Validate a receipt behind the historical live-sim receipt hash."""
 
     if receipt_sha256 != MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256:
         raise ValueError("Deadline post-canary receipt SHA-256 mismatch")
@@ -224,12 +224,12 @@ def build_receipt(
 ) -> dict[str, Any]:
     """Rebuild all evidence and return the only promotable fallback receipt."""
 
-    identity, marker = _checkpoint_identity(checkpoint)
+    identity, _corner_marker = _checkpoint_identity(checkpoint)
     expected_identity = {
         name: identity[name] for name in ("sha256", "iteration", "completed_updates")
     }
     strict_path = strict_tracking_report.expanduser().resolve(strict=True)
-    _validate_deadline_strict_report(strict_path, expected_identity)
+    strict_sha256, _ = _validate_deadline_strict_report(strict_path, expected_identity)
     tracking_path = fallback_tracking_report.expanduser().resolve(strict=True)
     tracking = _load_json(tracking_path)
     _validate_tracking_report(
@@ -242,7 +242,13 @@ def build_receipt(
 
     gate_path = stage_gate.expanduser().resolve(strict=True)
     gate = validate_gate(gate_path, Path(identity["path"]))
-    if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) != marker:
+    marker = validate_deadline_fallback_marker(
+        gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+    )
+    if (
+        marker["selected_checkpoint"]["sha256"] != identity["sha256"]
+        or marker["selected_strict_tracking_report_sha256"] != strict_sha256
+    ):
         raise ValueError("Stage gate deadline authorization marker drifted")
     reports = gate.get("reports")
     report_hashes = gate.get("report_sha256")
@@ -358,7 +364,9 @@ def build_post_canary_receipt(
         name: identity[name] for name in ("sha256", "iteration", "completed_updates")
     }
     strict_path = strict_tracking_report.expanduser().resolve(strict=True)
-    _validate_deadline_canary_strict_report(strict_path, expected_identity)
+    strict_sha256, strict_failed, _ = _validate_deadline_canary_strict_report(
+        strict_path, expected_identity
+    )
     fallback_path = fallback_tracking_report.expanduser().resolve(strict=True)
     tracking = _load_json(fallback_path)
     _validate_tracking_report(
@@ -371,7 +379,9 @@ def build_post_canary_receipt(
 
     gate_path = stage_gate.expanduser().resolve(strict=True)
     gate = validate_gate(gate_path, Path(identity["path"]))
-    authorization = deadline_post_canary_marker()
+    authorization = validate_deadline_post_canary_marker(
+        gate.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
+    )
     reports = gate.get("reports")
     report_hashes = gate.get("report_sha256")
     if (
@@ -387,8 +397,9 @@ def build_post_canary_receipt(
             gate.get("deadline_canary_strict_report", "")
         )
         != strict_path
-        or gate.get("deadline_canary_strict_report_sha256")
-        != MICROBAN_TELEOP_V12_DEADLINE_CANARY_STRICT_REPORT_SHA256
+        or gate.get("deadline_canary_strict_report_sha256") != strict_sha256
+        or authorization["canonical_strict_tracking_report_sha256"] != strict_sha256
+        or authorization["parent_checkpoint"]["sha256"] != identity["sha256"]
     ):
         raise ValueError("Stage gate is not bound to the canary promotion evidence")
 
@@ -404,8 +415,8 @@ def build_post_canary_receipt(
             "path": str(strict_path),
             "sha256": sha256_file(strict_path),
             "profile": FOOT_ACTIVATION_CANARY_PROFILE,
-            "status": "fail",
-            "failed_checks": ["hand_tracking_rms"],
+            "status": "fail" if strict_failed else "pass",
+            "failed_checks": strict_failed,
         },
         "fallback_tracking_report": {
             "path": str(fallback_path),

@@ -1,32 +1,30 @@
 #!/usr/bin/env bash
-# One-time, hash-pinned 99-update corner replay from corrected model9900.
+# 99-update corner replay (9901->10000) from a canonical model9900 whose strict
+# HMD/hand report fails only hand RMS.  The parent and its report are recorded
+# in the rescue marker and re-hashed on load (no literal pins).
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 readonly LOG_ROOT="${PROJECT_ROOT}/logs/rsl_rl/mjlab_microban_teleop_v12"
-readonly SOURCE_SHA="063a8f65ebf9007d63395e9a5b98420eb025bd39416dab5727f9f4c06fc6e877"
-readonly PARENT_TRACKING_SHA="399db0cee55c137d3d0226ebcb54b0fa3bb84c95496c5c206af55f2fb25837f4"
-readonly SUPERSEDED_V1_TRACKING_SHA="c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7"
 readonly SOURCE_ITERATION=9900
 readonly PROCESS_UPDATES=99
-readonly SEED_RUN="corner_rescue_seed_model9900"
+readonly REPORT_NAME="parent_strict_tracking.json"
 
 usage() {
-    cat <<'EOF'
+    cat <<'EOF_USAGE'
 Usage:
   scripts/train_microban_teleop_v12_corner_rescue.sh MODEL_9900 PARENT_TRACKING_REPORT \
-    SUPERSEDED_V1_TRACKING_REPORT \
     [--agent.run-name NAME]
 
-MODEL_9900 must have the pinned corrected-replay SHA-256. The launcher stages
-those immutable bytes under the dedicated experiment. PARENT_TRACKING_REPORT
-must be the pinned strict report whose only failure is hand RMS. The superseded
-v1 report authenticates why the v2 sampler is more concentrated. The launcher
-validates all inputs and full-state lineage on CPU, then runs exactly 99
-updates to model_9999. No training override other than the output run name is
-accepted.
-EOF
+MODEL_9900 must be a canonical contract-v12 model_9900.pt (HMD+hand columns
+active, foot columns exact zero, Adam step 198020). PARENT_TRACKING_REPORT
+must be its strict HMD/hand-profile tracking report whose only failing check is
+hand_tracking_rms. The launcher validates both on CPU, stages the immutable
+bytes under corner_rescue_seed_<sha16>/ and runs exactly 99 updates to
+model_9999 with the 5/90/5 uniform/LF+RB/LB+RF hand sampler. No training
+override other than the output run name is accepted.
+EOF_USAGE
 }
 
 fail() { echo "$*" >&2; exit 2; }
@@ -35,12 +33,11 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     exit 0
 fi
-(( $# >= 3 )) || { usage >&2; exit 2; }
+(( $# >= 2 )) || { usage >&2; exit 2; }
 source_checkpoint="$1"
 parent_tracking_report="$2"
-superseded_v1_tracking_report="$3"
-shift 3
-output_run_name="v12_corner_rescue_v2_9901_to10000"
+shift 2
+output_run_name="v12_corner_rescue_v3_9901_to10000"
 if (( $# > 0 )); then
     [[ "$1" == "--agent.run-name" && $# == 2 ]] \
         || fail "Only one optional --agent.run-name NAME is supported."
@@ -48,51 +45,54 @@ if (( $# > 0 )); then
         || fail "Unsafe output run name."
     output_run_name="$2"
 fi
-[[ "${output_run_name}" != "${SEED_RUN}" ]] \
+[[ "${output_run_name}" != corner_rescue_seed_* ]] \
     || fail "Output run name is reserved for the immutable seed."
 
+[[ -f "${source_checkpoint}" && ! -L "${source_checkpoint}" ]] \
+    || fail "model9900 must be a regular file."
+[[ -f "${parent_tracking_report}" && ! -L "${parent_tracking_report}" ]] \
+    || fail "Parent tracking report must be a regular file."
 source_checkpoint="$(realpath -e -- "${source_checkpoint}")"
 parent_tracking_report="$(realpath -e -- "${parent_tracking_report}")"
-superseded_v1_tracking_report="$(realpath -e -- "${superseded_v1_tracking_report}")"
-[[ -f "${source_checkpoint}" ]] || fail "model9900 not found."
-[[ -f "${parent_tracking_report}" ]] || fail "Parent tracking report not found."
-[[ -f "${superseded_v1_tracking_report}" ]] \
-    || fail "Superseded v1 tracking report not found."
-[[ "$(sha256sum -- "${source_checkpoint}" | awk '{print $1}')" == "${SOURCE_SHA}" ]] \
-    || fail "Pinned corrected model9900 SHA-256 mismatch."
-[[ "$(sha256sum -- "${parent_tracking_report}" | awk '{print $1}')" == "${PARENT_TRACKING_SHA}" ]] \
-    || fail "Pinned parent tracking report SHA-256 mismatch."
-[[ "$(sha256sum -- "${superseded_v1_tracking_report}" | awk '{print $1}')" == "${SUPERSEDED_V1_TRACKING_SHA}" ]] \
-    || fail "Pinned superseded v1 tracking report SHA-256 mismatch."
+[[ "${source_checkpoint##*/}" == "model_${SOURCE_ITERATION}.pt" ]] \
+    || fail "Corner rescue parent must be model_${SOURCE_ITERATION}.pt."
+source_sha="$(sha256sum -- "${source_checkpoint}" | awk '{print $1}')"
+report_sha="$(sha256sum -- "${parent_tracking_report}" | awk '{print $1}')"
 
 cd -- "${PROJECT_ROOT}"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] \
     || fail "Corner rescue training requires a clean committed source tree."
 uv run --locked python -m mjlab_microban.scripts.teleop_v12_corner_rescue \
-    validate-parent "${source_checkpoint}" "${parent_tracking_report}" \
-    "${superseded_v1_tracking_report}" >/dev/null
+    validate-parent "${source_checkpoint}" "${parent_tracking_report}" >/dev/null
 
-seed_dir="${LOG_ROOT}/${SEED_RUN}"
+seed_run="corner_rescue_seed_${source_sha:0:16}"
+seed_dir="${LOG_ROOT}/${seed_run}"
 seed_checkpoint="${seed_dir}/model_${SOURCE_ITERATION}.pt"
+seed_report="${seed_dir}/${REPORT_NAME}"
 mkdir -p -- "${seed_dir}"
-if [[ -e "${seed_checkpoint}" ]]; then
-    [[ -f "${seed_checkpoint}" && ! -L "${seed_checkpoint}" ]] \
-        || fail "Existing rescue seed is not a regular file."
-    [[ "$(sha256sum -- "${seed_checkpoint}" | awk '{print $1}')" == "${SOURCE_SHA}" ]] \
-        || fail "Existing rescue seed has the wrong SHA-256."
-else
-    cp --reflink=auto --no-clobber -- "${source_checkpoint}" "${seed_checkpoint}"
-    [[ "$(sha256sum -- "${seed_checkpoint}" | awk '{print $1}')" == "${SOURCE_SHA}" ]] \
-        || fail "Staged rescue seed changed during copy."
-fi
+for pair in "${source_checkpoint}|${seed_checkpoint}|${source_sha}" \
+            "${parent_tracking_report}|${seed_report}|${report_sha}"; do
+    IFS='|' read -r src dst sha <<<"${pair}"
+    if [[ -e "${dst}" ]]; then
+        [[ -f "${dst}" && ! -L "${dst}" ]] \
+            || fail "Existing rescue seed file is not a regular file: ${dst}"
+        [[ "$(sha256sum -- "${dst}" | awk '{print $1}')" == "${sha}" ]] \
+            || fail "Existing rescue seed file has the wrong SHA-256: ${dst}"
+    else
+        cp --reflink=auto --no-clobber -- "${src}" "${dst}"
+        [[ "$(sha256sum -- "${dst}" | awk '{print $1}')" == "${sha}" ]] \
+            || fail "Staged rescue seed changed during copy: ${dst}"
+    fi
+done
 
-echo "[INFO] authenticated 5/90/5 corner rescue completed=9901 target=10000 process_updates=${PROCESS_UPDATES}"
+echo "[INFO] authenticated 5/90/5 corner rescue parent=${source_sha} report=${report_sha}"
+echo "[INFO] completed=9901 target=10000 process_updates=${PROCESS_UPDATES}"
 exec uv run --locked train Mjlab-Teleop-V12-Corner-Rescue-Microban \
     --env.scene.num-envs 2048 --env.seed 42 --agent.seed 42 \
     --agent.num-steps-per-env 24 --agent.max-iterations "${PROCESS_UPDATES}" \
     --agent.save-interval "${PROCESS_UPDATES}" --agent.logger tensorboard \
     --agent.upload-model False --enable-nan-guard True \
     --agent.resume True \
-    --agent.load-run "^${SEED_RUN}$" \
+    --agent.load-run "^${seed_run}$" \
     --agent.load-checkpoint "^model_${SOURCE_ITERATION}[.]pt$" \
     --agent.run-name "${output_run_name}"

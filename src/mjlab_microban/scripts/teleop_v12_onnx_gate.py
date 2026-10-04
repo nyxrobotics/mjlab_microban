@@ -179,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--deadline-fallback",
         action="store_true",
-        help="accept only the hash-pinned v1 deadline-fallback checkpoint",
+        help="accept only a corner-rescue model9999 deadline-fallback checkpoint",
     )
     return parser
 

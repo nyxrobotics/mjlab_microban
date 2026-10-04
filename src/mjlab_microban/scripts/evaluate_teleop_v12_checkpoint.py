@@ -50,8 +50,6 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     assert_corner_rescue_optimizer_step,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
@@ -184,7 +182,7 @@ def _load_actor(
             raise ValueError("Deadline canary parent gate authorization drifted")
         if (
             sha256_file(parent_checkpoint)
-            != MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256
+            != deadline_marker["selected_checkpoint"]["sha256"]
             or sha256_file(parent_gate) != source["full_stage_gate_sha256"]
         ):
             raise ValueError("Deadline canary parent changed during actor load")
@@ -200,15 +198,19 @@ def _load_actor(
                 post_source["full_stage_gate_path"]
             )
             validated_canary_gate = validate_gate(canary_gate, canary_checkpoint)
-            if validated_canary_gate.get(
-                MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
-            ) != validate_deadline_post_canary_marker(
+            authorization = validate_deadline_post_canary_marker(
                 infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
+            )
+            if (
+                validated_canary_gate.get(
+                    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
+                )
+                != authorization
             ):
                 raise ValueError("Deadline final parent gate authorization drifted")
             if (
                 sha256_file(canary_checkpoint)
-                != MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
+                != authorization["parent_checkpoint"]["sha256"]
                 or sha256_file(canary_gate) != post_source["full_stage_gate_sha256"]
             ):
                 raise ValueError("Deadline final parent changed during actor load")
@@ -472,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--deadline-fallback",
         action="store_true",
         help=(
-            "accept only the hash-pinned v1 checkpoint under the explicit "
+            "accept only a corner-rescue model9999 under the explicit "
             "deadline fallback"
         ),
     )

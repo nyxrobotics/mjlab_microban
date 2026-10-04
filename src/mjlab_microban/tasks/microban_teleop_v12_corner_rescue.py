@@ -1,14 +1,22 @@
-"""Hash-pinned corner-pair rescue for the pre-foot contract-v12 boundary.
+"""Recorded-parent corner-pair rescue for the pre-foot contract-v12 boundary.
 
 The ordinary hand sampler remains active for 5% of resamples.  The failing
 LF+RB bilateral extremum is replayed for 90%, while the already-passing LB+RF
 extremum retains 5%.  This is a deliberately separate recipe: it changes command
 sampling only, while retaining the v12 actor, optimizer, rewards, normalizer,
 action semantics, and frozen legacy tensors.
+
+The historical (old-HOME) chain pinned one model_9900 and its strict report by
+literal SHA-256.  This revision records the parent checkpoint and its strict
+tracking report (failing only ``hand_tracking_rms``) in the marker instead; the
+runner re-hashes both when it loads the parent, and every consumer rebuilds the
+marker from those recorded values.  Clocks, sampler, and contract are unchanged.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from copy import deepcopy
@@ -36,6 +44,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MicrobanTeleopV12RlCfg,
     make_microban_teleop_v12_env_cfg,
@@ -48,26 +57,18 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY = (
     "microban_teleop_v12_corner_pair_rescue"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION = (
-    "model9900_targeted_bilateral_corner_pair_replay_to10000_v2"
+    "model9900_targeted_bilateral_corner_pair_replay_to10000_v3"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_MARKER_REVISION = (
-    "pinned_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v2"
+    "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v3"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_SAMPLER_REVISION = (
     "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_v2"
 )
-
-MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256 = (
-    "063a8f65ebf9007d63395e9a5b98420eb025bd39416dab5727f9f4c06fc6e877"
-)
-MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256 = (
-    "399db0cee55c137d3d0226ebcb54b0fa3bb84c95496c5c206af55f2fb25837f4"
-)
-MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256 = (
-    "393d35b4e7cc0453f5143c7f2be4d4a4658567ab6132dfb54d32e67eb26b62b7"
-)
-MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256 = (
-    "c466d66cf5b5ac8603f558e0ae8612450ac74bbad78fd88719a2cdaa9673e4b7"
+# The launcher stages the parent's strict tracking report next to the staged
+# parent checkpoint under this name; the runner re-validates and hashes it.
+MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_REPORT_FILENAME = (
+    "parent_strict_tracking.json"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION = 9_900
 MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMPLETED_UPDATES = 9_901
@@ -272,40 +273,52 @@ class CornerPairHandTargetCommand(ResetFixedHandTargetCommand):
 
 @dataclass(kw_only=True)
 class CornerPairHandTargetCommandCfg(ResetFixedHandTargetCommandCfg):
-    """Pinned uniform/LF+RB/LB+RF = 5/90/5 sampler configuration."""
+    """Uniform/LF+RB/LB+RF = 5/90/5 sampler configuration."""
 
     def build(self, env: Any) -> CornerPairHandTargetCommand:
         return CornerPairHandTargetCommand(self, env)
 
 
-def corner_rescue_marker() -> dict[str, Any]:
-    """Return the immutable marker embedded in every rescue checkpoint."""
+def _require_sha256(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def canonical_json_sha256(value: object) -> str:
+    """Return the SHA-256 of a canonical JSON encoding (sorted keys)."""
+
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def corner_rescue_marker(
+    *,
+    parent_checkpoint_sha256: str,
+    parent_strict_tracking_report_sha256: str,
+) -> dict[str, Any]:
+    """Return the marker embedded in every rescue checkpoint.
+
+    Only the two recorded hashes vary; every other field is fixed by code.
+    """
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": MICROBAN_TELEOP_V12_CORNER_RESCUE_MARKER_REVISION,
-        "parent_checkpoint_sha256": (
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256
+        "parent_identity": "recorded_and_rehashed_on_load",
+        "parent_checkpoint_sha256": _require_sha256(
+            parent_checkpoint_sha256, "Corner rescue parent checkpoint"
         ),
-        "parent_strict_tracking_report_sha256": (
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256
+        "parent_strict_tracking_report_sha256": _require_sha256(
+            parent_strict_tracking_report_sha256, "Corner rescue parent report"
         ),
-        "superseded_v1_evidence": {
-            "checkpoint_sha256": (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256
-            ),
-            "strict_tracking_report_sha256": (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256
-            ),
-            "sampler_probabilities": {
-                "ordinary_uniform_independent": 0.40,
-                "left_forward_right_backward": 0.40,
-                "left_backward_right_forward": 0.20,
-            },
-            "failed_checks": ["hand_tracking_rms"],
-            "left_forward_right_backward_rms_m": 0.0334825,
-            "left_backward_right_forward_rms_m": 0.0235841,
-        },
+        "parent_strict_failed_checks": ["hand_tracking_rms"],
         "parent_iteration": MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
         "parent_completed_updates": (
             MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMPLETED_UPDATES
@@ -382,7 +395,7 @@ def corner_rescue_marker() -> dict[str, Any]:
         "unchanged_contract": {
             "learning_rate": 1.0e-4,
             "action_semantics": "raw_actor_output",
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "hand_reward_weight": 2.0,
             "hand_reward_std_m": MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
             "normalizer": "unchanged_from_parent",
@@ -433,10 +446,20 @@ def validate_corner_rescue_marker(
 
 
 def validate_corner_rescue_lineage_marker(marker: object) -> dict[str, Any]:
-    """Validate the immutable rescue lineage independent of current recipe."""
+    """Rebuild the marker from its two recorded hashes and require equality."""
 
-    expected = corner_rescue_marker()
-    if marker != expected:
+    if not isinstance(marker, Mapping):
+        raise ValueError("Corner rescue lineage marker drifted")
+    try:
+        expected = corner_rescue_marker(
+            parent_checkpoint_sha256=marker.get("parent_checkpoint_sha256"),  # type: ignore[arg-type]
+            parent_strict_tracking_report_sha256=marker.get(  # type: ignore[arg-type]
+                "parent_strict_tracking_report_sha256"
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError("Corner rescue lineage marker drifted") from exc
+    if dict(marker) != expected:
         raise ValueError("Corner rescue lineage marker drifted")
     return deepcopy(expected)
 

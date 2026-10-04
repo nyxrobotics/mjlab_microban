@@ -52,7 +52,6 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     validate_corner_rescue_lineage_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
@@ -723,9 +722,16 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             from mjlab_microban.scripts.teleop_v12_stage import validate_gate
 
             gate = validate_gate(deadline_gate_path, resolved)  # type: ignore[arg-type]
-            if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) != (
-                deadline_fallback
-            ):
+            gate_marker = gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+            if deadline_fallback is None:
+                # Selected rescue model_9999: its marker exists only in the gate,
+                # which must select exactly these bytes.
+                deadline_fallback = validate_deadline_fallback_marker(gate_marker)
+                if deadline_fallback["selected_checkpoint"]["sha256"] != (
+                    before_sha256
+                ):
+                    raise ValueError("Resume gate does not select this checkpoint")
+            elif gate_marker != deadline_fallback:
                 raise ValueError("Resume gate does not authorize deadline fallback")
             deadline_post_canary_value = gate.get(
                 MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
@@ -734,6 +740,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 deadline_post_canary = validate_deadline_post_canary_marker(
                     deadline_post_canary_value
                 )
+                if deadline_post_canary["parent_checkpoint"]["sha256"] != (
+                    before_sha256
+                ):
+                    raise ValueError("Post-canary gate does not name this checkpoint")
                 deadline_resume_source = validate_deadline_fallback_resume_source(
                     infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
                 )
@@ -742,17 +752,19 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                         checkpoint_path=portable_bootstrap_artifact_path(resolved),
                         gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
                         gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                        parent_checkpoint_sha256=before_sha256,
                     )
                 )
             else:
                 if deadline_post_canary_value is not None:
-                    raise ValueError("Selected-v1 gate cannot authorize post-canary")
+                    raise ValueError("Selected-rescue gate cannot authorize post-canary")
                 deadline_post_canary = None
                 deadline_post_canary_resume_source = None
                 deadline_resume_source = deadline_fallback_resume_source(
                     checkpoint_path=portable_bootstrap_artifact_path(resolved),
                     gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
                     gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                    parent_checkpoint_sha256=before_sha256,
                 )
             corner_rescue = None
         else:
@@ -774,8 +786,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 and self.require_immutable_checkpoint_bytes
                 and isinstance(path, bytes)
                 and iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-                and before_sha256
-                == MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
             )
             if deadline_descendant is not None and not deadline_canary_consumer:
                 raise ValueError(

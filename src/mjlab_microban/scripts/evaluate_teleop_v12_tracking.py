@@ -68,7 +68,8 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
+    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
     MICROBAN_TELEOP_V12_DEADLINE_FINAL_FOOT_P95_MAX_M,
@@ -966,10 +967,6 @@ def run_evaluation(
         raise ValueError("Canonical tracking gate requires seed42/300/settle50")
     if allow_deadline_fallback and allow_deadline_canary_fallback:
         raise ValueError("Deadline source and canary fallback modes are exclusive")
-    if allow_deadline_canary_fallback and digest != (
-        MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
-    ):
-        raise ValueError("Deadline canary checkpoint SHA-256 mismatch")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
     policy, iteration, infos = _load_actor(
@@ -981,6 +978,12 @@ def run_evaluation(
         allow_deadline_fallback=allow_deadline_fallback,
     )
     completed = iteration + 1
+    if allow_deadline_canary_fallback and (
+        iteration != MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
+        or infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is None
+        or infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
+    ):
+        raise ValueError("Deadline canary fallback requires a deadline model10099")
     if allow_deadline_fallback:
         required = DEADLINE_FALLBACK_PROFILE
     elif allow_deadline_canary_fallback:
@@ -1109,7 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--deadline-fallback",
         action="store_true",
         help=(
-            "accept only the hash-pinned v1 checkpoint under the explicit "
+            "accept only a corner-rescue model9999 under the explicit "
             "35mm hand-RMS deadline profile"
         ),
     )
@@ -1117,7 +1120,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--deadline-canary-fallback",
         action="store_true",
         help=(
-            "accept only the hash-pinned model10099 foot canary under the "
+            "accept only a deadline-lineage model10099 foot canary under the "
             "35mm hand-RMS profile"
         ),
     )

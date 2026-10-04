@@ -908,6 +908,10 @@ class TeleopV12StageTest(unittest.TestCase):
                     onnx_report_path.write_text(json.dumps(onnx))
 
     def test_schema2_gate_binds_exact_final_corner_rescue_lineage(self) -> None:
+        _CORNER_MARKER = corner_rescue_marker(
+            parent_checkpoint_sha256="a" * 64,
+            parent_strict_tracking_report_sha256="b" * 64,
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint = root / "model_9999.pt"
@@ -938,7 +942,7 @@ class TeleopV12StageTest(unittest.TestCase):
                     MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS
                 ),
                 "env_state": {"common_step_counter": 10_000 * 24},
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: corner_rescue_marker(),
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: _CORNER_MARKER,
             }
             torch.save(
                 {
@@ -998,7 +1002,7 @@ class TeleopV12StageTest(unittest.TestCase):
             )
             self.assertEqual(
                 gate[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY],
-                corner_rescue_marker(),
+                _CORNER_MARKER,
             )
             gate_path = root / "gate.json"
             gate_path.write_text(json.dumps(gate))

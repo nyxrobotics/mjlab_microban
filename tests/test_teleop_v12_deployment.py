@@ -293,12 +293,21 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
         == deployment.FINAL_PROFILE
     )
 
+    lineage = deadline_fallback_marker(
+        selected_checkpoint_sha256="1" * 64,
+        corner_marker_sha256="2" * 64,
+        strict_report_sha256="3" * 64,
+        strict_hand_tracking_m={"maximum_rms": 0.034, "maximum_p95": 0.04},
+    )
     deadline_infos = {
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
-            deadline_fallback_marker()
-        ),
+        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage,
         deployment.MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY: (
-            deadline_post_canary_marker()
+            deadline_post_canary_marker(
+                canary_checkpoint_sha256="4" * 64,
+                strict_report_sha256="5" * 64,
+                strict_failed_checks=["hand_tracking_rms"],
+                strict_hand_tracking_m={"maximum_rms": 0.032, "maximum_p95": 0.04},
+            )
         ),
     }
     expected = deployment._expected_final_tracking_profile(deadline_infos)
@@ -320,11 +329,7 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
             expected_tracking_profile=expected,
         )
 
-    missing_post = {
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
-            deadline_fallback_marker()
-        )
-    }
+    missing_post = {deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage}
     with pytest.raises(ValueError, match="missing post-canary lineage"):
         deployment._expected_final_tracking_profile(missing_post)
 
