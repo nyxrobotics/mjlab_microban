@@ -79,6 +79,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
     preview_hand_tracking_settings,
@@ -293,8 +294,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     allow_deadline_canary_consumer = False
     consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
     consumer_requires_live_candidate = True
-    # Only the opt-in active-hand arm pose-release runner may load or write
-    # that recipe; the canonical runner keeps refusing it.
+    # Only the active-hand arm pose-release runner may train from or write that
+    # recipe (and accept its experimental switch); the canonical runner refuses
+    # to resume it and only consumes release-eligible checkpoints read-only.
     accepts_hand_pose_release_recipe = False
 
     def __init__(
@@ -712,6 +714,17 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             infos,
             allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
         )
+        if (
+            infos.get("microban_teleop_recipe_revision")
+            == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            and not self.accepts_hand_pose_release_recipe
+            and not consumer
+        ):
+            # This runner would save the v11 recipe string: a silent switch back.
+            raise ValueError(
+                "A hand pose-release checkpoint trains only under its own task "
+                "(Mjlab-Teleop-V12-HandPoseRelease-Microban)"
+            )
         if self.deadline_fallback_resume:
             deadline_fallback = validate_deadline_fallback_resume_payload(
                 payload, checkpoint_sha256=before_sha256

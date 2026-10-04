@@ -75,6 +75,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
@@ -491,6 +492,27 @@ def _require_final_gate(
         raise ValueError("Final contract-v12 checkpoint must be named model_14999.pt")
 
 
+def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
+    """Recipe string the package declares to the robot.
+
+    A release-eligible active-hand arm pose-release checkpoint (lineage already
+    re-validated by the gate and actor loaders) declares its own recipe; every
+    other accepted lineage (v11 and its rescues) declares the v11 recipe.
+    """
+
+    if infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            hand_pose_release_lineage,
+        )
+
+        # Refuses the experimental switch (no allow flag here).
+        hand_pose_release_lineage(infos, verify_parent=False)
+        return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    return MICROBAN_TELEOP_V12_RECIPE_REVISION
+
+
 def _full_precision_csv(values: list[float]) -> str:
     """CSV of shortest round-trip floats (no 3-decimal rounding)."""
 
@@ -682,7 +704,7 @@ def build_v12_deployment_metadata(
         "microban_teleop_training_contract_version": (
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ),
-        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        "microban_teleop_recipe_revision": _deployment_recipe_revision(infos),
         "v12_home_pose_revision": home_pose["revision"],
         "v12_training_home_pose_json": _json(home_pose),
         "checkpoint_filename": checkpoint.name,

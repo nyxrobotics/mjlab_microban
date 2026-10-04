@@ -111,18 +111,38 @@ def _actor(device: str) -> LegacyAdapterTeleopActor:
     ).to(device)
 
 
-def hand_pose_release_report_settings(infos: dict[str, Any]) -> dict[str, Any]:
-    """Report fields that label an opt-in pose-release checkpoint's evidence."""
+def hand_pose_release_report_settings(
+    infos: dict[str, Any], *, allow_experimental: bool = False
+) -> dict[str, Any]:
+    """Report fields that label a pose-release checkpoint's evidence (or none)."""
 
-    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_SWITCH_INFO_KEY,
+    if infos.get("microban_teleop_recipe_revision") != (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        return {}
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+        HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+        hand_pose_release_lineage,
     )
 
-    switch = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_SWITCH_INFO_KEY)
+    # The loader already re-validated the lineage including the parent files.
+    lineage = hand_pose_release_lineage(
+        infos, allow_experimental=allow_experimental, verify_parent=False
+    )
     return {
         "recipe_revision": infos.get("microban_teleop_recipe_revision"),
-        "experimental_recipe_switch": switch,
-        "canonical_stage_gate_accepts_recipe": False,
+        "hand_pose_release_lineage": lineage,
+        "experimental_recipe_switch": infos.get(
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY
+        ),
+        "release_recipe_switch": infos.get(
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY
+        ),
+        "canonical_stage_gate_accepts_recipe": (
+            lineage != HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
+        ),
     }
 
 
@@ -458,10 +478,8 @@ def run_evaluation(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
-            **(
-                hand_pose_release_report_settings(_infos)
-                if allow_hand_pose_release_recipe
-                else {}
+            **hand_pose_release_report_settings(
+                _infos, allow_experimental=allow_hand_pose_release_recipe
             ),
         },
         "thresholds": {
@@ -520,8 +538,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-hand-pose-release-recipe",
         action="store_true",
         help=(
-            "evaluate a checkpoint of the opt-in active-hand arm pose-release "
-            "recipe (evidence only; stage gates refuse that recipe)"
+            "require a hand pose-release checkpoint and also accept its "
+            "experimental (not release-eligible) recipe switch; release-eligible "
+            "pose-release lineages need no flag"
         ),
     )
     return parser

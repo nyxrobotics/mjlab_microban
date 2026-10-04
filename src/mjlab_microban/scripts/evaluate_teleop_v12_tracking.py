@@ -1168,10 +1168,8 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),
-            **(
-                hand_pose_release_report_settings(infos)
-                if allow_hand_pose_release_recipe
-                else {}
+            **hand_pose_release_report_settings(
+                infos, allow_experimental=allow_hand_pose_release_recipe
             ),
         },
         "thresholds": {
@@ -1237,9 +1235,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-hand-pose-release-recipe",
         action="store_true",
         help=(
-            "evaluate a checkpoint of the opt-in active-hand arm pose-release "
-            "recipe under its clock's profile (evidence only; stage gates "
-            "refuse that recipe)"
+            "require a hand pose-release checkpoint and also accept its "
+            "experimental (not release-eligible) recipe switch; release-eligible "
+            "pose-release lineages need no flag (same clock profiles)"
         ),
     )
     return parser

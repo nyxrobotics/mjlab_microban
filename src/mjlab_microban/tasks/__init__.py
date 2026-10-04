@@ -208,8 +208,8 @@ register_mjlab_task(
     runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
 )
 
-# Opt-in successor recipe (active-hand arms leave the HOME pose reward).
-# Canonical gates and the exporter do not accept it; see the module docstring.
+# Successor recipe (active-hand arms leave the HOME pose reward).  Gates and the
+# exporter accept its release-eligible lineages; see the module docstring.
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(),

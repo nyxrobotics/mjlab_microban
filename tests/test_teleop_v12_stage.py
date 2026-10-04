@@ -7,6 +7,7 @@ import math
 import tempfile
 import unittest
 from copy import deepcopy
+from unittest import mock
 from pathlib import Path
 
 import torch
@@ -66,6 +67,7 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
 from mjlab_microban.scripts.teleop_v12_stage import (
     _checkpoint_kind,
     _validate_tracking_report,
+    checkpoint_recipe_kind,
     create_gate,
     next_training_target,
     validate_gate,
@@ -94,7 +96,14 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     corner_rescue_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
+)
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+    HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+    hand_pose_release_recipe_switch_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -729,6 +738,148 @@ class TeleopV12StageTest(unittest.TestCase):
                     gate_path.write_text(json.dumps(tampered))
                     with self.assertRaises(ValueError):
                         validate_gate(gate_path, checkpoint)
+
+    def test_pose_release_lineages_gate_under_the_unchanged_profiles(
+        self,
+    ) -> None:
+        marker = hand_pose_release_recipe_switch_marker(
+            parent_checkpoint_path="repo://logs/run_7000_to7100/model_7099.pt",
+            parent_checkpoint_sha256=(
+                HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
+            ),
+            parent_stage_gate_path="repo://artifacts/run_model_7099_gate.json",
+            parent_stage_gate_sha256="b" * 64,
+        )
+        base_infos = {
+            "microban_teleop_training_contract_version": "12",
+            "microban_teleop_recipe_revision": (
+                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            ),
+            BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+            "adapter_gradient_schedule_revision": (
+                TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+            ),
+            "active_actor_columns_at_save": list(
+                teleop_v12_active_adapter_columns(10_000 * 24)
+            ),
+            "env_state": {"common_step_counter": 10_000 * 24},
+        }
+        parent_infos = {
+            **base_infos,
+            "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        }
+        verify = mock.patch(
+            "mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage."
+            "verify_hand_pose_release_switch_parent",
+            return_value=parent_infos,
+        )
+        with tempfile.TemporaryDirectory() as directory, verify as verified:
+            root = Path(directory)
+            onnx_path = root / "policy.onnx"
+            onnx_path.write_bytes(b"unit-test-onnx")
+            for lineage, extra in (
+                ("fresh", {}),
+                ("switch", {MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: marker}),
+            ):
+                with self.subTest(lineage=lineage):
+                    checkpoint = root / lineage / "model_9999.pt"
+                    checkpoint.parent.mkdir()
+                    torch.save(
+                        {"iter": 9_999, "infos": {**base_infos, **extra}}, checkpoint
+                    )
+                    identity = {
+                        "sha256": sha256_file(checkpoint),
+                        "iteration": 9_999,
+                        "completed_updates": 10_000,
+                    }
+                    reports = {
+                        "locomotion_report": root / lineage / "locomotion.json",
+                        "tracking_report": root / lineage / "tracking.json",
+                        "onnx_report": root / lineage / "onnx.json",
+                    }
+                    reports["locomotion_report"].write_text(
+                        json.dumps(_locomotion_report(identity))
+                    )
+                    reports["tracking_report"].write_text(
+                        json.dumps(_tracking_report(identity))
+                    )
+                    reports["onnx_report"].write_text(
+                        json.dumps(_onnx_report(identity, onnx_path))
+                    )
+                    gate = create_gate(checkpoint=checkpoint, **reports)
+                    self.assertEqual(
+                        gate["tracking_profile"], required_tracking_profile(10_000)
+                    )
+                    self.assertEqual(
+                        gate.get(
+                            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY
+                        ),
+                        extra.get(
+                            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY
+                        ),
+                    )
+                    gate_path = root / lineage / "gate.json"
+                    gate_path.write_text(json.dumps(gate))
+                    self.assertEqual(validate_gate(gate_path, checkpoint), gate)
+                    if extra:
+                        tampered = deepcopy(gate)
+                        del tampered[
+                            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY
+                        ]
+                        gate_path.write_text(json.dumps(tampered))
+                        with self.assertRaises(ValueError):
+                            validate_gate(gate_path, checkpoint)
+            self.assertTrue(verified.called)
+
+            # The experimental switch is evidence-only: no gate.
+            experimental = root / "experimental" / "model_9999.pt"
+            experimental.parent.mkdir()
+            torch.save(
+                {
+                    "iter": 9_999,
+                    "infos": {
+                        **base_infos,
+                        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY: {
+                            "schema_version": 1,
+                            "release_eligible": False,
+                            "parent_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+                            "recipe_revision": (
+                                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                            ),
+                            "parent_checkpoint_sha256": "0" * 64,
+                            "parent_iteration": 7_099,
+                        },
+                    },
+                },
+                experimental,
+            )
+            with self.assertRaisesRegex(ValueError, "not release-eligible"):
+                create_gate(
+                    checkpoint=experimental,
+                    locomotion_report=root / "fresh" / "locomotion.json",
+                    tracking_report=root / "fresh" / "tracking.json",
+                    onnx_report=root / "fresh" / "onnx.json",
+                )
+            # The switch marker cannot appear before its 7099 parent.
+            early = root / "early" / "model_7099.pt"
+            early.parent.mkdir()
+            torch.save(
+                {
+                    "iter": 7_099,
+                    "infos": {
+                        **base_infos,
+                        "active_actor_columns_at_save": list(
+                            teleop_v12_active_adapter_columns(7_100 * 24)
+                        ),
+                        "env_state": {"common_step_counter": 7_100 * 24},
+                        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: marker,
+                    },
+                },
+                early,
+            )
+            with self.assertRaisesRegex(ValueError, "descendant clock"):
+                checkpoint_recipe_kind(early)
 
     def test_deadline_final_tracking_report_requires_perturbation(self) -> None:
         identity = {

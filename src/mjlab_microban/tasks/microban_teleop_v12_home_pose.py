@@ -66,9 +66,12 @@ def validate_teleop_v12_home_pose(
 ) -> dict[str, Any]:
     """Reject old or relabeled checkpoints before loading actor or optimizer state.
 
-    ``allow_hand_pose_release_recipe`` additionally accepts the opt-in
-    active-hand arm pose-release recipe.  Only its own runner and explicitly
-    flagged evaluators pass it; stage gates and the exporter never do.
+    The active-hand arm pose-release recipe is accepted when its lineage is
+    release-eligible (a fresh pose-release chain, or the recorded switch at the
+    gated canonical model_7099; checked structurally here, with the parent files
+    re-validated by the lineage validators).  ``allow_hand_pose_release_recipe``
+    additionally accepts the evidence-only experimental switch; only its own
+    runner and explicitly flagged evaluators pass it.
     """
 
     if not isinstance(infos, Mapping):
@@ -97,11 +100,16 @@ def validate_teleop_v12_home_pose(
             == MICROBAN_TELEOP_V12_RECIPE_REVISION
         ):
             raise ValueError("Checkpoint recipe does not match the current HOME pose")
-    elif allow_hand_pose_release_recipe and recipe == (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-    ):
-        if rescue is not None:
-            raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+    elif recipe == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION:
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            hand_pose_release_lineage,
+        )
+
+        hand_pose_release_lineage(
+            infos,
+            allow_experimental=allow_hand_pose_release_recipe,
+            verify_parent=False,
+        )
     elif recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION and not (
         recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
         and isinstance(rescue, Mapping)
