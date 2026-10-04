@@ -582,7 +582,9 @@ class HandTargetCommand(CommandTerm):
 
     Active training targets are never sampled from a Cartesian cube.  A Microban
     shoulder-pitch/roll/elbow tuple is sampled uniformly inside the audited joint
-    box and converted to an XYZ offset with the exact robot.xml kinematic chain.
+    box and converted to an XYZ offset with the exact robot.xml kinematic chain;
+    tuples whose offset leaves the receiver's per-axis hand box (+-0.8 * 0.08 m)
+    are rejected and redrawn.
     """
 
     cfg: HandTargetCommandCfg
@@ -660,7 +662,9 @@ class HandTargetCommand(CommandTerm):
         self.is_active[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_active
 
         # FK offsets are trunk-frame; rotate them by R_y(trunk_pitch) into the
-        # HOME-levelled frame the targets and current_hand_pos_b use.
+        # HOME-levelled frame the targets and current_hand_pos_b use.  Joint
+        # samples whose target leaves the robot receiver's +-64 mm hand box
+        # are redrawn, so every target is reachable and deliverable.
         sampled_joints, offsets = sample_microban_reachable_hand_targets(
             self.is_active[env_ids],
             dtype=self.hand_target_offset_b.dtype,

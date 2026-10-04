@@ -58,13 +58,13 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY = (
     "microban_teleop_v12_corner_pair_rescue"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION = (
-    "model9900_targeted_bilateral_corner_pair_replay_to10000_v3"
+    "model9900_targeted_bilateral_corner_pair_replay_to10000_receiver_box_f_v4"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_MARKER_REVISION = (
-    "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v3"
+    "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_receiver_box_f_v4"
 )
 MICROBAN_TELEOP_V12_CORNER_RESCUE_SAMPLER_REVISION = (
-    "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_v2"
+    "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_v3"
 )
 # The launcher stages the parent's strict tracking report next to the staged
 # parent checkpoint under this name; the runner re-validates and hashes it.

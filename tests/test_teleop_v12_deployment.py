@@ -411,7 +411,7 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, 30.0, -10.0],
         [25.0, -10.0, -10.0],
     ]
-    assert hand_target_fk["normalizer_abs_bound_m"] == [0.0707, 0.0388, 0.0495]
+    assert hand_target_fk["normalizer_abs_bound_m"] == [0.064, 0.0388, 0.0458]
     assert hand_target_fk["target_frame"] == (
         "robot_home_levelled_trunk_xyz_forward_left_up"
     )

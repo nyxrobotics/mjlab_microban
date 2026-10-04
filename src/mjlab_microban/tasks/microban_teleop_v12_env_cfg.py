@@ -36,9 +36,14 @@ MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
 # into it, normalizer re-derived) and the neutral HMD neck pose is the level
 # headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  v13 used the leaning trunk
 # frame and neck_pitch 0.
+# v17 (2026-10-04): hand targets are capped to the robot receiver's +-64 mm
+# box (hand FK v4: joint-sample rejection, normalizer (64.0, 38.8, 45.8) mm,
+# F evaluation/corner pose (-20, 25, -50) deg).  v16 is the hand-pose-release
+# successor of v15.
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_v15"
+    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+    "receiver_box_hands_v17"
 )
 # Opt-in successor recipe: identical to v11 except that the inherited HOME
 # pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
@@ -50,7 +55,7 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = (
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
-    "active_hand_arm_pose_release_v16"
+    "receiver_box_hands_active_hand_arm_pose_release_v18"
 )
 # The robot's hmd_head move keeps the camera at the headset's world attitude,
 # so on the forward-lean HOME a level headset holds neck_pitch at

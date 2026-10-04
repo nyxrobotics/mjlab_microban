@@ -45,8 +45,10 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_EXPERIMENT = (
 )
 # v5 (2026-10-04): inherits v12's HOME-levelled foot/hand targets and the
 # level-headset neutral HMD neck pose.
+# v6 (2026-10-04): hand targets capped to the receiver's +-64 mm box (FK v4).
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
-    "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_v5"
+    "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_"
+    "receiver_box_hands_v6"
 )
 # v5: reverted alongside microban_constants.py's own HOME_FRAME revert -- the
 # "com_centered" experiment (hip_pitch +1.198deg) this task was built for

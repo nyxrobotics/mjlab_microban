@@ -10,6 +10,11 @@ HOME-levelled trunk frame ``R_trunk * R_y(-HOME_TRUNK_PITCH_RAD)`` (gravity
 level at HOME, x forward, y left, z up), so a trunk-frame FK offset ``v`` is the
 target ``R_y(HOME_TRUNK_PITCH_RAD) @ v`` (``microban_hand_target_offsets_from_
 arm_joints``).  The AABB, normalizer and evaluation offsets describe targets.
+
+Sampled targets are restricted to the robot receiver's hand box (microban
+``network_input``: each component within +-0.8 * 0.08 m = +-64 mm, endpoints
+accepted) by rejecting joint samples whose target offset leaves it, so every
+training target is both FK-reachable and deliverable on hardware.
 """
 
 from __future__ import annotations
@@ -22,9 +27,11 @@ from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
 
 # v3 (2026-10-04): targets are expressed in the HOME-levelled trunk frame of
 # the forward-lean HOME (trunk pitched HOME_TRUNK_PITCH_RAD forward).
+# v4 (2026-10-04): samples, AABB, normalizer and evaluation poses are capped
+# to the receiver's +-64 mm hand box (joint-sample rejection, see below).
 MICROBAN_HAND_FK_REVISION = (
     "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_"
-    "home_levelled_lean10_v3"
+    "home_levelled_lean10_receiver_box64mm_v4"
 )
 MICROBAN_HAND_TARGET_FRAME = "robot_home_levelled_trunk_xyz_forward_left_up"
 MICROBAN_HAND_TARGET_FRAME_PITCH_RAD = HOME_TRUNK_PITCH_RAD
@@ -59,7 +66,12 @@ MICROBAN_ARM_HOME_JOINT_RAD = tuple(
 # extrema in metres.  The bilateral chains mirror only Y.  The trunk-frame
 # AABB is the raw FK; the target AABB is the same grid rotated into the
 # HOME-levelled target frame (R_y(+10 deg): x' = cos*x + sin*z,
-# z' = -sin*x + cos*z), which is what the policy observes.
+# z' = -sin*x + cos*z) and restricted to the grid points inside the receiver
+# box (MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M), which is what the
+# policy observes.  Unrestricted, the levelled grid reaches x = 70.6 mm and
+# z = 49.5 mm; the restriction removes 0.997 % of each side's grid points
+# (all of them forward-up: x > 64 mm), which also lowers the z maximum to
+# 45.7 mm.
 MICROBAN_HAND_FK_BOUND_GRID_POINTS_PER_AXIS = 401
 MICROBAN_HAND_FK_TRUNK_OFFSET_AABB_MIN_M = (
     (-0.06120170602356862, -0.0034550417440758485, -0.0035619649312883805),
@@ -74,29 +86,37 @@ MICROBAN_HAND_FK_OFFSET_AABB_MIN_M = (
     (-0.05976319909948818, -0.0387512193701912, -0.0012919613069190233),
 )
 MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
-    (0.07062154916197355, 0.0387512193701912, 0.049485269073683856),
-    (0.07062154916197358, 0.0034550417440758485, 0.04948526907368383),
+    (0.06399997388471845, 0.0387512193701912, 0.04573068026176937),
+    (0.06399997388471848, 0.0034550417440758485, 0.04573068026176935),
 )
 
 # Conservative outward rounding (0.1 mm) of the per-axis maximum absolute
 # target-frame grid values.  These are actor-normalizer denominators, not the
 # wire protocol's +-0.08 m command envelope.  The lean moves reach from
-# trunk-z into levelled-x: forward-up hands reach x = 70.6 mm (trunk frame:
-# 62.9 mm), past the 0.8 * 0.08 = 64 mm live margin, so the validated live
-# limit for this contract is 0.9 * 0.08 = 72 mm and the reachable subset stays
-# strictly inside it.  NOTE: the robot receiver (microban network_input) still
-# enforces 64 mm until that change is approved; until then the ~1 % of
-# reachable targets beyond 64 mm forward (incl. the F evaluation pose,
-# 68.6 mm) are not deliverable on hardware.
-MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0707, 0.0388, 0.0495)
+# trunk-z into levelled-x (forward-up hands reach x = 70.6 mm, trunk frame
+# 62.9 mm), so the sampler rejects joint samples beyond the receiver's live
+# limit, 0.8 * 0.08 = 64 mm per component (microban network_input
+# _PICO_HAND_TARGET_LOWER/UPPER; the sender declares the 0.8 margin).  The
+# normalizer's x therefore equals that limit.
+MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0640, 0.0388, 0.0458)
 MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M = (0.08, 0.08, 0.08)
-MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = (0.072, 0.072, 0.072)
+MICROBAN_HAND_TARGET_RECEIVER_SAFETY_MARGIN = 0.8
+MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = tuple(
+    value * MICROBAN_HAND_TARGET_RECEIVER_SAFETY_MARGIN
+    for value in MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M
+)
+# Rejected joint samples are redrawn; after this many rounds (each loses only
+# ~1 % of the draws) any still-rejected hand falls back to its HOME joints.
+MICROBAN_HAND_TARGET_MAX_REJECTION_ROUNDS = 64
 
 # Named points shared by the v12 evaluator and training contract.  Each tuple is
 # one left-arm (pitch, roll, elbow) pose in degrees; the right pose mirrors only
-# shoulder roll because the MJCF arm chains are bilateral mirrors.
+# shoulder roll because the MJCF arm chains are bilateral mirrors.  F was
+# (-25, 25, -50) until v3; it read (68.6, 20.0, 45.7) mm in the levelled frame,
+# outside the receiver box, so v4 raises the shoulder pitch to -20 deg:
+# (62.3, 20.0, 39.7) mm, with the same roll and full elbow flexion.
 MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG = (
-    ("F", (-25.0, 25.0, -50.0)),
+    ("F", (-20.0, 25.0, -50.0)),
     ("B", (25.0, 20.0, -10.0)),
     ("f", (-12.0, 18.0, -32.0)),
     ("b", (12.0, 18.0, -32.0)),
@@ -249,19 +269,44 @@ def microban_hand_target_offsets_from_arm_joints(
     )
 
 
+def microban_hand_target_offsets_within_limit(
+    offsets: torch.Tensor,
+    abs_limit_m: tuple[float, float, float] = (
+        MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M
+    ),
+) -> torch.Tensor:
+    """Return ``[...]`` bools: every component of ``[..., 3]`` lies in the box.
+
+    Mirrors the receiver's rule (a component is dropped only when it is below
+    ``-limit`` or above ``+limit``); the comparison runs in float64 so a
+    float32 target never passes by rounding up to the float32 limit.
+    """
+
+    limit = torch.tensor(abs_limit_m, dtype=torch.float64, device=offsets.device)
+    values = offsets.to(torch.float64)
+    return ((values >= -limit) & (values <= limit)).all(dim=-1)
+
+
 def sample_microban_reachable_hand_targets(
     is_active: torch.Tensor,
     *,
     generator: torch.Generator | None = None,
     dtype: torch.dtype = torch.float32,
     trunk_pitch: float = MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
+    abs_limit_m: tuple[float, float, float] = (
+        MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M
+    ),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Uniformly sample the arm joint box and return joints plus reachable offsets.
 
     Offsets are FK offsets rotated into the HOME-levelled frame of a trunk
-    leaning ``trunk_pitch`` forward (0 keeps the trunk frame).  Inactive hands
-    are set to the exact HOME joint tuple before FK, producing an exact-zero
-    offset instead of sampling a Cartesian point that will be ignored.
+    leaning ``trunk_pitch`` forward (0 keeps the trunk frame).  An active
+    hand's joint tuple is redrawn while its offset has a component outside
+    ``+-abs_limit_m`` (the receiver box), so the result is the uniform joint
+    box conditioned on a deliverable target; every offset stays exact FK of
+    the returned joints.  Inactive hands are set to the exact HOME joint tuple
+    before FK, producing an exact-zero offset instead of sampling a Cartesian
+    point that will be ignored.
     """
 
     if not isinstance(is_active, torch.Tensor) or is_active.dtype != torch.bool:
@@ -283,19 +328,39 @@ def sample_microban_reachable_hand_targets(
     )
     sampled = home.expand(is_active.shape[0], -1, -1).clone()
     active_env, active_side = is_active.nonzero(as_tuple=True)
-    if len(active_env) > 0:
+    pending_env, pending_side = active_env, active_side
+    offsets = None
+    for _round in range(MICROBAN_HAND_TARGET_MAX_REJECTION_ROUNDS):
+        if len(pending_env) == 0:
+            break
         random = torch.rand(
-            (len(active_env), 3),
+            (len(pending_env), 3),
             dtype=lower.dtype,
             device=is_active.device,
             generator=generator,
         )
-        sampled[active_env, active_side] = lower[active_side] + random * (
-            upper[active_side] - lower[active_side]
+        sampled[pending_env, pending_side] = lower[pending_side] + random * (
+            upper[pending_side] - lower[pending_side]
         )
-    offsets = microban_hand_target_offsets_from_arm_joints(
-        sampled, trunk_pitch=trunk_pitch
-    )
+        # Check the very offsets that are returned (same batch, same FK call),
+        # so float rounding cannot differ between the check and the result.
+        offsets = microban_hand_target_offsets_from_arm_joints(
+            sampled, trunk_pitch=trunk_pitch
+        )
+        rejected = ~microban_hand_target_offsets_within_limit(
+            offsets[active_env, active_side], abs_limit_m
+        )
+        pending_env = active_env[rejected]
+        pending_side = active_side[rejected]
+    if len(pending_env) > 0:
+        # Practically unreachable (~0.01 ** 64); HOME (zero offset) is inside
+        # every box.
+        sampled[pending_env, pending_side] = home[pending_side]
+        offsets = None
+    if offsets is None:
+        offsets = microban_hand_target_offsets_from_arm_joints(
+            sampled, trunk_pitch=trunk_pitch
+        )
     offsets = torch.where(is_active.unsqueeze(-1), offsets, torch.zeros_like(offsets))
     return sampled, offsets
 
@@ -352,6 +417,7 @@ def microban_hand_fk_metadata() -> dict[str, object]:
         "runtime_validated_abs_limit_m": list(
             MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M
         ),
+        "max_rejection_rounds": MICROBAN_HAND_TARGET_MAX_REJECTION_ROUNDS,
         "evaluation_joint_degrees": [
             [name, list(values)]
             for name, values in MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG
@@ -363,6 +429,7 @@ def microban_hand_fk_metadata() -> dict[str, object]:
         "source": "src/mjlab_microban/robot/microban/robot.xml",
         "sampling": (
             "uniform_independent_joint_box_then_exact_fk_offset_from_home_"
-            "rotated_into_home_levelled_frame"
+            "rotated_into_home_levelled_frame_rejecting_joint_samples_outside_"
+            "runtime_validated_abs_limit"
         ),
     }

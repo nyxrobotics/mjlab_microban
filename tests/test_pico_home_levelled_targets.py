@@ -79,7 +79,7 @@ class HomeLevelledTargetFrameTest(unittest.TestCase):
             MICROBAN_TELEOP_TARGET_FRAME,
             "robot_home_levelled_trunk_xyz_forward_left_up",
         )
-        self.assertTrue(MICROBAN_TELEOP_V12_RECIPE_REVISION.endswith("_v15"))
+        self.assertTrue(MICROBAN_TELEOP_V12_RECIPE_REVISION.endswith("_v17"))
 
     def test_home_targets_are_zero_and_a_vertical_lift_reads_vertical(self) -> None:
         trunk = torch.tensor([[0.01, -0.02, 0.170430569776402]], dtype=torch.float64)
