@@ -20,8 +20,6 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_ACTOR_STATE_KEYS,
-    LEGACY_VELOCITY_CHECKPOINT_ITERATION,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
@@ -31,11 +29,18 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LegacyAdapterTeleopActor,
     transplant_legacy_actor_state_to_teleop83,
 )
-
-TELEOP_V12_BOOTSTRAP_PROVENANCE_SCHEMA_VERSION = 1
-PINNED_LEGACY_TELEOP_PROBE_SHA256 = (
-    "f51378d59ff4d68fb1185a91eb2a863749e5c7be6ec4cd0ab4a0b08f1565e69d"
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
 )
+from mjlab_microban.teleop_v12_safety import (
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
+)
+
+# Schema 2: the frozen source is any authenticated centered-HOME velocity
+# checkpoint selected on the command line.  Its SHA-256, iteration and
+# normalizer count are recorded here and re-hashed on every save/resume/gate;
+# the robot pins the final values (EXPECTED_V12_LEGACY_* in pico_hybrid.py).
+TELEOP_V12_BOOTSTRAP_PROVENANCE_SCHEMA_VERSION = 2
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _REPO_PATH_PREFIX = "repo://"
@@ -70,7 +75,7 @@ class TeleopV12BootstrapProvenance:
     target_actor_topology: tuple[int, ...]
     normalizer_eps: float
     previous_action_semantics: str
-    action_clip: None
+    action_clip: list[float]
     frozen_tensors: tuple[str, ...]
 
 
@@ -120,9 +125,9 @@ def _reject_nonfinite(value: str) -> object:
 
 def inspect_legacy_velocity_checkpoint(
     checkpoint_path: str | Path,
-    expected_sha256: str = LEGACY_VELOCITY_CHECKPOINT_SHA256,
+    expected_sha256: str,
 ) -> tuple[LegacyVelocitySourceIdentity, dict[str, torch.Tensor]]:
-    """Load only the authenticated actor state from the proven legacy run."""
+    """Load only the actor state of the hash-authenticated velocity source."""
 
     path = resolve_bootstrap_artifact_path(checkpoint_path)
     if not path.is_file():
@@ -130,13 +135,16 @@ def inspect_legacy_velocity_checkpoint(
     if _SHA256_RE.fullmatch(expected_sha256) is None:
         raise ValueError("Expected legacy checkpoint SHA-256 must be lowercase hex")
     digest = sha256_file(path)
-    if digest != expected_sha256 or digest != LEGACY_VELOCITY_CHECKPOINT_SHA256:
+    if digest != expected_sha256:
         raise ValueError(f"Legacy velocity checkpoint SHA-256 mismatch: {digest}")
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(payload, dict) or payload.get("iter") != (
-        LEGACY_VELOCITY_CHECKPOINT_ITERATION
+    iteration = payload.get("iter") if isinstance(payload, dict) else None
+    if (
+        not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration < 0
     ):
-        raise ValueError("Legacy velocity checkpoint iteration drifted")
+        raise ValueError("Velocity source checkpoint iteration is malformed")
     actor = payload.get("actor_state_dict")
     if not isinstance(actor, Mapping) or set(actor) != LEGACY_VELOCITY_ACTOR_STATE_KEYS:
         raise ValueError("Legacy velocity checkpoint actor keys drifted")
@@ -152,12 +160,12 @@ def inspect_legacy_velocity_checkpoint(
     if count_tensor.dtype != torch.int64 or count_tensor.ndim != 0:
         raise ValueError("Legacy normalizer count tensor drifted")
     count = int(count_tensor.item())
-    if count != 1_474_560_000:
-        raise ValueError(f"Legacy normalizer count drifted: {count}")
+    if count <= 0:
+        raise ValueError(f"Velocity source normalizer count is invalid: {count}")
     identity = LegacyVelocitySourceIdentity(
         path=portable_bootstrap_artifact_path(path),
         sha256=digest,
-        iteration=LEGACY_VELOCITY_CHECKPOINT_ITERATION,
+        iteration=iteration,
         normalizer_count=count,
     )
     return identity, state
@@ -166,7 +174,7 @@ def inspect_legacy_velocity_checkpoint(
 def validate_legacy_teleop_probe_receipt(
     receipt_path: str | Path,
     source: LegacyVelocitySourceIdentity,
-    expected_sha256: str = PINNED_LEGACY_TELEOP_PROBE_SHA256,
+    expected_sha256: str,
 ) -> LegacyTeleopProbeIdentity:
     """Verify the hash-bound 9x300 raw-action closed-loop source receipt."""
 
@@ -199,7 +207,7 @@ def validate_legacy_teleop_probe_receipt(
         "steps": 300,
         "settle_steps": 50,
         "step_dt_s": 0.02,
-        "action_clip": None,
+        "action_clip": MICROBAN_TELEOP_V12_ACTION_CLIP,
         "previous_action": "raw_actor_output",
         "foot_target": "exact_zero_inactive",
         "hand_target": "exact_zero_inactive",
@@ -235,7 +243,6 @@ def validate_legacy_teleop_probe_receipt(
         "completed_scenario_count": 9,
         "fall_scenario_count": 0,
         "nonfinite_scenario_count": 0,
-        "actual_soft_limit_violation_scenario_count": 0,
         "directionally_correct_scenario_count": 8,
         "directional_scenario_count": 8,
         "neutral_target_contract_all_steps": True,
@@ -258,10 +265,15 @@ def validate_legacy_teleop_probe_receipt(
             or result.get("executed_steps") != 300
             or result.get("raw_action_recurrence_verified_steps") != 300
             or result.get("neutral_foot_hand_target_verified_steps") != 300
-            or not math.isclose(
-                float(result.get("maximum_actual_soft_limit_violation_rad", math.inf)),
-                0.0,
-                abs_tol=1.0e-7,
+            # The source must satisfy the same measured-joint bound as every
+            # later stage gate and the robot contract (5 deg dynamic overshoot
+            # of the 0.9 soft limits); the historical source happened to have 0.
+            or not (
+                0.0
+                <= float(
+                    result.get("maximum_actual_soft_limit_violation_rad", math.inf)
+                )
+                <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             )
         ):
             raise ValueError("Probe receipt contains a failing scenario")
@@ -305,7 +317,7 @@ def bootstrap_legacy_actor(
         target_actor_topology=TELEOP_V12_ACTOR_TOPOLOGY,
         normalizer_eps=LEGACY_VELOCITY_NORMALIZER_EPS,
         previous_action_semantics="raw_actor_output",
-        action_clip=None,
+        action_clip=list(MICROBAN_TELEOP_V12_ACTION_CLIP),
         frozen_tensors=tuple(
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
@@ -360,7 +372,7 @@ def _validate_bootstrap_provenance(
         "target_actor_topology": TELEOP_V12_ACTOR_TOPOLOGY,
         "normalizer_eps": LEGACY_VELOCITY_NORMALIZER_EPS,
         "previous_action_semantics": "raw_actor_output",
-        "action_clip": None,
+        "action_clip": MICROBAN_TELEOP_V12_ACTION_CLIP,
         "frozen_tensors": tuple(
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
@@ -369,13 +381,18 @@ def _validate_bootstrap_provenance(
     if any(actual[name] != expected for name, expected in expected_static.items()):
         raise ValueError("Contract-v12 bootstrap provenance contract drifted")
     if (
-        source.sha256 != LEGACY_VELOCITY_CHECKPOINT_SHA256
-        or source.iteration != LEGACY_VELOCITY_CHECKPOINT_ITERATION
-        or source.normalizer_count != 1_474_560_000
+        not isinstance(source.sha256, str)
+        or _SHA256_RE.fullmatch(source.sha256) is None
+        or not isinstance(source.iteration, int)
+        or isinstance(source.iteration, bool)
+        or source.iteration < 0
+        or not isinstance(source.normalizer_count, int)
+        or source.normalizer_count <= 0
     ):
-        raise ValueError("Contract-v12 legacy source identity drifted")
+        raise ValueError("Contract-v12 velocity source identity is malformed")
     if (
-        probe.sha256 != PINNED_LEGACY_TELEOP_PROBE_SHA256
+        not isinstance(probe.sha256, str)
+        or _SHA256_RE.fullmatch(probe.sha256) is None
         or probe.scenario_count != 9
         or probe.steps != 300
         or probe.settle_steps != 50
@@ -447,3 +464,16 @@ def assert_actor_frozen_against_source(
             target = target[:, TELEOP_V12_SHARED_OBSERVATION_COLUMNS]
         if not torch.equal(candidate, target):
             raise RuntimeError(f"Actor no longer matches pinned legacy tensor: {name}")
+
+
+def load_bootstrap_source_state(
+    provenance: TeleopV12BootstrapProvenance,
+) -> dict[str, torch.Tensor]:
+    """Re-authenticate and return the frozen velocity source of a checkpoint."""
+
+    source, state = inspect_legacy_velocity_checkpoint(
+        provenance.source.path, provenance.source.sha256
+    )
+    if source != provenance.source:
+        raise ValueError("Velocity source identity no longer matches provenance")
+    return state

@@ -1,4 +1,4 @@
-"""Fail-closed runner for the pinned 9900->9999 corner-pair rescue."""
+"""Fail-closed runner for the recorded-parent 9900->9999 corner-pair rescue."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMMON_STEP,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_REPORT_FILENAME,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PROCESS_UPDATES,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP,
@@ -43,8 +43,12 @@ def validate_corner_rescue_parent_payload(
 ) -> None:
     """Validate the only checkpoint from which this runner may resume."""
 
-    if checkpoint_sha256 != MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256:
-        raise ValueError("Pinned corner rescue model9900 SHA-256 mismatch")
+    if (
+        not isinstance(checkpoint_sha256, str)
+        or len(checkpoint_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in checkpoint_sha256)
+    ):
+        raise ValueError("Corner rescue model9900 SHA-256 is malformed")
     iteration = payload.get("iter")
     infos = payload.get("infos")
     if iteration != MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION:
@@ -73,6 +77,47 @@ def validate_corner_rescue_parent_payload(
     assert_corner_rescue_foot_adapter_zero(payload)
 
 
+def validate_corner_rescue_parent_report(
+    report_path: Path, *, checkpoint_sha256: str, iteration: int
+) -> tuple[str, list[str]]:
+    """Validate the parent's strict tracking report and return its SHA-256.
+
+    The report must be the canonical HMD/hand-profile report of exactly this
+    parent and its only failing check must be ``hand_tracking_rms``.
+    """
+
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import HMD_HAND_PROFILE
+    from mjlab_microban.scripts.teleop_v12_stage import (
+        _load_json,
+        _validate_tracking_report,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+
+    resolved = Path(report_path).expanduser().resolve(strict=True)
+    if not resolved.is_file() or Path(report_path).is_symlink():
+        raise ValueError("Corner rescue parent report must be a regular file")
+    before = sha256_file(resolved)
+    report = _load_json(resolved)
+    _validate_tracking_report(
+        report,
+        {
+            "sha256": checkpoint_sha256,
+            "iteration": iteration,
+            "completed_updates": iteration + 1,
+        },
+        profile_override=HMD_HAND_PROFILE,
+        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
+    )
+    failed = sorted(name for name, passed in report["checks"].items() if not passed)
+    if report.get("status") != "fail" or failed != ["hand_tracking_rms"]:
+        raise ValueError(
+            "Corner rescue parent report must fail only the strict hand RMS check"
+        )
+    if sha256_file(resolved) != before:
+        raise ValueError("Corner rescue parent report changed while validating")
+    return before, failed
+
+
 class MicrobanTeleopV12CornerRescueOnPolicyRunner(
     MicrobanTeleopV12OnPolicyRunner
 ):
@@ -99,12 +144,25 @@ class MicrobanTeleopV12CornerRescueOnPolicyRunner(
         if not isinstance(payload, dict):
             raise TypeError("Corner rescue parent payload is malformed")
         validate_corner_rescue_parent_payload(payload, checkpoint_sha256=before)
+        report_path = resolved.parent / (
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_REPORT_FILENAME
+        )
+        report_sha256, _ = validate_corner_rescue_parent_report(
+            report_path,
+            checkpoint_sha256=before,
+            iteration=MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
+        )
         loaded = super().load(
             str(resolved), load_cfg=load_cfg, strict=strict, map_location=map_location
         )
-        if sha256_file(resolved) != before:
-            raise ValueError("Corner rescue parent changed while loading")
-        self._corner_rescue_marker = corner_rescue_marker()
+        if sha256_file(resolved) != before or sha256_file(report_path) != (
+            report_sha256
+        ):
+            raise ValueError("Corner rescue parent or its report changed while loading")
+        self._corner_rescue_marker = corner_rescue_marker(
+            parent_checkpoint_sha256=before,
+            parent_strict_tracking_report_sha256=report_sha256,
+        )
         self._assert_corner_rescue_environment()
         self._assert_live_foot_adapter_zero()
         self._assert_live_optimizer_step(

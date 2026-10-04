@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import unittest
 from unittest.mock import patch
 
@@ -250,7 +251,7 @@ def _tracking_report(*, visual_quality_failure: bool = False) -> dict:
             "settle_steps": 50,
             "moving_hmd": "forced_non_neutral",
             "perturbation": True,
-            "action_clip": None,
+            "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),
@@ -339,7 +340,7 @@ def _locomotion_report() -> dict:
             "seed": 42,
             "steps": 300,
             "settle_steps": 50,
-            "action_clip": None,
+            "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
         },

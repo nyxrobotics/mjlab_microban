@@ -1,4 +1,4 @@
-"""CPU-only fail-closed tests for the v1 deadline fallback route."""
+"""CPU-only fail-closed tests for the recorded deadline fallback route."""
 
 from __future__ import annotations
 
@@ -31,27 +31,27 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    canonical_json_sha256,
+    corner_rescue_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_REJECTED_V2_SHA256,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_V1_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
     deadline_fallback_marker,
     deadline_fallback_resume_source,
-    deadline_fallback_v1_corner_marker,
     deadline_post_canary_marker,
     validate_deadline_fallback_canary_payload,
     validate_deadline_fallback_checkpoint_payload,
+    validate_deadline_fallback_marker,
     validate_deadline_fallback_resume_payload,
     validate_deadline_fallback_save_endpoint,
     validate_deadline_fallback_training_request,
+    validate_deadline_post_canary_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
@@ -64,6 +64,36 @@ ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_fallback.sh"
 CANARY_EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_canary.sh"
 TRAINER = ROOT / "scripts/train_microban_teleop_v12.sh"
+SELECTED_SHA = "1" * 64
+CANARY_SHA = "2" * 64
+STRICT_SHA = "3" * 64
+CANARY_STRICT_SHA = "4" * 64
+METRICS = {"maximum_rms": 0.0335, "maximum_p95": 0.041}
+
+
+def _corner_marker() -> dict:
+    return corner_rescue_marker(
+        parent_checkpoint_sha256="5" * 64,
+        parent_strict_tracking_report_sha256="6" * 64,
+    )
+
+
+def _marker() -> dict:
+    return deadline_fallback_marker(
+        selected_checkpoint_sha256=SELECTED_SHA,
+        corner_marker_sha256=canonical_json_sha256(_corner_marker()),
+        strict_report_sha256=STRICT_SHA,
+        strict_hand_tracking_m=METRICS,
+    )
+
+
+def _post_canary_marker(failed: list[str] | None = None) -> dict:
+    return deadline_post_canary_marker(
+        canary_checkpoint_sha256=CANARY_SHA,
+        strict_report_sha256=CANARY_STRICT_SHA,
+        strict_failed_checks=["hand_tracking_rms"] if failed is None else failed,
+        strict_hand_tracking_m=METRICS,
+    )
 
 
 def _optimizer(step: int) -> dict:
@@ -108,7 +138,7 @@ def _source_payload() -> dict:
         "infos": {
             "microban_teleop_training_contract_version": "12",
             "microban_teleop_recipe_revision": (
-                MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_V1_RECIPE_REVISION
+                MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
             ),
             "adapter_gradient_schedule_revision": (
                 TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
@@ -130,9 +160,7 @@ def _source_payload() -> dict:
                 82,
             ],
             "env_state": {"common_step_counter": 240_000},
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: (
-                deadline_fallback_v1_corner_marker()
-            ),
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: _corner_marker(),
         },
     }
 
@@ -149,17 +177,14 @@ def _canary_payload(*, checkpoint_path: str, gate_path: str, gate_sha: str) -> d
             "env_state": {
                 "common_step_counter": MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP
             },
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: (
-                deadline_fallback_v1_corner_marker()
-            ),
-            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
-                deadline_fallback_marker()
-            ),
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: _corner_marker(),
+            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: _marker(),
             MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY: (
                 deadline_fallback_resume_source(
                     checkpoint_path=checkpoint_path,
                     gate_path=gate_path,
                     gate_sha256=gate_sha,
+                    parent_checkpoint_sha256=SELECTED_SHA,
                 )
             ),
         },
@@ -206,26 +231,64 @@ def _tracking_result(*, rms: float, p95: float, soft_limit: float = 0.0) -> dict
     }
 
 
-def test_only_selected_v1_hash_is_eligible() -> None:
+def test_selected_rescue_is_structurally_eligible() -> None:
     payload = _source_payload()
     assert (
         validate_deadline_fallback_checkpoint_payload(
-            payload,
-            checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256,
+            payload, checkpoint_sha256=SELECTED_SHA
         )
-        == deadline_fallback_marker()
+        == _corner_marker()
     )
-    with pytest.raises(ValueError, match="explicitly rejected"):
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
         validate_deadline_fallback_checkpoint_payload(
-            payload,
-            checkpoint_sha256=(
-                MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_REJECTED_V2_SHA256
-            ),
+            payload, checkpoint_sha256="F" * 64
         )
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+    drifted = copy.deepcopy(payload)
+    drifted["infos"]["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_RECIPE_REVISION
+    )
+    with pytest.raises(ValueError, match="contract/clock drifted"):
         validate_deadline_fallback_checkpoint_payload(
-            payload, checkpoint_sha256="f" * 64
+            drifted, checkpoint_sha256=SELECTED_SHA
         )
+    drifted = copy.deepcopy(payload)
+    drifted["infos"][MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY]["revision"] = "x"
+    with pytest.raises(ValueError, match="lineage marker drifted"):
+        validate_deadline_fallback_checkpoint_payload(
+            drifted, checkpoint_sha256=SELECTED_SHA
+        )
+
+
+def test_markers_rebuild_from_recorded_fields_and_are_tamper_evident() -> None:
+    marker = _marker()
+    assert validate_deadline_fallback_marker(marker) == marker
+    assert marker["threshold_change"]["hand_rms_m_max"] == 0.035
+    assert marker["threshold_change"]["hand_p95_m_max"] == 0.05
+    assert "pending_user_review" in marker["authorization"]
+    for path, value in (
+        (("threshold_change", "hand_rms_m_max"), 0.04),
+        (("strict_failed_checks",), ["hand_tracking_rms", "no_falls"]),
+        (("selected_checkpoint", "sha256"), "nothex"),
+        (("strict_hand_tracking_m", "maximum_rms"), -1.0),
+    ):
+        tampered = copy.deepcopy(marker)
+        target = tampered
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        with pytest.raises(ValueError, match="lineage marker drifted"):
+            validate_deadline_fallback_marker(tampered)
+    post = _post_canary_marker()
+    assert validate_deadline_post_canary_marker(post) == post
+    assert validate_deadline_post_canary_marker(_post_canary_marker([]))[
+        "canonical_failed_checks"
+    ] == []
+    with pytest.raises(ValueError, match="only hand_tracking_rms"):
+        _post_canary_marker(["no_falls"])
+    tampered = copy.deepcopy(post)
+    tampered["next_endpoint"]["completed_updates"] = 16_000
+    with pytest.raises(ValueError, match="post-canary authorization marker drifted"):
+        validate_deadline_post_canary_marker(tampered)
 
 
 def test_only_rms_is_relaxed_p95_and_safety_are_unchanged() -> None:
@@ -306,18 +369,18 @@ def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
         "schema_version": DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION,
         "gate": DEADLINE_POST_CANARY_RECEIPT_GATE,
         "status": "pass",
-        "revision": deadline_post_canary_marker()["revision"],
+        "revision": _post_canary_marker()["revision"],
         "checkpoint": {
             "path": "/portable/model_10099.pt",
-            "sha256": MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            "sha256": CANARY_SHA,
             "iteration": 10_099,
             "completed_updates": 10_100,
         },
-        "lineage": deadline_fallback_marker(),
-        "post_canary_authorization": deadline_post_canary_marker(),
+        "lineage": _marker(),
+        "post_canary_authorization": _post_canary_marker(),
         "strict_failure_report": {
             "path": "/portable/strict.json",
-            "sha256": "e8230cff4cd25e8af1d9931d1fcd459db112e5a34c88a20470e22c2019ec5161",
+            "sha256": CANARY_STRICT_SHA,
             "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
             "status": "fail",
             "failed_checks": ["hand_tracking_rms"],
@@ -334,7 +397,7 @@ def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
             "sha256": "d" * 64,
             "schema_version": 2,
             "status": "pass",
-            "checkpoint_sha256": MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            "checkpoint_sha256": CANARY_SHA,
             "tracking_profile": DEADLINE_CANARY_FALLBACK_PROFILE,
             "report_sha256": report_hashes,
         },
@@ -353,21 +416,35 @@ def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
     }
     assert validate_deadline_post_canary_receipt_payload(
         receipt,
-        checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+        checkpoint_sha256=CANARY_SHA,
         receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
     ) == dict(receipt)
     with pytest.raises(ValueError, match="receipt SHA-256"):
         validate_deadline_post_canary_receipt_payload(
             receipt,
-            checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            checkpoint_sha256=CANARY_SHA,
             receipt_sha256="0" * 64,
+        )
+    drifted = copy.deepcopy(receipt)
+    drifted["strict_failure_report"]["sha256"] = STRICT_SHA
+    with pytest.raises(ValueError, match="strict evidence"):
+        validate_deadline_post_canary_receipt_payload(
+            drifted,
+            checkpoint_sha256=CANARY_SHA,
+            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
+        )
+    with pytest.raises(ValueError, match="identity drifted"):
+        validate_deadline_post_canary_receipt_payload(
+            receipt,
+            checkpoint_sha256=SELECTED_SHA,
+            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
         )
     drifted = copy.deepcopy(receipt)
     drifted["fallback_tracking_report"]["checks"]["hand_tracking_p95"] = False
     with pytest.raises(ValueError, match="fallback evidence"):
         validate_deadline_post_canary_receipt_payload(
             drifted,
-            checkpoint_sha256=MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
+            checkpoint_sha256=CANARY_SHA,
             receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
         )
 
@@ -398,7 +475,7 @@ def test_validate_receipt_cli_rebuilds_10000_receipt(
     assert json.loads(capsys.readouterr().out) == expected
 
 
-def test_canary_is_exact_one_hop_and_requires_pinned_hash_to_resume() -> None:
+def test_canary_is_exact_one_hop_and_bound_to_selected_parent() -> None:
     payload = _canary_payload(
         checkpoint_path="repo://parent.pt",
         gate_path="repo://gate.json",
@@ -406,14 +483,34 @@ def test_canary_is_exact_one_hop_and_requires_pinned_hash_to_resume() -> None:
     )
     assert (
         validate_deadline_fallback_canary_payload(payload, verify_parent_files=False)
-        == deadline_fallback_marker()
+        == _marker()
     )
     drifted = copy.deepcopy(payload)
     drifted["iter"] -= 1
-    with pytest.raises(ValueError, match="descendant recipe/clock"):
+    with pytest.raises(ValueError, match="model_10099"):
         validate_deadline_fallback_canary_payload(drifted, verify_parent_files=False)
-    with pytest.raises(ValueError, match="checkpoint SHA-256"):
-        validate_deadline_fallback_resume_payload(payload, checkpoint_sha256="a" * 64)
+    drifted = copy.deepcopy(payload)
+    drifted["infos"][MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = (
+        deadline_fallback_resume_source(
+            checkpoint_path="repo://parent.pt",
+            gate_path="repo://gate.json",
+            gate_sha256="a" * 64,
+            parent_checkpoint_sha256="9" * 64,
+        )
+    )
+    with pytest.raises(ValueError, match="not the selected parent"):
+        validate_deadline_fallback_canary_payload(drifted, verify_parent_files=False)
+    drifted = copy.deepcopy(payload)
+    drifted["infos"][MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = (
+        corner_rescue_marker(
+            parent_checkpoint_sha256="7" * 64,
+            parent_strict_tracking_report_sha256="6" * 64,
+        )
+    )
+    with pytest.raises(ValueError, match="corner marker drifted"):
+        validate_deadline_fallback_canary_payload(drifted, verify_parent_files=False)
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        validate_deadline_fallback_resume_payload(payload, checkpoint_sha256="A" * 64)
 
 
 def test_parent_gate_hash_binding_and_toctou(monkeypatch, tmp_path: Path) -> None:
@@ -432,7 +529,7 @@ def test_parent_gate_hash_binding_and_toctou(monkeypatch, tmp_path: Path) -> Non
 
     def digest(path: Path) -> str:
         if Path(path) == parent:
-            return MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_CHECKPOINT_SHA256
+            return SELECTED_SHA
         return real_sha256(Path(path))
 
     monkeypatch.setattr(fallback, "sha256_file", digest)
@@ -446,7 +543,7 @@ def test_parent_gate_hash_binding_and_toctou(monkeypatch, tmp_path: Path) -> Non
         return source_payload
 
     monkeypatch.setattr(fallback.torch, "load", mutate_gate)
-    with pytest.raises(ValueError, match="changed while validating"):
+    with pytest.raises(ValueError, match="immediate-parent files changed"):
         validate_deadline_fallback_canary_payload(payload, verify_parent_files=True)
 
 
@@ -507,7 +604,7 @@ def test_shell_launchers_route_through_explicit_deadline_mode() -> None:
     for required in (
         "create-deadline-fallback",
         "--deadline-fallback",
-        "STRICT_REPORT_SHA=",
+        "SELECTED_SHA=",
         "realpath --",
         "create-receipt",
         "validate-receipt",
@@ -525,7 +622,6 @@ def test_shell_launchers_route_through_explicit_deadline_mode() -> None:
         "create-deadline-canary-fallback",
         "--deadline-canary-fallback",
         "CANARY_SHA=",
-        "STRICT_REPORT_SHA=",
         "create-canary-receipt",
         "validate-canary-receipt",
     ):

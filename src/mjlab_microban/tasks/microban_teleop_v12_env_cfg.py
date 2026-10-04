@@ -12,6 +12,7 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
+from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
@@ -22,11 +23,37 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 MICROBAN_TELEOP_V12_TASK_ID = "Mjlab-Teleop-V12-Microban"
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
 MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
-    "legacy_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v4"
+    "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5"
 )
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
-    "legacy_velocity_model14999_staged_mask_reachable_fk_elbow_minus10_raw_actions_shoulder_zero_v9"
+    "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+    "raw_prev_action_servo_range_pi_v11"
 )
+# Opt-in successor recipe: identical to v11 except that the inherited HOME
+# pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
+# whose target is active (an inactive hand's arm and every other joint keep the
+# v11 term).  It changes nothing before hand targets activate at update 7000.
+# Only its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or
+# records it; canonical gates, stage files and the exporter still accept only
+# the v11 recipe (and the corner rescue), so it needs its own fresh chain.
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
+    "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+)
+# Shared target rule of every Microban policy: target = HOME + raw_action on all
+# 18 body joints with no software clip.  The only bound is the servo's one-turn
+# goal range, modelled as an absolute target saturation at +-pi (the robot
+# saturates its goal writes at the same range).  The previous-action
+# observation stays the raw actor output.  The JSON-safe marker is what
+# checkpoints, gate reports, provenance and deployment metadata record.
+MICROBAN_TELEOP_V12_ACTION_CLIP = [-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD]
+
+
+def teleop_v12_action_clip_cfg() -> dict[str, tuple[float, float]]:
+    """Return the JointPositionAction clip dict for the servo goal range."""
+
+    return {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
+
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 1.0e-4
 MICROBAN_TELEOP_V12_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)
 
@@ -93,10 +120,10 @@ def _apply_preview_hand_tracking_stage(
 def make_microban_teleop_v12_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Build teleop with the proven legacy actor's raw recurrence semantics."""
+    """Build teleop with the source actor's raw recurrence and servo-range bound."""
 
     cfg = make_microban_teleop_env_cfg(play=play)
-    cfg.actions["joint_pos"].clip = None
+    cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
     raw_previous_action = ObservationTermCfg(
         func=velocity_mdp.last_action,
         params={"action_name": "joint_pos"},
@@ -104,8 +131,8 @@ def make_microban_teleop_v12_env_cfg(
     cfg.observations["actor"].terms["actions"] = raw_previous_action
     cfg.observations["critic"].terms["actions"] = raw_previous_action
 
-    # These terms call the bounded-action target-clip helper.  They are invalid
-    # when the legacy actor's raw output/recurrence contract is active.  The
+    # These terms call the soft-limit target-clip helper of the bounded-action
+    # contracts.  They do not describe the +-pi servo goal range used here.  The
     # measured joint-state soft-limit guard remains enabled as a reward only; it
     # does not filter or stop an action.
     for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):

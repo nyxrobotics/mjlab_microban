@@ -1,13 +1,25 @@
 # Microban teleop v12: legacy-preserving policy training
 
-この文書は旧HOME（股ピッチ -10°）で作った配備済みモデルの履歴手順である。
-`pico-v12-centered-home` ブランチでは旧v12学習スクリプトを停止している。
-旧v12タスクの肩ピッチ0°設定とcheckpoint markerは履歴用に分離する。
-共通HOMEの股ピッチは `+1.198384259489°`、足首ピッチは `-1.198384259489°` に更新されているため、このブランチの旧v12タスクで旧checkpointを再開しない。
-実機Aボタン初期姿勢に揃えた新HOME（体幹ピッチ `0°`、肩ピッチ `0°`）で全重みを再学習する場合は
-[`teleop_upright_fullbody_training.md`](teleop_upright_fullbody_training.md)を使う。
+## centered HOME + servo 範囲（±π）版（branch `track-centered-home-clip`）
 
-この文書は、実績のある joystick 歩行 actor を壊さずに PICO の HMD・手・足の目標を追加する手順を固定する。v12 の canonical policy と、早期確認専用の simulation preview は別物である。preview は実機配備できない。
+このブランチの v12 は旧HOME（股ピッチ -10°）の `xc330_velocity/model_14999.pt` ではなく、
+共通の centered HOME（`HOME_FRAME`: 股ピッチ `+1.198384259489°`、足首ピッチ `-1.198384259489°`、肩ピッチ `0°`）で学習した
+`Mjlab-Velocity-Microban` の checkpoint を凍結 source とする。
+
+- source は `scripts/train_microban_teleop_v12.sh start --source PATH` で指定する。SHA-256・iteration・normalizer count は
+  bootstrap provenance（schema 2）に記録され、save/resume/gate のたびに再ハッシュされる。source ファイルは動かさないこと。
+- start は source の 9x300 probe（`artifacts/legacy_teleop_probe/velocity_<sha16>_teleop83_raw_9x300.json`）を毎回生成し、
+  9/9 完走・転倒0・方向8/8・実関節 soft-limit overshoot ≤ 5° を満たさなければ bootstrap を拒否する。
+- action target は全18関節で `HOME + raw_action * 1.0`。ソフトウェア clip は無い。唯一の上下限は XC330 の
+  goal position 範囲（1回転、raw 0..4095 = `[-π, π - 2π/4096]` rad）で、学習側はこれを絶対 target の ±π 飽和
+  （`SERVO_TARGET_RANGE_RAD`）として模擬する。previous-action 観測は actor の raw 出力のまま。
+  checkpoint/receipt/gate の `action_clip` は `[-π, π]`（`[-3.141592653589793, 3.141592653589793]`）。
+  以前の ±1.57 clip は XC330 のトルクを約70%に制限し歩行学習が停滞したため廃止（training commit `94d2946`）。
+- recipe `centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi_v11`、
+  HOME revision `centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5`。旧 checkpoint（旧HOME、±1.57 clip の v10 recipe を含む）は再開できない。
+- 新規 chain は bilateral site order 修正後に bootstrap するため model-9200 の LR migration を持たない。exporter は
+  `v12_lr_order_migration_revision=none_corrected_site_order_from_bootstrap_v1` を書く。
+- 以下の節は旧HOMEで作った配備済みモデルの履歴手順である（stage 境界・gate の内容は同じ）。
 
 ## 固定した契約
 

@@ -1,4 +1,4 @@
-"""CPU-only regression tests for the pinned model9900 corner rescue."""
+"""CPU-only regression tests for the recorded-parent model9900 corner rescue."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_COMMON_STEP,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
@@ -38,6 +37,17 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
+
+PARENT_SHA = "a" * 64
+PARENT_REPORT_SHA = "b" * 64
+
+
+def _marker() -> dict:
+    return corner_rescue_marker(
+        parent_checkpoint_sha256=PARENT_SHA,
+        parent_strict_tracking_report_sha256=PARENT_REPORT_SHA,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts/train_microban_teleop_v12_corner_rescue.sh"
@@ -119,7 +129,7 @@ def _final_infos() -> dict:
         "env_state": {
             "common_step_counter": MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP
         },
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: corner_rescue_marker(),
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: _marker(),
     }
 
 
@@ -132,7 +142,7 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         self.assertEqual(
             corner_pair_selection(selector).tolist(), [1, 1, 2, 2, 0, 0]
         )
-        marker = corner_rescue_marker()
+        marker = _marker()
         self.assertEqual(
             marker["sampler_probabilities"],
             {
@@ -158,14 +168,14 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
     def test_parent_requires_exact_optimizer_clock_and_foot_state(self) -> None:
         payload = _parent_payload()
         validate_corner_rescue_parent_payload(
-            payload, checkpoint_sha256=MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256
+            payload, checkpoint_sha256=PARENT_SHA
         )
         drifted = copy.deepcopy(payload)
         drifted["optimizer_state_dict"]["state"][2]["step"] += 1
         with self.assertRaisesRegex(ValueError, "optimizer clock drifted"):
             validate_corner_rescue_parent_payload(
                 drifted,
-                checkpoint_sha256=MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_SHA256,
+                checkpoint_sha256=PARENT_SHA,
             )
         drifted = copy.deepcopy(payload)
         drifted["actor_state_dict"]["obs_normalizer._std"][0, 69] += 1.0e-4
@@ -205,12 +215,46 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
                 tampered,
                 iteration=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
             )
+        for field, value in (
+            ("parent_checkpoint_sha256", "A" * 64),
+            ("parent_strict_tracking_report_sha256", "b" * 63),
+        ):
+            tampered = copy.deepcopy(infos)
+            tampered[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY][field] = value
+            with self.assertRaisesRegex(ValueError, "lineage marker drifted"):
+                validate_corner_rescue_marker(
+                    tampered,
+                    iteration=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
+                )
+
+    def test_marker_records_parent_and_servo_range_clip(self) -> None:
+        marker = _marker()
+        self.assertEqual(marker["parent_checkpoint_sha256"], PARENT_SHA)
+        self.assertEqual(
+            marker["parent_strict_tracking_report_sha256"], PARENT_REPORT_SHA
+        )
+        self.assertEqual(marker["parent_strict_failed_checks"], ["hand_tracking_rms"])
+        self.assertEqual(
+            marker["unchanged_contract"]["action_clip"],
+            [-3.141592653589793, 3.141592653589793],
+        )
+        with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+            corner_rescue_marker(
+                parent_checkpoint_sha256="not-a-hash",
+                parent_strict_tracking_report_sha256=PARENT_REPORT_SHA,
+            )
+
+    def test_parent_payload_requires_wellformed_sha(self) -> None:
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            validate_corner_rescue_parent_payload(
+                _parent_payload(), checkpoint_sha256="x" * 64
+            )
 
     def test_canonical_consumers_accept_only_final_rescue_and_descendants(self) -> None:
         final = _final_infos()
         self.assertEqual(
             validate_corner_rescue_canonical_lineage(final, iteration=9_999),
-            corner_rescue_marker(),
+            _marker(),
         )
         with self.assertRaisesRegex(ValueError, "Only final model9999"):
             validate_corner_rescue_canonical_lineage(final, iteration=9_998)
@@ -221,12 +265,12 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         descendant["env_state"]["common_step_counter"] = 10_001 * 24
         self.assertEqual(
             validate_corner_rescue_canonical_lineage(descendant, iteration=10_000),
-            corner_rescue_marker(),
+            _marker(),
         )
         with self.assertRaisesRegex(ValueError, "descendant clock"):
             validate_corner_rescue_canonical_lineage(descendant, iteration=9_999)
 
-    def test_launcher_is_syntax_checked_and_fully_pinned(self) -> None:
+    def test_launcher_is_syntax_checked_and_records_parent(self) -> None:
         subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
         help_text = subprocess.run(
             ["bash", str(LAUNCHER), "--help"],
@@ -236,12 +280,12 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         ).stdout
         self.assertIn("exactly 99", help_text)
         self.assertIn("PARENT_TRACKING_REPORT", help_text)
-        self.assertIn("SUPERSEDED_V1_TRACKING_REPORT", help_text)
         launcher = LAUNCHER.read_text(encoding="utf-8")
         for fixed in (
             "mjlab_microban_teleop_v12\"",
-            "PARENT_TRACKING_SHA=",
-            "SUPERSEDED_V1_TRACKING_SHA=",
+            'REPORT_NAME="parent_strict_tracking.json"',
+            "validate-parent",
+            "corner_rescue_seed_${source_sha:0:16}",
             "--env.scene.num-envs 2048",
             "--env.seed 42",
             "--agent.seed 42",
@@ -249,6 +293,27 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
             'load-checkpoint "^model_${SOURCE_ITERATION}[.]pt$"',
         ):
             self.assertIn(fixed, launcher)
+
+    def test_home_pose_accepts_rescue_recipe_only_with_current_source(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+            TELEOP_V12_HOME_POSE_INFO_KEY,
+            teleop_v12_home_pose_marker,
+            validate_teleop_v12_home_pose,
+        )
+
+        infos = _final_infos()
+        infos[TELEOP_V12_HOME_POSE_INFO_KEY] = teleop_v12_home_pose_marker()
+        validate_teleop_v12_home_pose(infos)
+        drifted = copy.deepcopy(infos)
+        drifted[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY][
+            "source_recipe_revision"
+        ] = "old_home_recipe"
+        with self.assertRaisesRegex(ValueError, "current HOME pose"):
+            validate_teleop_v12_home_pose(drifted)
+        drifted = copy.deepcopy(infos)
+        drifted["microban_teleop_recipe_revision"] = "unknown_recipe"
+        with self.assertRaisesRegex(ValueError, "current HOME pose"):
+            validate_teleop_v12_home_pose(drifted)
 
 
 if __name__ == "__main__":

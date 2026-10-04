@@ -8,6 +8,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+)
 from mjlab_microban.tasks.microban_teleop_provenance import (
     collect_training_source_manifest,
 )
@@ -602,7 +605,7 @@ def _validate_child_report(
         "seed": 42,
         "steps": 300,
         "settle_steps": 50,
-        "action_clip": None,
+        "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
         "previous_action": "raw_actor_output",
     }
     if (

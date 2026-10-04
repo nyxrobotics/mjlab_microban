@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import math
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,7 +14,6 @@ from tensordict import TensorDict
 
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
@@ -21,22 +23,31 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
 )
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+)
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    PINNED_LEGACY_TELEOP_PROBE_SHA256,
     assert_actor_frozen_against_source,
     bootstrap_legacy_actor,
     inspect_legacy_velocity_checkpoint,
     serialize_bootstrap_provenance,
+    sha256_file,
     validate_bootstrap_provenance,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MicrobanTeleopV12RlCfg,
     make_microban_teleop_v12_env_cfg,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT = ROOT / "checkpoints/xc330_velocity/model_14999.pt"
-RECEIPT = ROOT / "artifacts/legacy_teleop_probe/model_14999_teleop83_raw_9x300.json"
+# The frozen source is now any centered-HOME velocity checkpoint chosen on the
+# command line, so these CPU tests build a synthetic source and a receipt with
+# the exact passing 9x300 schema instead of pinning one historical file.
+_TEMPORARY = tempfile.TemporaryDirectory(prefix="teleop_v12_bootstrap_test_")
+CHECKPOINT = Path(_TEMPORARY.name) / "model_499.pt"
+RECEIPT = Path(_TEMPORARY.name) / "probe_9x300.json"
 
 
 def _observations(width: int) -> TensorDict:
@@ -75,6 +86,79 @@ def _target_model() -> LegacyAdapterTeleopActor:
             "std_type": "scalar",
         },
     )
+
+
+def _write_synthetic_source() -> tuple[str, str]:
+    torch.manual_seed(7)
+    source = _source_model()
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.normal_(0.0, 0.1)
+    state = source.state_dict()
+    state["obs_normalizer._mean"].normal_(0.0, 0.3)
+    state["obs_normalizer._var"].uniform_(0.2, 2.0)
+    state["obs_normalizer._std"].copy_(state["obs_normalizer._var"].sqrt())
+    state["obs_normalizer.count"].fill_(500 * 4096 * 24)
+    torch.save({"actor_state_dict": state, "iter": 499, "infos": {}}, CHECKPOINT)
+    source_sha256 = sha256_file(CHECKPOINT)
+    result = {
+        "completed": True,
+        "fell": False,
+        "nonfinite": None,
+        "executed_steps": 300,
+        "raw_action_recurrence_verified_steps": 300,
+        "neutral_foot_hand_target_verified_steps": 300,
+        "maximum_actual_soft_limit_violation_rad": 0.0,
+    }
+    receipt = {
+        "probe": "legacy_velocity_actor_in_nominal_teleop_env_v1",
+        "checkpoint": {"path": str(CHECKPOINT), "sha256": source_sha256},
+        "settings": {
+            "seed": 42,
+            "steps": 300,
+            "settle_steps": 50,
+            "step_dt_s": 0.02,
+            "action_clip": MICROBAN_TELEOP_V12_ACTION_CLIP,
+            "previous_action": "raw_actor_output",
+            "foot_target": "exact_zero_inactive",
+            "hand_target": "exact_zero_inactive",
+        },
+        "mapping": {
+            "legacy_observation_width": 63,
+            "teleop_observation_width": 83,
+            "legacy_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+            "teleop_joint_names": [
+                *MICROBAN_HMD_JOINT_NAMES,
+                *MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+            ],
+            "teleop_joint_indices_for_legacy": list(range(3, 21)),
+            "legacy_action_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
+            "teleop_action_indices_for_legacy": list(range(18)),
+            "legacy_source_columns_to_teleop_target_columns": [
+                list(pair) for pair in LEGACY_TO_TELEOP_OBSERVATION_INDEX
+            ],
+            "new_teleop_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+        },
+        "summary": {
+            "scenario_count": 9,
+            "completed_scenario_count": 9,
+            "fall_scenario_count": 0,
+            "nonfinite_scenario_count": 0,
+            "actual_soft_limit_violation_scenario_count": 0,
+            "directionally_correct_scenario_count": 8,
+            "directional_scenario_count": 8,
+            "neutral_target_contract_all_steps": True,
+            "raw_action_recurrence_all_steps": True,
+        },
+        "results": [dict(result) for _ in range(9)],
+    }
+    RECEIPT.write_text(json.dumps(receipt), encoding="utf-8")
+    return source_sha256, sha256_file(RECEIPT)
+
+
+LEGACY_VELOCITY_CHECKPOINT_SHA256, PINNED_LEGACY_TELEOP_PROBE_SHA256 = (
+    _write_synthetic_source()
+)
 
 
 class TeleopV12BootstrapTest(unittest.TestCase):
@@ -168,9 +252,39 @@ class TeleopV12BootstrapTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "pinned legacy"):
             assert_actor_frozen_against_source(target, provenance)
 
+    def test_receipt_with_unclipped_settings_is_rejected(self) -> None:
+        report = json.loads(RECEIPT.read_text(encoding="utf-8"))
+        report["settings"]["action_clip"] = None
+        stale = Path(_TEMPORARY.name) / "stale_probe.json"
+        stale.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "settings drifted"):
+            bootstrap_legacy_actor(
+                _target_model(),
+                CHECKPOINT,
+                LEGACY_VELOCITY_CHECKPOINT_SHA256,
+                stale,
+                sha256_file(stale),
+            )
+
+    def test_source_iteration_and_count_are_recorded_not_pinned(self) -> None:
+        identity, _state = inspect_legacy_velocity_checkpoint(
+            CHECKPOINT, LEGACY_VELOCITY_CHECKPOINT_SHA256
+        )
+        self.assertEqual(identity.iteration, 499)
+        self.assertEqual(identity.normalizer_count, 500 * 4096 * 24)
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            inspect_legacy_velocity_checkpoint(CHECKPOINT, "0" * 64)
+
     def test_v12_environment_and_runner_config_use_raw_legacy_semantics(self) -> None:
         cfg = make_microban_teleop_v12_env_cfg(play=True)
-        self.assertIsNone(cfg.actions["joint_pos"].clip)
+        # No software clip: only the servo's one-turn goal range bounds the
+        # absolute target.
+        self.assertEqual(
+            cfg.actions["joint_pos"].clip, {r".*": (-math.pi, math.pi)}
+        )
+        self.assertEqual(MICROBAN_TELEOP_V12_ACTION_CLIP, [-math.pi, math.pi])
+        self.assertIn("servo_range_pi", MICROBAN_TELEOP_V12_RECIPE_REVISION)
+        self.assertNotIn("1p57", MICROBAN_TELEOP_V12_RECIPE_REVISION)
         self.assertNotIn("target_clip_excess", cfg.rewards)
         self.assertNotIn("target_near_limit", cfg.rewards)
         self.assertNotIn("raw_action_l2", cfg.rewards)

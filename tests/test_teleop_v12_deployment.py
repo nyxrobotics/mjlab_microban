@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,14 +23,12 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_ACTOR_STATE_KEYS,
-    LEGACY_VELOCITY_CHECKPOINT_SHA256,
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
-    PINNED_LEGACY_TELEOP_PROBE_SHA256,
     LegacyTeleopProbeIdentity,
     LegacyVelocitySourceIdentity,
     TeleopV12BootstrapProvenance,
@@ -47,11 +46,24 @@ from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     MIGRATION_INFO_KEY,
     MIGRATION_REVISION,
 )
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
+)
+from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    teleop_v12_home_pose_marker,
+)
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD,
 )
+
+
+# Synthetic identities: the velocity source is chosen per chain.
+LEGACY_VELOCITY_CHECKPOINT_SHA256 = "1" * 64
+PINNED_LEGACY_TELEOP_PROBE_SHA256 = "2" * 64
 
 
 def _sha(path: Path) -> str:
@@ -60,9 +72,9 @@ def _sha(path: Path) -> str:
 
 def _bootstrap() -> TeleopV12BootstrapProvenance:
     return TeleopV12BootstrapProvenance(
-        schema_version=1,
+        schema_version=2,
         source=LegacyVelocitySourceIdentity(
-            path="repo://checkpoints/xc330_velocity/model_14999.pt",
+            path="/runs/velocity/model_14999.pt",
             sha256=LEGACY_VELOCITY_CHECKPOINT_SHA256,
             iteration=14_999,
             normalizer_count=1_474_560_000,
@@ -81,7 +93,7 @@ def _bootstrap() -> TeleopV12BootstrapProvenance:
         target_actor_topology=TELEOP_V12_ACTOR_TOPOLOGY,
         normalizer_eps=LEGACY_VELOCITY_NORMALIZER_EPS,
         previous_action_semantics="raw_actor_output",
-        action_clip=None,
+        action_clip=list(MICROBAN_TELEOP_V12_ACTION_CLIP),
         frozen_tensors=tuple(
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
@@ -175,6 +187,7 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
         "status": "pass",
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": 14_999,
         "completed_updates": 15_000,
@@ -234,6 +247,8 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         },
     }
     infos = {
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "trainable_actor_parameters": ["mlp.0.weight"],
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         "active_actor_columns_at_save": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
@@ -273,17 +288,46 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
     checkpoint = tmp_path / "model_14999.pt"
     gate, *_ = _evidence(tmp_path)
     canonical_infos: dict[str, object] = {}
-    assert (
-        deployment._expected_final_tracking_profile(canonical_infos)
-        == deployment.FINAL_PROFILE
-    )
+    canonical = deployment._expected_final_tracking_profile(canonical_infos)
+    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
+    # The canonical final profile uses the deployed model's accuracy limits; a
+    # gate made under the stricter legacy final profile is still accepted.
+    for accepted in (
+        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
+        deployment.FINAL_PROFILE,
+    ):
+        gate["tracking_profile"] = accepted
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=canonical,
+        )
+    for rejected in (deployment.DEADLINE_FINAL_FALLBACK_PROFILE, None):
+        gate["tracking_profile"] = rejected
+        with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+            deployment._require_final_gate(
+                gate,
+                checkpoint=checkpoint,
+                checkpoint_sha256="1" * 64,
+                expected_tracking_profile=canonical,
+            )
 
+    lineage = deadline_fallback_marker(
+        selected_checkpoint_sha256="1" * 64,
+        corner_marker_sha256="2" * 64,
+        strict_report_sha256="3" * 64,
+        strict_hand_tracking_m={"maximum_rms": 0.034, "maximum_p95": 0.04},
+    )
     deadline_infos = {
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
-            deadline_fallback_marker()
-        ),
+        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage,
         deployment.MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY: (
-            deadline_post_canary_marker()
+            deadline_post_canary_marker(
+                canary_checkpoint_sha256="4" * 64,
+                strict_report_sha256="5" * 64,
+                strict_failed_checks=["hand_tracking_rms"],
+                strict_hand_tracking_m={"maximum_rms": 0.032, "maximum_p95": 0.04},
+            )
         ),
     }
     expected = deployment._expected_final_tracking_profile(deadline_infos)
@@ -305,11 +349,7 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
             expected_tracking_profile=expected,
         )
 
-    missing_post = {
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: (
-            deadline_fallback_marker()
-        )
-    }
+    missing_post = {deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage}
     with pytest.raises(ValueError, match="missing post-canary lineage"):
         deployment._expected_final_tracking_profile(missing_post)
 
@@ -372,6 +412,58 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, -10.0, -10.0],
     ]
     assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
+    assert metadata["action_clip_semantics"] == (
+        "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
+        "all_body_joints_radians"
+    )
+    assert metadata["action_target_semantics"] == (
+        "default_joint_pos_plus_raw_action_times_scale_saturated_at_action_clip"
+    )
+    assert metadata["runtime_action_semantics"] == (
+        "raw_default_plus_scale_then_servo_goal_range_saturation_v3"
+    )
+    # Written at full precision: a 3-decimal "3.142" would be wider than the
+    # servo goal range the robot enforces.
+    for key, sign in (("action_clip_lower", -1.0), ("action_clip_upper", 1.0)):
+        assert isinstance(metadata[key], str)
+        assert deployment._wire_metadata_value(metadata[key]) == metadata[key]
+        assert [float(value) for value in metadata[key].split(",")] == [
+            sign * math.pi
+        ] * 18
+    assert metadata["physical_motor_target_guard_semantics"] == (
+        "finite_target_then_servo_goal_range_saturation_pi_v3"
+    )
+
+
+def test_fresh_corrected_chain_needs_no_lr_order_migration(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model_14999.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate, locomotion, tracking, onnx_report, infos = _evidence(tmp_path)
+    infos.pop(MIGRATION_INFO_KEY)
+    gate["checkpoint_sha256"] = _sha(checkpoint)
+    metadata = deployment.build_v12_deployment_metadata(
+        checkpoint=checkpoint,
+        checkpoint_sha256=_sha(checkpoint),
+        gate_path=gate_path,
+        gate=gate,
+        infos=infos,
+        bootstrap=_bootstrap(),
+        locomotion=locomotion,
+        tracking=tracking,
+        onnx_report=onnx_report,
+        packager_parity={
+            "reference_maximum_absolute_error": 1.0e-6,
+            "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
+        },
+        microban_source_identity=_microban_identity(),
+    )
+    assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
+    assert metadata["v12_lr_order_migration_revision"] == (
+        deployment.LR_ORDER_NO_MIGRATION_REVISION
+    )
+    assert "v12_lr_order_migration_strategy" not in metadata
 
 
 def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
@@ -384,7 +476,6 @@ def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
 
     for case, mutate in (
         ("raw_pre_fix", lambda value: value.clear()),
-        ("fresh_without_migration", lambda value: value.pop(MIGRATION_INFO_KEY)),
         (
             "missing_top_level_revision",
             lambda value: value.pop(BILATERAL_SITE_ORDER_INFO_KEY),
@@ -408,6 +499,10 @@ def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
             (TypeError, ValueError), match="bilateral|predates|migration"
         ):
             deployment._require_deployable_lr_order_lineage(changed)
+
+    fresh = deepcopy(infos)
+    fresh.pop(MIGRATION_INFO_KEY)
+    assert deployment._require_deployable_lr_order_lineage(fresh) is None
 
 
 def test_hashed_report_loader_rejects_changed_evidence(tmp_path: Path) -> None:

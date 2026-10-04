@@ -23,6 +23,10 @@ from mjlab.utils.nan_guard import NanGuard
 from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
+from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
+    teleop_v12_action_clip_cfg,
+)
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.robot.microban_hand_fk import microban_hand_fk_metadata
 from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
@@ -188,8 +192,11 @@ def _evaluate_targeted_scenario(
     observations = _patch_initial_command_observation(wrapped.get_observations(), env)
     robot = env.scene["robot"]
     action_term = env.action_manager.get_term("joint_pos")
-    if action_term.cfg.clip is not None or wrapped.clip_actions is not None:
-        raise ValueError("Preview precheck requires raw, unclipped actions")
+    if (
+        action_term.cfg.clip != teleop_v12_action_clip_cfg()
+        or wrapped.clip_actions is not None
+    ):
+        raise ValueError("Preview precheck requires raw actions bounded only by the servo goal range (+-pi)")
     action_slice = _action_observation_slice(env)
     hmd_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
     hmd = hmd_cfg.func
@@ -547,7 +554,7 @@ def run_preview_precheck(
             "settle_steps": 50,
             "perturbation": True,
             "moving_hmd": "forced_non_neutral",
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),

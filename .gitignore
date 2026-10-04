@@ -6,6 +6,9 @@ src/mjlab_microban/robot/microban/scad/
 .venv/*
 
 logs/*
+# Frozen velocity sources referenced as repo://checkpoints/...; contract-v12
+# provenance records and re-hashes them, so they stay local like logs/.
+checkpoints/
 wandb/*
 policy.onnx
 # Generated evaluation artifacts stay local, except for the immutable source

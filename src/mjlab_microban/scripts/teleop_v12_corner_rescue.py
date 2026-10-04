@@ -1,4 +1,4 @@
-"""Authenticate the pinned model9900 targeted corner-pair rescue route."""
+"""Authenticate the recorded-parent model9900 targeted corner-pair rescue route."""
 
 from __future__ import annotations
 
@@ -23,13 +23,10 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMPLETED_UPDATES,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256,
     corner_rescue_marker,
     validate_corner_rescue_marker,
 )
@@ -37,6 +34,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
     validate_corner_rescue_parent_payload,
+    validate_corner_rescue_parent_report,
 )
 from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     validate_bilateral_site_order_checkpoint,
@@ -59,10 +57,8 @@ def _load_checkpoint(path: Path) -> tuple[Path, str, dict[str, Any]]:
     return resolved, digest, payload
 
 
-def validate_parent_checkpoint(
-    path: Path, tracking_report: Path, superseded_v1_tracking_report: Path
-) -> dict[str, Any]:
-    """Authenticate the exact corrected model9900 before simulator startup."""
+def validate_parent_checkpoint(path: Path, tracking_report: Path) -> dict[str, Any]:
+    """Authenticate a canonical model9900 and its strict report before startup."""
 
     resolved, digest, payload = _load_checkpoint(path)
     validate_corner_rescue_parent_payload(payload, checkpoint_sha256=digest)
@@ -74,50 +70,11 @@ def validate_parent_checkpoint(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
     report_path = tracking_report.expanduser().resolve(strict=True)
-    report_digest = sha256_file(report_path)
-    if report_digest != MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_TRACKING_SHA256:
-        raise ValueError("Pinned parent strict tracking report SHA-256 mismatch")
-    report = _load_json(report_path)
-    expected_identity = {
-        "sha256": digest,
-        "iteration": payload["iter"],
-        "completed_updates": payload["iter"] + 1,
-    }
-    _validate_tracking_report(
-        report,
-        expected_identity,
-        profile_override=HMD_HAND_PROFILE,
-        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
+    report_digest, failed = validate_corner_rescue_parent_report(
+        report_path, checkpoint_sha256=digest, iteration=payload["iter"]
     )
-    failed = sorted(name for name, passed in report["checks"].items() if not passed)
-    if report.get("status") != "fail" or failed != ["hand_tracking_rms"]:
-        raise ValueError(
-            "Pinned parent report must fail only the strict hand RMS check"
-        )
-    v1_report_path = superseded_v1_tracking_report.expanduser().resolve(strict=True)
-    v1_report_digest = sha256_file(v1_report_path)
-    if v1_report_digest != MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_TRACKING_SHA256:
-        raise ValueError("Pinned superseded-v1 tracking report SHA-256 mismatch")
-    v1_report = _load_json(v1_report_path)
-    _validate_tracking_report(
-        v1_report,
-        {
-            "sha256": MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256,
-            "iteration": MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
-            "completed_updates": (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMPLETED_UPDATES
-            ),
-        },
-        profile_override=HMD_HAND_PROFILE,
-        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
-    )
-    v1_failed = sorted(
-        name for name, passed in v1_report["checks"].items() if not passed
-    )
-    if v1_report.get("status") != "fail" or v1_failed != ["hand_tracking_rms"]:
-        raise ValueError("Superseded v1 report must fail only strict hand RMS")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "gate": "microban_teleop_v12_corner_pair_rescue_parent",
         "status": "pass",
         "checkpoint": {
@@ -129,19 +86,13 @@ def validate_parent_checkpoint(
         "strict_tracking_report": {
             "path": str(report_path),
             "sha256": report_digest,
-            "status": report["status"],
+            "status": "fail",
             "failed_checks": failed,
         },
-        "superseded_v1_tracking_report": {
-            "path": str(v1_report_path),
-            "sha256": v1_report_digest,
-            "checkpoint_sha256": (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_V1_CHECKPOINT_SHA256
-            ),
-            "status": v1_report["status"],
-            "failed_checks": v1_failed,
-        },
-        "target": corner_rescue_marker(),
+        "target": corner_rescue_marker(
+            parent_checkpoint_sha256=digest,
+            parent_strict_tracking_report_sha256=report_digest,
+        ),
     }
 
 
@@ -284,7 +235,6 @@ def build_parser() -> argparse.ArgumentParser:
     parent = commands.add_parser("validate-parent")
     parent.add_argument("checkpoint", type=Path)
     parent.add_argument("tracking_report", type=Path)
-    parent.add_argument("superseded_v1_tracking_report", type=Path)
     for name in ("create-receipt", "validate-receipt"):
         command = commands.add_parser(name)
         if name == "validate-receipt":
@@ -301,11 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "validate-parent":
-        result = validate_parent_checkpoint(
-            args.checkpoint,
-            args.tracking_report,
-            args.superseded_v1_tracking_report,
-        )
+        result = validate_parent_checkpoint(args.checkpoint, args.tracking_report)
     elif args.command == "create-receipt":
         result = create_receipt(
             checkpoint=args.checkpoint,

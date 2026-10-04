@@ -12,6 +12,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_HOME_POSE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
@@ -60,13 +61,36 @@ def teleop_v12_home_pose_marker() -> dict[str, Any]:
     }
 
 
-def validate_teleop_v12_home_pose(infos: Mapping[str, Any]) -> dict[str, Any]:
-    """Reject old or relabeled checkpoints before loading actor or optimizer state."""
+def validate_teleop_v12_home_pose(
+    infos: Mapping[str, Any], *, allow_hand_pose_release_recipe: bool = False
+) -> dict[str, Any]:
+    """Reject old or relabeled checkpoints before loading actor or optimizer state.
+
+    ``allow_hand_pose_release_recipe`` additionally accepts the opt-in
+    active-hand arm pose-release recipe.  Only its own runner and explicitly
+    flagged evaluators pass it; stage gates and the exporter never do.
+    """
 
     if not isinstance(infos, Mapping):
         raise TypeError("Contract-v12 checkpoint infos are malformed")
-    if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_RECIPE_REVISION
+    # The corner-rescue recipe is the current recipe with only the hand
+    # sampler changed; its marker must name the current recipe as its source.
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    )
+
+    recipe = infos.get("microban_teleop_recipe_revision")
+    rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    if allow_hand_pose_release_recipe and recipe == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        if rescue is not None:
+            raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+    elif recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION and not (
+        recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+        and isinstance(rescue, Mapping)
+        and rescue.get("source_recipe_revision") == MICROBAN_TELEOP_V12_RECIPE_REVISION
     ):
         raise ValueError("Checkpoint recipe does not match the current HOME pose")
     expected = teleop_v12_home_pose_marker()

@@ -52,7 +52,6 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     validate_corner_rescue_lineage_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
@@ -78,6 +77,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     deadline_post_canary_resume_source as build_deadline_post_canary_resume_source,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+    MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
@@ -252,8 +252,16 @@ def validate_teleop_v12_environment_contract(env) -> None:
         offset, expected_offset
     ):
         raise ValueError("Contract-v12 action offset drifted from the default pose")
-    if getattr(action, "_clip", None) is not None:
-        raise ValueError("Contract-v12 action term must not clip raw actor output")
+    clip = getattr(action, "_clip", None)
+    if clip is None or action.cfg.clip is None:
+        raise ValueError("Contract-v12 action term must saturate at the servo goal range")
+    expected_clip = torch.tensor(
+        MICROBAN_TELEOP_V12_ACTION_CLIP, device=clip.device, dtype=clip.dtype
+    ).expand(MICROBAN_TELEOP_ACTION_WIDTH, 2)
+    if tuple(clip.shape[1:]) != (MICROBAN_TELEOP_ACTION_WIDTH, 2) or not bool(
+        torch.all(clip == expected_clip.unsqueeze(0)).item()
+    ):
+        raise ValueError("Contract-v12 action target bound drifted from the servo goal range (+-pi)")
 
 
 def _atomic_torch_save(payload: object, destination: Path) -> None:
@@ -285,6 +293,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     allow_deadline_canary_consumer = False
     consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
     consumer_requires_live_candidate = True
+    # Only the opt-in active-hand arm pose-release runner may load or write
+    # that recipe; the canonical runner keeps refusing it.
+    accepts_hand_pose_release_recipe = False
 
     def __init__(
         self,
@@ -463,7 +474,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
             TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
             "previous_action_semantics": "raw_actor_output",
-            "action_clip": None,
+            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "trainable_actor_parameters": ["mlp.0.weight"],
             "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
             "adapter_gradient_schedule_revision": (
@@ -697,7 +708,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
             raise ValueError("Checkpoint is not contract-v12")
-        validate_teleop_v12_home_pose(infos)
+        validate_teleop_v12_home_pose(
+            infos,
+            allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
+        )
         if self.deadline_fallback_resume:
             deadline_fallback = validate_deadline_fallback_resume_payload(
                 payload, checkpoint_sha256=before_sha256
@@ -714,9 +728,16 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             from mjlab_microban.scripts.teleop_v12_stage import validate_gate
 
             gate = validate_gate(deadline_gate_path, resolved)  # type: ignore[arg-type]
-            if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) != (
-                deadline_fallback
-            ):
+            gate_marker = gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
+            if deadline_fallback is None:
+                # Selected rescue model_9999: its marker exists only in the gate,
+                # which must select exactly these bytes.
+                deadline_fallback = validate_deadline_fallback_marker(gate_marker)
+                if deadline_fallback["selected_checkpoint"]["sha256"] != (
+                    before_sha256
+                ):
+                    raise ValueError("Resume gate does not select this checkpoint")
+            elif gate_marker != deadline_fallback:
                 raise ValueError("Resume gate does not authorize deadline fallback")
             deadline_post_canary_value = gate.get(
                 MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
@@ -725,6 +746,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 deadline_post_canary = validate_deadline_post_canary_marker(
                     deadline_post_canary_value
                 )
+                if deadline_post_canary["parent_checkpoint"]["sha256"] != (
+                    before_sha256
+                ):
+                    raise ValueError("Post-canary gate does not name this checkpoint")
                 deadline_resume_source = validate_deadline_fallback_resume_source(
                     infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
                 )
@@ -733,17 +758,19 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                         checkpoint_path=portable_bootstrap_artifact_path(resolved),
                         gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
                         gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                        parent_checkpoint_sha256=before_sha256,
                     )
                 )
             else:
                 if deadline_post_canary_value is not None:
-                    raise ValueError("Selected-v1 gate cannot authorize post-canary")
+                    raise ValueError("Selected-rescue gate cannot authorize post-canary")
                 deadline_post_canary = None
                 deadline_post_canary_resume_source = None
                 deadline_resume_source = deadline_fallback_resume_source(
                     checkpoint_path=portable_bootstrap_artifact_path(resolved),
                     gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
                     gate_sha256=self.deadline_fallback_resume_gate_sha256,
+                    parent_checkpoint_sha256=before_sha256,
                 )
             corner_rescue = None
         else:
@@ -765,8 +792,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 and self.require_immutable_checkpoint_bytes
                 and isinstance(path, bytes)
                 and iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-                and before_sha256
-                == MICROBAN_TELEOP_V12_DEADLINE_CANARY_CHECKPOINT_SHA256
             )
             if deadline_descendant is not None and not deadline_canary_consumer:
                 raise ValueError(
@@ -786,7 +811,11 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 deadline_post_canary = None
                 deadline_post_canary_resume_source = None
                 corner_rescue = validate_corner_rescue_canonical_lineage(
-                    infos, iteration=iteration
+                    infos,
+                    iteration=iteration,
+                    allow_hand_pose_release_recipe=(
+                        self.accepts_hand_pose_release_recipe
+                    ),
                 )
                 if infos.get("microban_teleop_recipe_revision") == (
                     MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
@@ -800,7 +829,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                         ),
                     )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
-            infos.get("action_clip", object()) is not None
+            infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP
         ):
             raise ValueError("Checkpoint raw-action semantics drifted")
         if infos.get("adapter_gradient_schedule_revision") != (
