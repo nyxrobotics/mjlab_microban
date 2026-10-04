@@ -41,9 +41,6 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.nan_guard import NanGuard
 from mjlab.utils.torch import configure_torch_backends
 
-from mjlab_microban.robot.microban_hand_fk import (
-    MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M,
-)
 from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -396,9 +393,7 @@ def validate_scenarios(scenarios: tuple[EvaluationScenario, ...]) -> None:
     both_feet_limit = (
         torch.tensor(SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M) * TARGET_SAFETY_MARGIN
     )
-    # Hands: the receiver's live limit (0.9 * 0.08 m) so the HOME-levelled
-    # reachable FK poses (up to 70.6 mm forward) validate.
-    hand_limit = torch.tensor(MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M)
+    hand_limit = torch.tensor(HAND_TARGET_LIMIT_M) * TARGET_SAFETY_MARGIN
     for scenario in scenarios:
         vx, vy, yaw = scenario.twist
         yaw_limit = (

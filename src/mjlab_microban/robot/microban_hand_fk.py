@@ -82,9 +82,12 @@ MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
 # target-frame grid values.  These are actor-normalizer denominators, not the
 # wire protocol's +-0.08 m command envelope.  The lean moves reach from
 # trunk-z into levelled-x: forward-up hands reach x = 70.6 mm (trunk frame:
-# 62.9 mm), so the receiver's live margin is 0.9 * 0.08 = 72 mm (it was
-# 0.8 * 0.08 = 64 mm, which the levelled reach exceeds); the reachable subset
-# stays strictly inside it.
+# 62.9 mm), past the 0.8 * 0.08 = 64 mm live margin, so the validated live
+# limit for this contract is 0.9 * 0.08 = 72 mm and the reachable subset stays
+# strictly inside it.  NOTE: the robot receiver (microban network_input) still
+# enforces 64 mm until that change is approved; until then the ~1 % of
+# reachable targets beyond 64 mm forward (incl. the F evaluation pose,
+# 68.6 mm) are not deliverable on hardware.
 MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0707, 0.0388, 0.0495)
 MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M = (0.08, 0.08, 0.08)
 MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = (0.072, 0.072, 0.072)
