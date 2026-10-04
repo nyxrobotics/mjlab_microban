@@ -737,11 +737,17 @@ def _evaluate_scenario(
     all_limits = robot.data.soft_joint_pos_limits
     action_limits = all_limits[:, action_term.target_ids]
 
+    # Real actor observations for the robot's startup ONNX self-test: the
+    # first scored step and the last step of every scenario.
+    smoke_steps = (settle_steps, steps - 1)
+    smoke_observations: list[list[float]] = []
     for step in range(steps):
         actor_obs = observations["actor"]
         if not bool(torch.isfinite(actor_obs).all().item()):
             nonfinite = {"step": step, "phase": "observation"}
             break
+        if step in smoke_steps:
+            smoke_observations.append([float(value) for value in actor_obs[0].tolist()])
         foot_observation_nonzero_steps += int(
             bool(torch.count_nonzero(actor_obs[:, 69:75]).item())
         )
@@ -939,6 +945,7 @@ def _evaluate_scenario(
             "active_hand": hand_error.report(units="m"),
         },
         "target_column_ablation": target_column_ablation,
+        "runtime_smoke_observations": smoke_observations,
         "raw_action_envelope": {
             "joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
             "v12": _summary(torch.stack((action_min[0], action_max[0]))),
@@ -1185,6 +1192,11 @@ def run_evaluation(
         },
         "checks": checks,
         "raw_action_envelope": _aggregate_action_envelopes(results),
+        # Every scenario's sampled actor observations, in scenario order: the
+        # robot's startup ONNX self-test corpus (same rollouts as the envelope).
+        "runtime_smoke_observations": [
+            row for item in results for row in item["runtime_smoke_observations"]
+        ],
         "results": results,
     }
 
