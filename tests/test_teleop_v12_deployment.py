@@ -288,10 +288,30 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
     checkpoint = tmp_path / "model_14999.pt"
     gate, *_ = _evidence(tmp_path)
     canonical_infos: dict[str, object] = {}
-    assert (
-        deployment._expected_final_tracking_profile(canonical_infos)
-        == deployment.FINAL_PROFILE
-    )
+    canonical = deployment._expected_final_tracking_profile(canonical_infos)
+    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
+    # The canonical final profile uses the deployed model's accuracy limits; a
+    # gate made under the stricter legacy final profile is still accepted.
+    for accepted in (
+        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
+        deployment.FINAL_PROFILE,
+    ):
+        gate["tracking_profile"] = accepted
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=canonical,
+        )
+    for rejected in (deployment.DEADLINE_FINAL_FALLBACK_PROFILE, None):
+        gate["tracking_profile"] = rejected
+        with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+            deployment._require_final_gate(
+                gate,
+                checkpoint=checkpoint,
+                checkpoint_sha256="1" * 64,
+                expected_tracking_profile=canonical,
+            )
 
     lineage = deadline_fallback_marker(
         selected_checkpoint_sha256="1" * 64,

@@ -23,8 +23,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DEADLINE_CANARY_FALLBACK_PROFILE,
     DEADLINE_FINAL_FALLBACK_PROFILE,
     DIRECTIONAL_RESPONSE_MINIMUM,
-    EXPANDED_LOCOMOTION_PROFILE,
-    FINAL_PROFILE,
     FOOT_ACTIVATION_CANARY_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_HAND_PROFILE,
@@ -33,6 +31,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
     _aggregate_action_envelopes,
+    accepted_tracking_profiles,
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
     hand_tracking_p95_max_m,
@@ -41,6 +40,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     required_tracking_profile,
     required_tracking_scenario_names,
     target_column_ablation_observation_columns,
+    tracking_profile_uses_perturbation,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _acceptance as _tracking_acceptance,
@@ -378,15 +378,25 @@ def _validate_tracking_report(
     *,
     profile_override: str | None = None,
     allowed_failed_checks: frozenset[str] = frozenset(),
-) -> None:
+) -> str:
+    """Validate one tracking report; return the profile it was judged under.
+
+    Without an override the canonical (deployed-accuracy) profile and, for
+    reports made before that change, its stricter legacy profile are accepted.
+    """
+
     completed = int(expected_identity["completed_updates"])
-    profile = (
-        required_tracking_profile(completed)
-        if profile_override is None
-        else profile_override
-    )
     if profile_override is not None and profile_override not in TRACKING_PROFILES:
         raise ValueError("Tracking report profile override is invalid")
+    if profile_override is None:
+        accepted = accepted_tracking_profiles(completed)
+        profile = (
+            report.get("profile")
+            if report.get("profile") in accepted
+            else accepted[0]
+        )
+    else:
+        profile = profile_override
     expected_statuses = {"pass"} if not allowed_failed_checks else {"pass", "fail"}
     if (
         report.get("schema_version") != 1
@@ -403,12 +413,7 @@ def _validate_tracking_report(
             "steps": 300,
             "settle_steps": 50,
             "moving_hmd": "forced_non_neutral",
-            "perturbation": profile
-            in (
-                EXPANDED_LOCOMOTION_PROFILE,
-                FINAL_PROFILE,
-                DEADLINE_FINAL_FALLBACK_PROFILE,
-            ),
+            "perturbation": tracking_profile_uses_perturbation(profile),
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
@@ -670,6 +675,7 @@ def _validate_tracking_report(
         raise ValueError("Tracking aggregate step count drifted")
     if envelope != _aggregate_action_envelopes(results):
         raise ValueError("Tracking aggregate action envelope is inconsistent")
+    return profile
 
 
 def _validate_onnx_report(
@@ -1052,7 +1058,9 @@ def create_gate(
             profile_override=tracking_profile,
         )
     else:
-        _validate_tracking_report(tracking, expected_report_identity)
+        tracking_profile = _validate_tracking_report(
+            tracking, expected_report_identity
+        )
     parity_tolerance = (
         MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
         if completed == 15_000
@@ -1217,7 +1225,12 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
                     )
                     if infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
                     is not None
-                    else required_tracking_profile(completed)
+                    else (
+                        gate.get("tracking_profile")
+                        if gate.get("tracking_profile")
+                        in accepted_tracking_profiles(completed)
+                        else required_tracking_profile(completed)
+                    )
                 )
             )
         ),
