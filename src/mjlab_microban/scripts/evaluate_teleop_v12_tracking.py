@@ -1074,9 +1074,11 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),
-            **hand_pose_release_report_settings(infos)
-            if allow_hand_pose_release_recipe
-            else {},
+            **(
+                hand_pose_release_report_settings(infos)
+                if allow_hand_pose_release_recipe
+                else {}
+            ),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (

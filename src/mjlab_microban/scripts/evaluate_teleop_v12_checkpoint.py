@@ -458,9 +458,11 @@ def run_evaluation(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
-            **hand_pose_release_report_settings(_infos)
-            if allow_hand_pose_release_recipe
-            else {},
+            **(
+                hand_pose_release_report_settings(_infos)
+                if allow_hand_pose_release_recipe
+                else {}
+            ),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
