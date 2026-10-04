@@ -1,4 +1,21 @@
-# Microban get-up v5: train and export
+# Microban get-up v6: train and export
+
+> **2026-10-04 forward-lean HOME (contract v6, branch
+> `forward-lean-centered-home`).** HOME now leans the trunk 10° forward with
+> the mass-weighted COM over the fore-aft centre of the sole contact patch
+> (hip pitch −14.1666°, ankle pitch +4.1280°, knees straight, root pitched
+> +10° at z 0.170431 m; `HOME_TRUNK_PITCH_RAD` and friends in
+> `microban_constants.py`). The target rule is v5's (HOME + raw, ±π clip, raw
+> previous-action feedback). What changed with the trunk orientation:
+> `upright_standing` peaks at HOME's projected gravity (sin 10°, 0, −cos 10°)
+> instead of a vertical trunk, `HEAD_STANDING_HEIGHT` is 0.2953 m (gate
+> 0.2657 m), `HOME_FEET_LATERAL_M` is 0.0941 m, and the near-HOME reset turns
+> its random yaw about world z so every heading keeps the soles flat. Only a
+> `v6` stamp whose recorded env shows this HOME is resumed or exported; every
+> v3–v5 checkpoint was trained at another HOME and is refused. The walking
+> exporter's contract is `v4_forward_lean_home_servo_range` and the teleop v12
+> HOME revision is `forward_lean10_..._v6`. The stage commands below are
+> unchanged; everything below this box describes v5 and earlier.
 
 > **2026-10-03 unification (contract v5).** Every Microban policy (walking,
 > PICO full-body tracking, get-up) now uses the centered HOME

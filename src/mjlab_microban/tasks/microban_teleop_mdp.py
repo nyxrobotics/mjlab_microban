@@ -40,6 +40,8 @@ from mjlab_microban.tasks.mdp import (
     FootTargetCommandCfg,
     HandTargetCommand,
     HandTargetCommandCfg,
+    home_levelled_root_ang_vel_b,
+    home_levelled_root_lin_vel_b,
 )
 from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
@@ -1220,24 +1222,30 @@ def linear_velocity_tracking_error_l1(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
-    """Return body-frame planar velocity error with a non-vanishing gradient."""
+    """Return body-frame planar velocity error with a non-vanishing gradient.
 
-    asset: Entity = env.scene[asset_cfg.name]
+    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame
+    (mdp.track_linear_velocity_home_frame).
+    """
+
     command = env.command_manager.get_command(command_name)
-    return torch.abs(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]).sum(dim=-1)
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    return torch.abs(command[:, :2] - actual[:, :2]).sum(dim=-1)
 
 
 def yaw_velocity_tracking_error_l1(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
-    """Return absolute body-frame yaw-rate error."""
+    """Return absolute body-frame yaw-rate error (HOME-levelled, see above)."""
 
-    asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
-    return torch.abs(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+    actual = home_levelled_root_ang_vel_b(env, trunk_pitch, asset_cfg)
+    return torch.abs(command[:, 2] - actual[:, 2])
 
 
 class ResumeSafeStepBasedStagedCurriculum:

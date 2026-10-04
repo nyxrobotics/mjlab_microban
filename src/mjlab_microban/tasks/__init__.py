@@ -7,7 +7,6 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     MicrobanGetupRlCfg,
@@ -77,13 +76,16 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
     MicrobanVelocityRlCfg,
     make_microban_velocity_env_cfg,
 )
+from mjlab_microban.tasks.microban_velocity_runner import MicrobanVelocityOnPolicyRunner
 
+# Walking checkpoints are stamped with the training HOME and refused on load
+# under any other HOME (microban_velocity_runner.py).
 register_mjlab_task(
     task_id="Mjlab-Velocity-Microban",
     env_cfg=make_microban_velocity_env_cfg(),
     play_env_cfg=make_microban_velocity_env_cfg(play=True),
     rl_cfg=MicrobanVelocityRlCfg,
-    runner_cls=VelocityOnPolicyRunner,
+    runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
 register_mjlab_task(
@@ -94,7 +96,7 @@ register_mjlab_task(
     runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
-# Get-up (v5 action contract, see microban_getup_runner.py). The robot
+# Get-up (v6 action contract, see microban_getup_runner.py). The robot
 # policy is trained in two stages:
 #   1. Mjlab-Getup-Microban from scratch: HOME-stance reward set ("posture");
 #      stands from fallen starts with a HOME stance by ~2000 iterations.

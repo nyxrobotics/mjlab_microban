@@ -26,6 +26,8 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 from mjlab.utils.lab_api.math import (
     quat_apply,
     quat_apply_inverse,
+    quat_from_euler_xyz,
+    quat_mul,
     sample_uniform,
     subtract_frame_transforms,
     yaw_quat,
@@ -741,6 +743,139 @@ class upright:
         del env_ids  # Unused.
 
 
+def _home_levelled_quat(quat_w: torch.Tensor, trunk_pitch: float) -> torch.Tensor:
+    """The trunk frame with the HOME forward lean taken out.
+
+    At HOME (trunk pitched ``trunk_pitch`` forward) this frame is level and
+    faces the robot's heading, so velocities expressed in it read like the
+    body-frame velocities of an upright-trunk HOME.
+    """
+
+    if trunk_pitch == 0.0:
+        return quat_w
+    half = -0.5 * trunk_pitch
+    unpitch = torch.tensor(
+        (math.cos(half), 0.0, math.sin(half), 0.0), device=quat_w.device, dtype=quat_w.dtype
+    ).expand_as(quat_w)
+    return quat_mul(quat_w, unpitch)
+
+
+def track_linear_velocity_home_frame(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    trunk_pitch: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab's track_linear_velocity, in the HOME-levelled trunk frame.
+
+    mjlab reads root_link_lin_vel_b. With a HOME trunk leaning
+    ``trunk_pitch`` forward that frame tips the walking velocity: at 10 deg
+    the forward speed reads 1.5 % low and 17 % of it shows up as vertical
+    velocity, which the z term penalizes (0.7 m/s: -14 % reward). Rotating
+    the lean back out keeps the reward's meaning of the upright-HOME tasks.
+    trunk_pitch = 0 is exactly mjlab's term.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    actual = quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
+    xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+    z_error = torch.square(actual[:, 2])
+    return torch.exp(-(xy_error + z_error) / std**2)
+
+
+def track_angular_velocity_home_frame(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    trunk_pitch: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab's track_angular_velocity, in the HOME-levelled trunk frame.
+
+    In the leaning trunk frame a pure yaw rate w reads w*cos(lean) about z
+    and w*sin(lean) about x, which the xy term penalizes (10 deg, 1.5 rad/s:
+    -13 % reward). trunk_pitch = 0 is exactly mjlab's term.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    actual = quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
+    z_error = torch.square(command[:, 2] - actual[:, 2])
+    xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
+    return torch.exp(-(z_error + xy_error) / std**2)
+
+
+def home_levelled_root_lin_vel_b(
+    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """Root linear velocity in the HOME-levelled trunk frame (see above)."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if trunk_pitch == 0.0:
+        return asset.data.root_link_lin_vel_b
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    return quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
+
+
+def home_levelled_root_ang_vel_b(
+    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """Root angular velocity in the HOME-levelled trunk frame (see above)."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if trunk_pitch == 0.0:
+        return asset.data.root_link_ang_vel_b
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    return quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
+
+
+def reset_root_state_uniform_world_yaw(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """mjlab's reset_root_state_uniform, with the yaw turned about world z.
+
+    mjlab composes default_rot * R(roll, pitch, yaw), i.e. it turns the yaw
+    about the DEFAULT body's z axis. With an upright HOME that is the world
+    z axis; with a HOME trunk leaning forward it is the tilted trunk axis, so
+    a reset yawed by 180 deg would lean the robot backward relative to its
+    heading with both soles tipped. Here orientation = R_z(yaw) * default_rot
+    * R(roll, pitch): the roll/pitch noise is applied in the HOME trunk frame
+    and the whole HOME stance is then turned about world z, so every yaw
+    keeps the soles flat and the lean forward. With an identity default it
+    equals mjlab's term up to the order of yaw and roll/pitch noise.
+    """
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+    asset: Entity = env.scene[asset_cfg.name]
+    keys = ("x", "y", "z", "roll", "pitch", "yaw")
+    ranges = torch.tensor([pose_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device)
+    root_states = asset.data.default_root_state[env_ids].clone()
+    positions = root_states[:, 0:3] + samples[:, 0:3] + env.scene.env_origins[env_ids]
+    zeros = torch.zeros_like(samples[:, 0])
+    tilt = quat_from_euler_xyz(samples[:, 3], samples[:, 4], zeros)
+    heading = quat_from_euler_xyz(zeros, zeros, samples[:, 5])
+    orientations = quat_mul(heading, quat_mul(root_states[:, 3:7], tilt))
+    velocity_range = velocity_range or {}
+    ranges = torch.tensor([velocity_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    velocities = root_states[:, 7:13] + sample_uniform(
+        ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device
+    )
+    asset.write_root_link_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
+
+
 def extreme_joint_velocity(
     env: ManagerBasedRlEnv,
     max_joint_vel: float,
@@ -915,6 +1050,7 @@ def upright_balance_reward(
     head_asset_cfg: SceneEntityCfg,
     tilt_std: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    pitch: float = 0.0,
 ) -> torch.Tensor:
     """Reward LOW trunk tilt (from projected gravity), but only once standing.
 
@@ -945,11 +1081,18 @@ def upright_balance_reward(
     watch for saturation near 0 or 1 on the first run.
 
     Hard-gated with _standing_gate (see that helper for why not soft).
+
+    ``pitch`` is the trunk's forward lean at HOME (rad, positive = forward):
+    the reward peaks where the projected gravity equals its HOME value
+    (sin(pitch), 0, -cos(pitch)) instead of (0, 0, -1), so a HOME with a
+    leaning trunk is not pulled upright.
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
     gate = _standing_gate(height, height_threshold)
-    tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    target_xy = torch.tensor((math.sin(pitch), 0.0), device=gravity_xy.device, dtype=gravity_xy.dtype)
+    tilt = torch.linalg.norm(gravity_xy - target_xy, dim=-1)
     balance = torch.exp(-((tilt / tilt_std) ** 2))
     return gate * balance
 
@@ -2091,7 +2234,9 @@ def reset_near_home_fraction(
         return
 
     lo, hi = orientation_noise_range
-    envs_mdp.reset_root_state_uniform(
+    # Roll/pitch noise about the HOME trunk frame, yaw about world z, so the
+    # leaning HOME keeps its flat soles at every heading.
+    reset_root_state_uniform_world_yaw(
         env,
         near_home_ids,
         pose_range={

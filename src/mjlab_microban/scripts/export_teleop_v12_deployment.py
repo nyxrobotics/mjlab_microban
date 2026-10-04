@@ -108,7 +108,7 @@ SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (FINAL_DEPLOYED_ACCURACY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
 )
 PACKAGER_REVISION = (
-    "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
+    "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
 )
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0

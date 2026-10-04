@@ -20,12 +20,32 @@ assert MICROBAN_XML.exists(), f"XML not found: {MICROBAN_XML}"
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
-# Shared reference pose of every policy (walking, tracking, get-up): trunk
-# vertical, knees straight, and opposite hip/ankle pitches that keep the soles
-# flat with the mass-weighted COM over the centre of the sole contact patches
-# (31 mm to the toe and to the heel; the earlier hip -10 deg pose leaned the
-# trunk 10 deg forward and left 24 mm to the toe).
-HOME_PITCH_RAD = float(np.deg2rad(1.198384259489))
+# Shared reference pose of every policy (walking, tracking, get-up): the trunk
+# leans 10 deg forward (the lean of the original hip -10 deg HOME), knees are
+# straight, and the hip/ankle pitches keep both soles flat with the
+# mass-weighted COM over the fore-aft centre of the sole contact patches.
+# Solved with MuJoCo forward kinematics on robot.xml (2026-10-04): with the
+# root pitched +10 deg (nose down) the soles are flat (normal x < 1e-15), the
+# COM is 30.96 mm from the heel edge and 30.96 mm from the toe edge (|offset|
+# < 1e-14 m), the lowest sole corner touches z = 0 at root z 0.170430569776,
+# the virtual head (trunk COM + 0.07324 m along the trunk axis) is at 0.29562
+# m and the foot bodies are 0.09278 m apart laterally. Hip/ankle roll (+-5 deg)
+# leaves each sole rolled 0.076 deg, as in every earlier HOME. For reference:
+# the earlier hip -10 deg pose had the same lean but 23.8/38.1 mm toe/heel
+# margins; the centered upright HOME (hip +1.198, ankle -1.198 deg) kept the
+# trunk vertical with 30.8/30.8 mm.
+HOME_TRUNK_PITCH_RAD = float(np.deg2rad(10.0))
+HOME_HIP_PITCH_RAD = float(np.deg2rad(-14.166561199931119))
+HOME_ANKLE_PITCH_RAD = float(np.deg2rad(4.127976841869204))
+HOME_ROOT_HEIGHT_M = 0.170430569776402
+# Root orientation at HOME: +10 deg about the trunk's y axis (positive pitch
+# tips the trunk's x axis toward -z, i.e. leans forward), w-x-y-z.
+HOME_ROOT_QUAT_WXYZ = (
+    float(np.cos(HOME_TRUNK_PITCH_RAD / 2.0)),
+    0.0,
+    float(np.sin(HOME_TRUNK_PITCH_RAD / 2.0)),
+    0.0,
+)
 # Every policy commands target = HOME + action on all body joints, with no
 # software clip, and observes its own raw previous output. The only bound is
 # the servo's own goal-position range: one turn, [-pi, pi) rad. The robot
@@ -38,7 +58,8 @@ SERVO_TARGET_RANGE_RAD = float(np.pi)
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     # The lowest sole collision corner is on the ground at this z.
-    pos=(0.0, 0.0, 0.170554885633559),
+    pos=(0.0, 0.0, HOME_ROOT_HEIGHT_M),
+    rot=HOME_ROOT_QUAT_WXYZ,
     joint_pos={
         "head": float(np.deg2rad(0.0)),
         "neck_roll": float(np.deg2rad(0.0)),
@@ -51,16 +72,16 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
         "right_elbow": float(np.deg2rad(-20.0)),
         "left_hip_roll": float(np.deg2rad(5.0)),
         "right_hip_roll": float(np.deg2rad(-5.0)),
-        "left_hip_pitch": HOME_PITCH_RAD,
-        "right_hip_pitch": HOME_PITCH_RAD,
+        "left_hip_pitch": HOME_HIP_PITCH_RAD,
+        "right_hip_pitch": HOME_HIP_PITCH_RAD,
         "left_hip_yaw": float(np.deg2rad(0.0)),
         "right_hip_yaw": float(np.deg2rad(0.0)),
         "left_knee": float(np.deg2rad(0.0)),
         "right_knee": float(np.deg2rad(0.0)),
         "left_ankle_roll": float(np.deg2rad(-5.0)),
         "right_ankle_roll": float(np.deg2rad(5.0)),
-        "left_ankle_pitch": -HOME_PITCH_RAD,
-        "right_ankle_pitch": -HOME_PITCH_RAD,
+        "left_ankle_pitch": HOME_ANKLE_PITCH_RAD,
+        "right_ankle_pitch": HOME_ANKLE_PITCH_RAD,
     },
     joint_vel={r".*": 0.0},
 )

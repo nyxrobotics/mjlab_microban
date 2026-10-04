@@ -8,7 +8,9 @@ Usage::
 
 Both paths must be explicit.  The walking contract is the one shared by every
 Microban policy: target = HOME + raw_action * 1.0 on the 18 body joints, with
-no software clip, saturated only at the servo's one-turn goal range (+-pi rad), with the centered HOME, and the previous-action observation is the
+no software clip, saturated only at the servo's one-turn goal range (+-pi rad), with
+the forward-lean HOME (trunk 10 deg forward, COM over the sole centre), and the
+previous-action observation is the
 policy's own raw (unclipped) output.  The checkpoint's run directory must have
 recorded that same HOME and clip, the live play env must match it, and the
 exported ONNX is checked against the torch actor before an artifact is published.
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import uuid
 from collections.abc import Mapping, Sequence
@@ -39,14 +42,21 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
+from mjlab_microban.tasks.microban_velocity_runner import require_walk_home_pose
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 
 TASK = "Mjlab-Velocity-Microban"
-CONTRACT_VERSION = "v3_centered_home_servo_range"
+# v4 (2026-10-04): v3's target rule at the forward-lean HOME. v3 was the
+# centered upright HOME, v2 the same with a +-1.57 clip.
+CONTRACT_VERSION = "v4_forward_lean_home_servo_range"
 # WalkMove feeds back the ONNX model's own last raw output (mjlab last_action).
 PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 ACTION_SCALE = 1.0
@@ -81,7 +91,7 @@ BASE_METADATA_KEYS = (
 
 
 def walk_home_pose() -> dict[str, object]:
-    """The shared centered HOME, in the same JSON shape as get-up's metadata."""
+    """The shared forward-lean HOME, in the same JSON shape as get-up's metadata."""
 
     return getup_home_pose()
 
@@ -142,7 +152,7 @@ def build_walk_metadata(
     default = np.asarray(base["default_joint_pos"], dtype=np.float64)
     home = np.array([HOME_FRAME.joint_pos[name] for name in joint_names], dtype=np.float64)
     if default.shape != home.shape or not np.allclose(default, home, rtol=0, atol=1e-6):
-        raise ValueError("Env default joint pose is not the centered HOME")
+        raise ValueError("Env default joint pose is not the forward-lean HOME")
     if not set(ACTION_JOINT_NAMES) <= set(joint_names):
         raise ValueError("Action joints are missing from joint_names")
     if tuple(base["observation_names"]) != OBSERVATION_TERMS:  # type: ignore[arg-type]
@@ -211,10 +221,10 @@ _RecordedConfigLoader.add_multi_constructor("tag:yaml.org,2002:python/", _constr
 
 
 def require_recorded_walk_contract(env_yaml: Path) -> None:
-    """Refuse a run whose recorded HOME, clip or feedback differs from v2.
+    """Refuse a run whose recorded HOME, clip or feedback differs from v4.
 
     The metadata is built from the current code, so exporting an older run
-    (hip -10 deg HOME, no clip, ...) would silently mislabel it.
+    (centered upright HOME, hip -10 deg HOME, ...) would silently mislabel it.
     """
 
     if not env_yaml.is_file():
@@ -230,10 +240,10 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
     if not isinstance(joints, dict) or set(joints) != set(HOME_FRAME.joint_pos) or any(
         abs(float(joints[name]) - value) > 1e-12 for name, value in HOME_FRAME.joint_pos.items()
     ):
-        raise ValueError("Run was not trained from the centered HOME joint pose")
+        raise ValueError("Run was not trained from the forward-lean HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
         if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-12):
-            raise ValueError(f"Run was not trained from the centered HOME root {key}")
+            raise ValueError(f"Run was not trained from the forward-lean HOME root {key}")
     clip = action.get("clip")
     if clip is None or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [
         -SERVO_TARGET_RANGE_RAD,
@@ -254,9 +264,23 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
         raise ValueError("Run did not observe the raw previous action")
 
 
+def require_current_home_walk_checkpoint(path: Path) -> None:
+    """Refuse a walking checkpoint not trained at the current HOME.
+
+    Checks both the run's recorded params/env.yaml and the checkpoint's own
+    HOME stamp (consumers such as the teleop v12 bootstrap call this).
+    """
+
+    path = Path(path).resolve(strict=True)
+    require_recorded_walk_contract(path.parent / "params" / "env.yaml")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    require_walk_home_pose(checkpoint.get("infos"))
+
+
 def _inspect_checkpoint(path: Path) -> tuple[str, int]:
     before = _sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    require_walk_home_pose(checkpoint.get("infos"))
     actor = checkpoint.get("actor_state_dict")
     if not isinstance(actor, dict):
         raise ValueError("Checkpoint has no actor_state_dict")
@@ -331,11 +355,13 @@ def _validate_onnx(path: Path) -> None:
         raise ValueError("Walking ONNX must have one actions output of shape [1, 18]")
     _normalizer_arrays(model)
 
-    # Standing upright and a few commands, at HOME with zero previous action.
+    # Standing at HOME (trunk leaning HOME_TRUNK_PITCH_RAD forward) and a few
+    # commands, with zero previous action.
     evaluator = ReferenceEvaluator(model)
+    home_gravity = (math.sin(HOME_TRUNK_PITCH_RAD), 0.0, -math.cos(HOME_TRUNK_PITCH_RAD))
     for command in ((0.0, 0.0, 0.0), (0.3, 0.0, 0.0), (0.0, 0.0, 1.0)):
         observation = np.zeros((1, OBSERVATION_WIDTH), dtype=np.float32)
-        observation[0, 3:6] = (0.0, 0.0, -1.0)
+        observation[0, 3:6] = home_gravity
         observation[0, -3:] = command
         outputs = evaluator.run(None, {"obs": observation})
         if len(outputs) != 1 or outputs[0].shape != (1, ACTION_WIDTH):
@@ -381,7 +407,7 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
     default_all = robot.data.default_joint_pos[0].detach().cpu().numpy().astype(np.float64)
     home_all = np.array([HOME_FRAME.joint_pos[name] for name in robot.joint_names])
     if not np.allclose(default_all, home_all, rtol=0, atol=1e-6):
-        raise ValueError("Walking env default joint pose is not the centered HOME")
+        raise ValueError("Walking env default joint pose is not the forward-lean HOME")
     offset = action._offset
     if not isinstance(offset, torch.Tensor) or offset.shape != (1, ACTION_WIDTH):
         raise ValueError("Walking action offset must be the per-joint default pose")

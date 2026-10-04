@@ -6,10 +6,11 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the get-up v5 action and previous-action feedback.
+"""Contract tests for the get-up v6 action and previous-action feedback.
 
-v5 (2026-10-03): target = centered HOME + raw action, bounded only by the
+v6 (2026-10-04): target = forward-lean HOME + raw action, bounded only by the
 servo goal range (+-pi); the policy observes its own raw previous output.
+(v5 was the same rule at the centered upright HOME.)
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
 
     def test_no_clip_excess_penalty_pushes_or_imu_delay(self) -> None:
         # Every standing policy was trained without these (see the env
-        # module docstring); the v5 runner rejects the penalty outright.
+        # module docstring); the v6 runner rejects the penalty outright.
         # From-scratch sets only; fine-tuning sets may add a clip-excess
         # barrier (see microban_getup_env_cfg.py).
         for reward_set in ("posture", "v42", "redesign"):
@@ -87,7 +88,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
         self.assertEqual(action_cfg.offset, 0.0)
         self.assertTrue(action_cfg.use_default_offset)
         self.assertEqual(action_cfg.clip, dict(GETUP_ACTION_CLIP))
-        # v5: the only bound is the servo's one-turn goal range.
+        # v6: the only bound is the servo's one-turn goal range.
         self.assertEqual(GETUP_ACTION_CLIP, {r".*": (-math.pi, math.pi)})
         self.assertEqual(dict(cfg.scene.entities["robot"].init_state.joint_pos), dict(HOME_FRAME.joint_pos))
         self.assertIsInstance(action_cfg, GetupJointPositionActionCfg)

@@ -16,7 +16,11 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    MICROBAN_ROBOT_CFG,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -70,6 +74,9 @@ from mjlab_microban.tasks.mdp import (
     penalize_stepping_while_standing,
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
+    reset_root_state_uniform_world_yaw,
+    track_angular_velocity_home_frame,
+    track_linear_velocity_home_frame,
     upright as local_upright,
 )
 
@@ -208,6 +215,15 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
+    # HOME leans the trunk HOME_TRUNK_PITCH_RAD forward, so velocities are
+    # tracked in the trunk frame with that lean rotated back out (mjlab's
+    # terms read the leaning body frame; see track_linear_velocity_home_frame).
+    for name, func in (
+        ("track_linear_velocity", track_linear_velocity_home_frame),
+        ("track_angular_velocity", track_angular_velocity_home_frame),
+    ):
+        cfg.rewards[name].func = func
+        cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
     cfg.rewards["track_linear_velocity"].weight = 2.0
 
@@ -254,8 +270,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    # HOME keeps the trunk vertical.
-    cfg.rewards["upright"].params["pitch"] = 0.0
+    # Peak at HOME's forward trunk lean (the original 10 deg HOME's target).
+    cfg.rewards["upright"].params["pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
     
@@ -328,6 +344,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.rotation_min_ang_vel = 0.5
 
     #---------------------------- Events ----------------------------
+    # Turn the random reset yaw about world z: mjlab's term turns it about the
+    # leaning HOME trunk's own axis, which tips the soles and the lean.
+    cfg.events["reset_base"].func = reset_root_state_uniform_world_yaw
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.01)
 
     cfg.events["push_robot"].params["velocity_range"] = {

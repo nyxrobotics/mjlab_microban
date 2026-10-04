@@ -30,6 +30,7 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
     MICROBAN_ROBOT_CFG,
 )
 from mjlab_microban.tasks.mdp import (
@@ -639,7 +640,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["commanded_planar_velocity_progress"] = RewardTermCfg(
         func=commanded_planar_velocity_progress,
         weight=2.0,
-        params={"command_name": "twist", "command_threshold": 0.01},
+        params={
+            "command_name": "twist",
+            "command_threshold": 0.01,
+            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+        },
     )
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["threshold_min"] = 0.02
@@ -650,12 +655,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["linear_velocity_error_l1"] = RewardTermCfg(
         func=linear_velocity_tracking_error_l1,
         weight=-16.0,
-        params={"command_name": "twist"},
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
     cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
         func=yaw_velocity_tracking_error_l1,
         weight=-1.0,
-        params={"command_name": "twist"},
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
 
     # V2 converged to a wide static stance because the inherited term penalized

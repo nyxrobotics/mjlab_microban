@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Contract-v12 3000/7000/10000/15000 stage driver at the centered HOME with the
-# target = HOME + raw action, saturated only at the servo's +-pi goal range
-# (no software clip).  The frozen locomotion actor is a centered-HOME
-# Mjlab-Velocity-Microban checkpoint chosen with --source on a fresh start.
+# Contract-v12 3000/7000/10000/15000 stage driver at the forward-lean HOME
+# (trunk 10 deg forward, COM over the sole centre) with the target = HOME +
+# raw action, saturated only at the servo's +-pi goal range (no software
+# clip).  The frozen locomotion actor is a forward-lean-HOME
+# Mjlab-Velocity-Microban checkpoint chosen with --source on a fresh start;
+# its run's recorded params/env.yaml must show that HOME.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +22,8 @@ Usage:
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate]
 
-Fresh start hashes the centered-HOME velocity checkpoint, runs the 9x300 raw
+Fresh start checks that the velocity checkpoint's run recorded the current
+(forward-lean) HOME, hashes it, runs the 9x300 raw
 recurrence probe of it in the teleop task (must pass), publishes the pristine
 parity/ONNX bootstrap receipt, and writes model_pristine.pt.  The source path,
 its SHA-256 and the probe receipt are recorded in every checkpoint and
@@ -107,6 +110,11 @@ if [[ "${mode}" == "start" ]]; then
             || fail "Velocity source SHA-256 mismatch: ${actual_sha}"
     fi
     source_sha="${actual_sha}"
+    # The source must be a walking run trained at this HOME: its recorded
+    # env and its checkpoint's HOME stamp must pass the walking exporter's
+    # contract checks.
+    uv run --locked python -c 'import sys; from mjlab_microban.scripts.export_walk_onnx import require_current_home_walk_checkpoint as check; check(sys.argv[1])' "${source_path}" \
+        || fail "Velocity source was not trained at the current HOME: ${source_path}"
     probe="${PROBE_ROOT}/velocity_${source_sha:0:16}_teleop83_raw_9x300.json"
     mkdir -p -- "${PROBE_ROOT}" "${BOOTSTRAP_ROOT}"
     uv run --locked python -m mjlab_microban.scripts.probe_legacy_actor_in_teleop_env \

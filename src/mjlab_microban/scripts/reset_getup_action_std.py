@@ -43,7 +43,7 @@ def main() -> None:
     if not isinstance(actor, dict) or STD_KEY not in actor:
         raise ValueError(f"{source} has no {STD_KEY} (scalar-std actor expected)")
     # The copy leaves its run directory (and params/env.yaml) behind, so
-    # validate the contract here and stamp a v4-stamped v5 run as v5.
+    # validate the contract (v6 stamp, recorded env) here.
     infos = checkpoint.get("infos")
     require_getup_checkpoint_contract(source, infos, require_recorded_env=True)
     infos["microban_getup_contract"] = GETUP_CONTRACT_VERSION

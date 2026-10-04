@@ -22,12 +22,15 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 
 MICROBAN_TELEOP_V12_TASK_ID = "Mjlab-Teleop-V12-Microban"
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
+# v6 (2026-10-04): HOME leans the trunk 10 deg forward with the COM over the
+# sole centre (microban_constants.HOME_TRUNK_PITCH_RAD); the root quaternion
+# is part of the marker, so no upright-HOME checkpoint matches it.
 MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
-    "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5"
+    "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
 )
 MICROBAN_TELEOP_V12_RECIPE_REVISION = (
-    "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_v11"
+    "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+    "raw_prev_action_servo_range_pi_v13"
 )
 # Opt-in successor recipe: identical to v11 except that the inherited HOME
 # pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
@@ -37,8 +40,8 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = (
 # records it; canonical gates, stage files and the exporter still accept only
 # the v11 recipe (and the corner rescue), so it needs its own fresh chain.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
-    "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+    "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v14"
 )
 # Shared target rule of every Microban policy: target = HOME + raw_action on all
 # 18 body joints with no software clip.  The only bound is the servo's one-turn

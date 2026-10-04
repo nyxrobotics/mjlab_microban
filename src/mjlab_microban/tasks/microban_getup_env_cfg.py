@@ -36,6 +36,11 @@ redesign/ reports):
 * 2026-10-03: every policy now shares one target rule, HOME + raw with no
   software clip; only the servo's one-turn range (+-pi) bounds the target,
   which keeps even more torque authority than +-1.57.
+* 2026-10-04 (contract v6): HOME leans the trunk 10 deg forward with the COM
+  over the sole centre (microban_constants.HOME_FRAME). Every term that
+  assumed a vertical trunk is centred on HOME's lean instead
+  (upright_standing's target gravity, the head height, the near-HOME reset's
+  yaw axis).
 
 Reward sets sharing this contract:
 
@@ -81,7 +86,11 @@ from mjlab.viewer import ViewerConfig
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     reward_based_staged_curriculum,
@@ -121,15 +130,18 @@ _CALM_STAGE = {"calm_roll": 3, "calm_effort_strong": 4, "calm_push": 5}
 # Final (post-curriculum) standing_pose / hip_pose weights; 240/120 for the
 # HOME-stance sets (posture and every calm stage).
 _POSE_FINAL_WEIGHTS = {"v42": (30.0, 15.0), "redesign": (30.0, 15.0)}
-# Lateral distance between the two foot bodies at HOME, by forward kinematics.
-HOME_FEET_LATERAL_M = 0.094
+# Lateral distance between the two foot bodies at HOME, by forward kinematics
+# (0.09412 m at the forward-lean HOME; 0.094 was used at the centered HOME).
+HOME_FEET_LATERAL_M = 0.0941
 
 # Virtual head height (trunk COM + 0.07324 m along the trunk's up axis, see
-# mdp._head_height) at HOME: 0.29653 m by MuJoCo forward kinematics. Kneeling
-# upright reaches 0.226-0.239 and the deepest flat-foot squat 0.222-0.227,
-# so the 0.9x standing gate (0.2669) is above both. 0.260 was tried on 09-28
-# and made a forearm-propped tripod (0.205) earn 91 % of the height reward.
-HEAD_STANDING_HEIGHT = 0.2965
+# mdp._head_height) at HOME: 0.29527 m by MuJoCo forward kinematics at the
+# forward-lean HOME (the 10 deg lean lowers it from the centered HOME's
+# 0.29653). Kneeling upright reaches 0.226-0.239 and the deepest flat-foot
+# squat 0.222-0.227, so the 0.9x standing gate (0.2657) is above both. 0.260
+# was tried on 09-28 and made a forearm-propped tripod (0.205) earn 91 % of
+# the height reward.
+HEAD_STANDING_HEIGHT = 0.2953
 STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # (fraction of resets near HOME, max roll/pitch noise in rad). 957ab42 widened
 # this to (0.2, 0.6) -- +-34 deg, "tipping, not yet fallen" -- so the policy
@@ -614,14 +626,16 @@ def _add_v42_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None
 def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
     """v42's core, with each change tied to a measurement.
 
-    * Pose, stillness and torque terms gate at 0.9x H (0.2646), not 0.8x
-      (0.2352): kneeling upright reaches 0.226-0.239, so the 0.8x gate paid
+    * Pose, stillness and torque terms gate at 0.9x H (0.2657), not 0.8x
+      (0.2362): kneeling upright reaches 0.226-0.239, so the 0.8x gate paid
       pose reward to a kneel.
     * No always-on body_ang_vel/angular_momentum: the first penalizes the
       trunk rotation the recovery needs, the second measured exactly 0.
     * HoST's post-standing terms (arXiv:2502.08378, its code's weights and
-      shapes): exp(-5|g_xy|^2) uprightness and a calm-trunk term, hard-gated
-      at the same 0.9x H so no crouch or prop can earn them.
+      shapes): exp(-5|g_xy - g_xy(HOME)|^2) uprightness -- centred on the
+      projected gravity of HOME's 10 deg forward lean, (sin 10deg, 0) -- and a
+      calm-trunk term, hard-gated at the same 0.9x H so no crouch or prop can
+      earn them.
     """
 
     _add_shared_rewards(
@@ -640,6 +654,8 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
             "height_threshold": STANDING_GATE_HEIGHT,
             "head_asset_cfg": HEAD_ASSET_CFG,
             "tilt_std": float(1.0 / np.sqrt(5.0)),
+            # Peak at HOME's forward trunk lean, not at a vertical trunk.
+            "pitch": HOME_TRUNK_PITCH_RAD,
         },
     )
     cfg.rewards["calm_standing"] = RewardTermCfg(

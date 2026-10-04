@@ -51,8 +51,10 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
 # measured worse and is reverted; this task now trains at the original
 # physical-neutral HOME (hip_pitch -10deg) instead. Bumped so a checkpoint
 # from either pose is never silently accepted under the other.
+# v6 (2026-10-04): the shared HOME leans the trunk 10 deg forward with the
+# COM over the sole centre (hip -14.17, ankle +4.13 deg, root pitched 10 deg).
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_REVISION = (
-    "physical_neutral_shoulder_zero_hip_neg10_v5"
+    "forward_lean10_com_centered_shoulder_zero_v6"
 )
 # Derived from HOME_FRAME directly rather than hardcoded a second time: this
 # is the one shared source of truth for the pose, so it cannot drift out of
@@ -88,13 +90,13 @@ def make_microban_teleop_upright_fullbody_env_cfg(
         or tuple(init_state.rot) != tuple(HOME_FRAME.rot)
     ):
         raise ValueError("Upright full-body root pose differs from shared HOME")
-    if tuple(init_state.rot) != (1.0, 0.0, 0.0, 0.0) or not isclose(
+    if not isclose(
         float(init_state.pos[2]),
         MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M,
         rel_tol=0.0,
         abs_tol=1.0e-12,
     ):
-        raise ValueError("Upright full-body HOME trunk is not vertical on the ground")
+        raise ValueError("Upright full-body HOME trunk is not on the ground")
     for name in ("left_hip_pitch", "right_hip_pitch"):
         if not isclose(
             float(joint_pos[name]),
