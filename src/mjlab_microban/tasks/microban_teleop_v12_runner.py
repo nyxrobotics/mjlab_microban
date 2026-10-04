@@ -293,6 +293,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     allow_deadline_canary_consumer = False
     consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
     consumer_requires_live_candidate = True
+    # Only the opt-in active-hand arm pose-release runner may load or write
+    # that recipe; the canonical runner keeps refusing it.
+    accepts_hand_pose_release_recipe = False
 
     def __init__(
         self,
@@ -705,7 +708,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
             raise ValueError("Checkpoint is not contract-v12")
-        validate_teleop_v12_home_pose(infos)
+        validate_teleop_v12_home_pose(
+            infos,
+            allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
+        )
         if self.deadline_fallback_resume:
             deadline_fallback = validate_deadline_fallback_resume_payload(
                 payload, checkpoint_sha256=before_sha256
@@ -805,7 +811,11 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 deadline_post_canary = None
                 deadline_post_canary_resume_source = None
                 corner_rescue = validate_corner_rescue_canonical_lineage(
-                    infos, iteration=iteration
+                    infos,
+                    iteration=iteration,
+                    allow_hand_pose_release_recipe=(
+                        self.accepts_hand_pose_release_recipe
+                    ),
                 )
                 if infos.get("microban_teleop_recipe_revision") == (
                     MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION

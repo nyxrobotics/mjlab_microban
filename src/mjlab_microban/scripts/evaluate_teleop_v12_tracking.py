@@ -43,7 +43,10 @@ from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
     _set_scenario,
     default_scenarios,
 )
-from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
+from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
+    _load_actor,
+    hand_pose_release_report_settings,
+)
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     _legacy_model,
 )
@@ -958,6 +961,7 @@ def run_evaluation(
     allow_corner_rescue: bool = False,
     allow_deadline_fallback: bool = False,
     allow_deadline_canary_fallback: bool = False,
+    allow_hand_pose_release_recipe: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -976,6 +980,7 @@ def run_evaluation(
         allow_legacy_preview_v1=allow_legacy_preview_v1,
         allow_corner_rescue=allow_corner_rescue,
         allow_deadline_fallback=allow_deadline_fallback,
+        allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
     )
     completed = iteration + 1
     if allow_deadline_canary_fallback and (
@@ -1069,6 +1074,9 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),
+            **hand_pose_release_report_settings(infos)
+            if allow_hand_pose_release_recipe
+            else {},
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -1124,6 +1132,15 @@ def build_parser() -> argparse.ArgumentParser:
             "35mm hand-RMS profile"
         ),
     )
+    parser.add_argument(
+        "--allow-hand-pose-release-recipe",
+        action="store_true",
+        help=(
+            "evaluate a checkpoint of the opt-in active-hand arm pose-release "
+            "recipe under its clock's profile (evidence only; stage gates "
+            "refuse that recipe)"
+        ),
+    )
     return parser
 
 
@@ -1140,6 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_corner_rescue=args.allow_corner_rescue,
         allow_deadline_fallback=args.deadline_fallback,
         allow_deadline_canary_fallback=args.deadline_canary_fallback,
+        allow_hand_pose_release_recipe=args.allow_hand_pose_release_recipe,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

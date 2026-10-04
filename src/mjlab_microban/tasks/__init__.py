@@ -43,6 +43,14 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     make_microban_teleop_v12_env_cfg,
     make_microban_teleop_v12_preview_env_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
+    MicrobanTeleopV12HandPoseReleaseRlCfg,
+    make_microban_teleop_v12_hand_pose_release_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_runner import (
+    MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
+)
 from mjlab_microban.tasks.microban_teleop_v12_preview import (
     MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
 )
@@ -190,6 +198,16 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v12_preview_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12PreviewRlCfg,
     runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
+)
+
+# Opt-in successor recipe (active-hand arms leave the HOME pose reward).
+# Canonical gates and the exporter do not accept it; see the module docstring.
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
+    env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV12HandPoseReleaseRlCfg,
+    runner_cls=MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
 )
 
 register_mjlab_task(

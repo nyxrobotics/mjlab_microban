@@ -29,6 +29,17 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = (
     "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
     "raw_prev_action_servo_range_pi_v11"
 )
+# Opt-in successor recipe: identical to v11 except that the inherited HOME
+# pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
+# whose target is active (an inactive hand's arm and every other joint keep the
+# v11 term).  It changes nothing before hand targets activate at update 7000.
+# Only its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or
+# records it; canonical gates, stage files and the exporter still accept only
+# the v11 recipe (and the corner rescue), so it needs its own fresh chain.
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
+    "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+)
 # Shared target rule of every Microban policy: target = HOME + raw_action on all
 # 18 body joints with no software clip.  The only bound is the servo's one-turn
 # goal range, modelled as an absolute target saturation at +-pi (the robot
