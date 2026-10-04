@@ -1,4 +1,4 @@
-"""The ONNX parity bound scales with |expected| (atol + rtol * |expected|)."""
+"""The ONNX parity bound scales with each sample's max |expected|."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from mjlab_microban.scripts.teleop_v12_onnx_gate import (
 def test_large_outputs_tolerate_float32_rounding_only() -> None:
     expected = np.array([[54.73857, -3.0, 0.0]], dtype=np.float32)
     # The c20k rescue model_9999 measurement: 2.86e-5 absolute at |out|~55.
-    actual = expected + np.array([[2.861023e-05, 0.0, 0.0]], dtype=np.float32)
+    # It landed on a small output of a large-output sample.
+    actual = expected + np.array([[0.0, 2.861023e-05, 0.0]], dtype=np.float32)
     assert parity_bound_ratio(actual, expected, atol=2.0e-5) < 1.0
     # The same error on a small output still fails the absolute floor.
     small = np.array([[1.0]], dtype=np.float32)

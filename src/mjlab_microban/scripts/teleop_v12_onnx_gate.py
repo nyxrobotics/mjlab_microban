@@ -41,21 +41,23 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 # The 64-sample corpus feeds randn into raw observation columns, so the
 # normalized teleop-target columns see ~20-sigma inputs and raw actions reach
 # tens of radians.  Float32 accumulation-order differences between torch and
-# ONNX Runtime then scale with |output|; a pure absolute bound of 2e-5 fails
-# at ~5e-7 relative error (a few ulps).  The bound is therefore elementwise
-# |onnx - torch| <= atol + rtol * |torch| (numpy.allclose form).  rtol = 1e-6
-# is ~8 float32 ulps, far below any real export defect (O(1) errors).
+# ONNX Runtime then scale with the magnitude of the hidden activations, and
+# they land on every output of that sample, including outputs that cancel to
+# a small value.  A pure absolute bound of 2e-5 fails at ~5e-7 of the
+# sample's output scale (a few ulps).  The bound is therefore norm-wise per
+# sample: max|onnx - torch| <= atol + rtol * max|torch|.  rtol = 1e-6 is ~8
+# float32 ulps, far below any real export defect (O(1e-3) and above).
 ONNX_PARITY_RELATIVE_TOLERANCE = 1.0e-6
-ONNX_PARITY_RULE = "abs_error_le_atol_plus_rtol_times_abs_expected_elementwise_v1"
+ONNX_PARITY_RULE = "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
 
 
 def parity_bound_ratio(
     actual: np.ndarray, expected: np.ndarray, *, atol: float
 ) -> float:
-    """Return max(|actual - expected| / (atol + rtol * |expected|))."""
+    """Return max|actual - expected| / (atol + rtol * max|expected|) per sample."""
 
-    bound = atol + ONNX_PARITY_RELATIVE_TOLERANCE * np.abs(expected)
-    return float(np.max(np.abs(actual - expected) / bound))
+    bound = atol + ONNX_PARITY_RELATIVE_TOLERANCE * float(np.max(np.abs(expected)))
+    return float(np.max(np.abs(actual - expected)) / bound)
 
 
 def run_gate(

@@ -933,7 +933,7 @@ def _validate_final_parity(
                 parity_bound_ratio(reference_actual, expected, atol=tolerance),
                 parity_bound_ratio(runtime_actual, expected, atol=tolerance),
             )
-    # Same elementwise atol + rtol*|expected| rule as teleop_v12_onnx_gate.
+    # Same per-sample atol + rtol*max|expected| rule as teleop_v12_onnx_gate.
     if (
         not math.isfinite(reference_max)
         or not math.isfinite(runtime_max)

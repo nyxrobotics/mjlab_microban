@@ -712,7 +712,7 @@ def _validate_onnx_report(
     ):
         raise ValueError("ONNX full-83 CPU evidence drifted")
     if "relative_tolerance" in onnx or "parity_rule" in onnx:
-        # Elementwise atol + rtol*|expected| bound (teleop_v12_onnx_gate).
+        # Per-sample atol + rtol*max|expected| bound (teleop_v12_onnx_gate).
         from mjlab_microban.scripts.teleop_v12_onnx_gate import (
             ONNX_PARITY_RELATIVE_TOLERANCE,
             ONNX_PARITY_RULE,
