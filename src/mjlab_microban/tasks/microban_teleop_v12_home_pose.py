@@ -65,8 +65,19 @@ def validate_teleop_v12_home_pose(infos: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(infos, Mapping):
         raise TypeError("Contract-v12 checkpoint infos are malformed")
-    if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_RECIPE_REVISION
+    # The corner-rescue recipe is the current recipe with only the hand
+    # sampler changed; its marker must name the current recipe as its source.
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
+    )
+
+    recipe = infos.get("microban_teleop_recipe_revision")
+    rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    if recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION and not (
+        recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+        and isinstance(rescue, Mapping)
+        and rescue.get("source_recipe_revision") == MICROBAN_TELEOP_V12_RECIPE_REVISION
     ):
         raise ValueError("Checkpoint recipe does not match the current HOME pose")
     expected = teleop_v12_home_pose_marker()

@@ -294,6 +294,27 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         ):
             self.assertIn(fixed, launcher)
 
+    def test_home_pose_accepts_rescue_recipe_only_with_current_source(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+            TELEOP_V12_HOME_POSE_INFO_KEY,
+            teleop_v12_home_pose_marker,
+            validate_teleop_v12_home_pose,
+        )
+
+        infos = _final_infos()
+        infos[TELEOP_V12_HOME_POSE_INFO_KEY] = teleop_v12_home_pose_marker()
+        validate_teleop_v12_home_pose(infos)
+        drifted = copy.deepcopy(infos)
+        drifted[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY][
+            "source_recipe_revision"
+        ] = "old_home_recipe"
+        with self.assertRaisesRegex(ValueError, "current HOME pose"):
+            validate_teleop_v12_home_pose(drifted)
+        drifted = copy.deepcopy(infos)
+        drifted["microban_teleop_recipe_revision"] = "unknown_recipe"
+        with self.assertRaisesRegex(ValueError, "current HOME pose"):
+            validate_teleop_v12_home_pose(drifted)
+
 
 if __name__ == "__main__":
     unittest.main()
