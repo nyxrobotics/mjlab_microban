@@ -16,8 +16,8 @@ Active-hand arm pose-release variant (forward-lean HOME): the same 99-update
 replay from a fresh pose-release chain's model_9900 whose strict HMD/hand report
 fails only hand accuracy (RMS and/or P95).  Both bilateral corners failed there,
 so its registered sampler mixes split the replay between LF+RB and LB+RF (5 %
-ordinary): ``lf60`` = 60/35, ``lf72`` = 72/23 and ``lf90`` = 90/5 (the
-canonical split), chosen
+ordinary): ``lf60`` = 60/35, ``lf65`` = 65/30, ``lf72`` = 72/23 and
+``lf90`` = 90/5 (the canonical split), chosen
 by the launcher through ``MICROBAN_V12_PR_CORNER_RESCUE_MIX`` and recorded in
 the marker revision.
 Its checkpoints keep the pose-release recipe revision (the env is the
@@ -134,6 +134,17 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES: dict[str, dict[str, A
         ),
         "lf_rb": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
         "lb_rf": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY,
+    },
+    "lf65": {
+        "marker_revision": (
+            "recorded_pose_release_model9900_uniform5_lf_rb65_lb_rf30_99_updates_"
+            "receiver_box_f_v1"
+        ),
+        "sampler_revision": (
+            "uniform_joint_box5pct_lf_rb65pct_lb_rf30pct_receiver_box_f_pose_release_v1"
+        ),
+        "lf_rb": 0.65,
+        "lb_rf": 0.30,
     },
     "lf72": {
         "marker_revision": (

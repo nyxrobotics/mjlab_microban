@@ -74,7 +74,7 @@ class HandPoseReleaseCornerRescueTest(unittest.TestCase):
             validate_corner_rescue_lineage_marker(tampered)
 
     def test_registered_mixes_round_trip(self) -> None:
-        for name, share in (("lf60", 0.60), ("lf72", 0.72), ("lf90", 0.90)):
+        for name, share in (("lf60", 0.60), ("lf65", 0.65), ("lf72", 0.72), ("lf90", 0.90)):
             with self.subTest(mix=name):
                 marker = corner_rescue_marker(
                     parent_checkpoint_sha256=PARENT_SHA,
