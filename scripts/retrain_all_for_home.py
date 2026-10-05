@@ -159,6 +159,10 @@ V12_FINAL_PROFILES = {
 STALL_S = {"train": 1200, "gate": 3600, "probe": 1800, "eval": 1800, "cpu": 1800}
 GPU_RESERVATION_S = 120  # a started job has this long to allocate its memory
 GPU_POLL_S = 60
+# Dry run: v12 start attempts before stopping.  Its walkers are 3-iteration
+# continuations whose probe margin is within the probe's repeat noise, so a
+# failed start probe re-probes the candidates instead of stopping the dry run.
+DRY_START_ATTEMPTS = 4
 EXIT_FAILED, EXIT_STALL, EXIT_INPUT, EXIT_BUSY = 1, 2, 3, 4
 
 
@@ -823,7 +827,8 @@ class Pipeline:
     def reselect_walker(self, reason: str) -> bool:
         """Drop the selected walker after a failed v12 start probe; select the next candidate.
 
-        Returns False when no candidate is left.
+        Returns False when no candidate is left.  A dry run cycles through the
+        candidates again (DRY_START_ATTEMPTS starts in all) instead.
         """
 
         selected = self.get("walk", "selected")
@@ -831,7 +836,10 @@ class Pipeline:
         rejected.append({"from": selected["from"], "sha256": selected["sha256"], "reason": reason})
         self.put("walk", "rejected", rejected)
         excluded = {r["from"] for r in rejected}
-        candidates = {k: v for k, v in (self.get("walk", "candidates") or {}).items() if k not in excluded}
+        every = self.get("walk", "candidates") or {}
+        candidates = {k: v for k, v in every.items() if k not in excluded}
+        if not candidates and self.dry and len(rejected) < DRY_START_ATTEMPTS:
+            candidates = {k: v for k, v in every.items() if k != selected["from"]} or dict(every)
         if not candidates:
             return False
         best, row, fallback = select_walker(candidates)
@@ -1009,7 +1017,7 @@ class Pipeline:
                     error = SourceProbeFailed(f"v12 start refused the fresh source probe {probe.name}")
                 # Repeat probes vary by about +-0.01; the next-best candidate
                 # (already probed during selection) gets its own fresh probe.
-                if self.dry or not self.reselect_walker(str(error)):
+                if not self.reselect_walker(str(error)):
                     raise PipelineError(f"{error}; no other walking candidate is left "
                                         f"(see {self.state_dir / 'walk_selection.txt'})") from error
                 return self.v12_train(seg, None)

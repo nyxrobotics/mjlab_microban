@@ -99,6 +99,10 @@ python3 scripts/retrain_all_for_home.py --dry-run \
     --robot-repo /tmp/robot_scratch --robot-branch dryrun --state-dir /tmp/home_dry
 ```
 
+ドライランの歩行は3反復の続きなので、v12 の開始時プローブのマージンがプローブのばらつき（±0.02 程度）と
+同じ大きさになる。開始時プローブで落ちたら、候補を順に替えて計 `DRY_START_ATTEMPTS`（4）回まで
+開始し直す（本番は各候補1回だけで、候補がなくなったら止まる）。
+
 `--dry-run-simulate-failures` は最初のカナリアゲートと9999ゲートを不合格とみなして、
 再学習とコーナー救済の経路も通す。
 

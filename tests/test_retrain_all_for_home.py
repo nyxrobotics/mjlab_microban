@@ -320,6 +320,23 @@ class WalkerFallbackTest(unittest.TestCase):
             self.assertFalse(p.reselect_walker("probe failed"))
             self.assertEqual(len(p.get("walk", "rejected")), 3)
 
+    def test_dry_run_reprobes_the_candidates_before_stopping(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline(Path(d), "--dry-run")
+            installed = []
+            p.install_walker = lambda best, row, fallback: (
+                installed.append(best),
+                p.put("walk", "selected", {"from": best, "sha256": best[-4] * 64}),
+            )
+            v = lambda margin: {"ok": True, "worst_margin": margin}  # noqa: E731
+            p.put("walk", "candidates", {"/r/model_1.pt": [v(0.03)], "/r/model_2.pt": [v(0.02)]})
+            p.put("walk", "selected", {"from": "/r/model_1.pt", "sha256": "1" * 64})
+            for _ in range(pipeline.DRY_START_ATTEMPTS - 1):
+                self.assertTrue(p.reselect_walker("probe failed"))
+            self.assertEqual(installed, ["/r/model_2.pt", "/r/model_1.pt", "/r/model_2.pt"])
+            self.assertFalse(p.reselect_walker("probe failed"))
+            self.assertEqual(len(p.get("walk", "rejected")), pipeline.DRY_START_ATTEMPTS)
+
 
 class DryRunSmokeCorpusTest(unittest.TestCase):
     def test_short_corpus_is_cycled_to_sixteen_rows(self):
