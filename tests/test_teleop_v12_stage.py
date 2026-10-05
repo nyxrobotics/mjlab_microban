@@ -36,6 +36,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     HMD_HAND_ACTIVATION_CANARY_PROFILE,
     HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
     HMD_HAND_HAND_RMS_40MM_PROFILE,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE,
     HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     PRE_ACTIVATION_EXPOSURE_PROFILE,
@@ -763,9 +764,10 @@ class TeleopV12StageTest(unittest.TestCase):
                     required_tracking_profile(15_000, recipe_revision=recipe),
                     FINAL_DEPLOYED_ACCURACY_PROFILE,
                 )
-        # Every other clock except the 10000 boundary (hand-RMS allowance,
-        # tested below) keeps its profile for the pose-release lineage.
-        for completed in (3_000, 7_000, 7_100, 9_999, 10_100, 14_999):
+        # Every other clock except the 10000 boundary and the 10100 canary
+        # (hand-RMS allowances, tested below) keeps its profile for the
+        # pose-release lineage.
+        for completed in (3_000, 7_000, 7_100, 9_999, 10_099, 14_999):
             with self.subTest(completed=completed):
                 self.assertEqual(
                     required_tracking_profile(completed, recipe_revision=pose_release),
@@ -816,7 +818,11 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(record["recipe_revisions"], [pose_release])
         self.assertIn("near-fall", record["reason"])
         for profile in TRACKING_PROFILES:
-            if profile not in (allowance, HMD_HAND_HAND_RMS_40MM_PROFILE):
+            if profile not in (
+                allowance,
+                HMD_HAND_HAND_RMS_40MM_PROFILE,
+                FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+            ):
                 with self.subTest(profile=profile):
                     self.assertIsNone(tracking_profile_completion_allowance(profile))
 
@@ -843,8 +849,8 @@ class TeleopV12StageTest(unittest.TestCase):
                     required_tracking_profile(10_000, recipe_revision=recipe),
                     HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
                 )
-        # Only the exact 10000 boundary moves: interrupted 7101..9999 clocks,
-        # the 10100 canary and the 15000 final keep their profiles.
+        # Only the exact 10000 boundary (and its 10100 canary, below) move:
+        # interrupted 7101..9999 clocks and the 15000 final keep their profiles.
         for completed in (7_101, 9_000, 9_999):
             with self.subTest(completed=completed):
                 self.assertEqual(
@@ -853,7 +859,7 @@ class TeleopV12StageTest(unittest.TestCase):
                 )
         self.assertEqual(
             required_tracking_profile(10_100, recipe_revision=pose_release),
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
+            FOOT_CANARY_HAND_RMS_40MM_PROFILE,
         )
         self.assertEqual(
             required_tracking_profile(15_000, recipe_revision=pose_release),
@@ -923,6 +929,76 @@ class TeleopV12StageTest(unittest.TestCase):
         assert final_record is not None
         self.assertEqual(final_record["revision"], "completion_allowance_v1")
         self.assertNotIn("boundary_completed_updates", final_record)
+
+    def test_hand_rms_40mm_is_the_pose_release_10100_canary_profile_only(
+        self,
+    ) -> None:
+        pose_release = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        allowance = FOOT_CANARY_HAND_RMS_40MM_PROFILE
+        relaxed = FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE
+        self.assertEqual(
+            allowance,
+            "whole_body_foot_activation_canary_reachable_safety_v1_"
+            "deployed_accuracy_v1_hand_rms_40mm_v1",
+        )
+        self.assertIn(allowance, TRACKING_PROFILES)
+        self.assertEqual(
+            required_tracking_profile(10_100, recipe_revision=pose_release),
+            allowance,
+        )
+        self.assertEqual(
+            accepted_tracking_profiles(10_100, recipe_revision=pose_release),
+            (allowance, relaxed, FOOT_ACTIVATION_CANARY_PROFILE),
+        )
+        for recipe in (None, MICROBAN_TELEOP_V12_RECIPE_REVISION, "other"):
+            with self.subTest(recipe=recipe):
+                self.assertEqual(
+                    required_tracking_profile(10_100, recipe_revision=recipe),
+                    relaxed,
+                )
+        # Interrupted 10001..10099 clocks keep the deployed-accuracy canary.
+        for completed in (10_001, 10_050, 10_099):
+            with self.subTest(completed=completed):
+                self.assertEqual(
+                    required_tracking_profile(completed, recipe_revision=pose_release),
+                    relaxed,
+                )
+        self.assertEqual(hand_tracking_rms_max_m(allowance), 0.040)
+        self.assertEqual(hand_tracking_rms_max_m(relaxed), 0.035)
+        for limit in (
+            hand_tracking_p95_max_m,
+            foot_tracking_rms_max_m,
+            foot_tracking_p95_max_m,
+        ):
+            with self.subTest(limit=limit.__name__):
+                self.assertEqual(limit(allowance), limit(relaxed))
+        self.assertEqual(
+            required_tracking_scenario_names(allowance),
+            required_tracking_scenario_names(relaxed),
+        )
+        self.assertEqual(_scenarios(allowance), _scenarios(relaxed))
+        self.assertEqual(
+            required_tracking_check_names(allowance),
+            required_tracking_check_names(relaxed),
+        )
+        self.assertEqual(
+            required_target_column_ablation_targets(allowance),
+            required_target_column_ablation_targets(relaxed),
+        )
+        self.assertEqual(
+            tracking_profile_uses_perturbation(allowance),
+            tracking_profile_uses_perturbation(relaxed),
+        )
+        record = tracking_profile_completion_allowance(allowance)
+        assert record is not None
+        self.assertEqual(record["revision"], "hand_rms_40mm_v1")
+        self.assertEqual(record["structure_profile"], FOOT_ACTIVATION_CANARY_PROFILE)
+        self.assertEqual(record["relaxes_profile"], relaxed)
+        self.assertEqual(record["boundary_completed_updates"], 10_100)
+        self.assertEqual(record["recipe_revisions"], [pose_release])
+        self.assertEqual(record["hand_rms_m_max"], 0.040)
+        self.assertEqual(record["relaxed_profile_hand_rms_m_max"], 0.035)
+        self.assertIn("10100-canary", record["reason"])
 
     def test_pose_release_10000_gate_uses_and_records_the_hand_rms_allowance(
         self,

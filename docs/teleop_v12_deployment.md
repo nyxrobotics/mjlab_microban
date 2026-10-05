@@ -252,8 +252,9 @@ HMD/hand deployed-accuracy profile with exactly one change:
 Scenarios, checks (falls, finiteness, soft limits, raw-action recurrence,
 forced HMD motion, coverage, hand ablation, twist), locomotion and ONNX gates
 are unchanged; the deployed-accuracy and strict HMD/hand profiles are also
-accepted at that boundary. Interrupted 7101..9999 clocks, the 10100 canary,
-the 15000 final and every other lineage keep their profiles.
+accepted at that boundary. Interrupted 7101..9999 clocks, the 15000 final and
+every other lineage keep their profiles; the 10100 canary has its own
+counterpart (below).
 
 Reason (2026-10-05): the forward-lean pose-release model_9999 checkpoints (two
 fresh 7100->10000 segments and eleven model_9900 corner rescues) passed every
@@ -263,13 +264,32 @@ one bilateral corner (best max(L, R) about 0.0365 m). User decision: "手は
 `tracking_profile_completion_allowance` (revision `hand_rms_40mm_v1`,
 `boundary_completed_updates` 10000).
 
+### 10100-canary counterpart
+
+Profile
+`whole_body_foot_activation_canary_reachable_safety_v1_deployed_accuracy_v1_hand_rms_40mm_v1`
+is the 10100-update (model_10099 activation canary) profile of the same
+pose-release recipe only: the foot-activation canary deployed-accuracy profile
+with hand RMS 0.040 m instead of 0.035 m and nothing else changed (hand P95
+0.05 m, foot 0.05 / 0.08 m, scenarios, checks, ablation, locomotion, ONNX);
+the deployed-accuracy and strict canary profiles stay accepted there and the
+interrupted 10001..10099 clocks keep the deployed-accuracy canary profile.
+Reason (2026-10-05, same user decision): two forward-lean 10099 canaries
+resumed from the 0.040 m-gated model_9999 (itself 0.0365 m) passed every
+non-accuracy check, locomotion and hand P95 and missed only the 0.035 m hand
+RMS (max 0.0367 / 0.0372 m); a 100-update canary cannot be held tighter than
+the boundary it continues. Its gate records `boundary_completed_updates`
+10100.
+
 The packager does not see earlier gates through the final checkpoint, so it
 takes them explicitly: `--boundary-gate GATE.json` (repeatable) fully
-revalidates each earlier canonical-boundary gate, requires its checkpoint to
+revalidates each earlier canonical-boundary or activation-canary gate, requires
+its checkpoint to
 share the final checkpoint's contract, recipe, bootstrap, HOME and site-order
 markers (and the final to carry its corner-rescue / recipe-switch /
 LR-migration markers unchanged), and records `v12_boundary_stage_gates_json`
-(clock, checkpoint and gate SHA-256, tracking profile, allowance record) with
+(clock, checkpoint kind, checkpoint and gate SHA-256, tracking profile,
+allowance record) with
 `v12_boundary_stage_gates_semantics` in the package. The robot runtime only
 checks the final `v12_tracking_profile`; the boundary record is informational.
 

@@ -956,6 +956,7 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     assert len(entries) == 1
     entry = entries[0]
     assert entry["completed_updates"] == 10_000
+    assert entry["checkpoint_kind"] == "canonical_boundary"
     assert entry["iteration"] == 9_999
     assert entry["stage_gate_sha256"] == _sha(gate_path)
     assert entry["tracking_profile"] == deployment.HMD_HAND_HAND_RMS_40MM_PROFILE
@@ -1005,13 +1006,57 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     assert "v12_boundary_stage_gates_semantics" not in plain
 
 
+def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+    )
+
+    monkeypatch.setattr(
+        deployment,
+        "validate_gate",
+        lambda gate_path, _checkpoint: json.loads(gate_path.read_text("utf-8")),
+    )
+    monkeypatch.setattr(deployment, "resolve_bootstrap_artifact_path", Path)
+    *_, final_infos = _evidence(tmp_path)
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    canary = _boundary_gate_fixture(
+        tmp_path,
+        monkeypatch,
+        name="canary",
+        infos=deepcopy(final_infos),
+        completed=10_100,
+        kind="activation_canary",
+        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+    )
+    boundary = _boundary_gate_fixture(
+        tmp_path, monkeypatch, name="boundary", infos=deepcopy(final_infos)
+    )
+    entries = deployment._boundary_stage_gate_lineage(
+        (canary, boundary), final_infos=final_infos
+    )
+    assert [entry["completed_updates"] for entry in entries] == [10_000, 10_100]
+    assert [entry["checkpoint_kind"] for entry in entries] == [
+        "canonical_boundary",
+        "activation_canary",
+    ]
+    allowance = entries[1]["tracking_profile_completion_allowance"]
+    assert entries[1]["tracking_profile"] == FOOT_CANARY_HAND_RMS_40MM_PROFILE
+    assert allowance["boundary_completed_updates"] == 10_100
+    assert allowance["hand_rms_m_max"] == 0.040
+    assert allowance["relaxed_profile_hand_rms_m_max"] == 0.035
+
+
 @pytest.mark.parametrize(
     "case",
     [
         "other_recipe",
         "marker_not_carried",
         "final_clock",
-        "activation_canary",
+        "interrupted_recovery",
         "duplicate_clock",
     ],
 )
@@ -1050,10 +1095,10 @@ def test_boundary_gates_reject_foreign_or_nonboundary_gates(
         )
     elif case == "final_clock":
         fixture = {"completed": 15_000}
-    elif case == "activation_canary":
+    elif case == "interrupted_recovery":
         fixture = {
-            "completed": 10_100,
-            "kind": "activation_canary",
+            "completed": 10_050,
+            "kind": "interrupted_recovery",
             "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
         }
     gates = [

@@ -520,6 +520,13 @@ BOUNDARY_STAGE_GATES_SEMANTICS = (
     "packager_validated_earlier_boundary_gates_sharing_the_final_checkpoint_"
     "carried_lineage_markers_v1"
 )
+# Gate kinds (canonical_boundary flag, checkpoint_kind) the packager records:
+# canonical boundaries (3000/7000/10000) and their activation canaries
+# (3100/7100/10100), which the chain resumes from like a boundary.
+_BOUNDARY_GATE_KINDS = (
+    (True, "canonical_boundary"),
+    (False, "activation_canary"),
+)
 # Lineage markers every descendant checkpoint carries forward unchanged.
 _BOUNDARY_GATE_SHARED_INFO_KEYS = (
     "microban_teleop_training_contract_version",
@@ -559,16 +566,17 @@ def _boundary_stage_gate_lineage(
         if gate != snapshot or sha256_file(gate_path) != gate_sha256:
             raise RuntimeError("Boundary stage gate changed while it was validated")
         completed = gate.get("completed_updates")
+        kind = (gate.get("canonical_boundary"), gate.get("checkpoint_kind"))
         if (
-            gate.get("canonical_boundary") is not True
-            or gate.get("checkpoint_kind") != "canonical_boundary"
+            kind not in _BOUNDARY_GATE_KINDS
             or not isinstance(completed, int)
             or isinstance(completed, bool)
             or completed >= FINAL_COMPLETED_UPDATES
             or completed in seen
         ):
             raise ValueError(
-                "Boundary stage gates must be distinct earlier canonical boundaries"
+                "Boundary stage gates must be distinct earlier canonical "
+                "boundaries or activation canaries"
             )
         seen.add(completed)
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -589,6 +597,7 @@ def _boundary_stage_gate_lineage(
         entries.append(
             {
                 "completed_updates": completed,
+                "checkpoint_kind": gate["checkpoint_kind"],
                 "iteration": gate["iteration"],
                 "checkpoint_sha256": gate["checkpoint_sha256"],
                 "stage_gate_sha256": gate_sha256,

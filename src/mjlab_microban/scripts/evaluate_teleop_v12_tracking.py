@@ -205,13 +205,46 @@ HAND_RMS_40MM_REASON = (
     "user-approved hand RMS <= 0.040 m, hand P95, foot limits, every "
     "non-accuracy check and every other profile unchanged"
 )
-# 10000-boundary allowance profile -> the deployed-accuracy profile it relaxes
-# (only hand RMS differs) and the strict profile whose structure it uses.
+# 10100-canary counterpart (2026-10-05).  The same user decision ("手は 0.04m
+# まで許容") applied to the 100-update foot-activation canary that follows the
+# 10000 boundary on the same pose-release lineage: identical to the
+# foot-activation canary deployed-accuracy profile (scenarios, checks,
+# ablation, hand P95, foot limits) except hand RMS <= 0.040 m.  Reason: the
+# forward-lean pose-release 10099 canaries resumed from the 0.040 m-gated
+# model_9999 (whose own hand RMS is 0.0365 m) passed every non-accuracy check,
+# locomotion and the hand P95 limit and missed only the 0.035 m hand RMS limit
+# (two runs, max 0.0367 / 0.0372 m); a 100-update canary cannot be held
+# tighter than the boundary it continues.
+FOOT_CANARY_HAND_RMS_40MM_PROFILE = (
+    f"{FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE}_{HAND_RMS_40MM_REVISION}"
+)
+FOOT_CANARY_HAND_RMS_40MM_COMPLETED_UPDATES = 10_100
+FOOT_CANARY_HAND_RMS_40MM_REASON = (
+    "10100-canary hand-RMS allowance for the active-hand arm pose-release "
+    "lineage: its model_10099 canaries resumed from the hand-RMS-allowance "
+    "10000 boundary passed every non-accuracy foot-activation canary check, "
+    "locomotion and hand P95 and missed only the 0.035 m hand RMS limit by a "
+    "few millimetres; user-approved hand RMS <= 0.040 m, hand P95, foot "
+    "limits, every non-accuracy check and every other profile unchanged"
+)
+# Hand-RMS allowance profile -> the deployed-accuracy profile it relaxes (only
+# hand RMS differs), the strict profile whose structure it uses, the one
+# boundary clock it applies to, and its recorded reason.
 DEPLOYED_ACCURACY_PROFILE_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
 }
 STRICT_PROFILE_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HMD_HAND_PROFILE,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_ACTIVATION_CANARY_PROFILE,
+}
+COMPLETED_UPDATES_BY_HAND_RMS_40MM_PROFILE = {
+    HMD_HAND_HAND_RMS_40MM_PROFILE: HAND_RMS_40MM_BOUNDARY_COMPLETED_UPDATES,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_CANARY_HAND_RMS_40MM_COMPLETED_UPDATES,
+}
+REASON_BY_HAND_RMS_40MM_PROFILE = {
+    HMD_HAND_HAND_RMS_40MM_PROFILE: HAND_RMS_40MM_REASON,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_CANARY_HAND_RMS_40MM_REASON,
 }
 # Stricter profiles an allowance boundary also accepts (they pass tighter
 # accuracy limits with the same scenarios and checks).
@@ -223,6 +256,10 @@ STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: (
         HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
         HMD_HAND_PROFILE,
+    ),
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE: (
+        FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
+        FOOT_ACTIVATION_CANARY_PROFILE,
     ),
 }
 DEADLINE_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
@@ -245,6 +282,7 @@ TRACKING_PROFILES = (
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_COMPLETION_ALLOWANCE_PROFILE,
     HMD_HAND_HAND_RMS_40MM_PROFILE,
+    FOOT_CANARY_HAND_RMS_40MM_PROFILE,
 )
 
 # Strict limits (the strict profiles above).
@@ -291,8 +329,8 @@ def tracking_profile_structure(profile: str) -> str:
 def tracking_profile_completion_allowance(profile: str) -> dict[str, Any] | None:
     """Return the recorded allowance (reason and limits) of one profile, if any.
 
-    Both the 15000 final completion allowance and the 10000-boundary hand-RMS
-    allowance are recorded; every other profile has none.
+    The 15000 final completion allowance and the 10000-boundary / 10100-canary
+    hand-RMS allowances are recorded; every other profile has none.
     """
 
     if profile in DEPLOYED_ACCURACY_PROFILE_BY_HAND_RMS_40MM_PROFILE:
@@ -301,14 +339,16 @@ def tracking_profile_completion_allowance(profile: str) -> dict[str, Any] | None
             "revision": HAND_RMS_40MM_REVISION,
             "structure_profile": STRICT_PROFILE_BY_HAND_RMS_40MM_PROFILE[profile],
             "relaxes_profile": relaxed,
-            "boundary_completed_updates": HAND_RMS_40MM_BOUNDARY_COMPLETED_UPDATES,
+            "boundary_completed_updates": COMPLETED_UPDATES_BY_HAND_RMS_40MM_PROFILE[
+                profile
+            ],
             "recipe_revisions": sorted(HAND_RMS_40MM_RECIPE_REVISIONS),
             "hand_rms_m_max": hand_tracking_rms_max_m(profile),
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
             "relaxed_profile_hand_rms_m_max": hand_tracking_rms_max_m(relaxed),
-            "reason": HAND_RMS_40MM_REASON,
+            "reason": REASON_BY_HAND_RMS_40MM_PROFILE[profile],
         }
     if profile not in STRICT_PROFILE_BY_COMPLETION_ALLOWANCE_PROFILE:
         return None
@@ -609,9 +649,9 @@ def required_tracking_profile(
 ) -> str:
     """Return the canonical stage profile for one clock (and training recipe).
 
-    Only the 10000 and 15000 boundaries depend on the recipe: the active-hand
-    arm pose-release lineage is judged under the 10000-boundary hand-RMS
-    allowance and the final completion allowance there.
+    Only the 10000 / 10100 / 15000 clocks depend on the recipe: the
+    active-hand arm pose-release lineage is judged under the hand-RMS
+    allowances at 10000 and 10100 and the final completion allowance at 15000.
     """
 
     if isinstance(completed_updates, bool) or completed_updates <= 0:
@@ -630,6 +670,11 @@ def required_tracking_profile(
             return HMD_HAND_HAND_RMS_40MM_PROFILE
         return HMD_HAND_DEPLOYED_ACCURACY_PROFILE
     if completed_updates <= 10_100:
+        if (
+            completed_updates == FOOT_CANARY_HAND_RMS_40MM_COMPLETED_UPDATES
+            and recipe_revision in HAND_RMS_40MM_RECIPE_REVISIONS
+        ):
+            return FOOT_CANARY_HAND_RMS_40MM_PROFILE
         return FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE
     if completed_updates < 15_000:
         return WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE
