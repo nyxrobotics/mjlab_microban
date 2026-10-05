@@ -8,9 +8,9 @@ on exactly:
 * the forward-lean HOME (tests/fixtures/home_pose_forward_lean.yaml: what
   ``config/balance_home_pose.py --trunk-pitch-deg 10 --write`` writes into a copy
   of the centered YAML, with name/label edited) reproduces forward-lean-v2
-  with its pose-release final rescue (lean-final-rescue 5e316fe = forward-lean-v2
-  eb02a05 + fc1c313 + 5e316fe; its walking and get-up tasks are those of
-  forward-lean-centered-home).
+  with its pose-release final rescue and its push-replay mixes (forward-lean-v2
+  cd0ea78, which contains lean-final-rescue fc1c313..3fc519b and 005f55c; its
+  walking and get-up tasks are those of forward-lean-centered-home).
 
 "Reproduces" means every module constant, every HOME-derived function result
 and the repr of every registered task's env / play / RL config and runner of
@@ -51,7 +51,7 @@ LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
 CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
 REFERENCES = {
     "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
-    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_lean-final-rescue_5e316fe.json",
+    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_cd0ea78.json",
 }
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 import home_equivalence  # noqa: E402
@@ -336,7 +336,7 @@ class ForwardLeanOnlyTestsTest(unittest.TestCase):
         self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
 
     def test_pose_release_final_rescue_tests_pass_at_the_forward_lean_home(self):
-        """forward-lean-v2's final rescue (fc1c313/5e316fe) with its published strings."""
+        """forward-lean-v2's final rescue (fc1c313..cd0ea78) with its published strings."""
 
         try:
             import pytest  # noqa: F401
