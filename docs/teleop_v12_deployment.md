@@ -200,7 +200,9 @@ The packager performs the following fail-closed sequence on CPU:
 
 Profile `full_body_reachable_performance_perturbation_v2_completion_allowance_v1`
 is the 15000-update profile of the active-hand arm pose-release recipe
-(`..._active_hand_arm_pose_release_v12`) only. It keeps the final profile's
+only: `..._active_hand_arm_pose_release_v12` at the centered HOME,
+`..._home_levelled_targets_level_hmd_receiver_box_hands_active_hand_arm_pose_release_v18`
+at the forward-lean HOME (`src/mjlab_microban/robot/home_contracts.py`). It keeps the final profile's
 scenarios, perturbation, target-column ablation targets and every
 non-accuracy check (no falls, finite, actual soft limits, raw-action
 recurrence, forced HMD motion, observation coverage, ablation response, twist
@@ -222,6 +224,12 @@ only on accuracy: `mixed_forward_left` hand 0.0403/0.0727 m, foot
 mixed scenarios are near-fall states for the previous canonical model as well.
 The user approved completing the centered-HOME PICO this way ("全部許可するから
 一番良いと思う方法で作業完了まで進めて", "本来の基準ってのも別にそんなに意味ない").
+At every HOME but the centered one the release route is a fresh pose-release
+chain (`scripts/train_microban_teleop_v12.sh start --source WALK.pt
+--hand-pose-release`): only the centered HOME pins a model_7099 as a
+recipe-switch parent. A HOME whose trunk leans forward labels its foot/hand
+target columns `robot_home_levelled_trunk_xyz_forward_left_up` and is packaged
+by packager v7 (forward-lean) or a `<tag>` revision.
 Every other boundary and every other lineage keeps its profile. A gate judged
 under the allowance records the limits and this reason in
 `tracking_profile_completion_allowance`.

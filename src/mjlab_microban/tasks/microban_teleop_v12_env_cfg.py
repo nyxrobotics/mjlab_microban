@@ -12,8 +12,11 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
-from mjlab_microban.robot.home_pose import HOME, signed_degree_token
-from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot import home_contracts
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
@@ -23,30 +26,47 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 
 MICROBAN_TELEOP_V12_TASK_ID = "Mjlab-Teleop-V12-Microban"
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
-# HOME-bound identities, derived from config/home_pose.yaml: HOME.tag is
-# "centered_home" for the centered HOME every current artifact was trained at,
-# and "<label>_<joint hash>" for any other HOME, so checkpoints, gates and
-# packages of another HOME are refused.  At the centered HOME this reproduces
-# "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5".
-MICROBAN_TELEOP_V12_HOME_POSE_REVISION = (
-    f"{HOME.tag}_hip_{signed_degree_token(HOME.hip_pitch_deg)}"
-    f"_ankle_{signed_degree_token(HOME.ankle_pitch_deg)}_shoulder_zero_v5"
-)
-MICROBAN_TELEOP_V12_RECIPE_REVISION = (
-    f"{HOME.tag}_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_v11"
-)
-# Opt-in successor recipe: identical to v11 except that the inherited HOME
-# pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
-# whose target is active (an inactive hand's arm and every other joint keep the
-# v11 term).  It changes nothing before hand targets activate at update 7000.
-# Only its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or
-# records it; canonical gates, stage files and the exporter still accept only
-# the v11 recipe (and the corner rescue), so it needs its own fresh chain.
+# HOME-bound identities (robot/home_contracts.py, from config/home_pose.yaml):
+# the centered HOME keeps
+# "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5"
+# and its v11 / v12 (pose-release) recipes; the forward-lean HOME (trunk 10 deg
+# forward; the root quaternion is part of the marker) keeps
+# "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
+# and its v17 / v18 recipes; any other HOME embeds "<label>_<joint hash>", so
+# checkpoints, gates and packages of another HOME are refused.
+MICROBAN_TELEOP_V12_HOME_POSE_REVISION = home_contracts.V12_HOME_POSE_REVISION
+# Canonical recipe.  With a pitched HOME trunk (forward-lean v15/v17) the
+# foot/hand targets are offsets in the HOME-levelled trunk frame
+# R_trunk * R_y(-HOME_TRUNK_PITCH_RAD) (reachable-FK hand samples rotated into
+# it and capped to the robot receiver's +-64 mm box, hand FK v4: joint-sample
+# rejection, F evaluation/corner pose (-20, 25, -50) deg) and the neutral HMD
+# neck pose is the level headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  With a
+# vertical trunk all of that is the trunk frame and neck_pitch 0 (v11).
+MICROBAN_TELEOP_V12_RECIPE_REVISION = home_contracts.V12_RECIPE_REVISION
+# Opt-in successor recipe (v12 centered / v18 forward-lean): identical to the
+# canonical recipe except that the inherited HOME pose reward drops the
+# shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
+# active (an inactive hand's arm and every other joint keep the canonical
+# term).  It changes nothing before hand targets activate at update 7000.  Only
+# its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or records
+# it.  Stage gates and the exporter accept its release-eligible lineages
+# (microban_teleop_v12_hand_pose_release_lineage): a fresh pose-release chain,
+# or (centered HOME only) the pinned recipe switch at the gated canonical
+# model_7099.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
-    f"{HOME.tag}_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-    "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+    home_contracts.V12_HAND_POSE_RELEASE_RECIPE_REVISION
 )
+# The robot's hmd_head move keeps the camera at the headset's world attitude,
+# so on a HOME whose trunk leans forward a level headset holds neck_pitch at
+# -HOME_TRUNK_PITCH_RAD (and that is also where an active hmd_head sits with
+# no head command).  V12 resets and neutral waypoints use this pose; random
+# waypoints keep covering the full runtime range.  Absolute joint angles.  A
+# vertical-trunk HOME keeps HOME itself (default_joint_pos) as the neutral.
+MICROBAN_TELEOP_V12_HMD_NEUTRAL_POSITION_RAD = {
+    "head": 0.0,
+    "neck_roll": 0.0,
+    "neck_pitch": -HOME_TRUNK_PITCH_RAD,
+}
 # Shared target rule of every Microban policy: target = HOME + raw_action on all
 # 18 body joints with no software clip.  The only bound is the servo's one-turn
 # goal range, modelled as an absolute target saturation at +-pi (the robot
@@ -144,6 +164,12 @@ def make_microban_teleop_v12_env_cfg(
     # does not filter or stop an action.
     for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):
         cfg.rewards.pop(reward_name, None)
+
+    hmd_event = cfg.events.get("hmd_neck_target_motion")
+    if hmd_event is not None and HOME_TRUNK_PITCH_RAD != 0.0:
+        hmd_event.params["neutral_position_rad"] = dict(
+            MICROBAN_TELEOP_V12_HMD_NEUTRAL_POSITION_RAD
+        )
     return cfg
 
 

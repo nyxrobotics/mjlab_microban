@@ -15,9 +15,10 @@ Usage:
   scripts/train_microban_teleop_upright_fullbody.sh resume SOURCE_RUN CHECKPOINT_ITERATION UPDATES RUN_LABEL
 
 This is a new policy trained from scratch at the physical A-button neutral:
-bilateral hip pitch +1.198384259489 degrees, ankle pitch -1.198384259489
-degrees, shoulder pitch 0 degrees, and a vertical trunk. It does not
-load the old v12 checkpoint or walk004 motion prior.
+the shared HOME of config/home_pose.yaml (shoulder pitch 0 degrees; the
+centered HOME has hip pitch +1.198384259489, ankle pitch -1.198384259489
+degrees and a vertical trunk). It does not load the old v12 checkpoint or
+walk004 motion prior.
 UPDATES defaults to 15000 for start. Use multiples of 100 so the last update
 is written to a checkpoint. Resume names an existing run directory under the
 separate upright_fullbody experiment and creates a newly named output run.
@@ -69,7 +70,8 @@ fi
     || fail "Requested training would exceed 15000 total updates."
 
 cd -- "$PROJECT_ROOT"
-echo "[INFO] task=$TASK HOME hip pitch=+1.198384259489 deg ankle pitch=-1.198384259489 deg shoulder pitch=0 deg trunk pitch=0 deg mode=$mode" >&2
+home_summary="$(uv run --locked python -c 'from mjlab_microban.robot.home_pose import HOME as h; d = h.joint_pos_deg; print("hip pitch=%+.12f deg ankle pitch=%+.12f deg shoulder pitch=%g deg trunk pitch=%+g deg (%s)" % (d["left_hip_pitch"], d["left_ankle_pitch"], d["left_shoulder_pitch"], h.trunk_pitch_deg, h.tag))')"
+echo "[INFO] task=$TASK HOME ${home_summary} mode=$mode" >&2
 echo "[INFO] completed=$completed updates=$updates output_label=$run_label" >&2
 echo "[INFO] This training route has no release gate; checkpoints are simulation-only." >&2
 exec uv run --locked train "$TASK" \

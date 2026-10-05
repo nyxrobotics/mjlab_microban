@@ -57,11 +57,31 @@ def _load_checkpoint(path: Path) -> tuple[Path, str, dict[str, Any]]:
     return resolved, digest, payload
 
 
-def validate_parent_checkpoint(path: Path, tracking_report: Path) -> dict[str, Any]:
-    """Authenticate a canonical model9900 and its strict report before startup."""
+def validate_parent_checkpoint(
+    path: Path, tracking_report: Path, *, hand_pose_release: bool = False
+) -> dict[str, Any]:
+    """Authenticate a model9900 and its strict report before startup.
+
+    Canonical: a v11 model9900 failing only strict hand RMS.  With
+    ``hand_pose_release``: a fresh pose-release chain's model9900 failing only
+    strict hand accuracy (RMS and/or P95).
+    """
+
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        selected_hand_pose_release_corner_rescue_mix,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
+        validate_hand_pose_release_corner_rescue_parent_payload,
+        validate_hand_pose_release_corner_rescue_parent_report,
+    )
 
     resolved, digest, payload = _load_checkpoint(path)
-    validate_corner_rescue_parent_payload(payload, checkpoint_sha256=digest)
+    if hand_pose_release:
+        validate_hand_pose_release_corner_rescue_parent_payload(
+            payload, checkpoint_sha256=digest
+        )
+    else:
+        validate_corner_rescue_parent_payload(payload, checkpoint_sha256=digest)
     infos = payload.get("infos")
     assert isinstance(infos, dict)
     validate_bilateral_site_order_checkpoint(infos)
@@ -70,7 +90,12 @@ def validate_parent_checkpoint(path: Path, tracking_report: Path) -> dict[str, A
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
     report_path = tracking_report.expanduser().resolve(strict=True)
-    report_digest, failed = validate_corner_rescue_parent_report(
+    validate_report = (
+        validate_hand_pose_release_corner_rescue_parent_report
+        if hand_pose_release
+        else validate_corner_rescue_parent_report
+    )
+    report_digest, failed = validate_report(
         report_path, checkpoint_sha256=digest, iteration=payload["iter"]
     )
     return {
@@ -92,6 +117,13 @@ def validate_parent_checkpoint(path: Path, tracking_report: Path) -> dict[str, A
         "target": corner_rescue_marker(
             parent_checkpoint_sha256=digest,
             parent_strict_tracking_report_sha256=report_digest,
+            hand_pose_release=hand_pose_release,
+            parent_strict_failed_checks=failed,
+            **(
+                {"pose_release_mix": selected_hand_pose_release_corner_rescue_mix()}
+                if hand_pose_release
+                else {}
+            ),
         ),
     }
 
@@ -235,6 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     parent = commands.add_parser("validate-parent")
     parent.add_argument("checkpoint", type=Path)
     parent.add_argument("tracking_report", type=Path)
+    parent.add_argument("--hand-pose-release", action="store_true")
     for name in ("create-receipt", "validate-receipt"):
         command = commands.add_parser(name)
         if name == "validate-receipt":
@@ -251,7 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "validate-parent":
-        result = validate_parent_checkpoint(args.checkpoint, args.tracking_report)
+        result = validate_parent_checkpoint(
+            args.checkpoint,
+            args.tracking_report,
+            hand_pose_release=args.hand_pose_release,
+        )
     elif args.command == "create-receipt":
         result = create_receipt(
             checkpoint=args.checkpoint,

@@ -36,6 +36,11 @@ redesign/ reports):
 * 2026-10-03: every policy now shares one target rule, HOME + raw with no
   software clip; only the servo's one-turn range (+-pi) bounds the target,
   which keeps even more torque authority than +-1.57.
+* 2026-10-04 (contract v6 on the forward-lean line): the HOME may lean the
+  trunk forward (config/home_pose.yaml trunk_pitch_deg). Every term that
+  assumed a vertical trunk is centred on the HOME lean instead
+  (upright_standing's target gravity, the head height, the near-HOME reset's
+  yaw axis); at a vertical-trunk HOME they are the original terms.
 
 Reward sets sharing this contract:
 
@@ -82,7 +87,11 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
     reward_based_staged_curriculum,
@@ -129,12 +138,30 @@ HOME_FEET_LATERAL_M = HOME.feet_lateral_m
 
 # Virtual head height (trunk COM + 0.07324 m along the trunk's up axis, see
 # mdp._head_height) at HOME by MuJoCo forward kinematics, rounded to 0.1 mm
-# (robot/home_pose.py): 0.2965 m at the centered HOME (FK 0.29653). Kneeling
+# (robot/home_pose.py): 0.2965 m at the centered HOME (FK 0.29653), 0.2953 m
+# at the forward-lean HOME (FK 0.29527; the 10 deg lean lowers it). Kneeling
 # upright reaches 0.226-0.239 and the deepest flat-foot squat 0.222-0.227,
-# so the 0.9x standing gate (0.2669) is above both. 0.260 was tried on 09-28
-# and made a forearm-propped tripod (0.205) earn 91 % of the height reward.
+# so the 0.9x standing gate (0.2669 / 0.2657) is above both. 0.260 was tried
+# on 09-28 and made a forearm-propped tripod (0.205) earn 91 % of the height
+# reward.
 HEAD_STANDING_HEIGHT = HOME.head_standing_height_m
 STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
+# (fraction of resets near HOME, max roll/pitch noise in rad). 957ab42 widened
+# this to (0.2, 0.6) -- +-34 deg, "tipping, not yet fallen" -- so the policy
+# would practise catching itself. Measured at the centered HOME on 2026-10-03:
+# with it, stage 1 learned to catch tips by moving a foot and kept that stance
+# (17.6 cm wide under the +-1.57 clip; 8.6 cm staggered fore-aft under the
+# servo range, feet_fore_aft reward 3.1 vs 13.9 and standing_pose 124 vs 176 at
+# iteration 2000), while (0.1, 0.09) reproduced the HOME-stance lineage. The
+# wide reset stays available as Mjlab-Getup-Microban-Tipping. The centered
+# HOME's tasks keep the wide default they were registered with
+# (LEGACY_HOME_OVERRIDES "getup_near_home_reset"); every other HOME, the
+# forward-lean one included, defaults to NEAR_HOME_RESET.
+NEAR_HOME_RESET = (0.1, 0.09)
+NEAR_HOME_RESET_TIPPING = (0.2, 0.6)
+_DEFAULT_NEAR_HOME_RESET: tuple[float, float] = tuple(  # type: ignore[assignment]
+    HOME.override("getup_near_home_reset", NEAR_HOME_RESET)
+)
 # Despite the name, _head_height only uses .name to resolve the robot entity.
 HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))
 DOFS_FILTER = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
@@ -180,7 +207,7 @@ def make_microban_getup_env_cfg(
     play: bool = False,
     reward_set: str = "posture",
     imu_delay_max_lag: int = 0,
-    near_home_reset: tuple[float, float] = (0.2, 0.6),
+    near_home_reset: tuple[float, float] = _DEFAULT_NEAR_HOME_RESET,
 ) -> ManagerBasedRlEnvCfg:
     """near_home_reset: (fraction of resets near HOME, max roll/pitch noise in rad)."""
     if reward_set not in GETUP_REWARD_SETS:
@@ -346,33 +373,17 @@ def make_microban_getup_env_cfg(
         "yaw": (-3.14159, 3.14159),
     }
     cfg.events["reset_robot_joints"].params["position_range"] = (-3.14159, 3.14159)
-    # 20 % of resets start near HOME instead (FRASA's reset_final_p,
+    # A fraction of resets start near HOME instead (FRASA's reset_final_p,
     # HumanUP's standing_init_prob). Added after reset_base/reset_robot_joints
-    # so it overrides their sample for the selected envs.
-    #
-    # Widened from +-5 deg to +-34 deg (and the fraction doubled from 10% to
-    # 20%) so this reset distribution also covers "clearly tipping but not
-    # yet fallen" states, not just small near-home jitter. The robot's own
-    # fall-detection trigger (scheduler.py's _update_getup_override) only
-    # hands control to this policy once already substantially tilted, and
-    # training only ever sampled either that fully-fallen regime or a ~5 deg
-    # near-home jitter -- nothing in between. A policy that has only ever
-    # practiced "already flat" or "basically upright" has no practiced
-    # response for "tipping, still recoverable": it either falls all the way
-    # (never having learned to catch itself) or holds still (never having
-    # learned to actively brace). Roll and pitch are independent, so this can
-    # compound to a larger total tilt at the corners of the sampled range;
-    # that is intentional headroom into "about to fall", not just "near
-    # home". The 80%-weighted fully-fallen distribution remains the dominant
-    # training regime, preserving the already-validated stand-from-flat
-    # capability.
+    # so it overrides their sample for the selected envs. See NEAR_HOME_RESET
+    # for the default (10 %, +-5 deg of the HOME-stance lineage) and the wide
+    # "tipping" reset (20 %, +-34 deg; the centered HOME's default).
     cfg.events["reset_near_home"] = EventTermCfg(
         mode="reset",
         func=reset_near_home_fraction,
         params={
             "rel_near_home_envs": near_home_reset[0],
             "joint_noise_range": (-0.05, 0.05),
-            # Default +-0.6 rad (~+-34 deg) roll/pitch.
             "orientation_noise_range": (-near_home_reset[1], near_home_reset[1]),
             "asset_cfg": SceneEntityCfg("robot"),
         },
@@ -630,8 +641,10 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
     * No always-on body_ang_vel/angular_momentum: the first penalizes the
       trunk rotation the recovery needs, the second measured exactly 0.
     * HoST's post-standing terms (arXiv:2502.08378, its code's weights and
-      shapes): exp(-5|g_xy|^2) uprightness and a calm-trunk term, hard-gated
-      at the same 0.9x H so no crouch or prop can earn them.
+      shapes): exp(-5|g_xy - g_xy(HOME)|^2) uprightness -- centred on the
+      projected gravity of the HOME trunk lean p, (sin p, 0), which is
+      HoST's exp(-5|g_xy|^2) for a vertical-trunk HOME -- and a calm-trunk
+      term, hard-gated at the same 0.9x H so no crouch or prop can earn them.
     """
 
     _add_shared_rewards(
@@ -650,6 +663,8 @@ def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) ->
             "height_threshold": STANDING_GATE_HEIGHT,
             "head_asset_cfg": HEAD_ASSET_CFG,
             "tilt_std": float(1.0 / np.sqrt(5.0)),
+            # A pitched-trunk HOME: peak at its lean, not at a vertical trunk.
+            **({"pitch": HOME_TRUNK_PITCH_RAD} if HOME_TRUNK_PITCH_RAD != 0.0 else {}),
         },
     )
     cfg.rewards["calm_standing"] = RewardTermCfg(

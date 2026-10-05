@@ -117,25 +117,197 @@ HEAD_STANDING_HEIGHT_DECIMALS = 4
 FEET_LATERAL_DECIMALS = 4
 
 # Compatibility table: values published for one exact HOME before this file
-# existed, keyed by its joint hash.  The centered HOME of 2026-10-05
-# (mjlab_microban track-centered-home-clip, robot a62a793) keeps its contract
-# strings ("centered_home_...") and its hand-rounded get-up feet target
-# (0.094 m; FK says 0.0935) so every artifact trained at it stays valid.  Any
-# edit of the HOME changes the hash and drops these overrides: the strings then
-# carry "<label>_<hash>" and the targets are the FK values.
+# existed, keyed by its joint hash.  Two HOMEs have trained and deployed
+# artifacts:
+#
+# * the centered HOME (trunk vertical; mjlab_microban track-centered-home-clip,
+#   robot feature/neck-roll-pitch-camera a62a793), and
+# * the forward-lean HOME (trunk +10 deg; mjlab_microban forward-lean-centered-
+#   home / forward-lean-v2, robot forward-lean-home).
+#
+# Each keeps every value and string it was trained and deployed with, so its
+# checkpoints, gates and ONNX stay valid and a checkout of this code with that
+# HOME's YAML reproduces the branch it came from bit for bit:
+#
+# * ``tag``: the identifier used where a string embeds the HOME;
+# * ``contracts``: every HOME-bound contract/recipe/revision string by key
+#   (robot/home_contracts.py derives "<label>_<hash>" strings for any other
+#   HOME);
+# * ``root_z_m``: the published root z (checked against FK to
+#   ROOT_Z_PIN_TOLERANCE_M);
+# * ``feet_lateral_m``: the centered HOME's hand-rounded get-up feet target
+#   (0.094 m; FK says 0.0935);
+# * ``joint_pos_deg``: published full-precision joint values that differ from
+#   the YAML's canonical 12-decimal ones in the last digits (the forward-lean
+#   branch wrote the solver's unrounded hip/ankle pitch); checked against the
+#   YAML to JOINT_PIN_TOLERANCE_DEG;
+# * ``getup_near_home_reset``: the default near-HOME reset of the get-up tasks
+#   on that branch (the centered line kept the wide (0.2, 0.6) default; the
+#   forward-lean line, and any new HOME, use NEAR_HOME_RESET (0.1, 0.09));
+# * ``accepts_unstamped_walk_checkpoints``: walking checkpoints saved before
+#   the HOME stamp existed (centered line only);
+# * ``v12_pose_release_switch_parent_sha256``: the pinned canonical model_7099
+#   of the release-eligible pose-release recipe switch (centered line only;
+#   every other HOME trains the pose-release recipe as a fresh chain).
+#
+# Any edit of the HOME changes the hash and drops all of this: strings then
+# carry "<label>_<hash>", targets are the FK values, no unstamped or switched
+# checkpoint is accepted.
+JOINT_PIN_TOLERANCE_DEG = 1.0e-9
+
+CENTERED_HOME_HASH = "bbef07cab8"
+FORWARD_LEAN_HOME_HASH = "481503d292"
+
+_CENTERED_HOME_CONTRACTS = {
+    "walk_contract_version": "v3_centered_home_servo_range",
+    "getup_contract_version": "v5",
+    # Runs started on 2026-10-03 before the v5 bump stamped "v4"; accepted as
+    # v5 only when their recorded env proves v5 (microban_getup_runner).
+    "getup_legacy_stamp": "v4",
+    "v12_home_pose_revision": (
+        "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5"
+    ),
+    "v12_recipe_revision": (
+        "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+        "raw_prev_action_servo_range_pi_v11"
+    ),
+    "v12_hand_pose_release_recipe_revision": (
+        "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+        "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+    ),
+    "v12_packager_revision": (
+        "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
+    ),
+    "v12_final_rescue_recipe_revision": "model14900_targeted_final_scenario_replay_to15000_v1",
+    "v12_final_rescue_marker_revision": (
+        "recorded_model14900_ordinary10_final_scenarios90_99_updates_v1"
+    ),
+    "v12_final_rescue_sampler_revision": (
+        "episode_shared_twist_foot_hand_evaluator_scenario_replay_v1"
+    ),
+    "v12_corner_rescue_recipe_revision": (
+        "model9900_targeted_bilateral_corner_pair_replay_to10000_v3"
+    ),
+    "v12_corner_rescue_marker_revision": (
+        "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v3"
+    ),
+    "v12_corner_rescue_sampler_revision": "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_v2",
+    "upright_fullbody_recipe_revision": "physical_neutral_full_actor_from_scratch_raw83x18_v4",
+    "upright_fullbody_home_revision": "physical_neutral_shoulder_zero_hip_neg10_v5",
+}
+
+_FORWARD_LEAN_HOME_CONTRACTS = {
+    "walk_contract_version": "v4_forward_lean_home_servo_range",
+    "getup_contract_version": "v6",
+    "v12_home_pose_revision": (
+        "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
+    ),
+    "v12_recipe_revision": (
+        "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+        "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+        "receiver_box_hands_v17"
+    ),
+    "v12_hand_pose_release_recipe_revision": (
+        "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+        "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+        "receiver_box_hands_active_hand_arm_pose_release_v18"
+    ),
+    "v12_packager_revision": (
+        "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
+    ),
+    "v12_final_rescue_recipe_revision": (
+        "model14900_targeted_final_scenario_replay_to15000_forward_lean_"
+        "home_levelled_receiver_box_v2"
+    ),
+    "v12_final_rescue_marker_revision": (
+        "recorded_model14900_ordinary10_final_scenarios90_99_updates_forward_lean_v2"
+    ),
+    "v12_final_rescue_sampler_revision": (
+        "episode_shared_twist_foot_hand_evaluator_scenario_replay_home_levelled_v2"
+    ),
+    "v12_corner_rescue_recipe_revision": (
+        "model9900_targeted_bilateral_corner_pair_replay_to10000_receiver_box_f_v4"
+    ),
+    "v12_corner_rescue_marker_revision": (
+        "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_receiver_box_f_v4"
+    ),
+    "v12_corner_rescue_sampler_revision": (
+        "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_v3"
+    ),
+    "v12_pr_corner_rescue_lf60_marker_revision": (
+        "recorded_pose_release_model9900_uniform5_lf_rb60_lb_rf35_99_updates_"
+        "receiver_box_f_v1"
+    ),
+    "v12_pr_corner_rescue_lf60_sampler_revision": (
+        "uniform_joint_box5pct_lf_rb60pct_lb_rf35pct_receiver_box_f_v1"
+    ),
+    "v12_pr_corner_rescue_lf72_marker_revision": (
+        "recorded_pose_release_model9900_uniform5_lf_rb72_lb_rf23_99_updates_"
+        "receiver_box_f_v1"
+    ),
+    "v12_pr_corner_rescue_lf72_sampler_revision": (
+        "uniform_joint_box5pct_lf_rb72pct_lb_rf23pct_receiver_box_f_pose_release_v1"
+    ),
+    "v12_pr_corner_rescue_lf90_marker_revision": (
+        "recorded_pose_release_model9900_uniform5_lf_rb90_lb_rf5_99_updates_"
+        "receiver_box_f_v1"
+    ),
+    "v12_pr_corner_rescue_lf90_sampler_revision": (
+        "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_pose_release_v1"
+    ),
+    "upright_fullbody_recipe_revision": (
+        "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_"
+        "receiver_box_hands_v6"
+    ),
+    "upright_fullbody_home_revision": "forward_lean10_com_centered_shoulder_zero_v6",
+}
+
 LEGACY_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
     {
         # The centered HOME's FK root z is 0.17055488563355944, two ulps below
         # the 15-decimal rounding boundary, so it is pinned (not re-rounded).
-        "bbef07cab8": MappingProxyType(
-            {"tag": "centered_home", "feet_lateral_m": 0.094, "root_z_m": 0.170554885633559}
+        CENTERED_HOME_HASH: MappingProxyType(
+            {
+                "tag": "centered_home",
+                "feet_lateral_m": 0.094,
+                "root_z_m": 0.170554885633559,
+                "contracts": MappingProxyType(_CENTERED_HOME_CONTRACTS),
+                "getup_near_home_reset": (0.2, 0.6),
+                "accepts_unstamped_walk_checkpoints": True,
+                "v12_pose_release_switch_parent_sha256": (
+                    # The gated canonical centered-HOME v12 model_7099 (run
+                    # 2026-10-04_10-18-35_c20k_v12_7000_to7100, source walking
+                    # model_20000).
+                    "366763f233f30947554c2f66c5619a8b8c1230ac8529f17740fb1d27cfe0d224"
+                ),
+            }
         ),
-        # The forward-lean HOME (trunk +10 deg, branches forward-lean-v2 /
-        # forward-lean-home) published root z 0.170430569776402; pinned so a
-        # port of that line onto this YAML keeps its stamps bit-exact.
-        "481503d292": MappingProxyType({"root_z_m": 0.170430569776402}),
+        # The forward-lean HOME (trunk +10 deg) as published on the
+        # forward-lean branches: root z 0.170430569776402 and the solver's
+        # unrounded hip/ankle pitch (the YAML holds the canonical 12-decimal
+        # values -14.166561199931 / 4.127976841869, 1.2e-13 deg away).
+        FORWARD_LEAN_HOME_HASH: MappingProxyType(
+            {
+                "tag": "forward_lean_home",
+                "root_z_m": 0.170430569776402,
+                "joint_pos_deg": MappingProxyType(
+                    {
+                        "left_hip_pitch": -14.166561199931119,
+                        "right_hip_pitch": -14.166561199931119,
+                        "left_ankle_pitch": 4.127976841869204,
+                        "right_ankle_pitch": 4.127976841869204,
+                    }
+                ),
+                "contracts": MappingProxyType(_FORWARD_LEAN_HOME_CONTRACTS),
+            }
+        ),
     }
 )
+
+# Explicit HOME YAML for this process (tests, side-by-side comparisons, the
+# training-line check): when set, ``HOME`` is loaded from this path instead of
+# config/home_pose.yaml.
+HOME_POSE_YAML_ENV = "MJLAB_MICROBAN_HOME_POSE_YAML"
 
 
 # --------------------------------------------------------------------------
@@ -495,6 +667,10 @@ class HomePose:
     analysis: PoseAnalysis
     joint_hash: str
     overrides: Mapping[str, object] = field(default_factory=dict)
+    input_joint_pos_deg: Mapping[str, float] | None = None
+    """The YAML's joint values (canonical; what ``joint_hash`` covers).  They
+    equal ``joint_pos_deg`` except where a legacy HOME pins published
+    full-precision values (LEGACY_HOME_OVERRIDES ``joint_pos_deg``)."""
 
     # -- inputs in radians ---------------------------------------------
     @property
@@ -537,6 +713,27 @@ class HomePose:
         if "tag" in self.overrides:
             return str(self.overrides["tag"])
         return f"{self.label}_{self.joint_hash}"
+
+    @property
+    def is_legacy(self) -> bool:
+        """True for a HOME with published artifacts (LEGACY_HOME_OVERRIDES)."""
+
+        return "contracts" in self.overrides
+
+    @property
+    def trunk_is_vertical(self) -> bool:
+        return self.trunk_pitch_deg == 0.0
+
+    def contract(self, key: str, derived: str) -> str:
+        """A HOME-bound string: the published one of a legacy HOME, else ``derived``."""
+
+        contracts = self.overrides.get("contracts")
+        if isinstance(contracts, Mapping) and key in contracts:
+            return str(contracts[key])
+        return derived
+
+    def override(self, key: str, default: object = None) -> object:
+        return self.overrides.get(key, default)
 
     @property
     def hip_pitch_deg(self) -> float:
@@ -669,16 +866,28 @@ def home_pose_from_values(
                 f"HOME {joint_hash}: FK root z {analysis.root_pos[2]!r} differs from its published "
                 f"value {overrides['root_z_m']!r} by {drift:.3e} m (robot.xml changed?)"
             )
+    published = dict(degrees)
+    pins = overrides.get("joint_pos_deg")
+    if isinstance(pins, Mapping):
+        for joint, value in pins.items():
+            if abs(float(value) - degrees[joint]) > JOINT_PIN_TOLERANCE_DEG:
+                raise ValueError(  # pragma: no cover - a hash collision
+                    f"HOME {joint_hash}: {joint} {degrees[joint]!r} deg is not its published "
+                    f"value {value!r}"
+                )
+            published[joint] = float(value)
+    published_rad = {name_: float(np.deg2rad(value)) for name_, value in published.items()}
     return HomePose(
         path=Path(path),
         name=str(name),
         label=label,
         trunk_pitch_deg=pitch_deg,
-        joint_pos_deg=MappingProxyType(degrees),
-        joint_pos_rad=MappingProxyType(radians),
+        joint_pos_deg=MappingProxyType(published),
+        joint_pos_rad=MappingProxyType(published_rad),
         analysis=analysis,
         joint_hash=joint_hash,
         overrides=overrides,
+        input_joint_pos_deg=MappingProxyType(degrees),
     )
 
 
@@ -805,14 +1014,18 @@ def __getattr__(name: str) -> object:
     """Load ``HOME`` (the HOME of this checkout) on first access.
 
     ``from mjlab_microban.robot.home_pose import HOME`` loads and checks
-    ``config/home_pose.yaml`` once and caches the result.  Loading lazily
+    ``config/home_pose.yaml`` (or the file named by ``$MJLAB_MICROBAN_HOME_POSE_YAML``)
+    once and caches the result.  Loading lazily
     keeps this module importable while the YAML is being edited (for example
     a knee change that ``config/balance_home_pose.py`` has not re-levelled
     yet); only code that actually needs the HOME is refused.
     """
 
     if name == "HOME":
-        home = load_home_pose()
+        import os
+
+        explicit = os.environ.get(HOME_POSE_YAML_ENV)
+        home = load_home_pose(explicit) if explicit else load_home_pose()
         globals()["HOME"] = home
         return home
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

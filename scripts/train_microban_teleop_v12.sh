@@ -18,6 +18,7 @@ usage() {
 Usage:
   scripts/train_microban_teleop_v12.sh start --source VELOCITY_MODEL.pt [--source-sha256 SHA]
       [--canary] [--agent.run-name NAME] [--num-envs N] [--max-updates N]
+      [--hand-pose-release]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
 
@@ -37,11 +38,12 @@ the remaining stage may run. --canary also limits any other segment to 100.
 
 --hand-pose-release trains Mjlab-Teleop-V12-HandPoseRelease-Microban (the
 active-hand arm pose-release recipe) through the same stage route and gates.
-With start it begins a fresh pose-release chain.  With resume of a canonical
-v11 checkpoint it is the release-eligible recipe switch, accepted only for the
-gated canonical model_7099; its validated gate is passed to the runner and
-recorded in every later checkpoint.  A pose-release checkpoint is resumed with
-this option (it is refused without it).
+With start it begins a fresh pose-release chain (the release route at every
+HOME but the centered one).  With resume of a canonical checkpoint it is the
+release-eligible recipe switch, accepted only at the centered HOME and only for
+its pinned, gated canonical model_7099; its validated gate is passed to the
+runner and recorded in every later checkpoint.  A pose-release checkpoint is
+resumed with this option (it is refused without it).
 EOF
 }
 fail() { echo "$*" >&2; exit 2; }
@@ -213,6 +215,11 @@ else
         case "${recipe_kind}" in
             hand_pose_release) ;;
             canonical)
+                # Only a HOME with a pinned switch parent (the centered HOME;
+                # microban_teleop_v12_hand_pose_release_lineage.py) has the
+                # release-eligible recipe switch.
+                uv run --locked python -c 'import sys; from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 as pinned; sys.exit(pinned is None)' \
+                    || fail "No release-eligible recipe switch at this HOME; start a fresh chain with: start --source VELOCITY_MODEL.pt --hand-pose-release"
                 (( skip_gate == 0 )) \
                     || fail "The release recipe switch needs the parent stage gate"
                 gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"

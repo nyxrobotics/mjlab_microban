@@ -1,0 +1,333 @@
+"""Trunk pitch is just a value of config/home_pose.yaml.
+
+The two HOMEs with trained artifacts reproduce the branches they were trained
+on exactly:
+
+* the centered HOME (config/home_pose.yaml, trunk vertical) reproduces
+  mjlab_microban track-centered-home-clip (5b5a9d0);
+* the forward-lean HOME (tests/fixtures/home_pose_forward_lean.yaml: what
+  ``config/balance_home_pose.py --trunk-pitch-deg 10 --write`` writes into a copy
+  of the centered YAML, with name/label edited) reproduces forward-lean-v2
+  (5442e88; its walking and get-up tasks are those of forward-lean-centered-home).
+
+"Reproduces" means every module constant, every HOME-derived function result
+and the repr of every registered task's env / play / RL config and runner of
+the reference branch (tests/fixtures/home_equivalence/*.json, sha256 per key,
+recorded with tests/home_equivalence.py) is equal here.  The only allowed
+differences are new names this tree adds, and at the centered HOME the new
+command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
+``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
+their HOME (a subclass of mjlab's).
+
+``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
+checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
+forward-lean-v2 and requires byte-identical ONNX files.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = REPO_ROOT / "tests" / "fixtures"
+LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
+CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
+REFERENCES = {
+    "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
+    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_5442e88.json",
+}
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+import home_equivalence  # noqa: E402
+
+
+def _environment(yaml_path: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONHASHSEED": "0",
+            "CUDA_VISIBLE_DEVICES": "",
+            "MJLAB_MICROBAN_HOME_POSE_YAML": str(yaml_path),
+            "PYTHONPATH": os.pathsep.join(
+                [str(REPO_ROOT / "src"), *filter(None, [os.environ.get("PYTHONPATH")])]
+            ),
+        }
+    )
+    return environment
+
+
+def _run_python(yaml_path: Path, code: str) -> str:
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        env=_environment(yaml_path),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr[-3000:])
+    return completed.stdout.strip().splitlines()[-1]
+
+
+class HomeEquivalenceTest(unittest.TestCase):
+    """Side-by-side with the reference branches (subprocess per HOME, ~40 s each)."""
+
+    def _compare(self, yaml_path: Path, reference: Path, *, centered: bool) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dump.json"
+            completed = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "tests" / "home_equivalence.py"), "dump",
+                 str(output), str(REPO_ROOT)],
+                env=_environment(yaml_path),
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+            values = json.loads(output.read_text())
+        if centered:
+            values = {
+                key: home_equivalence.without_centered_default_fields(value)
+                for key, value in values.items()
+            }
+        allowed = {}
+        if centered:
+            # The walking runner stamps checkpoints with the training HOME (a
+            # subclass of mjlab's VelocityOnPolicyRunner, as on the
+            # forward-lean branches); the centered branch used mjlab's own.
+            allowed["task:Mjlab-Velocity-Microban:runner"] = (
+                "mjlab_microban.tasks.microban_velocity_runner.MicrobanVelocityOnPolicyRunner"
+            )
+        for key, value in allowed.items():
+            self.assertEqual(values.get(key), value)
+        current = home_equivalence.digest(values)
+        expected = json.loads(reference.read_text())
+        missing = sorted(set(expected) - set(current))
+        different = sorted(
+            key
+            for key in expected
+            if key in current and current[key] != expected[key] and key not in allowed
+        )
+        self.assertEqual(missing, [], "names of the reference branch missing here")
+        self.assertEqual(different, [], "values that differ from the reference branch")
+        # Every registered task of the reference exists and matches (checked
+        # above); the task count is at least the reference's.
+        self.assertGreaterEqual(
+            sum(key.startswith("task:") for key in current),
+            sum(key.startswith("task:") for key in expected),
+        )
+
+    def test_centered_home_reproduces_track_centered_home_clip(self):
+        self._compare(CENTERED_YAML, REFERENCES["centered"], centered=True)
+
+    def test_forward_lean_home_reproduces_forward_lean_v2(self):
+        self._compare(LEAN_YAML, REFERENCES["forward_lean"], centered=False)
+
+
+class ForwardLeanHomeValuesTest(unittest.TestCase):
+    """The forward-lean YAML gives the forward-lean branches' literal values."""
+
+    def test_home_values_and_contract_strings(self):
+        result = json.loads(
+            _run_python(
+                LEAN_YAML,
+                "import json\n"
+                "from mjlab_microban.robot.home_pose import HOME\n"
+                "from mjlab_microban.robot import home_contracts as c\n"
+                "print(json.dumps({'tag': HOME.tag, 'hash': HOME.joint_hash,"
+                " 'rad': dict(HOME.joint_pos_rad), 'deg_in': dict(HOME.input_joint_pos_deg),"
+                " 'root': HOME.root_pos, 'quat': HOME.root_quat_wxyz, 'g': HOME.projected_gravity,"
+                " 'head': HOME.head_standing_height_m, 'feet': HOME.feet_lateral_m,"
+                " 'robot': c.robot_contract_strings(), 'getup_legacy': c.GETUP_LEGACY_STAMP,"
+                " 'switch': c.V12_POSE_RELEASE_SWITCH_PARENT_SHA256,"
+                " 'unstamped': c.ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS}))",
+            )
+        )
+        self.assertEqual(result["tag"], "forward_lean_home")
+        self.assertEqual(result["hash"], "481503d292")
+        # The YAML holds the canonical 12-decimal values; HOME publishes the
+        # forward-lean branch's unrounded ones bit for bit.
+        self.assertEqual(result["deg_in"]["left_hip_pitch"], -14.166561199931)
+        self.assertEqual(result["rad"]["left_hip_pitch"], float(np.deg2rad(-14.166561199931119)))
+        self.assertEqual(result["rad"]["right_ankle_pitch"], float(np.deg2rad(4.127976841869204)))
+        self.assertEqual(result["root"], [0.0, 0.0, 0.170430569776402])
+        pitch = float(np.deg2rad(10.0))
+        self.assertEqual(
+            result["quat"],
+            [float(np.cos(pitch / 2.0)), 0.0, float(np.sin(pitch / 2.0)), 0.0],
+        )
+        self.assertEqual(result["g"], [math.sin(pitch), 0.0, -math.cos(pitch)])
+        self.assertEqual((result["head"], result["feet"]), (0.2953, 0.0941))
+        self.assertEqual(
+            result["robot"],
+            {
+                "walk_contract_version": "v4_forward_lean_home_servo_range",
+                "getup_contract_version": "v6",
+                "getup_checkpoint_stamp": "v6",
+                "v12_home_pose_revision": (
+                    "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_"
+                    "shoulder_zero_v6"
+                ),
+                "v12_recipe_revision": (
+                    "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+                    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+                    "receiver_box_hands_v17"
+                ),
+                "v12_hand_pose_release_recipe_revision": (
+                    "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+                    "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+                    "receiver_box_hands_active_hand_arm_pose_release_v18"
+                ),
+                "v12_packager_revision": (
+                    "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
+                ),
+                "v12_target_frame": "robot_home_levelled_trunk_xyz_forward_left_up",
+            },
+        )
+        self.assertIsNone(result["getup_legacy"])
+        self.assertIsNone(result["switch"])
+        self.assertFalse(result["unstamped"])
+
+    def test_fixture_is_the_balance_tool_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "home_pose.yaml"
+            shutil.copyfile(CENTERED_YAML, path)
+            completed = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "config" / "balance_home_pose.py"), "--yaml",
+                 str(path), "--trunk-pitch-deg", "10", "--write", "--no-training-check"],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=600, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            written = path.read_text().splitlines()
+        fixture = LEAN_YAML.read_text().splitlines()
+        # Same file except the fixture's header comment and name/label.
+        values = lambda lines: [  # noqa: E731
+            line for line in lines
+            if line and not line.startswith("#") and not line.startswith(("name:", "label:"))
+        ]
+        self.assertEqual(values(written), values(fixture))
+
+
+class DerivedHomeStringsTest(unittest.TestCase):
+    """Any other HOME gets "<label>_<hash>" strings of its trunk's mechanism."""
+
+    def test_pitched_and_vertical_derived_strings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for pitch, knee in ((5.0, 0.0), (0.0, 15.0)):
+                path = Path(directory) / f"home_{pitch}_{knee}.yaml"
+                shutil.copyfile(CENTERED_YAML, path)
+                from mjlab_microban.robot.home_pose import rewrite_home_pose_yaml
+
+                rewrite_home_pose_yaml(path, joint_pos_deg={"left_knee": knee, "right_knee": knee})
+                completed = subprocess.run(
+                    [sys.executable, str(REPO_ROOT / "config" / "balance_home_pose.py"),
+                     "--yaml", str(path), "--trunk-pitch-deg", str(pitch), "--write",
+                     "--no-training-check"],
+                    cwd=REPO_ROOT, capture_output=True, text=True, timeout=600, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                result = json.loads(
+                    _run_python(
+                        path,
+                        "import json\n"
+                        "from mjlab_microban.robot.home_pose import HOME\n"
+                        "from mjlab_microban.robot import home_contracts as c\n"
+                        "print(json.dumps({'tag': HOME.tag, 'walk': c.WALK_CONTRACT_VERSION,"
+                        " 'getup': c.GETUP_CONTRACT_VERSION, 'legacy': c.GETUP_LEGACY_STAMP,"
+                        " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION,"
+                        " 'corner': c.V12_CORNER_RESCUE_RECIPE_REVISION,"
+                        " 'switch': c.V12_POSE_RELEASE_SWITCH_PARENT_SHA256}))",
+                    )
+                )
+                tag = result["tag"]
+                self.assertRegex(tag, r"^centered_home_[0-9a-f]{10}$")
+                version = "v3" if pitch == 0.0 else "v4"
+                self.assertEqual(result["walk"], f"{version}_{tag}_servo_range")
+                self.assertEqual(result["getup"], f"{'v5' if pitch == 0.0 else 'v6'}_{tag}")
+                self.assertIsNone(result["legacy"])
+                self.assertIsNone(result["switch"])
+                self.assertTrue(result["recipe"].startswith(f"{tag}_velocity_source_"))
+                self.assertEqual(
+                    result["recipe"].endswith("_v11"), pitch == 0.0, result["recipe"]
+                )
+                self.assertIn(tag, result["packager"])
+                self.assertIn(tag, result["corner"])
+
+
+def _git_show(commit: str, path: str, destination: Path) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{commit}:{path}"],
+        capture_output=True, check=False,
+    )
+    if completed.returncode != 0:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(completed.stdout)
+    return True
+
+
+@unittest.skipUnless(
+    os.environ.get("MJLAB_MICROBAN_EXPORT_EQUIVALENCE") == "1",
+    "set MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1 (CPU re-export of four checkpoints, minutes)",
+)
+class ExportEquivalenceTest(unittest.TestCase):
+    """Re-exporting each HOME's walking / get-up checkpoint is byte-identical."""
+
+    SOURCE_COMMIT = "5442e8838535c48e3e36bbb57ed016614e29ff3b"  # forward-lean-v2
+    CASES = (
+        # (HOME yaml, exporter, run directory, checkpoint, published ONNX, its sha256)
+        (LEAN_YAML, "export_walk_onnx", "logs/rsl_rl/mjlab_microban_velocity/2026-10-05_06-14-02_lean_walk_cont2",
+         "model_29000.pt", "artifacts/walk_v4_forward_lean_home_servo_cont2_29000.onnx",
+         "b33cd9ea7dbebbfe4543c0bb616a54d9ba713ded1ffdda0891b79dad09e2c1d2"),
+        (LEAN_YAML, "export_getup_onnx", "logs/rsl_rl/mjlab_microban_getup/2026-10-05_04-37-04_lean_s5_push",
+         "model_21495.pt", "artifacts/getup_v6_lean_home_push_21495.onnx",
+         "ce6cdc0489b451b32a35c3a791830ca123cadb308f3b2f4eaf1019c3721678bf"),
+        (CENTERED_YAML, "export_walk_onnx", "logs/rsl_rl/mjlab_microban_velocity/2026-10-04_03-05-49_chome_servo_walk_cont",
+         "model_20000.pt", "artifacts/walk_v3_centered_home_servo_cont_20000.onnx",
+         "c9cdd8527704046d5c8058fc63fc3ef148716d659509666d0dc844b64c18fa40"),
+        (CENTERED_YAML, "export_getup_onnx", "logs/rsl_rl/mjlab_microban_getup/2026-10-04_01-35-01_servo_s5_push",
+         "model_21495.pt", "artifacts/getup_v5_chome_servo_push_21495.onnx",
+         "80cd7ddb13066f6563b07927e85e6fb7916149d4275218b9ad80ee58f5b08cfa"),
+    )
+
+    def test_reexports_are_byte_identical(self):
+        for yaml_path, exporter, run, checkpoint, published, published_sha in self.CASES:
+            with self.subTest(published=published), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir = root / Path(run).name
+                ok = _git_show(self.SOURCE_COMMIT, f"{run}/{checkpoint}", run_dir / checkpoint)
+                ok = ok and _git_show(self.SOURCE_COMMIT, f"{run}/params/env.yaml", run_dir / "params" / "env.yaml")
+                ok = ok and _git_show(self.SOURCE_COMMIT, f"{run}/params/agent.yaml", run_dir / "params" / "agent.yaml")
+                ok = ok and _git_show(self.SOURCE_COMMIT, published, root / "published.onnx")
+                if not ok:
+                    self.skipTest(f"git objects of {self.SOURCE_COMMIT[:7]} are not available")
+                self.assertEqual(
+                    hashlib.sha256((root / "published.onnx").read_bytes()).hexdigest(), published_sha
+                )
+                output = root / "export.onnx"
+                completed = subprocess.run(
+                    [sys.executable, "-m", f"mjlab_microban.scripts.{exporter}", "--checkpoint",
+                     str(run_dir / checkpoint), "--output", str(output), "--device", "cpu"],
+                    env=_environment(yaml_path), cwd=REPO_ROOT, capture_output=True, text=True,
+                    timeout=1800, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+                self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), published_sha)
+
+
+if __name__ == "__main__":
+    unittest.main()

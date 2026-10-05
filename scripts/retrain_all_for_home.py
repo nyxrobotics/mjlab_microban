@@ -36,9 +36,12 @@ same command resumes after a crash, a stall or a fixed failure):
    route 0 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000 with
    scripts/evaluate_microban_teleop_v12_stage.sh at every boundary.  Automatic
    rescues: an accuracy-only canary failure is retrained once; a failed 9999
-   gate tries the model_9900 corner rescue (scripts/
-   train_microban_teleop_v12_corner_rescue.sh, which accepts only a parent its
-   validator authenticates); the 15000 gate of the pose-release recipe is
+   gate tries the pose-release model_9900 corner rescue (scripts/
+   train_microban_teleop_v12_corner_rescue.sh --hand-pose-release --mix
+   <--pr-corner-rescue-mix>, which accepts only a fresh pose-release parent
+   failing hand accuracy only, as its validator authenticates; its model_9999
+   is gated by the stage evaluator and resumed as an ordinary pose-release
+   checkpoint); the 15000 gate of the pose-release recipe is
    judged under its completion-allowance profile by the stage evaluator.
 5. Export walk.onnx / getup.onnx, install them, the robot HOME yaml and the
    run pins (walking source / probe / walk.onnx SHA-256s, HOME literals of the
@@ -1077,7 +1080,13 @@ class Pipeline:
         return rc, trk, other
 
     def corner_rescue(self, run: str) -> str:
-        """Try the model_9900 corner rescue of a failed 9999 gate; return the rescue run."""
+        """Try the pose-release model_9900 corner rescue of a failed 9999 gate; return its run.
+
+        The chain is a fresh pose-release chain, so the rescue is the
+        pose-release variant (Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-
+        Microban, sampler mix --pr-corner-rescue-mix); its model_9999 keeps the
+        pose-release recipe and is gated like any stage checkpoint.
+        """
 
         parent = V12_EXP / run / "model_9900.pt"
         if not parent.is_file():
@@ -1089,24 +1098,28 @@ class Pipeline:
                 *UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking", str(parent),
                 "--expected-sha256", sha256(parent), "--output", str(report), "--force"], "gate",
                 allow_fail=True)
+        mix_env = {"MICROBAN_V12_PR_CORNER_RESCUE_MIX": self.args.pr_corner_rescue_mix}
         check = self.capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_corner_rescue",
-                              "validate-parent", str(parent), str(report)], timeout=1800)
+                              "validate-parent", str(parent), str(report), "--hand-pose-release"],
+                             timeout=1800, env=mix_env)
         if check.returncode != 0:
             raise PipelineError("9999 gate failed and the corner rescue refuses model_9900: "
                                 + (check.stderr or check.stdout).strip()[-600:])
         if self.git(REPO, "status", "--porcelain", "--untracked-files=all"):
             raise PipelineError("9999 gate failed; the corner rescue is applicable but needs a clean, committed "
                                 "training tree (commit config/home_pose.yaml, then rerun)")
-        seg = f"{self.prefix}_v12_rescue_9901_to10000"
+        seg = f"{self.prefix}_v12_pr_rescue_9901_to10000"
         rescue = self.latest_v12(seg)
         if not (rescue and (V12_EXP / rescue / "model_9999.pt").exists()):
             self.gpu_job(self.args.pico_gpu_mib, seg, ["scripts/train_microban_teleop_v12_corner_rescue.sh",
-                                                       str(parent), str(report), "--agent.run-name", seg],
+                                                       str(parent), str(report), "--hand-pose-release",
+                                                       "--mix", self.args.pr_corner_rescue_mix,
+                                                       "--agent.run-name", seg],
                          "train")
             rescue = self.latest_v12(seg)
         if not self.gate_ok(rescue, 9999):
             self.gpu_job(self.args.probe_gpu_mib, "gate_rescue_9999",
-                         ["scripts/evaluate_microban_teleop_v12_corner_rescue.sh", rescue], "gate")
+                         ["scripts/evaluate_microban_teleop_v12_stage.sh", rescue, "9999"], "gate")
         self.log(f"corner rescue {rescue} passed the 9999 gate")
         return rescue
 
@@ -1634,6 +1647,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--dry-run-simulate-failures", action="store_true",
                    help="dry run: treat the first canary/9999 gates as failed to exercise the rescues")
     p.add_argument("--dry-envs", type=int, default=64)
+    p.add_argument("--pr-corner-rescue-mix", choices=("lf60", "lf72", "lf90"), default="lf60",
+                   help="sampler mix of the pose-release corner rescue of a failed 9999 gate")
     args = p.parse_args(argv)
     if args.dry_run:
         args.probe_every, args.probe_min = 1, 0
@@ -1651,6 +1666,11 @@ def main(argv: list[str] | None = None) -> int:
             print("--status needs --state-dir", file=sys.stderr)
             return EXIT_INPUT
         return print_status(Path(args.state_dir))
+    if os.environ.get("MJLAB_MICROBAN_HOME_POSE_YAML"):
+        # Every job must train at the committed config/home_pose.yaml.
+        print("error: unset MJLAB_MICROBAN_HOME_POSE_YAML (the pipeline trains at "
+              "config/home_pose.yaml)", file=sys.stderr)
+        return EXIT_INPUT
     pipeline = Pipeline(args)
 
     def on_signal(signum, _frame) -> None:

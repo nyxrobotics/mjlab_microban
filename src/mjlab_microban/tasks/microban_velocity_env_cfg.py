@@ -74,6 +74,9 @@ from mjlab_microban.tasks.mdp import (
     penalize_stepping_while_standing,
     stepping_curriculum,
     UniformVelocityCommandWithRotation,
+    reset_root_state_uniform_world_yaw,
+    track_angular_velocity_home_frame,
+    track_linear_velocity_home_frame,
     upright as local_upright,
 )
 
@@ -212,6 +215,17 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
+    # A HOME that leans the trunk HOME_TRUNK_PITCH_RAD forward tracks the
+    # velocities in the trunk frame with that lean rotated back out (mjlab's
+    # terms read the leaning body frame; see track_linear_velocity_home_frame).
+    # A vertical-trunk HOME keeps mjlab's own terms.
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        for name, func in (
+            ("track_linear_velocity", track_linear_velocity_home_frame),
+            ("track_angular_velocity", track_angular_velocity_home_frame),
+        ):
+            cfg.rewards[name].func = func
+            cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
     cfg.rewards["track_linear_velocity"].weight = 2.0
 
@@ -258,8 +272,7 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    # Trunk pitch at HOME (config/home_pose.yaml; 0 = vertical, the only
-    # value this training line supports, see microban_constants).
+    # Peak at HOME's trunk pitch (config/home_pose.yaml; 0 = vertical).
     cfg.rewards["upright"].params["pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
@@ -334,6 +347,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.rotation_min_ang_vel = 0.5
 
     #---------------------------- Events ----------------------------
+    # A leaning HOME turns the random reset yaw about world z: mjlab's term
+    # turns it about the HOME trunk's own axis, which would tip the soles and
+    # the lean.  With a vertical trunk the two axes coincide (mjlab's term).
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        cfg.events["reset_base"].func = reset_root_state_uniform_world_yaw
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.01)
 
     cfg.events["push_robot"].params["velocity_range"] = {

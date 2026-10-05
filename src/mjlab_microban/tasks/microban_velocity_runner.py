@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
+from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose, home_pose_stamps_match
 
@@ -17,16 +18,18 @@ WALK_HOME_POSE_INFO_KEY = "microban_walk_home_pose"
 # Walking checkpoints saved before the stamp existed (the centered-HOME
 # checkpoints of 2026-10-03/04, e.g. checkpoints/centered_home_velocity_cont/
 # model_20000.pt) carry no marker.  They are accepted only while the current
-# HOME is that centered HOME; at any other HOME an unstamped checkpoint is
-# refused.
-LEGACY_UNSTAMPED_WALK_HOME_TAGS = frozenset({"centered_home"})
+# HOME is that centered HOME (home_pose.LEGACY_HOME_OVERRIDES
+# "accepts_unstamped_walk_checkpoints"); at any other HOME, the forward-lean one
+# included (its walking runs were stamped from the start), an unstamped
+# checkpoint is refused.
+ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS = home_contracts.ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS
 
 
 def require_walk_home_pose(infos: object) -> None:
     """Refuse a walking checkpoint not trained at the current HOME."""
 
     stamp = infos.get(WALK_HOME_POSE_INFO_KEY) if isinstance(infos, Mapping) else None
-    if stamp is None and HOME.tag in LEGACY_UNSTAMPED_WALK_HOME_TAGS:
+    if stamp is None and ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS:
         return
     if not home_pose_stamps_match(stamp, getup_home_pose()):
         raise ValueError(

@@ -26,16 +26,22 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 from mjlab.utils.lab_api.math import (
     quat_apply,
     quat_apply_inverse,
+    quat_from_euler_xyz,
+    quat_mul,
     sample_uniform,
     subtract_frame_transforms,
     yaw_quat,
 )
 from mjlab.utils.lab_api.string import resolve_matching_names_values
 
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
     sample_microban_reachable_hand_targets,
 )
+
+# HOME forward trunk lean (rad); 0 = vertical trunk (config/home_pose.yaml).
+HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad
 
 ############################ COMMANDS #############################
 
@@ -427,7 +433,8 @@ class UniformVelocityCommandWithRotationCfg(UniformVelocityCommandCfg):
 class FootTargetCommand(CommandTerm):
     """Live per-env target offset (dx, dy, dz) for each foot, relative to that foot's
     own position measured right after reset (i.e. the robot's default/home stance),
-    expressed in the trunk frame.
+    expressed in the trunk frame with the HOME lean rotated out
+    (``cfg.trunk_pitch``; level at HOME, x forward, y left, z up).
 
     This drives the "whole-body tracking" leg behavior: trained alongside the existing
     velocity command so ONE policy learns both walking and holding a commanded foot
@@ -452,7 +459,8 @@ class FootTargetCommand(CommandTerm):
             label="FootTargetCommand",
         )
 
-        # Offset target (dx, dy, dz) per env, per foot (left, right), in the trunk frame.
+        # Offset target (dx, dy, dz) per env, per foot (left, right), in the
+        # HOME-levelled trunk frame (see current_foot_pos_b).
         self.foot_target_offset_b = torch.zeros(self.num_envs, 2, 3, device=self.device)
         self.is_single_support_env = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
@@ -471,9 +479,13 @@ class FootTargetCommand(CommandTerm):
         return self.foot_target_offset_b.view(self.num_envs, -1)
 
     def current_foot_pos_b(self) -> torch.Tensor:
-        """Live foot positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        """Live foot positions (left, right) in the HOME-levelled trunk frame
+        (``_home_levelled_quat`` with ``cfg.trunk_pitch``; 0 = the trunk frame).
+        Shape (N, 2, 3)."""
         trunk_pos_w = self.robot.data.root_link_pos_w
-        trunk_quat_w = self.robot.data.root_link_quat_w
+        trunk_quat_w = _home_levelled_quat(
+            self.robot.data.root_link_quat_w, self.cfg.trunk_pitch
+        )
         foot_pos_w = self.robot.data.site_pos_w[:, self._foot_asset_cfg.site_ids, :]
         num_feet = foot_pos_w.shape[1]
         pos_b, _ = subtract_frame_transforms(
@@ -546,6 +558,10 @@ class FootTargetCommandCfg(CommandTermCfg):
     """Fraction of environments that get a single-leg-stance target (one foot lifted)."""
     lift_height_range: tuple[float, float] = (0.01, 0.05)
     reach_xy_range: tuple[float, float] = (-0.03, 0.03)
+    trunk_pitch: float = 0.0
+    """HOME forward trunk lean (rad).  Offsets are expressed in the trunk frame
+    with this lean rotated out, R_trunk * R_y(-trunk_pitch), which is level at
+    HOME.  0 keeps the plain trunk frame."""
 
     def build(self, env: ManagerBasedRlEnv) -> FootTargetCommand:
         return FootTargetCommand(self, env)
@@ -553,7 +569,8 @@ class FootTargetCommandCfg(CommandTermCfg):
 
 class HandTargetCommand(CommandTerm):
     """Live per-env, per-hand target offset (dx, dy, dz), relative to that hand's own
-    position measured right after reset, in the trunk frame.
+    position measured right after reset, in the HOME-levelled trunk frame
+    (``cfg.trunk_pitch``; see current_hand_pos_b).
 
     Activation is PER HAND (independent left/right), matching the real controller UX:
     each hand's tracking is meant to be enabled by that hand's own controller trigger,
@@ -569,7 +586,9 @@ class HandTargetCommand(CommandTerm):
 
     Active training targets are never sampled from a Cartesian cube.  A Microban
     shoulder-pitch/roll/elbow tuple is sampled uniformly inside the audited joint
-    box and converted to an XYZ offset with the exact robot.xml kinematic chain.
+    box and converted to an XYZ offset with the exact robot.xml kinematic chain;
+    tuples whose offset leaves the receiver's per-axis hand box (+-0.8 * 0.08 m)
+    are rejected and redrawn.
     """
 
     cfg: HandTargetCommandCfg
@@ -610,9 +629,13 @@ class HandTargetCommand(CommandTerm):
         )
 
     def current_hand_pos_b(self) -> torch.Tensor:
-        """Live hand positions (left, right) in the trunk frame. Shape (N, 2, 3)."""
+        """Live hand positions (left, right) in the HOME-levelled trunk frame
+        (``_home_levelled_quat`` with ``cfg.trunk_pitch``; 0 = the trunk frame).
+        Shape (N, 2, 3)."""
         trunk_pos_w = self.robot.data.root_link_pos_w
-        trunk_quat_w = self.robot.data.root_link_quat_w
+        trunk_quat_w = _home_levelled_quat(
+            self.robot.data.root_link_quat_w, self.cfg.trunk_pitch
+        )
         hand_pos_w = self.robot.data.site_pos_w[:, self._hand_asset_cfg.site_ids, :]
         num_hands = hand_pos_w.shape[1]
         pos_b, _ = subtract_frame_transforms(
@@ -642,8 +665,14 @@ class HandTargetCommand(CommandTerm):
         r = torch.empty(len(env_ids), 2, device=self.device)
         self.is_active[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_active
 
+        # FK offsets are trunk-frame; rotate them by R_y(trunk_pitch) into the
+        # HOME-levelled frame the targets and current_hand_pos_b use.  Joint
+        # samples whose target leaves the robot receiver's +-64 mm hand box
+        # are redrawn, so every target is reachable and deliverable.
         sampled_joints, offsets = sample_microban_reachable_hand_targets(
-            self.is_active[env_ids], dtype=self.hand_target_offset_b.dtype
+            self.is_active[env_ids],
+            dtype=self.hand_target_offset_b.dtype,
+            trunk_pitch=self.cfg.trunk_pitch,
         )
         self.sampled_arm_joint_pos_rad[env_ids] = sampled_joints
         self.hand_target_offset_b[env_ids] = offsets
@@ -662,6 +691,10 @@ class HandTargetCommandCfg(CommandTermCfg):
     """Per-hand probability of being active at each resample (independent left/right,
     matching each controller's own trigger). Inactive hands contribute nothing to the
     tracking reward, so the policy learns that arm is free to move naturally."""
+    trunk_pitch: float = 0.0
+    """HOME forward trunk lean (rad).  Offsets are expressed in the trunk frame
+    with this lean rotated out, R_trunk * R_y(-trunk_pitch), and the FK samples
+    are rotated by R_y(trunk_pitch) into it.  0 keeps the plain trunk frame."""
 
     def build(self, env: ManagerBasedRlEnv) -> HandTargetCommand:
         return HandTargetCommand(self, env)
@@ -672,7 +705,8 @@ class HandTargetCommandCfg(CommandTermCfg):
 
 def foot_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target foot
-    offset, in the trunk frame. Lets the actor see what leg-tracking target (if any) is
+    offset, in the command's HOME-levelled trunk frame. Lets the actor see what
+    leg-tracking target (if any) is
     currently commanded, alongside the velocity command."""
     command: FootTargetCommand = env.command_manager.get_term(command_name)
     return command.command
@@ -680,7 +714,7 @@ def foot_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Ten
 
 def hand_target_offset_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     """Flattened (left_dx, left_dy, left_dz, right_dx, right_dy, right_dz) target hand
-    offset, in the trunk frame."""
+    offset, in the command's HOME-levelled trunk frame."""
     command: HandTargetCommand = env.command_manager.get_term(command_name)
     return command.command
 
@@ -739,6 +773,139 @@ class upright:
 
     def reset(self, env_ids: torch.Tensor) -> None:
         del env_ids  # Unused.
+
+
+def _home_levelled_quat(quat_w: torch.Tensor, trunk_pitch: float) -> torch.Tensor:
+    """The trunk frame with the HOME forward lean taken out.
+
+    At HOME (trunk pitched ``trunk_pitch`` forward) this frame is level and
+    faces the robot's heading, so velocities expressed in it read like the
+    body-frame velocities of an upright-trunk HOME.
+    """
+
+    if trunk_pitch == 0.0:
+        return quat_w
+    half = -0.5 * trunk_pitch
+    unpitch = torch.tensor(
+        (math.cos(half), 0.0, math.sin(half), 0.0), device=quat_w.device, dtype=quat_w.dtype
+    ).expand_as(quat_w)
+    return quat_mul(quat_w, unpitch)
+
+
+def track_linear_velocity_home_frame(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    trunk_pitch: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab's track_linear_velocity, in the HOME-levelled trunk frame.
+
+    mjlab reads root_link_lin_vel_b. With a HOME trunk leaning
+    ``trunk_pitch`` forward that frame tips the walking velocity: at 10 deg
+    the forward speed reads 1.5 % low and 17 % of it shows up as vertical
+    velocity, which the z term penalizes (0.7 m/s: -14 % reward). Rotating
+    the lean back out keeps the reward's meaning of the upright-HOME tasks.
+    trunk_pitch = 0 is exactly mjlab's term.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    actual = quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
+    xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+    z_error = torch.square(actual[:, 2])
+    return torch.exp(-(xy_error + z_error) / std**2)
+
+
+def track_angular_velocity_home_frame(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    trunk_pitch: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab's track_angular_velocity, in the HOME-levelled trunk frame.
+
+    In the leaning trunk frame a pure yaw rate w reads w*cos(lean) about z
+    and w*sin(lean) about x, which the xy term penalizes (10 deg, 1.5 rad/s:
+    -13 % reward). trunk_pitch = 0 is exactly mjlab's term.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    actual = quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
+    z_error = torch.square(command[:, 2] - actual[:, 2])
+    xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
+    return torch.exp(-(z_error + xy_error) / std**2)
+
+
+def home_levelled_root_lin_vel_b(
+    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """Root linear velocity in the HOME-levelled trunk frame (see above)."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if trunk_pitch == 0.0:
+        return asset.data.root_link_lin_vel_b
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    return quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
+
+
+def home_levelled_root_ang_vel_b(
+    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """Root angular velocity in the HOME-levelled trunk frame (see above)."""
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if trunk_pitch == 0.0:
+        return asset.data.root_link_ang_vel_b
+    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
+    return quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
+
+
+def reset_root_state_uniform_world_yaw(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """mjlab's reset_root_state_uniform, with the yaw turned about world z.
+
+    mjlab composes default_rot * R(roll, pitch, yaw), i.e. it turns the yaw
+    about the DEFAULT body's z axis. With an upright HOME that is the world
+    z axis; with a HOME trunk leaning forward it is the tilted trunk axis, so
+    a reset yawed by 180 deg would lean the robot backward relative to its
+    heading with both soles tipped. Here orientation = R_z(yaw) * default_rot
+    * R(roll, pitch): the roll/pitch noise is applied in the HOME trunk frame
+    and the whole HOME stance is then turned about world z, so every yaw
+    keeps the soles flat and the lean forward. With an identity default it
+    equals mjlab's term up to the order of yaw and roll/pitch noise.
+    """
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+    asset: Entity = env.scene[asset_cfg.name]
+    keys = ("x", "y", "z", "roll", "pitch", "yaw")
+    ranges = torch.tensor([pose_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device)
+    root_states = asset.data.default_root_state[env_ids].clone()
+    positions = root_states[:, 0:3] + samples[:, 0:3] + env.scene.env_origins[env_ids]
+    zeros = torch.zeros_like(samples[:, 0])
+    tilt = quat_from_euler_xyz(samples[:, 3], samples[:, 4], zeros)
+    heading = quat_from_euler_xyz(zeros, zeros, samples[:, 5])
+    orientations = quat_mul(heading, quat_mul(root_states[:, 3:7], tilt))
+    velocity_range = velocity_range or {}
+    ranges = torch.tensor([velocity_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    velocities = root_states[:, 7:13] + sample_uniform(
+        ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device
+    )
+    asset.write_root_link_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
 
 
 def extreme_joint_velocity(
@@ -915,6 +1082,7 @@ def upright_balance_reward(
     head_asset_cfg: SceneEntityCfg,
     tilt_std: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    pitch: float = 0.0,
 ) -> torch.Tensor:
     """Reward LOW trunk tilt (from projected gravity), but only once standing.
 
@@ -945,11 +1113,23 @@ def upright_balance_reward(
     watch for saturation near 0 or 1 on the first run.
 
     Hard-gated with _standing_gate (see that helper for why not soft).
+
+    ``pitch`` is the trunk's forward lean at HOME (rad, positive = forward):
+    the reward peaks where the projected gravity equals its HOME value
+    (sin(pitch), 0, -cos(pitch)) instead of (0, 0, -1), so a HOME with a
+    leaning trunk is not pulled upright.
     """
     asset: Entity = env.scene[asset_cfg.name]
     height = _head_height(env, head_asset_cfg)
     gate = _standing_gate(height, height_threshold)
-    tilt = torch.linalg.norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+    gravity_xy = asset.data.projected_gravity_b[:, :2]
+    if pitch == 0.0:
+        tilt = torch.linalg.norm(gravity_xy, dim=-1)
+    else:
+        target_xy = torch.tensor(
+            (math.sin(pitch), 0.0), device=gravity_xy.device, dtype=gravity_xy.dtype
+        )
+        tilt = torch.linalg.norm(gravity_xy - target_xy, dim=-1)
     balance = torch.exp(-((tilt / tilt_std) ** 2))
     return gate * balance
 
@@ -2091,7 +2271,15 @@ def reset_near_home_fraction(
         return
 
     lo, hi = orientation_noise_range
-    envs_mdp.reset_root_state_uniform(
+    # Roll/pitch noise about the HOME trunk frame, yaw about world z, so a
+    # leaning HOME keeps its flat soles at every heading.  A vertical-trunk
+    # HOME keeps mjlab's term (its yaw axis is world z already).
+    reset_root = (
+        envs_mdp.reset_root_state_uniform
+        if HOME_TRUNK_PITCH_RAD == 0.0
+        else reset_root_state_uniform_world_yaw
+    )
+    reset_root(
         env,
         near_home_ids,
         pose_range={

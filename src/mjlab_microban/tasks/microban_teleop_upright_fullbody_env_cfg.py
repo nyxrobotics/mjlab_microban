@@ -8,6 +8,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
+from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
@@ -43,16 +44,21 @@ MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID = (
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_EXPERIMENT = (
     "mjlab_microban_teleop_upright_fullbody"
 )
+# HOME-bound (robot/home_contracts.py).  v4 at the centered HOME; v5/v6 on the
+# forward-lean line (inherits v12's HOME-levelled foot/hand targets, the
+# level-headset neutral HMD neck pose and the receiver-capped hand box).
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_RECIPE_REVISION = (
-    "physical_neutral_full_actor_from_scratch_raw83x18_v4"
+    home_contracts.UPRIGHT_FULLBODY_RECIPE_REVISION
 )
 # v5: reverted alongside microban_constants.py's own HOME_FRAME revert -- the
 # "com_centered" experiment (hip_pitch +1.198deg) this task was built for
 # measured worse and is reverted; this task now trains at the original
 # physical-neutral HOME (hip_pitch -10deg) instead. Bumped so a checkpoint
 # from either pose is never silently accepted under the other.
+# (The centered HOME keeps this historical string although it checks the
+# centered HOME_FRAME; v6 on the forward-lean line.)
 MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_REVISION = (
-    "physical_neutral_shoulder_zero_hip_neg10_v5"
+    home_contracts.UPRIGHT_FULLBODY_HOME_REVISION
 )
 # Derived from HOME_FRAME directly rather than hardcoded a second time: this
 # is the one shared source of truth for the pose, so it cannot drift out of
@@ -88,13 +94,15 @@ def make_microban_teleop_upright_fullbody_env_cfg(
         or tuple(init_state.rot) != tuple(HOME_FRAME.rot)
     ):
         raise ValueError("Upright full-body root pose differs from shared HOME")
-    if tuple(init_state.rot) != (1.0, 0.0, 0.0, 0.0) or not isclose(
+    # The root orientation is the HOME trunk pitch (checked above against
+    # HOME_FRAME); the soles must be on the ground.
+    if not isclose(
         float(init_state.pos[2]),
         MICROBAN_TELEOP_UPRIGHT_FULLBODY_HOME_ROOT_Z_M,
         rel_tol=0.0,
         abs_tol=1.0e-12,
     ):
-        raise ValueError("Upright full-body HOME trunk is not vertical on the ground")
+        raise ValueError("Upright full-body HOME trunk is not on the ground")
     for name in ("left_hip_pitch", "right_hip_pitch"):
         if not isclose(
             float(joint_pos[name]),

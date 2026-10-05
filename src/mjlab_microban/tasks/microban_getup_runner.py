@@ -13,6 +13,7 @@ import yaml
 from mjlab.envs.mdp.observations import builtin_sensor
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
+from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
@@ -28,21 +29,25 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
 )
 
 
+# The contract string is HOME-bound (robot/home_contracts.py):
 # v5 (2026-10-03): target = centered HOME + raw action on the 18 body joints,
 # bounded only by the servo's one-turn goal range (an absolute +-pi clip),
 # the policy's RAW previous output as previous-action feedback, neck held.
+# v6 (2026-10-04): the same rule at the forward-lean HOME (trunk 10 deg
+# forward). Any other HOME: "v5_<tag>" (vertical trunk) or "v6_<tag>".
 # v4 was the same rule with a flat +-1.57 rad clip -- the contract every
 # standing get-up policy up to 2026-10-02 was trained under (old HOME, see
 # microban_getup_env_cfg.py's module docstring). v3 (per-joint soft-limit
 # clip, post-clip feedback) never produced a stand; its previous-action
 # input meant the applied target, so v3 checkpoints/ONNX are incompatible.
-GETUP_CONTRACT_VERSION = "v5"
-# Runs started on 2026-10-03 before this version bump (e.g.
+GETUP_CONTRACT_VERSION = home_contracts.GETUP_CONTRACT_VERSION
+# Centered HOME only: runs started on 2026-10-03 before the v5 bump (e.g.
 # 2026-10-03_13-40-39_chome_servo_s1) already trained under v5 but stamped
 # "v4". A "v4" stamp is therefore accepted as v5 only when the run's recorded
 # params/env.yaml proves the +-pi clip at the centered HOME (see
 # require_getup_checkpoint_contract); every other v4 checkpoint is rejected.
-GETUP_LEGACY_STAMP = "v4"
+# None at every other HOME: only the current contract's stamp is accepted.
+GETUP_LEGACY_STAMP = home_contracts.GETUP_LEGACY_STAMP
 GETUP_ANGULAR_VELOCITY_FRAME = "imu_sensor_xyz"
 
 
@@ -124,8 +129,8 @@ def recorded_env_path(checkpoint: Path) -> Path:
     return Path(checkpoint).resolve().parent / "params" / "env.yaml"
 
 
-def require_recorded_getup_v5_env(env_yaml: Path) -> None:
-    """Refuse a run whose recorded HOME, target rule or feedback is not v5.
+def require_recorded_getup_env(env_yaml: Path) -> None:
+    """Refuse a run whose recorded HOME, target rule or feedback is not current.
 
     Decides from what the run actually trained with, not from the contract
     string its runner stamped.
@@ -147,10 +152,10 @@ def require_recorded_getup_v5_env(env_yaml: Path) -> None:
     if not isinstance(joints, dict) or set(joints) != set(HOME_FRAME.joint_pos) or any(
         abs(float(joints[name]) - value) > 1e-12 for name, value in HOME_FRAME.joint_pos.items()
     ):
-        raise ValueError("Run was not trained from the centered HOME joint pose")
+        raise ValueError("Run was not trained from the current HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
         if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-9):
-            raise ValueError(f"Run was not trained from the centered HOME root {key}")
+            raise ValueError(f"Run was not trained from the current HOME root {key}")
     clip = action.get("clip")
     if not isinstance(clip, dict) or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [
         -SERVO_TARGET_RANGE_RAD,
@@ -175,14 +180,19 @@ def require_recorded_getup_v5_env(env_yaml: Path) -> None:
             raise ValueError(f"Run did not observe the undelayed raw previous action ({group})")
 
 
+# Historical name (contract v5 at the centered HOME).
+require_recorded_getup_v5_env = require_recorded_getup_env
+
+
 def require_getup_checkpoint_contract(
     checkpoint: Path, infos: object, *, require_recorded_env: bool
 ) -> str:
     """Validate a checkpoint's get-up markers; return the contract it stamped.
 
-    A "v5" stamp is trusted (the v5 runner refused anything else at start-up),
-    and its recorded env is checked too when ``require_recorded_env``. A
-    "v4" stamp is accepted only when the run's recorded env proves v5.
+    A GETUP_CONTRACT_VERSION stamp is trusted (the runner refused anything
+    else at start-up), and its recorded env is checked too when
+    ``require_recorded_env``.  At the centered HOME a "v4" stamp
+    (GETUP_LEGACY_STAMP) is accepted only when the run's recorded env proves v5.
     """
 
     if not isinstance(infos, dict):
@@ -193,13 +203,13 @@ def require_getup_checkpoint_contract(
     stamp = infos.get("microban_getup_contract")
     if stamp == GETUP_CONTRACT_VERSION:
         if require_recorded_env:
-            require_recorded_getup_v5_env(recorded_env_path(checkpoint))
-    elif stamp == GETUP_LEGACY_STAMP:
+            require_recorded_getup_env(recorded_env_path(checkpoint))
+    elif GETUP_LEGACY_STAMP is not None and stamp == GETUP_LEGACY_STAMP:
         try:
-            require_recorded_getup_v5_env(recorded_env_path(checkpoint))
+            require_recorded_getup_env(recorded_env_path(checkpoint))
         except ValueError as error:
             raise ValueError(
-                f"Checkpoint is a get-up v4 (+-1.57 clip) checkpoint, not v5: {error}"
+                f"Checkpoint is a get-up v4 (+-1.57 clip) checkpoint, not {GETUP_CONTRACT_VERSION}: {error}"
             ) from error
     else:
         raise ValueError(
@@ -215,32 +225,32 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         unwrapped = env.unwrapped
         action = unwrapped.action_manager.get_term("joint_pos")
         if not isinstance(action, GetupJointPositionAction):
-            raise ValueError("Get-up v5 requires the get-up joint-position action")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires the get-up joint-position action")
         if env.clip_actions is not None or env.num_actions != 18:
-            raise ValueError("Get-up v5 requires 18 actions without wrapper clipping")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires 18 actions without wrapper clipping")
         if not math.isclose(unwrapped.step_dt, 0.02, rel_tol=0.0, abs_tol=1.0e-9):
-            raise ValueError("Get-up v5 requires a 20 ms policy step")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires a 20 ms policy step")
         if unwrapped.cfg.episode_length_s != GETUP_EPISODE_LENGTH_S:
-            raise ValueError("Get-up v5 requires a 20-second training episode")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires a 20-second training episode")
         if action.cfg.clip != dict(GETUP_ACTION_CLIP):
-            raise ValueError("Get-up v5 requires the servo-range (+-pi) absolute target clip")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires the servo-range (+-pi) absolute target clip")
         if action.cfg.scale != 1.0 or action.cfg.offset != 0.0 or not action.cfg.use_default_offset:
-            raise ValueError("Get-up v5 requires unit-scale default-relative actions")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires unit-scale default-relative actions")
         gyro_term = unwrapped.cfg.observations["actor"].terms["base_ang_vel"]
         if gyro_term.func is not builtin_sensor or gyro_term.params != {"sensor_name": "robot/imu_ang_vel"}:
-            raise ValueError("Get-up v5 requires raw IMU-sensor-frame angular velocity")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires raw IMU-sensor-frame angular velocity")
         for group in ("actor", "critic"):
             term = unwrapped.cfg.observations[group].terms["actions"]
             if term.func is not raw_getup_action:
-                raise ValueError(f"Get-up v5 requires raw previous-action {group} feedback")
+                raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires raw previous-action {group} feedback")
             if term.delay_max_lag != 0:
-                raise ValueError(f"Get-up v5 requires undelayed {group} action feedback")
+                raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires undelayed {group} action feedback")
         robot_cfg = unwrapped.cfg.scene.entities["robot"]
         actuator_cfgs = robot_cfg.articulation.actuators if robot_cfg.articulation else ()
         if len(actuator_cfgs) != 1 or not isinstance(actuator_cfgs[0], GetupBamActuatorCfg):
-            raise ValueError("Get-up v5 requires its body/neck XC330 actuator model")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires its body/neck XC330 actuator model")
         if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
-            raise ValueError("Get-up v5 requires body P125 and XC330 0.91 A current limit")
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires body P125 and XC330 0.91 A current limit")
         super().__init__(env, train_cfg, log_dir, device)
 
     def save(self, path: str, infos=None) -> None:

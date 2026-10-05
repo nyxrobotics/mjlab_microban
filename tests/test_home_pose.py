@@ -121,6 +121,8 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
             robot_contract_strings(),
             {
                 "walk_contract_version": "v3_centered_home_servo_range",
+                "getup_contract_version": "v5",
+                "getup_checkpoint_stamp": "",
                 "v12_home_pose_revision": (
                     "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_"
                     "shoulder_zero_v5"
@@ -136,6 +138,7 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
                 "v12_packager_revision": (
                     "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
                 ),
+                "v12_target_frame": "robot_trunk_xyz_forward_left_up",
             },
         )
 

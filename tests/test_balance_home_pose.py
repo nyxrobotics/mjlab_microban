@@ -60,7 +60,8 @@ def with_pairs(joints: dict[str, float], **pairs: float) -> dict[str, float]:
 
 
 def fake_training_line(joint_pos_deg, trunk_pitch_deg, **_):
-    """Stand-in for the (seconds-long) task import: refuse only a pitched trunk."""
+    """Stand-in for the (seconds-long) task import; refuses a pitched trunk (an
+    arbitrary rule for these tests: the real training line accepts one)."""
 
     if float(trunk_pitch_deg) != 0.0:
         return TrainingLineCheck(False, "NotImplementedError: fake: vertical trunk only")
@@ -589,10 +590,16 @@ class TrainingLineTest(unittest.TestCase):
         result = check_training_line(self.balanced(knee=15.0), 0.0)
         self.assertTrue(result.ok, result.error)
 
+    def test_forward_lean_home_is_trainable(self):
+        # A pitched trunk is just a value now: the forward-lean HOME (trunk
+        # +10 deg) imports every task, as on branch forward-lean-v2.
+        result = check_training_line(self.balanced(trunk_pitch_deg=10.0), 10.0)
+        self.assertTrue(result.ok, result.error)
+
     def test_refused_homes_say_why(self):
         cases = (
             (self.balanced(elbow=-25.0), 0.0, "receiver box"),
-            (self.balanced(trunk_pitch_deg=10.0), 10.0, "vertical trunk"),
+            (self.balanced(shoulder_pitch=-1.0), 0.0, "shoulder_pitch"),
         )
         for joints, trunk, message in cases:
             with self.subTest(message=message):

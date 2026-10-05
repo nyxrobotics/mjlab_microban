@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -136,12 +137,18 @@ def run_gate(
     legacy_observations = teleop_observations[
         :, [target for _source, target in LEGACY_TO_TELEOP_OBSERVATION_INDEX]
     ]
+    # Legacy parity checks the 63->83 weight mapping, so it is evaluated in
+    # float64 on copies: in float32 the two widths accumulate in different
+    # orders and randn inputs drive raw actions to hundreds of radians, where
+    # one float32 ulp alone exceeds the 2e-5 bound.  A mapping defect still
+    # shows as O(1e-3) or more; the deployed float32 export is checked by the
+    # ONNX parity below.
     with torch.inference_mode():
-        source_actions = source(
-            TensorDict({"actor": legacy_observations}, batch_size=[10_000])
+        source_actions = copy.deepcopy(source).double()(
+            TensorDict({"actor": legacy_observations.double()}, batch_size=[10_000])
         )
-        target_actions = target(
-            TensorDict({"actor": teleop_observations}, batch_size=[10_000])
+        target_actions = copy.deepcopy(target).double()(
+            TensorDict({"actor": teleop_observations.double()}, batch_size=[10_000])
         )
     parity_max = float(torch.max(torch.abs(source_actions - target_actions)).item())
     if parity_max > PRISTINE_PARITY_TOLERANCE:
@@ -166,9 +173,21 @@ def run_gate(
     )
     if runtime.get_providers() != ["CPUExecutionProvider"]:
         raise RuntimeError("ONNX Runtime did not select only CPUExecutionProvider")
+    # Same norm-wise rule as the stage ONNX gate (teleop_v12_onnx_gate): the
+    # randn corpus drives raw actions to hundreds of radians, where float32
+    # accumulation-order differences alone exceed a pure 2e-5 bound.
+    from mjlab_microban.scripts.teleop_v12_onnx_gate import (
+        ONNX_PARITY_RELATIVE_TOLERANCE,
+        ONNX_PARITY_RULE,
+        parity_bound_ratio,
+    )
+
     reference_observations = teleop_observations[:64]
     reference_errors: list[float] = []
     runtime_errors: list[float] = []
+    reference_ratios: list[float] = []
+    runtime_ratios: list[float] = []
+    expected_magnitudes: list[float] = []
     export_model = target.as_onnx(verbose=False).cpu().eval()
     with torch.inference_mode():
         for observation in reference_observations:
@@ -180,17 +199,28 @@ def run_gate(
             runtime_errors.append(
                 float(np.max(np.abs(runtime_actual - expected)))
             )
+            reference_ratios.append(
+                parity_bound_ratio(actual, expected, atol=ONNX_PARITY_TOLERANCE)
+            )
+            runtime_ratios.append(
+                parity_bound_ratio(
+                    runtime_actual, expected, atol=ONNX_PARITY_TOLERANCE
+                )
+            )
+            expected_magnitudes.append(float(np.max(np.abs(expected))))
     reference_max = max(reference_errors)
     runtime_max = max(runtime_errors)
-    if reference_max > ONNX_PARITY_TOLERANCE:
+    reference_ratio = max(reference_ratios)
+    runtime_ratio = max(runtime_ratios)
+    if not np.isfinite(reference_ratio) or reference_ratio > 1.0:
         raise ValueError(
             "ONNX ReferenceEvaluator parity failed: "
-            f"{reference_max} > {ONNX_PARITY_TOLERANCE}"
+            f"{reference_max} (bound ratio {reference_ratio})"
         )
-    if runtime_max > ONNX_PARITY_TOLERANCE:
+    if not np.isfinite(runtime_ratio) or runtime_ratio > 1.0:
         raise ValueError(
-            f"ONNX Runtime CPU parity failed: {runtime_max} > "
-            f"{ONNX_PARITY_TOLERANCE}"
+            f"ONNX Runtime CPU parity failed: {runtime_max} "
+            f"(bound ratio {runtime_ratio})"
         )
 
     return {
@@ -234,6 +264,11 @@ def run_gate(
             "onnxruntime_version": ort.__version__,
             "onnxruntime_providers": runtime.get_providers(),
             "tolerance": ONNX_PARITY_TOLERANCE,
+            "relative_tolerance": ONNX_PARITY_RELATIVE_TOLERANCE,
+            "parity_rule": ONNX_PARITY_RULE,
+            "maximum_absolute_expected_output": max(expected_magnitudes),
+            "reference_evaluator_maximum_bound_ratio": reference_ratio,
+            "onnxruntime_cpu_maximum_bound_ratio": runtime_ratio,
         },
     }
 

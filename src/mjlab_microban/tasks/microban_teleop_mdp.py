@@ -40,6 +40,8 @@ from mjlab_microban.tasks.mdp import (
     FootTargetCommandCfg,
     HandTargetCommand,
     HandTargetCommandCfg,
+    home_levelled_root_ang_vel_b,
+    home_levelled_root_lin_vel_b,
 )
 from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
@@ -1220,24 +1222,30 @@ def linear_velocity_tracking_error_l1(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
-    """Return body-frame planar velocity error with a non-vanishing gradient."""
+    """Return body-frame planar velocity error with a non-vanishing gradient.
 
-    asset: Entity = env.scene[asset_cfg.name]
+    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame
+    (mdp.track_linear_velocity_home_frame).
+    """
+
     command = env.command_manager.get_command(command_name)
-    return torch.abs(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]).sum(dim=-1)
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    return torch.abs(command[:, :2] - actual[:, :2]).sum(dim=-1)
 
 
 def yaw_velocity_tracking_error_l1(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
-    """Return absolute body-frame yaw-rate error."""
+    """Return absolute body-frame yaw-rate error (HOME-levelled, see above)."""
 
-    asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
-    return torch.abs(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+    actual = home_levelled_root_ang_vel_b(env, trunk_pitch, asset_cfg)
+    return torch.abs(command[:, 2] - actual[:, 2])
 
 
 class ResumeSafeStepBasedStagedCurriculum:
@@ -1587,14 +1595,54 @@ class HmdNeckTargetMotion:
         if not 0.0 <= self.neutral_probability <= 1.0:
             raise ValueError("neutral_probability must be in [0, 1]")
 
-        default = self.asset.data.default_joint_pos[:, self.joint_ids]
-        self.current_target = torch.clamp(
-            default.clone(), min=self.position_lower, max=self.position_upper
-        )
+        # The "neutral" HMD pose used for resets and neutral waypoints.  By
+        # default it is HOME (default_joint_pos, read when used).
+        # ``neutral_position_rad`` (absolute joint angles) moves it, e.g. to the
+        # pose a level headset produces on a trunk that leans forward at HOME.
+        neutral_position = params.get("neutral_position_rad")
+        self._neutral_override: torch.Tensor | None = None
+        if neutral_position is not None:
+            values = [
+                float(value)
+                for value in _ordered_values(
+                    neutral_position, names, "neutral_position_rad"
+                )
+            ]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("HMD neutral position must be finite")
+            override = (
+                torch.tensor(values, dtype=torch.float32, device=env.device)
+                .unsqueeze(0)
+                .expand(env.num_envs, -1)
+                .clone()
+            )
+            if not bool(
+                torch.all(
+                    (override >= self.position_lower)
+                    & (override <= self.position_upper)
+                ).item()
+            ):
+                raise ValueError("HMD neutral position lies outside the HMD limits")
+            self._neutral_override = override
+
+        all_envs = torch.arange(env.num_envs, dtype=torch.long, device=env.device)
+        self.current_target = self.neutral_target(all_envs).clone()
         self.goal_target = self.current_target.clone()
         # Zero causes a waypoint to be sampled on the first post-reset step.
         self.time_to_retarget_s = torch.zeros(
             env.num_envs, dtype=torch.float32, device=env.device
+        )
+
+    def neutral_target(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return the clamped neutral HMD targets of ``indices``. Shape (n, 3)."""
+
+        if self._neutral_override is not None:
+            return self._neutral_override[indices]
+        default = self.asset.data.default_joint_pos[indices][:, self.joint_ids]
+        return torch.clamp(
+            default,
+            min=self.position_lower[indices],
+            max=self.position_upper[indices],
         )
 
     def _explicit_env_ids(self, env_ids: torch.Tensor | slice | None) -> torch.Tensor:
@@ -1608,17 +1656,12 @@ class HmdNeckTargetMotion:
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         indices = self._explicit_env_ids(env_ids)
-        default = self.asset.data.default_joint_pos[indices][:, self.joint_ids]
-        default = torch.clamp(
-            default,
-            min=self.position_lower[indices],
-            max=self.position_upper[indices],
-        )
-        self.current_target[indices] = default
-        self.goal_target[indices] = default
+        neutral = self.neutral_target(indices)
+        self.current_target[indices] = neutral
+        self.goal_target[indices] = neutral
         self.time_to_retarget_s[indices] = 0.0
         self.asset.set_joint_position_target(
-            default,
+            neutral,
             joint_ids=self.joint_ids,
             env_ids=indices.unsqueeze(-1),
         )
@@ -1639,7 +1682,14 @@ class HmdNeckTargetMotion:
                 torch.rand((count, 1), device=self.current_target.device)
                 < self.neutral_probability
             )
-            neutral = self.asset.data.default_joint_pos[indices][:, self.joint_ids]
+            # Neutral waypoints: the override (validated inside the limits), or
+            # HOME itself (unclamped, as before the override existed; the
+            # goal is clamped below).
+            neutral = (
+                self._neutral_override[indices]
+                if self._neutral_override is not None
+                else self.asset.data.default_joint_pos[indices][:, self.joint_ids]
+            )
             sampled = torch.where(neutral_mask, neutral, sampled)
 
         self.goal_target[indices] = torch.clamp(sampled, min=lower, max=upper)

@@ -153,6 +153,9 @@ DEPLOYED_ACCURACY_PROFILE_BY_STRICT_PROFILE = {
 # canonical model too.  User instruction: "全部許可するから一番良いと思う方法で
 # 作業完了まで進めて" / "本来の基準ってのも別にそんなに意味ない"; the
 # orchestrator chose this allowance to complete the centered-HOME PICO.
+# The allowance is bound to the current HOME's pose-release recipe string
+# (MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION: the centered v12, the
+# forward-lean v18 or a derived "<tag>" string), with identical limits.
 COMPLETION_ALLOWANCE_REVISION = "completion_allowance_v1"
 FINAL_COMPLETION_ALLOWANCE_PROFILE = f"{FINAL_PROFILE}_{COMPLETION_ALLOWANCE_REVISION}"
 COMPLETION_ALLOWANCE_HAND_RMS_MAX_M = 0.045

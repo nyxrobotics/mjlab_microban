@@ -30,6 +30,7 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
     MICROBAN_ROBOT_CFG,
 )
 from mjlab_microban.tasks.mdp import (
@@ -416,6 +417,14 @@ def _set_hmd_neck_neutral_probability(
     event_cfg.params["neutral_probability"] = neutral_probability
 
 
+# A HOME trunk leaning forward reads the commanded twist in the HOME-levelled
+# trunk frame (mdp.home_levelled_root_lin_vel_b); a vertical trunk keeps the
+# body frame (no parameter, mjlab's original terms).
+_HOME_LEVELLED_VELOCITY_PARAMS = (
+    {"trunk_pitch": HOME_TRUNK_PITCH_RAD} if HOME_TRUNK_PITCH_RAD != 0.0 else {}
+)
+
+
 def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Build the independent PICO hybrid policy training environment."""
 
@@ -644,7 +653,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["commanded_planar_velocity_progress"] = RewardTermCfg(
         func=commanded_planar_velocity_progress,
         weight=2.0,
-        params={"command_name": "twist", "command_threshold": 0.01},
+        params={
+            "command_name": "twist",
+            "command_threshold": 0.01,
+            **_HOME_LEVELLED_VELOCITY_PARAMS,
+        },
     )
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["threshold_min"] = 0.02
@@ -655,12 +668,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["linear_velocity_error_l1"] = RewardTermCfg(
         func=linear_velocity_tracking_error_l1,
         weight=-16.0,
-        params={"command_name": "twist"},
+        params={"command_name": "twist", **_HOME_LEVELLED_VELOCITY_PARAMS},
     )
     cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
         func=yaw_velocity_tracking_error_l1,
         weight=-1.0,
-        params={"command_name": "twist"},
+        params={"command_name": "twist", **_HOME_LEVELLED_VELOCITY_PARAMS},
     )
 
     # V2 converged to a wide static stance because the inherited term penalized
@@ -673,7 +686,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["no_stepping"].params["foot_target_command_name"] = "foot_target"
 
     # Six foot XYZ offsets, and six hand XYZ offsets plus left/right active
-    # flags.  All offsets are expressed in the trunk frame and measured in metres.
+    # flags, in metres.  All offsets are expressed in the HOME-levelled trunk
+    # frame R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): level at HOME (x forward,
+    # y left, z up), the frame the PICO bridge sends and the twist uses, so a
+    # world-vertical foot lift at HOME reads (0, 0, dz).  With a vertical
+    # trunk at HOME it is the trunk frame.
     cfg.commands["foot_target"] = ResetFixedFootTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_single_support_envs=0.0,
@@ -685,10 +702,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             0.012,
         ),
         both_feet_reach_xy_range=(-0.01, 0.01),
+        trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
     cfg.commands["hand_target"] = ResetFixedHandTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_active=0.0,
+        trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
     # This command is privileged: it is appended only to the critic below and
     # never changes the actor's deployment-stable 83-value observation schema.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -107,12 +108,16 @@ def run_gate(
     legacy_observations = neutral_observations[
         :, [target for _source, target in LEGACY_TO_TELEOP_OBSERVATION_INDEX]
     ]
+    # Float64 copies: this checks the frozen 63->83 mapping exactly; float32
+    # accumulation order differs between the two widths and alone exceeds 2e-5
+    # once randn inputs drive raw actions to hundreds of radians (see
+    # teleop_v12_bootstrap_gate).  The float32 export is checked below.
     with torch.inference_mode():
-        expected_actions = source(
-            TensorDict({"actor": legacy_observations}, batch_size=[10_000])
+        expected_actions = copy.deepcopy(source).double()(
+            TensorDict({"actor": legacy_observations.double()}, batch_size=[10_000])
         )
-        actual_actions = target(
-            TensorDict({"actor": neutral_observations}, batch_size=[10_000])
+        actual_actions = copy.deepcopy(target).double()(
+            TensorDict({"actor": neutral_observations.double()}, batch_size=[10_000])
         )
     neutral_max = float(torch.max(torch.abs(actual_actions - expected_actions)).item())
     if neutral_max > PRISTINE_PARITY_TOLERANCE:

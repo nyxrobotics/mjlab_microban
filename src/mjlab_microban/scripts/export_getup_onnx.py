@@ -1,7 +1,8 @@
 """Export a newly trained Microban get-up checkpoint for the robot.
 
-Both paths must be explicit.  The checkpoint's v5 contract (decided from the
-run's recorded params/env.yaml: centered HOME, +-pi servo-range clip, raw
+Both paths must be explicit.  The checkpoint's get-up contract (v5 at the
+centered HOME, v6 at the forward-lean HOME; decided from the run's recorded
+params/env.yaml: the current HOME, +-pi servo-range clip, raw
 previous-action feedback) and the exported ONNX normalizer are checked before
 an artifact is published.
 """
@@ -31,6 +32,7 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.robot.microban_constants import (
     HOME_PROJECTED_GRAVITY,
+    HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD
@@ -65,11 +67,12 @@ def _sha256(path: Path) -> str:
 
 
 def _require_new_checkpoint(path: Path) -> tuple[str, str]:
-    """Require a v5 training checkpoint; return its SHA-256 and stamped contract.
+    """Require a current-contract training checkpoint; return its SHA-256 and stamp.
 
-    Validity comes from the run's recorded env, so a run trained under v5 but
-    stamped "v4" by a runner loaded before the version bump still exports
-    (as v5), while a +-1.57 clip or old-HOME v4 run is refused.
+    Validity comes from the run's recorded env (the current HOME, the +-pi
+    clip, raw previous-action feedback).  At the centered HOME a run trained
+    under v5 but stamped "v4" by a runner loaded before the version bump still
+    exports (as v5), while a +-1.57 clip or old-HOME v4 run is refused.
     """
 
     before = _sha256(path)
@@ -148,14 +151,20 @@ def _validate_onnx(path: Path) -> None:
         raise ValueError("Get-up ONNX must have one actions output of shape [1, 18]")
 
     # Finite, positive normalizer. No range check on the previous-action
-    # slots: v5 observes the raw output, which is unbounded by design (a
+    # slots: the policy observes the raw output, which is unbounded by design (a
     # standing policy drives it to hundreds of radians to saturate the clip).
     _normalizer_arrays(model)
 
     # Screen a small set of physically meaningful initial orientations for
     # non-finite output, the runtime's only actor fault.
     evaluator = ReferenceEvaluator(model)
-    for gravity in (HOME_PROJECTED_GRAVITY, (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)):
+    # HOME's own gravity (a leaning HOME trunk reads (sin p, 0, -cos p)), then
+    # vertical upright, upside down and on its side.
+    gravities = [tuple(HOME_PROJECTED_GRAVITY)]
+    for gravity in ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)):
+        if gravity not in gravities:
+            gravities.append(gravity)
+    for gravity in gravities:
         observation = np.zeros((1, OBSERVATION_WIDTH), dtype=np.float32)
         observation[0, 3:6] = gravity
         outputs = evaluator.run(None, {"obs": observation})
@@ -207,7 +216,7 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
     if not np.allclose(lower, -SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6) or not np.allclose(
         upper, SERVO_TARGET_RANGE_RAD, rtol=0, atol=1e-6
     ):
-        raise ValueError("Get-up action target clip differs from the v5 servo range (+-pi)")
+        raise ValueError("Get-up action target clip differs from the servo range (+-pi)")
     # The env holds the clip as float32 (3.1415927 > pi); publish the exact
     # float64 bound so the robot's "not wider than the servo range" check holds.
     lower = np.full(ACTION_WIDTH, -SERVO_TARGET_RANGE_RAD, dtype=np.float64)
@@ -222,7 +231,7 @@ def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path, help="v5 model_N.pt (in its run directory with params/env.yaml)")
+    parser.add_argument("--checkpoint", required=True, type=Path, help="get-up model_N.pt (in its run directory with params/env.yaml)")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
@@ -270,7 +279,7 @@ def main() -> None:
                     getup_home_pose(), sort_keys=True, separators=(",", ":")
                 ),
                 # The contract string the training runner stamped ("v4" for
-                # v5 runs started before the version bump).
+                # centered v5 runs started before the version bump).
                 "microban_getup_checkpoint_contract_stamp": checkpoint_stamp,
                 "checkpoint_sha256": checkpoint_sha256,
                 "checkpoint_filename": checkpoint.name,

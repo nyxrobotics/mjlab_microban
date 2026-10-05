@@ -53,7 +53,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
-    microban_hand_offsets_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
 )
 from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
     FULLBODY_VISUAL_GATE,
@@ -1670,7 +1670,9 @@ class LivePicoSimulationPolicy:
                         primary_command.arm_joint_target,
                         dtype=torch.float64,
                     )
-                    expected_hands = microban_hand_offsets_from_arm_joints(
+                    # Hand targets are HOME-levelled-frame offsets: the
+                    # mapper must send the arm FK rotated by the HOME lean.
+                    expected_hands = microban_hand_target_offsets_from_arm_joints(
                         arm_joint_target
                     )
                     commanded_hands = torch.tensor(

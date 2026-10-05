@@ -21,7 +21,8 @@ cd ../mjlab_microban_homecfg
 git -C ../microban fetch origin
 git -C ../microban worktree add -b home-knee15 ../microban_home-knee15 origin/home-config
 # 1. HOMEを編集する（変えられる値は config/README.md の表）。name / label も新しい姿勢に合わせる。
-# 2. 重心を足裏の前後中央に戻す（任意、股・足首ピッチだけを書き換える）
+# 2. 重心を足裏の前後中央に戻す（任意、股・足首ピッチだけを書き換える）。体幹ピッチも値の1つで、
+#    --trunk-pitch-deg 10 なら前傾HOME（前傾ラインの仕組みで学習する。config/README.md）
 uv run python config/balance_home_pose.py --write
 # 3. 全部やり直す（数十時間。中断しても同じコマンドで続きから）
 python3 scripts/retrain_all_for_home.py --commit-trailer "Co-Authored-By: ..." \
@@ -54,7 +55,7 @@ tail -f artifacts/home_pipeline/<tag>_<hash>/STATUS.log
 | 1. HOME | `scripts/home_pipeline/home_check.py`（重心と足裏接地面）、`balance_home_pose.py --check`、`home_pose_tool.py show`（学習ライン）、`write-robot`（ロボット側yaml） | 重心が足裏の前後範囲の外なら拒否。中心から 0.5 mm 以上ずれている、足裏がロールしていて床に触れる角が減る、正準の解でない、は警告。yamlは書き換えない |
 | 2. 歩行 | `Mjlab-Velocity-Microban` 15000回（4096 env）→ 続きを30000まで。1000回ごとのチェックポイントを、GPUに空きがあれば学習中に、なければ学習後にPICOテレオペ環境の 9×300 プローブで評価。合格した上位6候補を計3回ずつプローブし、全回の最悪マージンが最大のものを選ぶ | 全回合格の候補がなければ、最悪マージン最大のものを使い **FALLBACK** と記録。v12の開始時プローブ（新しく1回）で落ちたら、次の候補に替えて開始し直す（候補がなくなったら止まる）。選んだものは `checkpoints/<prefix>_walk/` にコピー |
 | 3. 起き上がり | 段階1〜5（2500 → ImuDelay +1500 → std 0.5 にリセット → CalmRoll +8000 → CalmEffortStrong +6500 → CalmPush +3000、段階3以降 entropy 0.001）。各段階のあと `scripts/home_pipeline/getup_eval.py` で評価（遅延0-3+ノイズの2シード、0.3 m/s 押し、姿勢）。歩行と並列 | 最終段階: 倒れた状態からの起立 ≥ 85 %、押しで転倒 ≤ 10 %、立位の関節速度 ≤ 0.3 rad/s、姿勢評価で立ち続け ≥ 80 % |
-| 4. PICO v12 | 選んだ歩行から pose-release の新規チェーン（`train_microban_teleop_v12.sh start --hand-pose-release`）、0→3000→3100→7000→7100→10000→10100→15000、境界ごとに `evaluate_microban_teleop_v12_stage.sh` | 各ゲート。自動救済: カナリア（3099/7099/10099）が精度だけで落ちたら1回だけ再学習。9999が落ちたら model_9900 のコーナー救済を試す（救済スクリプトの検証が受け付ける親だけ。現状は canonical レシピ専用なので pose-release では拒否されて止まる）。15000 は pose-release レシピの completion-allowance プロファイルで評価される（評価スクリプトが自動で選ぶ） |
+| 4. PICO v12 | 選んだ歩行から pose-release の新規チェーン（`train_microban_teleop_v12.sh start --hand-pose-release`）、0→3000→3100→7000→7100→10000→10100→15000、境界ごとに `evaluate_microban_teleop_v12_stage.sh` | 各ゲート。自動救済: カナリア（3099/7099/10099）が精度だけで落ちたら1回だけ再学習。9999が落ちたら model_9900 の pose-release コーナー救済を試す（`train_microban_teleop_v12_corner_rescue.sh --hand-pose-release --mix <--pr-corner-rescue-mix、既定 lf60>`。新しい pose-release チェーンの model_9900 で、厳密評価が手先精度だけで落ちたものを親として受け付ける。救済後の model_9999 は通常の段階評価でゲートし、pose-release として続きを学習する）。15000 は pose-release レシピの completion-allowance プロファイルで評価される（評価スクリプトが自動で選ぶ） |
 | 5. 書き出し・導入 | walk.onnx / getup.onnx を書き出してロボットへ。ロボット側ピン（`pico_hybrid.py` の歩行ソースSHA・反復数・プローブSHA、`validate_pico_policy.py` の walk.onnx SHA）、歩行テスト用フィクスチャの再生成、テストに固定されたHOME値（`TRAINING_HOME_DEG`、タグ、ルート高さ、全桁の角度、リビジョン文字列、`PACKAGER_V12_HOME_POSE_JSON`）を更新。そのロボットツリーに対してPICOをパッケージ（実ロボットのバリデータ込み）して導入 | `tools/validate_pico_policy.py` が pass、ロボットのテストスイートが全部通る |
 | 6. コミット | ロボット: `--robot-branch` にコミットしてpush。学習: `config/home_pose.yaml`、記録 `config/releases/<tag>.json`、リリース一式（中心HOMEの 5b5a9d0 と同じ: PICO model_14999.pt と params/git、ゲート報告とONNX、パッケージONNXと受領書。加えてロボットがSHAで固定する選択歩行チェックポイントとその 9×300 プローブ受領書、起き上がり最終チェックポイント。gitignore対象なので `git add -f`）をコミットしてpush | 1〜5がすべて通ったときだけ |
 

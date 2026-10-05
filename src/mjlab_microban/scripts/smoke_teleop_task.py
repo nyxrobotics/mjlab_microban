@@ -510,7 +510,11 @@ def main() -> None:
                 "Unexpected locomotion command units: "
                 f"{metadata['locomotion_command_units']}"
             )
-        expected_target_frame = "robot_trunk_xyz_forward_left_up"
+        from mjlab_microban.tasks.microban_policy_export import (
+            MICROBAN_TELEOP_TARGET_FRAME,
+        )
+
+        expected_target_frame = MICROBAN_TELEOP_TARGET_FRAME
         for target_name in ("foot_target", "hand_target"):
             if metadata[f"{target_name}_frame"] != expected_target_frame:
                 raise AssertionError(

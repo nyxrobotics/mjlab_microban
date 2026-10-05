@@ -4,10 +4,17 @@ A pose-release checkpoint is release-eligible when its lineage is either
 
 * a fresh pose-release chain (no switch marker at all; the recipe equals v11
   bit for bit before hand targets activate at update 7000), or
-* the one recorded recipe switch at the gated canonical model_7099
+* the one recorded recipe switch at a pinned, gated canonical model_7099
   (completed 7100, just after the HMD/hand activation canary): the canonical
   v11 chain is resumed by the pose-release task from that exact checkpoint,
   and every later save carries the release-switch marker below.
+
+The switch parent is HOME-bound (robot/home_contracts.py): only the centered
+HOME pins one (its gated centered-HOME model_7099).  At every other HOME, the
+forward-lean one included, no switch parent is pinned
+(``HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256`` is ``None``), so
+every switch marker is refused and the pose-release recipe is trained as a
+fresh chain (``scripts/train_microban_teleop_v12.sh start --hand-pose-release``).
 
 The marker names the parent checkpoint and its stage gate by path and SHA-256.
 Every consumer re-validates it on every load: the parent bytes must still hash
@@ -28,6 +35,8 @@ from typing import Any
 
 import torch
 
+from mjlab_microban.robot import home_contracts
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     portable_bootstrap_artifact_path,
     resolve_bootstrap_artifact_path,
@@ -52,10 +61,22 @@ HAND_POSE_RELEASE_RECIPE_SWITCH_SCHEMA_VERSION = 1
 HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_ITERATION = 7_099
 HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_COMPLETED_UPDATES = 7_100
 HAND_POSE_RELEASE_RECIPE_SWITCH_NUM_STEPS_PER_ENV = 24
-# The gated canonical centered-HOME v12 model_7099 (run
-# 2026-10-04_10-18-35_c20k_v12_7000_to7100, source walking model_20000).
-HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 = (
-    "366763f233f30947554c2f66c5619a8b8c1230ac8529f17740fb1d27cfe0d224"
+# The gated canonical model_7099 the switch may resume: the centered HOME's
+# (run 2026-10-04_10-18-35_c20k_v12_7000_to7100, source walking model_20000).
+# At any other HOME none is pinned, so the release switch is closed and the
+# fresh pose-release chain is the release route; pinning a parent there
+# (home_pose.LEGACY_HOME_OVERRIDES) re-opens the switch with every check below
+# unchanged.
+HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256: str | None = (
+    home_contracts.V12_POSE_RELEASE_SWITCH_PARENT_SHA256
+)
+_HOME_NAME = {"centered_home": "centered", "forward_lean_home": "forward-lean"}.get(
+    HOME.tag, HOME.tag
+)
+_NO_SWITCH_PARENT_MESSAGE = (
+    "No release-eligible pose-release switch parent is pinned at the "
+    f"{_HOME_NAME} HOME; start a fresh pose-release chain "
+    "(train_microban_teleop_v12.sh start --hand-pose-release)"
 )
 HAND_POSE_RELEASE_RECIPE_SWITCH_REASON = (
     "canonical v11 chain from this model_7099 failed the deployed-accuracy final "
@@ -66,6 +87,10 @@ HAND_POSE_RELEASE_RECIPE_SWITCH_REASON = (
 )
 
 HAND_POSE_RELEASE_LINEAGE_FRESH = "fresh_chain"
+# A fresh chain whose model_9900 went through the pose-release corner rescue
+# (microban_teleop_v12_corner_rescue, pose-release variant): its model_9999 and
+# that model's ordinary pose-release descendants.
+HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE = "fresh_chain_model9900_corner_rescue"
 HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH = "release_eligible_recipe_switch"
 HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH = "experimental_recipe_switch"
 
@@ -125,6 +150,8 @@ def hand_pose_release_recipe_switch_marker(
 ) -> dict[str, Any]:
     """Build the exact release-eligible switch marker (structure only)."""
 
+    if HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 is None:
+        raise ValueError(_NO_SWITCH_PARENT_MESSAGE)
     if parent_checkpoint_sha256 != (
         HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
     ):
@@ -191,6 +218,8 @@ def validate_hand_pose_release_switch_parent_payload(
 ) -> dict[str, Any]:
     """Validate the parent's own bytes: pinned canonical v11 model_7099."""
 
+    if HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 is None:
+        raise ValueError(_NO_SWITCH_PARENT_MESSAGE)
     if checkpoint_sha256 != HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256:
         raise ValueError(
             "The release-eligible pose-release switch may resume only the gated "
@@ -290,15 +319,44 @@ def hand_pose_release_lineage(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     ):
         raise ValueError("Checkpoint is not the hand pose-release recipe")
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
+        is_hand_pose_release_corner_rescue_marker,
+        validate_corner_rescue_lineage_marker,
+    )
+
+    corner = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     for key in _rescue_info_keys():
+        if key == MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY:
+            continue
         if infos.get(key) is not None:
             raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+    if corner is not None:
+        # Only the pose-release corner rescue is part of this lineage; its
+        # intermediate saves (9901..9998) are not consumable.
+        if not is_hand_pose_release_corner_rescue_marker(corner):
+            raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+        validate_corner_rescue_lineage_marker(corner)
+        if iteration is not None and (
+            isinstance(iteration, bool)
+            or not isinstance(iteration, int)
+            or iteration < MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION
+        ):
+            raise ValueError(
+                "Only model_9999 of a pose-release corner rescue (or a "
+                "descendant) is consumable"
+            )
     release = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
     experimental = infos.get(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY
     )
     if release is not None and experimental is not None:
         raise ValueError("A checkpoint cannot carry both pose-release switch markers")
+    if corner is not None and (release is not None or experimental is not None):
+        raise ValueError(
+            "The pose-release corner rescue applies only to a fresh pose-release chain"
+        )
     if experimental is not None:
         if not allow_experimental:
             raise ValueError(
@@ -311,6 +369,8 @@ def hand_pose_release_lineage(
         validate_hand_pose_release_switch_marker(experimental)
         return HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
     if release is None:
+        if corner is not None:
+            return HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE
         return HAND_POSE_RELEASE_LINEAGE_FRESH
     marker = validate_hand_pose_release_recipe_switch_marker(release)
     if iteration is not None and (

@@ -59,7 +59,7 @@ def _load(path: Path):
 
 def _training_line(home):
     return check_training_line(
-        home.joint_pos_deg,
+        home.input_joint_pos_deg,
         home.trunk_pitch_deg,
         name=home.name,
         label=home.label,

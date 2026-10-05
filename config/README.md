@@ -20,16 +20,58 @@
 - HOMEの識別子: 関節値と体幹ピッチの正規形のSHA-256先頭10桁（`joint_hash`）と、
   契約文字列に埋め込む `tag`
 
-`tag` は現在の中心HOMEでは `centered_home` で、今日までの文字列
-（`v3_centered_home_servo_range`、`centered_home_hip_plus1p198384259489_...` など）と完全に一致する。
-値を1つでも変えると `tag` は `<label>_<joint_hash>` になる。古いチェックポイント・ゲート・ONNXは
-文字列やHOMEスタンプが合わないため拒否される。中心HOMEのときだけ、手で丸めた足の横間隔 0.094 m
-（FKでは 0.0935 m）も維持される（`LEGACY_HOME_OVERRIDES`）。
+## 学習済みの2つのHOMEと契約文字列
+
+学習済みの成果物があるHOMEは2つあり、どちらも `home_pose.py` の `LEGACY_HOME_OVERRIDES`（joint hash
+がキー）で、そのHOMEのブランチが使っていた値と文字列をそのまま再現する。それ以外のHOMEは
+`<label>_<joint_hash>` を埋め込んだ文字列になり（`src/mjlab_microban/robot/home_contracts.py` に全部まとめてある）、
+古いチェックポイント・ゲート・ONNXは文字列やHOMEスタンプが合わないため拒否される。
+
+| | 中心HOME（`bbef07cab8`） | 前傾HOME（`481503d292`） | その他のHOME |
+| --- | --- | --- | --- |
+| yaml | `config/home_pose.yaml`（体幹 0°） | `tests/fixtures/home_pose_forward_lean.yaml`（体幹 +10°） | 編集したyaml |
+| 再現するブランチ | 学習 `track-centered-home-clip`、ロボット `feature/neck-roll-pitch-camera` | 学習 `forward-lean-centered-home` / `forward-lean-v2`、ロボット `forward-lean-home` | — |
+| `tag` | `centered_home` | `forward_lean_home` | `<label>_<hash>` |
+| 歩行 ONNX 契約 | `v3_centered_home_servo_range` | `v4_forward_lean_home_servo_range` | `v3_<tag>_servo_range`（体幹 0°）/ `v4_<tag>_servo_range` |
+| 起き上がり契約 | `v5`（`v4` スタンプも記録envで確認して受理） | `v6` | `v5_<tag>` / `v6_<tag>` |
+| PICO v12 HOME / recipe | `centered_home_hip_plus1p198..._v5`、recipe `..._v11`、pose-release `..._v12` | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17`、pose-release `..._v18` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
+| パッケージャ | `..._packager_v6_centered_home_servo_range` | `..._packager_v7_forward_lean_home_servo_range` | `v6`/`v7` + `<tag>` |
+| 救済段階・upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
+| 固定値 | root z 0.170554885633559、足の横間隔 0.094 m（FK 0.0935） | root z 0.170430569776402、股・足首は前傾ブランチの全桁の値（yamlは12桁の正準値） | FK値 |
+| 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント、model_7099 からの pose-release 切替 | （なし。pose-release は新しいチェーンで学習） | （なし） |
+
+体幹ピッチ 0° のHOMEは中心ラインの仕組み（体幹座標系の目標、元の手先FK箱）、0° 以外は前傾ラインの仕組み
+（HOME水平化座標系の目標、水平なヘッドセットのHMD中立、受信箱 ±64 mm に収めた手先目標、F 評価姿勢 (−20, 25, −50)°）
+で学習する。どちらも同じコードで、体幹ピッチの値から決まる（次節）。
 
 root z は FK 値を 1e-12 m に丸めて公開する。中心HOME（FK 0.17055488563355944、15桁丸めの境界から
-2 ulp）と前傾HOME（`481503d292`）は、今日公開した値（0.170554885633559 / 0.170430569776402）を
+2 ulp）と前傾HOME（`481503d292`）は、公開済みの値（0.170554885633559 / 0.170430569776402）を
 `LEGACY_HOME_OVERRIDES` の `root_z_m` に固定し、読み込み時に FK との差が 1e-12 m 以内かを確認する。
 MuJoCo の更新などで FK が最終桁で揺れても、HOMEスタンプ・ロボット側yaml・テストの固定値は変わらない。
+前傾HOMEの股・足首ピッチも同様に、yaml の12桁の正準値（−14.166561199931 / 4.127976841869、ハッシュはこの値）
+から 1.2e-13° 以内であることを確かめた上で、前傾ブランチが公開した全桁の値（−14.166561199931119 /
+4.127976841869204）を `HOME.joint_pos_deg` / `joint_pos_rad` として使う（`HOME.input_joint_pos_deg` がyamlの値）。
+
+## 体幹ピッチに依存するもの（すべて yaml の `trunk_pitch_deg` から計算）
+
+体幹ピッチ p は yaml の1つの値で、次がすべてそこから決まる。p = 0 では中心ラインと同じ式・同じ設定になる
+（テストで確認、後述）。
+
+| 項目 | p ≠ 0 のとき | p = 0 のとき |
+| --- | --- | --- |
+| HOME の root 姿勢・重力 | クォータニオン (cos p/2, 0, sin p/2, 0)、重力 (sin p, 0, −cos p) | 単位クォータニオン、(0, 0, −1) |
+| 歩行の upright 報酬 | 目標ピッチ p | 0 |
+| 歩行・テレオペの速度報酬 | HOME水平化座標系 R_trunk·R_y(−p) で速度を読む（`track_*_home_frame`、`trunk_pitch` パラメータ） | mjlab の項そのもの |
+| リセットのヨー | ワールド z 軸まわり（`reset_root_state_uniform_world_yaw`。起き上がりの near-HOME リセットも） | mjlab の `reset_root_state_uniform` |
+| 起き上がりの直立報酬 | `upright_standing` の目標重力 (sin p, 0)（`pitch` パラメータ） | (0, 0) |
+| 頭高さ・足の横間隔 | FK（前傾 0.2953 / 0.0941 m） | FK（中心 0.2965 / 0.094 m） |
+| PICO 足・手目標 | HOME水平化座標系、ラベル `robot_home_levelled_trunk_xyz_forward_left_up`、手先FK v4（受信箱 ±64 mm で棄却サンプリング） | 体幹座標系、`robot_trunk_xyz_forward_left_up`、手先FK v2 |
+| HMD 中立 | neck_pitch = −p（水平なヘッドセット） | HOME（default_joint_pos） |
+| エクスポータ | 重力 = HOME 重力（歩行・起き上がりのスモーク、PICO の parity 入力） | (0, 0, −1) |
+| ロボット | 起き上がりの立ち上がり判定・引き渡し前の静定判定を HOME 重力からの傾きで測る、首の安定化の基準を p だけずらす、シミュレータの IMU 遅延を HOME 姿勢で初期化 | 鉛直基準の元の判定 |
+
+転倒判定（重力 z > −0.5、鉛直から 60°）は物理的な姿勢なので、どの p でも鉛直基準のまま。
+記録済みでない p（+10° 以外）では手先目標の箱を 401^3 格子で初回に計算する（数十秒、`~/.cache/mjlab_microban/` に保存）。
 
 ローダーは、関節名21個がそろっていること、左右対称であること（左右ペアの一致・反転に加えて、
 首ヨー `head` と `neck_roll` が 0）、MJCFの可動範囲内であること、`trunk_pitch_deg` で両足裏が水平
@@ -50,9 +92,9 @@ PICO v12 と救済段階の全タスクの環境設定が組み立てられる�
 | 膝（左右同じ） | 可。`balance_home_pose.py --write` で股・足首を合わせればよい。膝 20° で歩行と起き上がりの数回の学習、v12 の開始時HOME照合とテレオペ環境のプローブが動くことを確認済み |
 | 股・足首ロール（左右反転）、股ヨー | 足裏が床に平らに着く組み合わせだけ（ふつうは 足首ロール = −股ロール、股ヨー 0）。股ロールだけを変えると足裏がロールしてローダーが拒否する |
 | 首ピッチ | 可 |
-| 体幹ピッチ | 0 だけ。前傾HOMEは下の「前傾ラインへの移植」 |
+| 体幹ピッチ | 可（±90° 未満）。0 は中心ラインの仕組み、それ以外は前傾ラインの仕組みで学習する（上の表）。前傾HOME（+10°）は前傾ブランチを全桁で再現する |
 | 肩ピッチ | 0 だけ（PICO contract v12 のHOME revision） |
-| 肘・肩ロール | 手先の到達範囲が PICO 受信側で検証済みの ±0.064 m の箱に収まる範囲だけ。今の腕HOMEで x がすでに 0.0630 m なので、1つだけ動かす場合の目安は 肘 −22.4°〜−19.1°、肩ロール（左）−2.6°〜44.7°（MJCFの範囲内で） |
+| 肘・肩ロール | 体幹 0° では、手先の到達範囲が PICO 受信側で検証済みの ±0.064 m の箱に収まる範囲だけ。今の腕HOMEで x がすでに 0.0630 m なので、1つだけ動かす場合の目安は 肘 −22.4°〜−19.1°、肩ロール（左）−2.6°〜44.7°（MJCFの範囲内で）。体幹 ≠ 0° では箱の外の目標を棄却して学習するので、評価姿勢（F/B/f/b）が箱に入る範囲 |
 | 首ヨー `head`、`neck_roll` | 0 だけ（左右対称でなくなるため、ローダーが拒否） |
 
 この表の外へ進めるには、そのタスク側の制約（受信箱の検証、v12 contract など）を先に変える必要がある。
@@ -147,7 +189,8 @@ uv run python config/balance_home_pose.py --no-training-check     # 学習ライ
   - 体幹 0°: 股 +1.198384259489°、足首 −1.198384259489°、root z 0.170554885633559、余裕 30.83/30.83 mm（現在のyamlがそのまま解）
   - 体幹 +10°: 股 −14.166561199931°、足首 +4.127976841869°（前傾ブランチの全桁の解 −14.166561199931119 /
     +4.127976841869204 を12桁に丸めた値）、root z 0.170430569776402、余裕 30.96/30.96 mm
-- 体幹 +10° の解はこの学習ラインでは REFUSED になる（体幹ピッチ 0 だけに対応）。書くには `--force` が要る。
+- 体幹 +10° の解は training line: OK（前傾ラインの仕組みで学習する）。この解に `name`/`label` を付けたものが
+  `tests/fixtures/home_pose_forward_lean.yaml`（前傾ブランチを全桁で再現する yaml）。
 
 ## Pythonからの利用（重心合わせなどのツール向け）
 
@@ -167,22 +210,30 @@ a.heel_margin_m, a.toe_margin_m
 a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 ```
 
-## 前傾ラインへの移植（未実施）
+## 直立版と前傾版の切り替え（ブランチ）
 
-前傾HOME（体幹 +10°）は、値としてはこのyamlで正確に表せる（`balance_home_pose.py --trunk-pitch-deg 10`
-が `forward-lean-v2` の値を全桁で再現し、root z 0.170430569776402 も `LEGACY_HOME_OVERRIDES` で固定済み）。
-しかしこの学習ラインのコード（報酬の直立基準、重力方向、速度報酬の座標系、ロボットの姿勢判定など）は
-体幹 0 を前提にしており、`microban_constants.py` とロボットの `src/home_pose.py` は体幹ピッチ 0 以外を拒否する。
-前傾ラインを出荷するなら、次の順で移植する（前傾ジョブが終わってから、前傾の worktree とは別の作業ツリーで）:
+コードは1つで、HOME は yaml の値だけで決まる。直立版と前傾版はブランチで持つ:
+各ブランチ = 同じコード + そのブランチの `config/home_pose.yaml` + そのHOMEで学習したモデル。
 
-1. `forward-lean-v2` に `home-config` をマージする（`config/`、`home_pose*.py`、`microban_velocity_runner.py`、
-   パイプライン）。衝突する箇所は `HOME_FRAME` / `HOME_TRUNK_PITCH_RAD` の手書き定義で、yaml由来の値に置き換える。
-2. 体幹ピッチの拒否（`microban_constants.py`）を外し、`HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad` とする。
-   前傾ブランチがピッチに依存させた箇所（報酬の基準ピッチ、重力、リセットのヨー軸、エクスポータの重力、
-   手先の到達箱）は `git diff track-centered-home-clip origin/forward-lean-v2` に一覧がある。
-3. `config/home_pose.yaml` に前傾の値を書き（`balance_home_pose.py --trunk-pitch-deg 10 --write --force`）、
-   `label` を `forward_lean10` などにする。前傾ブランチのチェックポイントを捨てずに使うなら、
-   `LEGACY_HOME_OVERRIDES["481503d292"]` に前傾ブランチの契約文字列の `tag` を加える。
-4. ロボット側も同様に `forward-lean-home` に `home-config` をマージし、`src/home_pose.py` の体幹 0 の制限と
-   scheduler の起立判定（鉛直基準）を体幹ピッチ基準にする
-   （`git -C ../microban diff feature/neck-roll-pitch-camera origin/forward-lean-home`）。PICO は再パッケージする。
+- `home-config`（学習・ロボットとも）: 中心HOME（体幹 0°）。今の成果物（歩行 cont 20000、起き上がり段階5、
+  PICO pose-release v12）がそのまま有効。
+- 前傾版: `home-config` から作ったブランチで `config/home_pose.yaml` を前傾HOMEにする
+  （`tests/fixtures/home_pose_forward_lean.yaml` をコピーするか、`balance_home_pose.py --trunk-pitch-deg 10 --write`
+  の後で `name`/`label` を直す）。ロボット側は `write-robot` で生成し、前傾ブランチのモデル
+  （walk.onnx b33cd9ea、getup.onnx ce6cdc04）とピン（歩行ソース・プローブ・walk.onnx の SHA-256）を入れる。
+  学習側の前傾チェックポイントはそのまま再エクスポートでき（バイト単位で同じ ONNX になる）、PICO はこのコードで
+  新しく学習・パッケージする。新しく学習し直すなら上の「HOMEを変える手順」（`retrain_all_for_home.py`）でよい。
+
+切り替えは `git checkout <branch>` だけ（ロボット側も同様）。
+
+## 等価性の確認（テスト）
+
+- `tests/test_home_pose_any_trunk.py`: 中心 yaml で `track-centered-home-clip`（5b5a9d0）、前傾 yaml で
+  `forward-lean-v2`（5442e88）のモジュール定数・HOME 由来の関数値・登録された全タスクの env/play/rl 設定と runner が
+  一致すること（参照は `tests/fixtures/home_equivalence/*.json`、`tests/home_equivalence.py` で記録）。
+  中心HOMEで許す差は、新しいコマンド設定フィールドの既定値（`trunk_pitch=0.0`、`lf_rb_probability=0.9`）と
+  HOMEスタンプを付ける歩行 runner だけ。
+- `MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1` で、両HOMEの歩行・起き上がりチェックポイントを CPU で再エクスポートし、
+  公開済み ONNX（前傾 b33cd9ea / ce6cdc04、中心 c9cdd852 / 80cd7ddb）とバイト単位で一致することを確認する。
+- `MJLAB_MICROBAN_HOME_POSE_YAML=<yaml>` で、そのプロセスの HOME を別の yaml にできる（テスト・比較用。
+  `retrain_all_for_home.py` はこれが設定されていると拒否する）。

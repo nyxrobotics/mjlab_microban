@@ -103,7 +103,8 @@ register_mjlab_task(
     runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
-# Get-up (v5 action contract, see microban_getup_runner.py). The robot
+# Get-up (v5 action contract at the centered HOME, v6 at the forward-lean
+# HOME, "v6_<tag>" at any other; see microban_getup_runner.py). The robot
 # policy is trained in two stages:
 #   1. Mjlab-Getup-Microban from scratch: HOME-stance reward set ("posture");
 #      stands from fallen starts with a HOME stance by ~2000 iterations.
@@ -159,12 +160,23 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 
-# Stage 1 with the pre-957ab42 near-home reset (10 %, +-5 deg): ablation of
-# the widened "tipping" reset, which trained a wide braced stance.
+# Stage 1 with the near-home reset written out (10 %, +-5 deg), the default of
+# every HOME but the centered one (whose Mjlab-Getup-Microban keeps the wide
+# "tipping" reset; the 2026-10-03 centered servo-range stage-1 run was trained
+# under this id).
 register_mjlab_task(
     task_id="Mjlab-Getup-Microban-NearHome5deg",
     env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.1, 0.09)),
     play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.1, 0.09)),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
+
+# Stage 1 with 957ab42's wide "tipping" near-home reset (20 %, +-34 deg).
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban-Tipping",
+    env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.2, 0.6)),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.2, 0.6)),
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
@@ -225,6 +237,28 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12CornerRescueRlCfg,
     runner_cls=MicrobanTeleopV12CornerRescueOnPolicyRunner,
+)
+
+# Pose-release variant of the 9901->10000 corner rescue (fresh pose-release
+# chain's model_9900; registered sampler mixes; saves keep the pose-release
+# recipe).
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (  # noqa: E402
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
+    MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
+    make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (  # noqa: E402
+    MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
+    env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
+    runner_cls=MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
 )
 
 # 14900->14999 final-scenario rescue; the sampler mix is read from

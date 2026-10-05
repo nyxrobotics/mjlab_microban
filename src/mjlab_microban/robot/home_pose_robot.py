@@ -40,25 +40,11 @@ _HEADER = """\
 
 
 def robot_contract_strings() -> dict[str, str]:
-    """HOME-bound identifiers the robot checks, from the training modules."""
+    """HOME-bound identifiers the robot checks (robot/home_contracts.py)."""
 
-    from mjlab_microban.scripts.export_teleop_v12_deployment import PACKAGER_REVISION
-    from mjlab_microban.scripts.export_walk_onnx import CONTRACT_VERSION
-    from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-        MICROBAN_TELEOP_V12_HOME_POSE_REVISION,
-        MICROBAN_TELEOP_V12_RECIPE_REVISION,
-    )
+    from mjlab_microban.robot.home_contracts import robot_contract_strings as strings
 
-    return {
-        "walk_contract_version": CONTRACT_VERSION,
-        "v12_home_pose_revision": MICROBAN_TELEOP_V12_HOME_POSE_REVISION,
-        "v12_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
-        "v12_hand_pose_release_recipe_revision": (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-        ),
-        "v12_packager_revision": PACKAGER_REVISION,
-    }
+    return strings()
 
 
 def robot_home_pose_document(home: HomePose = HOME) -> dict[str, Any]:

@@ -36,9 +36,10 @@ from typing import Any
 
 import torch
 
+from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG,
-    microban_hand_offsets_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
 )
 from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotation,
@@ -72,14 +73,18 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 
 MICROBAN_TELEOP_V12_FINAL_RESCUE_TASK_ID = "Mjlab-Teleop-V12-Final-Rescue-Microban"
 MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY = "microban_teleop_v12_final_scenario_rescue"
+# HOME-bound (robot/home_contracts.py): the replayed hand targets are the
+# evaluator's offsets in the HOME's target frame, so a replay recorded at one
+# HOME is not interchangeable with another (centered ..._v1: trunk frame;
+# forward-lean ..._v2: HOME-levelled receiver-box (hand FK v4) offsets).
 MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION = (
-    "model14900_targeted_final_scenario_replay_to15000_v1"
+    home_contracts.V12_FINAL_RESCUE_RECIPE_REVISION
 )
 MICROBAN_TELEOP_V12_FINAL_RESCUE_MARKER_REVISION = (
-    "recorded_model14900_ordinary10_final_scenarios90_99_updates_v1"
+    home_contracts.V12_FINAL_RESCUE_MARKER_REVISION
 )
 MICROBAN_TELEOP_V12_FINAL_RESCUE_SAMPLER_REVISION = (
-    "episode_shared_twist_foot_hand_evaluator_scenario_replay_v1"
+    home_contracts.V12_FINAL_RESCUE_SAMPLER_REVISION
 )
 # The launcher stages the two reports next to the staged parent checkpoint.
 MICROBAN_TELEOP_V12_FINAL_RESCUE_PARENT_REPORT_FILENAME = (
@@ -224,7 +229,8 @@ def final_rescue_scenario_commands() -> dict[str, dict[str, Any]]:
             [float(left[0]), float(left[1]), float(left[2])],
             [float(right[0]), -float(right[1]), float(right[2])],
         ]
-        offsets = microban_hand_offsets_from_arm_joints(
+        # HOME-levelled target frame, exactly as the evaluator builds it.
+        offsets = microban_hand_target_offsets_from_arm_joints(
             torch.deg2rad(torch.tensor(joints_deg, dtype=torch.float64))
         )
         expected = torch.tensor(scenario.hand_target, dtype=torch.float64)
@@ -403,8 +409,8 @@ class FinalRescueHandTargetCommand(ResetFixedHandTargetCommand):
         self._scenario_joints = torch.deg2rad(
             _scenario_tensor("hand_joint_deg", device=self.device, dtype=dtype)
         )
-        self._scenario_offsets = microban_hand_offsets_from_arm_joints(
-            self._scenario_joints
+        self._scenario_offsets = microban_hand_target_offsets_from_arm_joints(
+            self._scenario_joints, trunk_pitch=self.cfg.trunk_pitch
         )
 
     def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:

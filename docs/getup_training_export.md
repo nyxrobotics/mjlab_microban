@@ -1,5 +1,19 @@
 # Microban get-up v5: train and export
 
+> **HOME from config/home_pose.yaml (branch `home-config`).** The HOME, and
+> with it the contract string, is the YAML's: `v5` at the centered HOME (trunk
+> vertical), `v6` at the forward-lean HOME (trunk +10°, as on
+> `forward-lean-centered-home`), `v5_<tag>` / `v6_<tag>` at any other
+> (`src/mjlab_microban/robot/home_contracts.py`). With a pitched trunk
+> `upright_standing` peaks at the HOME projected gravity (sin p, 0, −cos p),
+> `HEAD_STANDING_HEIGHT` / `HOME_FEET_LATERAL_M` are the FK values (0.2953 m /
+> 0.0941 m at +10°), the near-HOME reset turns its yaw about world z, and
+> `Mjlab-Getup-Microban` defaults to the 10 %, ±5° near-HOME reset (the
+> centered HOME keeps its registered 20 %, ±34° default; both stay available as
+> `-NearHome5deg` / `-Tipping`). Only the current contract's stamp (plus, at the
+> centered HOME, a `v4` stamp whose recorded env proves v5) is resumed or
+> exported. The stage commands below are unchanged.
+
 > **2026-10-03 unification (contract v5).** Every Microban policy (walking,
 > PICO full-body tracking, get-up) now uses the centered HOME
 > (`HOME_FRAME` in `microban_constants.py`) and target = HOME + raw action

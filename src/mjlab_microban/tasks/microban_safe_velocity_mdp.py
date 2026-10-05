@@ -30,6 +30,7 @@ from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from rsl_rl.algorithms import PPO
 from torch import nn
 
+from mjlab_microban.tasks.mdp import home_levelled_root_lin_vel_b
 from mjlab_microban.tasks.microban_teleop_mdp import (
     AsymmetricBoundedGaussianDistribution,
 )
@@ -388,6 +389,7 @@ def planar_velocity_tracking_exp(
     std: float,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
     """Track body-frame XY velocity without penalizing gait vertical motion.
 
@@ -396,13 +398,17 @@ def planar_velocity_tracking_exp(
     sharpened 0.10 m/s scale, that suppresses the vertical motion needed to
     unload and lift a foot.  Vertical stability remains covered by the upright,
     pose, body-angular-velocity, contact, and fall terms.
+
+    ``trunk_pitch`` (the HOME trunk's forward lean) reads the velocity in the
+    HOME-levelled trunk frame (mdp.track_linear_velocity_home_frame); 0 is
+    the body frame.
     """
 
     if not math.isfinite(std) or std <= 0.0:
         raise ValueError("planar velocity tracking std must be finite and positive")
-    asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
-    error = torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]).sum(
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    error = torch.square(command[:, :2] - actual[:, :2]).sum(
         dim=-1
     )
     return torch.exp(-error / std**2)
@@ -413,8 +419,12 @@ def commanded_planar_velocity_progress(
     command_name: str = "twist",
     command_threshold: float = 0.01,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
 ) -> torch.Tensor:
-    """Reward commanded body-frame XY progress, bounded to ``[0, 1]``."""
+    """Reward commanded body-frame XY progress, bounded to ``[0, 1]``.
+
+    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame.
+    """
 
     if not math.isfinite(command_threshold) or command_threshold <= 0.0:
         raise ValueError("command_threshold must be finite and positive")
@@ -424,8 +434,7 @@ def commanded_planar_velocity_progress(
     if not bool(torch.isfinite(command).all()):
         raise ValueError("planar velocity progress command must be finite")
 
-    asset: Entity = env.scene[asset_cfg.name]
-    actual = asset.data.root_link_lin_vel_b
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
     if actual.ndim != 2 or actual.shape != (env.num_envs, 3):
         raise ValueError(
             "planar velocity progress requires an (num_envs, 3) body velocity"

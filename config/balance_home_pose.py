@@ -55,9 +55,9 @@ point (``1.0e-05``) and -0.0 as 0.0, so the same pose has one HOME hash.
 
 Before writing, the balanced HOME is checked against this checkout's training
 tasks (``mjlab_microban.robot.home_pose_training``: a subprocess imports
-``mjlab_microban.tasks`` at that HOME).  A HOME they refuse -- a pitched trunk,
-shoulder pitch other than 0, an arm HOME outside the PICO receiver box -- is
-not written unless ``--force`` is given; ``--no-training-check`` skips the
+``mjlab_microban.tasks`` at that HOME).  A HOME they refuse -- shoulder pitch
+other than 0, an arm HOME whose hand box leaves the PICO receiver box -- is
+not written unless ``--force`` is given (a pitched trunk is accepted); ``--no-training-check`` skips the
 check.  ``--check`` looks at the balance only.
 """
 
@@ -129,9 +129,9 @@ START_ANKLE_RAD = 0.0
 
 # Shown when the training tasks refuse a HOME (see home_pose_training).
 TRAINING_LINE_HINT = (
-    "This checkout retrains only at HOMEs its tasks accept: trunk_pitch_deg 0 (a pitched "
-    "trunk needs branch forward-lean-v2), shoulder pitch 0 (PICO contract v12) and an arm "
-    "HOME whose reachable hand box stays inside the PICO receiver's +-0.064 m box."
+    "This checkout retrains only at HOMEs its tasks accept: shoulder pitch 0 (PICO "
+    "contract v12) and an arm HOME / trunk pitch whose reachable hand targets stay inside "
+    "the PICO receiver's +-0.064 m box (any trunk_pitch_deg is supported)."
 )
 
 
@@ -581,7 +581,8 @@ def write_balanced_yaml(result: BalanceResult) -> None:
             else None,
         )
         home = load_home_pose(result.path)
-        if dict(home.joint_pos_deg) != dict(result.after_deg):
+        # The YAML inputs (a legacy HOME may publish pinned full-precision values).
+        if dict(home.input_joint_pos_deg) != dict(result.after_deg):
             raise AssertionError("the rewritten YAML does not hold the balanced values")
         if home.trunk_pitch_deg != result.trunk_pitch_deg:
             raise AssertionError("the rewritten YAML does not hold the trunk pitch")

@@ -3,11 +3,18 @@
 Some HOME edits are valid poses (``home_pose.py`` loads them) but the
 training tasks of this checkout still refuse them, for example:
 
-* ``trunk_pitch_deg`` other than 0: the upright observation/reward frames of
-  this line (the forward-lean frames live on branch ``forward-lean-v2``);
 * shoulder pitch other than 0: the PICO contract v12 HOME revision;
-* an arm HOME whose reachable hand box leaves the PICO receiver's
-  runtime-validated +-0.064 m box (``microban_hand_fk``).
+* with a vertical trunk, an arm HOME whose reachable hand box leaves the PICO
+  receiver's runtime-validated +-0.064 m box (``microban_hand_fk``);
+* with a pitched trunk, an arm HOME / trunk pitch whose HOME-levelled hand
+  evaluation poses leave that box.
+
+A pitched trunk itself (``trunk_pitch_deg`` other than 0) is accepted: every
+trunk-pitch-dependent term (upright reward pitch, HOME-levelled velocity and
+target frames, reset yaw axis, get-up uprightness, HMD neutral, exporter
+gravity) is computed from the HOME, exactly as on the forward-lean line.  A
+pitch other than the recorded forward-lean +10 deg computes its hand-target box
+on a 401^3 grid the first time (tens of seconds, then cached).
 
 Instead of a hand-kept list of such rules, ``check_training_line`` asks the
 tasks themselves: a fresh Python process installs the candidate HOME as

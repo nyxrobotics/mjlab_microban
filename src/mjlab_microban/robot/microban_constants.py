@@ -25,24 +25,26 @@ from mjlab_microban.robot.home_pose import HOME
 # Shared reference pose of every policy (walking, tracking, get-up), loaded
 # from config/home_pose.yaml (the single source of truth; see config/README.md).
 # Everything below is derived from that file by MuJoCo FK
-# (robot/home_pose.py): the centered HOME has the trunk vertical, knees
-# straight, and opposite hip/ankle pitches that keep the soles flat with the
-# mass-weighted COM over the centre of the sole contact patches (30.8 mm to the
-# toe and to the heel).
-HOME_PITCH_RAD = HOME.joint_pos_rad["left_hip_pitch"]
+# (robot/home_pose.py): the soles are flat at the HOME trunk pitch and the
+# mass-weighted COM is over the fore-aft centre of the sole contact patches.
+# The centered HOME has the trunk vertical (hip +1.198, ankle -1.198 deg,
+# 30.8 mm to toe and heel); the forward-lean HOME leans it 10 deg forward
+# (hip -14.17, ankle +4.13 deg, 30.96 mm).  Every trunk-pitch-dependent term
+# (upright reward pitch, HOME-levelled velocity and target frames, reset yaw
+# axis, HOME gravity of the exporters, HMD neutral) reads
+# HOME_TRUNK_PITCH_RAD and is exactly the vertical-trunk term at 0.
 HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad
+HOME_HIP_PITCH_RAD = HOME.joint_pos_rad["left_hip_pitch"]
+HOME_ANKLE_PITCH_RAD = HOME.joint_pos_rad["left_ankle_pitch"]
+# Historical name (the centered HOME's hip = -ankle pitch).
+HOME_PITCH_RAD = HOME_HIP_PITCH_RAD
 HOME_ROOT_POS = HOME.root_pos
+HOME_ROOT_HEIGHT_M = HOME_ROOT_POS[2]
+# Root orientation at HOME: HOME_TRUNK_PITCH_RAD about the trunk's y axis
+# (positive tips the trunk's x axis toward -z, i.e. leans forward), w-x-y-z.
 HOME_ROOT_QUAT_WXYZ = HOME.root_quat_wxyz
+# Unit gravity in the trunk frame while standing at HOME: (sin p, 0, -cos p).
 HOME_PROJECTED_GRAVITY = HOME.projected_gravity
-# This training line's rewards, velocity/target frames, reset yaw and exporters
-# assume a vertical trunk at HOME.  A trunk-pitched HOME needs the
-# home-levelled frames of the forward-lean line (branch forward-lean-v2).
-if HOME_TRUNK_PITCH_RAD != 0.0:
-    raise NotImplementedError(
-        f"{HOME.path}: trunk_pitch_deg={HOME.trunk_pitch_deg!r}; this training code "
-        "supports only a vertical trunk at HOME (see branch forward-lean-v2 for "
-        "the home-levelled frames a pitched trunk needs)"
-    )
 # Every policy commands target = HOME + action on all body joints, with no
 # software clip, and observes its own raw previous output. The only bound is
 # the servo's own goal-position range: one turn, [-pi, pi) rad. The robot
