@@ -18,8 +18,9 @@ robot runtime validator on MICROBAN_REPO, identity hashes of the robot tree)
 on a dry-run checkpoint whose stage reports fail on performance.  The
 locomotion/tracking reports are copied next to GATE_OUT with status forced
 to "pass" (marked ``dry_run_original_status``), their status/threshold
-validation is skipped, and the gate carries
-``dry_run_status_forced_not_deployable``.  Prints the packager receipt (JSON).
+validation is skipped, a short runtime smoke corpus (a DRYRUN checkpoint
+that fell records fewer than 16 rows) is cycled to 16 rows, and the gate
+carries ``dry_run_status_forced_not_deployable``.  Prints the packager receipt (JSON).
 """
 
 from __future__ import annotations
@@ -27,6 +28,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
+
+# Runtime smoke rows of a complete final tracking report (the packager's
+# ONNX Runtime smoke on the robot requires exactly this many samples).
+SMOKE_ROWS = 16
 
 
 def lift_clock(source: str, destination_dir: str, iteration: str) -> int:
@@ -68,6 +74,13 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, r
         report = json.loads(source.read_text(encoding="utf-8"))
         report["dry_run_original_status"] = report.get("status")
         report["status"] = "pass"
+        rows = report.get("runtime_smoke_observations")
+        if suffix == "_tracking.json" and isinstance(rows, list) and rows and len(rows) != SMOKE_ROWS:
+            # A passing final gate completes every scenario and records exactly
+            # 16 rows, which the packager's robot smoke check requires; a
+            # DRYRUN checkpoint can fall early and record fewer, so cycle them.
+            report["dry_run_smoke_rows_original_count"] = len(rows)
+            report["runtime_smoke_observations"] = [rows[i % len(rows)] for i in range(SMOKE_ROWS)]
         copy = gate_path.parent / f"DRYRUN_FORCED_PASS_{source.name}"
         copy.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
         forced.append(copy)

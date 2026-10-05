@@ -209,11 +209,16 @@ class SolverTest(unittest.TestCase):
             balance.balance_joint_pos(base, 60.0)
         with self.assertRaisesRegex(balance.BalanceError, "< 90 deg"):
             balance.balance_joint_pos(base, 95.0)
-        # No arbitrary trunk cap: 50 deg is solvable inside the soft limits.
-        steep = balance.balance_joint_pos(base, 50.0)
-        self.assertAlmostEqual(steep.after_deg["left_hip_pitch"], -73.719, delta=1.0e-3)
-        self.assertAlmostEqual(steep.after_deg["left_ankle_pitch"], 23.491, delta=1.0e-3)
-        self.assert_balanced(steep, 50.0)
+        # No arbitrary trunk cap: 30 deg is solvable inside the soft limits
+        # with the soles still on the floor (roll 0.67 deg, edge 0.49 mm up).
+        steep = balance.balance_joint_pos(base, 30.0)
+        self.assertAlmostEqual(steep.after_deg["left_hip_pitch"], -44.568342439498, delta=1.0e-9)
+        self.assertAlmostEqual(steep.after_deg["left_ankle_pitch"], 14.444188636125, delta=1.0e-9)
+        self.assert_balanced(steep, 30.0)
+        # At 50 deg the fixed hip/ankle rolls roll the soles 1.8 deg: the
+        # pitch-only solve exists but the robot would stand on an edge.
+        with self.assertRaisesRegex(balance.BalanceError, "not flat on the floor"):
+            balance.balance_joint_pos(base, 50.0)
         # Restricted to a hip range that does not contain the solution, the
         # scan proves the COM cannot reach the sole centre.
         base_rad = {name: math.radians(value) for name, value in base.items()}
@@ -649,3 +654,27 @@ class LazyHomeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RolledSoleTest(unittest.TestCase):
+    """The pitch-only solve must not accept a HOME that stands on a sole edge."""
+
+    def test_roll_yaw_knee_case_is_refused(self):
+        joints = yaml_joints()
+        for side, sign in (("left", 1.0), ("right", -1.0)):
+            joints[f"{side}_hip_roll"] = 10.0 * sign
+            joints[f"{side}_hip_yaw"] = 8.0 * sign
+            joints[f"{side}_knee"] = 30.0
+        # Previously written with 48 "contact" corners and 31.7 mm margins
+        # although only 2 corners touch the floor, 22 mm behind the COM.
+        with self.assertRaisesRegex(balance.BalanceError, "not flat on the floor"):
+            balance.balance_joint_pos(joints, 0.0)
+
+    def test_hip_roll_alone_is_refused_and_compensated_roll_is_not(self):
+        rolled = dict(yaml_joints(), left_hip_roll=10.0, right_hip_roll=-10.0)
+        with self.assertRaisesRegex(balance.BalanceError, "4 of 48 sole corners"):
+            balance.balance_joint_pos(rolled, 0.0)
+        level = dict(rolled, left_ankle_roll=-10.0, right_ankle_roll=10.0)
+        result = balance.balance_joint_pos(level, 0.0)
+        self.assertTrue(result.after.soles_on_floor)
+        self.assertEqual(result.after.ground_contact_corner_count, 48)

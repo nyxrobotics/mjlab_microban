@@ -96,10 +96,23 @@ SOLE_CONTACT_TOLERANCE_M = 1.0e-4
 # The declared trunk pitch must make both soles flat to this tolerance.
 FLAT_SOLE_TOLERANCE_RAD = 1.0e-9
 
-# Published (rounded) values.  Root z is rounded to 1e-15 m so the FK value is
-# stable against floating-point noise in the last digit; the head height is the
-# 0.1 mm value the get-up gates have always used.
-ROOT_Z_DECIMALS = 15
+# A HOME's soles must lie flat on the floor: every sole-face corner (the
+# contact area measured along the sole normal) must be within
+# SOLE_ON_FLOOR_TOLERANCE_M of the floor in WORLD height.  Otherwise a sole is
+# rolled (or pitched) and stands on an edge, so the contact area the COM is
+# centred over is not the one the robot stands on.  0.5 mm over the ~40 mm
+# sole width is about 0.7 deg of roll: hip roll +-10 deg alone (sole roll 5 deg,
+# 3.5 mm) is refused, the forward-lean HOME (0.08 deg) is accepted.
+SOLE_ON_FLOOR_TOLERANCE_M = 5.0e-4
+
+# Published (rounded) values.  Root z is rounded to 1e-12 m (1 pm): FK noise
+# from another MuJoCo build or CPU is ~1e-16 m, so a rounding flip needs the
+# FK value to sit within that of a 1e-12 boundary.  HOMEs published before
+# this rule keep their exact historical value through LEGACY_HOME_OVERRIDES
+# ("root_z_m", checked against FK to ROOT_Z_PIN_TOLERANCE_M).  The head height
+# is the 0.1 mm value the get-up gates have always used.
+ROOT_Z_DECIMALS = 12
+ROOT_Z_PIN_TOLERANCE_M = 1.0e-12
 HEAD_STANDING_HEIGHT_DECIMALS = 4
 FEET_LATERAL_DECIMALS = 4
 
@@ -112,7 +125,15 @@ FEET_LATERAL_DECIMALS = 4
 # carry "<label>_<hash>" and the targets are the FK values.
 LEGACY_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
     {
-        "bbef07cab8": MappingProxyType({"tag": "centered_home", "feet_lateral_m": 0.094}),
+        # The centered HOME's FK root z is 0.17055488563355944, two ulps below
+        # the 15-decimal rounding boundary, so it is pinned (not re-rounded).
+        "bbef07cab8": MappingProxyType(
+            {"tag": "centered_home", "feet_lateral_m": 0.094, "root_z_m": 0.170554885633559}
+        ),
+        # The forward-lean HOME (trunk +10 deg, branches forward-lean-v2 /
+        # forward-lean-home) published root z 0.170430569776402; pinned so a
+        # port of that line onto this YAML keeps its stamps bit-exact.
+        "481503d292": MappingProxyType({"root_z_m": 0.170430569776402}),
     }
 )
 
@@ -148,6 +169,27 @@ class PoseAnalysis:
     head_height_m: float
     feet_lateral_m: float
     """|y(left foot body) - y(right foot body)| (``foot_2`` / ``foot``)."""
+    sole_roll_rad: tuple[float, float] = (0.0, 0.0)
+    """(left, right) sole roll in the world (side tilt; 0 = level)."""
+    ground_contact_corner_count: int = 0
+    """Sole corners within SOLE_CONTACT_TOLERANCE_M of the lowest corner in
+    WORLD height (the corners that actually touch a flat floor)."""
+    ground_x_min: float = 0.0
+    ground_x_max: float = 0.0
+    sole_contact_lift_m: float = 0.0
+    """Highest sole-face corner above the floor (0 when the soles are flat)."""
+
+    @property
+    def soles_on_floor(self) -> bool:
+        """True when the whole sole contact area lies on the floor.
+
+        The contact area (``sole_x_min``/``sole_x_max``) is measured along each
+        sole's own normal; it is the real ground contact only when no sole is
+        rolled or pitched, i.e. when every one of its corners is within
+        SOLE_ON_FLOOR_TOLERANCE_M of the floor.
+        """
+
+        return self.sole_contact_lift_m <= SOLE_ON_FLOOR_TOLERANCE_M
 
     @property
     def sole_center_x(self) -> float:
@@ -183,6 +225,11 @@ class PoseAnalysis:
             "heel_margin_m": self.heel_margin_m,
             "toe_margin_m": self.toe_margin_m,
             "sole_contact_corner_count": self.sole_contact_corner_count,
+            "sole_roll_deg": [math.degrees(value) for value in self.sole_roll_rad],
+            "ground_contact_corner_count": self.ground_contact_corner_count,
+            "ground_x_range_m": [self.ground_x_min, self.ground_x_max],
+            "sole_contact_lift_m": self.sole_contact_lift_m,
+            "soles_on_floor": self.soles_on_floor,
             "head_height_m": self.head_height_m,
             "feet_lateral_m": self.feet_lateral_m,
         }
@@ -281,6 +328,12 @@ def _sole_pitch(normal: np.ndarray) -> float:
     return float(math.atan2(normal[0], normal[2]))
 
 
+def _sole_roll(normal: np.ndarray) -> float:
+    """World roll (side tilt) of a sole whose normal is ``normal`` (0 when level)."""
+
+    return float(math.atan2(-normal[1], normal[2]))
+
+
 def analyze_pose(
     joint_pos_rad: Mapping[str, float],
     trunk_pitch_rad: float | None = None,
@@ -321,6 +374,8 @@ def analyze_pose(
         heights = corners[side] @ normals[side]
         contact.append(corners[side][heights <= heights.min() + SOLE_CONTACT_TOLERANCE_M])
     contact_corners = np.concatenate(contact)
+    # The reference definition (what a flat floor touches): world height.
+    ground_corners = all_corners[all_corners[:, 2] <= all_corners[:, 2].min() + SOLE_CONTACT_TOLERANCE_M]
 
     com = data.subtree_com[pose_model.trunk_id].copy()
     com[2] += root_z
@@ -344,6 +399,11 @@ def analyze_pose(
         sole_contact_corner_count=int(len(contact_corners)),
         head_height_m=head,
         feet_lateral_m=float(abs(left_foot[1] - right_foot[1])),
+        sole_roll_rad=(_sole_roll(normals["left"]), _sole_roll(normals["right"])),
+        ground_contact_corner_count=int(len(ground_corners)),
+        ground_x_min=float(ground_corners[:, 0].min()),
+        ground_x_max=float(ground_corners[:, 0].max()),
+        sole_contact_lift_m=float(contact_corners[:, 2].max() - all_corners[:, 2].min()),
     )
 
 
@@ -444,6 +504,8 @@ class HomePose:
     # -- root pose -------------------------------------------------------
     @property
     def root_pos(self) -> tuple[float, float, float]:
+        if "root_z_m" in self.overrides:
+            return (0.0, 0.0, float(self.overrides["root_z_m"]))  # type: ignore[arg-type]
         return (0.0, 0.0, round(self.analysis.root_pos[2], ROOT_Z_DECIMALS))
 
     @property
@@ -551,7 +613,9 @@ def validate_home_inputs(joint_pos_deg: Mapping[str, float], trunk_pitch_deg: fl
         if not lower <= value <= upper:
             raise ValueError(
                 f"HOME joint {name} = {joint_pos_deg[name]} deg is outside its MJCF range "
-                f"[{math.degrees(lower):.3f}, {math.degrees(upper):.3f}] deg"
+                f"[{math.degrees(lower)!r}, {math.degrees(upper)!r}] deg "
+                f"({'below the lower' if value < lower else 'above the upper'} limit by "
+                f"{abs(math.degrees(value - (lower if value < lower else upper))):.3e} deg)"
             )
 
 
@@ -584,7 +648,27 @@ def home_pose_from_values(
                 "trunk_pitch_deg or rebalance the hip/ankle pitches with "
                 "config/balance_home_pose.py."
             )
+        if not analysis.soles_on_floor:
+            roll = " / ".join(f"{math.degrees(v):+.3f}" for v in analysis.sole_roll_rad)
+            raise ValueError(
+                "HOME soles are not flat on the floor: sole roll L / R "
+                f"{roll} deg lifts a sole edge {analysis.sole_contact_lift_m * 1e3:.2f} mm off the "
+                f"floor (limit {SOLE_ON_FLOOR_TOLERANCE_M * 1e3:.1f} mm; "
+                f"{analysis.ground_contact_corner_count} of {analysis.sole_contact_corner_count} "
+                "sole corners touch it), so the robot would stand on an edge, not on the sole "
+                "the COM is centred over. Level the soles in roll -- usually "
+                "ankle_roll = -hip_roll and hip_yaw = 0 -- before balancing; "
+                "config/balance_home_pose.py moves only hip/ankle pitch."
+            )
     joint_hash = home_joint_hash(degrees, pitch_deg)
+    overrides = LEGACY_HOME_OVERRIDES.get(joint_hash, MappingProxyType({}))
+    if "root_z_m" in overrides:
+        drift = abs(float(overrides["root_z_m"]) - analysis.root_pos[2])  # type: ignore[arg-type]
+        if drift > ROOT_Z_PIN_TOLERANCE_M:
+            raise ValueError(
+                f"HOME {joint_hash}: FK root z {analysis.root_pos[2]!r} differs from its published "
+                f"value {overrides['root_z_m']!r} by {drift:.3e} m (robot.xml changed?)"
+            )
     return HomePose(
         path=Path(path),
         name=str(name),
@@ -594,7 +678,7 @@ def home_pose_from_values(
         joint_pos_rad=MappingProxyType(radians),
         analysis=analysis,
         joint_hash=joint_hash,
-        overrides=LEGACY_HOME_OVERRIDES.get(joint_hash, MappingProxyType({})),
+        overrides=overrides,
     )
 
 

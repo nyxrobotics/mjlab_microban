@@ -240,7 +240,7 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
     ):
         raise ValueError("Run was not trained from the centered HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
-        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-12):
+        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-9):
             raise ValueError(f"Run was not trained from the centered HOME root {key}")
     clip = action.get("clip")
     if clip is None or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [

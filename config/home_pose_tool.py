@@ -4,8 +4,8 @@
 Usage (from the training repository root)::
 
     uv run python config/home_pose_tool.py show
-    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban
-    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban --check
+    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_homecfg
+    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_homecfg --check
 
 ``show`` prints the HOME inputs and everything derived from them by MuJoCo FK
 (root pose, projected gravity, COM and sole contact area, heel/toe margins,
@@ -14,8 +14,11 @@ plus ``training_line``: whether this checkout's training tasks load at the
 HOME (``mjlab_microban.robot.home_pose_training``; exit 1 if they do not).
 ``write-robot`` writes ``<microban-repo>/config/home_pose.yaml``, the robot's
 copy (NEUTRAL_POSE, root pose, gravity, contract identifiers, hand FK
-contract); it refuses a HOME the training tasks refuse unless ``--force``.
-``--check`` exits 1 if that file is missing or stale instead.
+contract); it refuses a HOME the training tasks refuse (such a HOME cannot
+be published: the contract strings and the hand FK are built by those same
+tasks) and a robot checkout that does not read the YAML (no src/home_pose.py,
+e.g. the pre-home-config deploy branch).  ``--check`` exits 1 if that file is
+missing or stale instead.
 
 Every failure (unreadable or unbalanced YAML, not a robot checkout, ...) is
 one ``error: ...`` line and exit status 1.
@@ -96,21 +99,34 @@ def _show(arguments: argparse.Namespace) -> int:
 
 def _write_robot(arguments: argparse.Namespace) -> int:
     home = _load(HOME_POSE_YAML)
-    if not arguments.check and not arguments.force:
+    warnings.filterwarnings("ignore")
+    try:
+        from mjlab_microban.robot.home_pose_robot import (
+            NotHomeYamlRobotCheckout,
+            require_home_yaml_robot_checkout,
+            write_robot_home_pose,
+        )
+    except Exception as error:  # noqa: BLE001 - the training code refused this HOME
+        raise ToolError(
+            f"cannot write the robot HOME: this checkout's training code refuses the HOME in "
+            f"{HOME_POSE_YAML.name}: {' '.join(str(error).split())}"
+        ) from error
+    try:
+        require_home_yaml_robot_checkout(arguments.microban_repo)
+    except NotHomeYamlRobotCheckout as error:
+        raise ToolError(str(error)) from error
+    if not arguments.check:
         training = _training_line(home)
         if not training.ok:
             raise ToolError(
                 f"this checkout cannot retrain at the HOME in {HOME_POSE_YAML.name}: "
-                f"{training.error} (pass --force to publish it anyway)"
+                f"{training.error} (its contract strings and hand FK cannot be built here)"
             )
-    warnings.filterwarnings("ignore")
-    from mjlab_microban.robot.home_pose_robot import write_robot_home_pose
-
     try:
         path, up_to_date = write_robot_home_pose(arguments.microban_repo, check=arguments.check)
     except FileNotFoundError as error:
         raise ToolError(str(error)) from error
-    except (OSError, ValueError) as error:
+    except Exception as error:  # noqa: BLE001 - one-line failure
         raise ToolError(f"cannot write the robot HOME: {' '.join(str(error).split())}") from error
     if arguments.check:
         print(f"{path}: {'up to date' if up_to_date else 'STALE or missing'}")
@@ -138,11 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     write = commands.add_parser("write-robot", help="write the robot repo's config/home_pose.yaml")
     write.add_argument("--microban-repo", type=Path, required=True)
     write.add_argument("--check", action="store_true", help="only report whether it is up to date")
-    write.add_argument(
-        "--force",
-        action="store_true",
-        help="publish even if this checkout's training tasks refuse the HOME",
-    )
     write.set_defaults(handler=_write_robot)
     arguments = parser.parse_args(argv)
     try:

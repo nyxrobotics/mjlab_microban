@@ -172,3 +172,160 @@ class RobotPinsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def make_pipeline(state_dir: Path | None = None, *extra: str):
+    args = pipeline.parse_args(["--robot-repo", "/nonexistent", "--robot-branch", "x", *extra])
+    p = pipeline.Pipeline(args)
+    if state_dir is not None:
+        p.state_dir = state_dir
+        p.owns_state = True
+    return p
+
+
+class GpuSchedulingTest(unittest.TestCase):
+    """Review round 4: no head-of-line blocking, no stall-check deadlock."""
+
+    def test_reservations_do_not_block_a_fitting_job(self):
+        p = make_pipeline()
+        p.gpu_free_mib = lambda: 5000
+        self.assertIsNone(p.gpu_reserve(11000))  # the big job does not fit, holds nothing
+        first = p.gpu_reserve(3000)
+        self.assertIsNotNone(first)
+        # The first job's memory is not visible yet: its reservation counts.
+        self.assertIsNone(p.gpu_reserve(3000))
+        p.gpu_release(first)
+        self.assertIsNotNone(p.gpu_reserve(3000))
+
+    def test_reservations_expire(self):
+        p = make_pipeline()
+        p.gpu_free_mib = lambda: 5000
+        reservation = p.gpu_reserve(4000)
+        p.gpu_reservations[reservation] = (4000, 0.0)  # expired
+        self.assertIsNotNone(p.gpu_reserve(4000))
+
+    def test_non_waiting_job_returns_none_when_full(self):
+        p = make_pipeline()
+        p.gpu_free_mib = lambda: 1000
+        self.assertIsNone(p.gpu_job(3000, "probe", ["true"], "probe", wait=False))
+
+    def test_default_pico_memory_fits_a_2048_env_v12_job(self):
+        self.assertGreaterEqual(make_pipeline().args.pico_gpu_mib, 17000)
+
+
+class StateOwnershipTest(unittest.TestCase):
+    def test_refused_second_instance_leaves_the_live_state_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d)
+            (state / "state.json").write_text('{"children": {"1": {"name": "walk"}}}')
+            (state / "STATUS.log").write_text("live\n")
+            p = make_pipeline()
+            p.state_dir = state  # as open_state sets it before the lock is refused
+            p.put("stopped", {"code": 4})
+            p.log("STOPPED: another instance holds it")
+            self.assertEqual(json.loads((state / "state.json").read_text()),
+                             {"children": {"1": {"name": "walk"}}})
+            self.assertEqual((state / "STATUS.log").read_text(), "live\n")
+
+    def test_unexpected_errors_are_reported_and_stop_own_jobs(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d)
+            killed = []
+
+            def execute(self):
+                self.state_dir, self.owns_state = state, True
+                raise KeyError("summary")
+
+            original = pipeline.Pipeline.execute
+            original_kill = pipeline.Pipeline.kill_all_children
+            pipeline.Pipeline.execute = execute
+            pipeline.Pipeline.kill_all_children = lambda self: killed.append(True)
+            try:
+                code = pipeline.main(["--robot-repo", "/x", "--robot-branch", "x"])
+            finally:
+                pipeline.Pipeline.execute = original
+                pipeline.Pipeline.kill_all_children = original_kill
+            self.assertEqual(code, pipeline.EXIT_FAILED)
+            self.assertEqual(killed, [True])
+            stopped = json.loads((state / "state.json").read_text())["stopped"]
+            self.assertIn("unexpected KeyError", stopped["reason"])
+            self.assertIn("STOPPED: unexpected KeyError", (state / "STATUS.log").read_text())
+
+
+class HomeYamlGuardTest(unittest.TestCase):
+    def test_an_edit_during_the_run_stops_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            yaml_path = Path(d) / "home_pose.yaml"
+            yaml_path.write_text("a: 1\n")
+            original = pipeline.HOME_YAML
+            pipeline.HOME_YAML = yaml_path
+            try:
+                p = make_pipeline(Path(d))
+                p.yaml_sha256 = pipeline.sha256(yaml_path)
+                p.verify_home_yaml()
+                p.capture(["true"])
+                yaml_path.write_text("a: 2\n")
+                with self.assertRaisesRegex(pipeline.PipelineError, "changed during the run") as raised:
+                    p.capture(["true"])
+                self.assertEqual(raised.exception.code, pipeline.EXIT_INPUT)
+                with self.assertRaisesRegex(pipeline.PipelineError, "changed during the run"):
+                    p.run("job", ["true"], "cpu")
+            finally:
+                pipeline.HOME_YAML = original
+
+
+class PreflightTest(unittest.TestCase):
+    def robot(self, d: Path, *, reads_yaml: bool) -> Path:
+        (d / ".git").mkdir()
+        (d / "tools").mkdir()
+        (d / "tools" / "validate_pico_policy.py").write_text("")
+        (d / "src").mkdir()
+        if reads_yaml:
+            (d / "src" / "home_pose.py").write_text("")
+            (d / "src" / "constants.py").write_text("from home_pose import (\n)\n")
+        else:
+            (d / "src" / "constants.py").write_text("NEUTRAL_POSE = {}\n")
+        return d
+
+    def test_robot_checkout_must_read_the_home_yaml(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline()
+            p.robot = self.robot(Path(d), reads_yaml=False)
+            with self.assertRaisesRegex(pipeline.PipelineError, "does not read config/home_pose.yaml") as raised:
+                p.preflight()
+            self.assertEqual(raised.exception.code, pipeline.EXIT_INPUT)
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline()
+            p.robot = self.robot(Path(d), reads_yaml=True)
+            p.preflight()
+
+
+class WalkerFallbackTest(unittest.TestCase):
+    def test_next_candidate_after_a_failed_start_probe(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline(Path(d))
+            installed = []
+            p.install_walker = lambda best, row, fallback: (
+                installed.append(best),
+                p.put("walk", "selected", {"from": best, "sha256": best[-1] * 64}),
+            )
+            v = lambda margin: {"ok": True, "worst_margin": margin}  # noqa: E731
+            p.put("walk", "candidates", {"/r/model_1.pt": [v(0.03)], "/r/model_2.pt": [v(0.02)],
+                                         "/r/model_3.pt": [v(0.01)]})
+            p.put("walk", "selected", {"from": "/r/model_1.pt", "sha256": "1" * 64})
+            self.assertTrue(p.reselect_walker("probe failed"))
+            self.assertEqual(installed, ["/r/model_2.pt"])
+            self.assertTrue(p.reselect_walker("probe failed"))
+            self.assertEqual(installed, ["/r/model_2.pt", "/r/model_3.pt"])
+            self.assertFalse(p.reselect_walker("probe failed"))
+            self.assertEqual(len(p.get("walk", "rejected")), 3)
+
+
+class DryRunSmokeCorpusTest(unittest.TestCase):
+    def test_short_corpus_is_cycled_to_sixteen_rows(self):
+        sys.path.insert(0, str(REPO / "scripts" / "home_pipeline"))
+        import dry_run_tools
+
+        self.assertEqual(dry_run_tools.SMOKE_ROWS, 16)
+        source = (REPO / "scripts" / "home_pipeline" / "dry_run_tools.py").read_text()
+        self.assertIn("rows[i % len(rows)] for i in range(SMOKE_ROWS)", source)

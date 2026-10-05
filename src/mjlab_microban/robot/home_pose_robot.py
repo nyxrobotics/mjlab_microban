@@ -139,6 +139,35 @@ def render_robot_home_pose_yaml(document: Mapping[str, Any]) -> str:
     return _HEADER + "\n" + "\n".join(lines) + "\n"
 
 
+class NotHomeYamlRobotCheckout(FileNotFoundError):
+    """The robot checkout does not read config/home_pose.yaml."""
+
+
+def require_home_yaml_robot_checkout(microban_repo: Path | str) -> Path:
+    """Refuse a robot checkout whose code does not read config/home_pose.yaml.
+
+    Only robot trees with ``src/home_pose.py`` imported by ``src/constants.py``
+    (branch ``home-config`` and its descendants) take their HOME from the
+    generated YAML; an older tree (e.g. ``feature/neck-roll-pitch-camera``)
+    hard-codes the centered HOME, so writing the YAML there would change
+    nothing and a retrained policy would be refused only at install time.
+    """
+
+    repo = Path(microban_repo).expanduser().resolve()
+    constants = repo / "src" / "constants.py"
+    if not constants.is_file():
+        raise NotHomeYamlRobotCheckout(f"{repo} is not a microban robot checkout")
+    if not (repo / "src" / "home_pose.py").is_file() or "from home_pose import" not in (
+        constants.read_text(encoding="utf-8")
+    ):
+        raise NotHomeYamlRobotCheckout(
+            f"{repo} does not read config/home_pose.yaml (no src/home_pose.py imported by "
+            "src/constants.py); use a checkout of the robot branch home-config or a branch "
+            "made from it"
+        )
+    return repo
+
+
 def write_robot_home_pose(microban_repo: Path | str, *, check: bool = False) -> tuple[Path, bool]:
     """Write (or with ``check`` only compare) the robot HOME YAML.
 
@@ -147,8 +176,7 @@ def write_robot_home_pose(microban_repo: Path | str, *, check: bool = False) -> 
     """
 
     repo = Path(microban_repo).expanduser().resolve()
-    if not (repo / "src" / "constants.py").is_file():
-        raise FileNotFoundError(f"{repo} is not a microban robot checkout")
+    require_home_yaml_robot_checkout(repo)
     path = repo / ROBOT_HOME_POSE_RELATIVE_PATH
     text = render_robot_home_pose_yaml(robot_home_pose_document())
     current = path.read_text(encoding="utf-8") if path.is_file() else None

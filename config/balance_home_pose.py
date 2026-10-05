@@ -634,10 +634,22 @@ def _table(result: BalanceResult) -> str:
     before_level = abs(
         before.flat_sole_trunk_pitch_rad - before.trunk_pitch_rad
     ) <= FLAT_SOLE_TOLERANCE_RAD
-    tilted = f"n/a (sole pitch {tilt_deg:+.3f} deg)"
+    tilted = f"n/a (sole pitch {normalized_float(round(tilt_deg, 3)):+.3f} deg)"
+    if before_level and not before.soles_on_floor:
+        # Level in pitch but rolled: only an edge touches the floor.
+        before_level = False
+        roll_deg = math.degrees(before.sole_roll_rad[0])
+        tilted = (
+            f"n/a (sole roll {roll_deg:+.3f} deg, "
+            f"{before.ground_contact_corner_count} corners on the floor)"
+        )
 
     def deg(value: float) -> str:
         return f"{normalized_float(value):+.15g}"
+
+    def sci(value: float) -> str:
+        text = f"{value:+.3e}"
+        return "+" + text[1:] if float(text) == 0.0 else text
 
     def mm(value: float) -> str:
         return f"{value * 1e3:+.6f}"
@@ -682,8 +694,8 @@ def _table(result: BalanceResult) -> str:
         ),
         (
             "sole pitch L / R [deg]",
-            " / ".join(f"{math.degrees(v):+.3e}" for v in before.sole_pitch_rad),
-            " / ".join(f"{math.degrees(v):+.3e}" for v in after.sole_pitch_rad),
+            " / ".join(sci(math.degrees(v)) for v in before.sole_pitch_rad),
+            " / ".join(sci(math.degrees(v)) for v in after.sole_pitch_rad),
         ),
         # Roll/yaw of a tilted sole (up to upside down at large knee bends)
         # are not the ground-contact quantities either.
@@ -693,8 +705,8 @@ def _table(result: BalanceResult) -> str:
         ("root quat wxyz", quat(before.root_quat_wxyz), quat(after.root_quat_wxyz)),
         (
             "COM - sole centre (x) [mm]",
-            contact(f"{before.com_offset_x * 1e3:+.3e}"),
-            f"{after.com_offset_x * 1e3:+.3e}",
+            contact(sci(before.com_offset_x * 1e3)),
+            sci(after.com_offset_x * 1e3),
         ),
         ("heel margin [mm]", contact(mm(before.heel_margin_m)), mm(after.heel_margin_m)),
         ("toe margin [mm]", contact(mm(before.toe_margin_m)), mm(after.toe_margin_m)),
@@ -716,6 +728,26 @@ def _table(result: BalanceResult) -> str:
         f"{name:<{width[0]}}  {old:<{width[1]}}  {new}" for name, old, new in rows
     ]
     return "\n".join(lines)
+
+
+def _training_line_of(result: BalanceResult):
+    return check_training_line(
+        result.after_deg,
+        result.trunk_pitch_deg,
+        name=result.name,
+        label=result.label,
+        path=result.path or "candidate HOME",
+    )
+
+
+def _report_training_line(training) -> None:
+    if training.ok:
+        print("training line: OK (this checkout's training tasks load at the balanced HOME)")
+        return
+    print(f"training line: REFUSED: {training.error}")
+    # The hint is about pose limits; a bad name/label needs no pose advice.
+    if "label" not in training.error and "name" not in training.error.split(":")[0]:
+        print(f"  {TRAINING_LINE_HINT}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -771,6 +803,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not result.changed:
         print("Already balanced: the YAML holds the canonical solution, nothing to change.")
+        if not arguments.check and not arguments.no_training_check:
+            _report_training_line(_training_line_of(result))
         return 0
     if result.before_within_tolerance and not result.trunk_pitch_changed:
         print(
@@ -782,20 +816,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     training = None
     if not arguments.no_training_check:
-        training = check_training_line(
-            result.after_deg,
-            result.trunk_pitch_deg,
-            name=result.name,
-            label=result.label,
-            path=result.path or "candidate HOME",
-        )
-        if training.ok:
-            print(
-                "training line: OK (this checkout's training tasks load at the balanced HOME)"
-            )
-        else:
-            print(f"training line: REFUSED: {training.error}")
-            print(f"  {TRAINING_LINE_HINT}")
+        training = _training_line_of(result)
+        _report_training_line(training)
     if not arguments.write:
         print(
             "Dry run: re-run with --write to rewrite the hip/ankle pitch values in the YAML."
@@ -837,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
         f"       name:  {result.name!r}\n"
         f"       label: {result.label!r} (tag is now {home.tag})\n"
         "     then run: uv run python config/home_pose_tool.py show\n"
-        "  2. uv run python config/home_pose_tool.py write-robot --microban-repo ../microban\n"
+        "  2. uv run python config/home_pose_tool.py write-robot --microban-repo <robot home-config worktree>\n"
         "  3. retrain walking, get-up and PICO v12 from scratch at the new HOME, install the\n"
         "     policies in the robot repo, package PICO against it\n"
         "  4. run both test suites and commit both repos"

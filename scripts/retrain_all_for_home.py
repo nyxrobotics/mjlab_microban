@@ -4,7 +4,11 @@
 One command after a HOME edit (docs/home_pose_workflow.md):
 
     python3 scripts/retrain_all_for_home.py \\
-        --robot-repo ../microban --robot-branch home-<label> [--training-branch home-<label>]
+        --robot-repo ../microban_home-<label> --robot-branch home-<label> [--training-branch home-<label>]
+
+(run it in the home-config training checkout; --robot-repo must be a robot
+worktree whose code reads config/home_pose.yaml, i.e. made from the robot
+branch home-config -- the deploy checkout is refused at preflight)
 
 Steps (each one is skipped when its outputs already exist and validate, so the
 same command resumes after a crash, a stall or a fixed failure):
@@ -153,6 +157,8 @@ V12_FINAL_PROFILES = {
 }
 
 STALL_S = {"train": 1200, "gate": 3600, "probe": 1800, "eval": 1800, "cpu": 1800}
+GPU_RESERVATION_S = 120  # a started job has this long to allocate its memory
+GPU_POLL_S = 60
 EXIT_FAILED, EXIT_STALL, EXIT_INPUT, EXIT_BUSY = 1, 2, 3, 4
 
 
@@ -161,6 +167,10 @@ class PipelineError(Exception):
         super().__init__(message)
         self.code = code
         self.secondary = secondary  # stopped only because another parallel step failed
+
+
+class SourceProbeFailed(PipelineError):
+    """The fresh v12 start probe of the selected walker failed."""
 
 
 def sha256(path: Path) -> str:
@@ -247,6 +257,11 @@ class Pipeline:
         self.dry = args.dry_run
         self.lock = threading.RLock()
         self.gpu_lock = threading.Lock()
+        self.gpu_reservations: dict[int, tuple[int, float]] = {}
+        self.gpu_reservation_seq = 0
+        self.gpu_last_free = 0
+        self.owns_state = False
+        self.yaml_sha256: str | None = None
         self.abort = threading.Event()
         self.children: dict[int, str] = {}
         self.robot = Path(args.robot_repo).resolve() if args.robot_repo else None
@@ -259,11 +274,13 @@ class Pipeline:
         line = f"{datetime.now():%F %T} {message}"
         with self.lock:
             print(line, flush=True)
-            if self.state_dir is not None:
+            if self.state_dir is not None and self.owns_state:
                 with open(self.state_dir / "STATUS.log", "a") as f:
                     f.write(line + "\n")
 
     def save(self) -> None:
+        if not self.owns_state:
+            return  # never touch the state of a run another instance holds
         with self.lock:
             tmp = self.state_dir / "state.json.tmp"
             tmp.write_text(json.dumps(self.state, indent=1, sort_keys=True, default=str))
@@ -295,6 +312,7 @@ class Pipeline:
         """Run one job in its own process group with stall detection."""
 
         self.check_abort()
+        self.verify_home_yaml()
         log_dir = self.state_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         path = log_dir / f"{datetime.now():%m%d-%H%M%S}_{name}.log"
@@ -346,6 +364,26 @@ class Pipeline:
         self.log(f"done {name} rc={proc.returncode} in {minutes:.1f} min")
         return proc.returncode
 
+    def verify_home_yaml(self) -> None:
+        """Stop at once if config/home_pose.yaml changed since step 1 of this run.
+
+        Every job imports the YAML when it starts, so an edit during the run
+        (for example trying the next HOME with balance_home_pose.py --write in
+        this worktree) would mix HOMEs across stages.
+        """
+
+        if self.yaml_sha256 is None:
+            return
+        try:
+            current = sha256(HOME_YAML)
+        except OSError:
+            current = None
+        if current != self.yaml_sha256:
+            raise PipelineError(
+                f"{HOME_YAML} changed during the run (sha256 {self.yaml_sha256[:12]} at step 1, now "
+                f"{(current or 'missing')[:12]}); restore it (git -C {REPO} diff config/home_pose.yaml) and "
+                "rerun, or use another worktree for the next HOME", EXIT_INPUT)
+
     def kill(self, proc: subprocess.Popen, name: str) -> None:
         """Stop one of this command's own jobs (its process group only)."""
 
@@ -371,6 +409,7 @@ class Pipeline:
 
     def capture(self, cmd: list[str], *, cwd: Path = REPO, env: dict | None = None,
                 timeout: float = 1800, check: bool = False) -> subprocess.CompletedProcess:
+        self.verify_home_yaml()
         result = subprocess.run(cmd, cwd=cwd, env=dict(os.environ, **(env or {})),
                                 capture_output=True, text=True, timeout=timeout)
         if check and result.returncode != 0:
@@ -386,43 +425,60 @@ class Pipeline:
                             "--format=csv,noheader,nounits"], timeout=60).stdout.split()
         return int(out[0]) if out else 0
 
-    def gpu_job(self, need_mib: int, name: str, cmd: list[str], kind: str, **kwargs) -> int:
-        """Start a GPU job once the GPU has ``need_mib`` free.
+    def gpu_reserve(self, need_mib: int) -> int | None:
+        """Reserve ``need_mib`` of free GPU memory for a job about to start.
 
-        The GPU slot (a lock shared by this command's parallel steps) is held
-        until the job has had 90 s to allocate its memory, so two of this
-        command's jobs never both start on the same free memory.
+        Returns a reservation id, or None when the memory is not free now.
+        The lock is held only for this check (never while waiting), so a job
+        waiting for a lot of memory never blocks a small one that fits, nor
+        the stall checks of running jobs.  A reservation counts against the
+        free memory until the job has had GPU_RESERVATION_S to allocate it
+        (or ends), so two of this command's jobs never start on the same
+        free memory.
         """
 
-        self.gpu_lock.acquire()
-        try:
-            waited, noted = 0, -1
-            while True:
-                self.check_abort()
-                free = self.gpu_free_mib()
-                if free >= need_mib:
-                    break
-                if noted < 0 or waited - noted >= 1800:
-                    self.log(f"waiting for GPU memory for {name}: free {free} MiB < {need_mib} MiB")
-                    noted = waited
-                time.sleep(60)
-                waited += 60
-        except BaseException:
-            self.gpu_lock.release()
-            raise
-        done = threading.Event()
+        with self.gpu_lock:
+            now = time.time()
+            self.gpu_reservations = {k: v for k, v in self.gpu_reservations.items() if v[1] > now}
+            free = self.gpu_free_mib() - sum(v[0] for v in self.gpu_reservations.values())
+            self.gpu_last_free = free
+            if free < need_mib:
+                return None
+            self.gpu_reservation_seq += 1
+            self.gpu_reservations[self.gpu_reservation_seq] = (need_mib, now + GPU_RESERVATION_S)
+            return self.gpu_reservation_seq
 
-        def release() -> None:
-            done.wait(90)
-            self.gpu_lock.release()
+    def gpu_release(self, reservation: int) -> None:
+        with self.gpu_lock:
+            self.gpu_reservations.pop(reservation, None)
 
-        releaser = threading.Thread(target=release, daemon=True)
-        releaser.start()
+    def gpu_job(self, need_mib: int, name: str, cmd: list[str], kind: str, *, wait: bool = True,
+                **kwargs) -> int | None:
+        """Start a GPU job once the GPU has ``need_mib`` free.
+
+        With ``wait=False`` returns None at once when the memory is not free
+        (the walking probes use this from inside the walking job's poll, so
+        the walking stall check keeps running).
+        """
+
+        waited, noted = 0, -1
+        while True:
+            self.check_abort()
+            reservation = self.gpu_reserve(need_mib)
+            if reservation is not None:
+                break
+            if not wait:
+                return None
+            if noted < 0 or waited - noted >= 1800:
+                self.log(f"waiting for GPU memory for {name}: free {self.gpu_last_free} MiB "
+                         f"(after this command's reservations) < {need_mib} MiB")
+                noted = waited
+            self.abort.wait(GPU_POLL_S)
+            waited += GPU_POLL_S
         try:
             return self.run(name, cmd, kind, **kwargs)
         finally:
-            done.set()
-            releaser.join()
+            self.gpu_release(reservation)
 
     # --------------------------------------------------------- preflight
     def preflight(self) -> None:
@@ -431,6 +487,20 @@ class Pipeline:
             raise PipelineError(f"--robot-repo is not a git checkout: {a.robot_repo}", EXIT_INPUT)
         if not (self.robot / "tools" / "validate_pico_policy.py").is_file():
             raise PipelineError(f"{self.robot} is not a microban robot checkout", EXIT_INPUT)
+        # The robot code must read config/home_pose.yaml (robot branch home-config or
+        # a branch made from it).  An older tree hard-codes the centered HOME, and a
+        # retrained policy would be refused only at step 5, a day of GPU later.
+        constants = self.robot / "src" / "constants.py"
+        if not (self.robot / "src" / "home_pose.py").is_file() or "from home_pose import" not in (
+                constants.read_text() if constants.is_file() else ""):
+            raise PipelineError(
+                f"{self.robot} does not read config/home_pose.yaml (no src/home_pose.py imported by "
+                "src/constants.py, e.g. the deploy branch feature/neck-roll-pitch-camera). Use a worktree "
+                "of the robot branch home-config: git -C ../microban worktree add -b home-<label> "
+                "../microban_home-<label> origin/home-config", EXIT_INPUT)
+        if not (REPO / "config" / "home_pose.yaml").is_file() or not (
+                REPO / "src" / "mjlab_microban" / "robot" / "home_pose.py").is_file():
+            raise PipelineError(f"{REPO} is not a home-config training checkout", EXIT_INPUT)
         if not a.robot_branch:
             raise PipelineError("--robot-branch is required", EXIT_INPUT)
         if self.dry:
@@ -443,8 +513,11 @@ class Pipeline:
     def open_state(self) -> None:
         """Load the HOME identity, pick and lock the state dir."""
 
+        yaml_sha256 = sha256(HOME_YAML) if HOME_YAML.is_file() else None
         home = json.loads(self.capture(
             [*UV, "python", "scripts/home_pipeline/home_check.py"], timeout=600).stdout or "{}")
+        self.yaml_sha256 = yaml_sha256
+        self.verify_home_yaml()  # not edited while it was being checked
         if not home.get("tag"):
             raise PipelineError("cannot load config/home_pose.yaml: "
                                 + "; ".join(home.get("reasons") or ["no output"]), EXIT_INPUT)
@@ -459,6 +532,7 @@ class Pipeline:
             fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise PipelineError(f"another retrain_all_for_home.py holds {self.state_dir}", EXIT_BUSY)
+        self.owns_state = True
         state_path = self.state_dir / "state.json"
         self.state = json.loads(state_path.read_text()) if state_path.exists() else {}
         for pid, child in list(self.state.get("children", {}).items()):
@@ -563,7 +637,7 @@ class Pipeline:
             "tag", "joint_hash", "label", "name", "trunk_pitch_deg", "root_pos_m", "status", "warnings",
             "loader_contact", "ground_contact", "head_standing_height_m", "feet_lateral_m")}
             | {"balance_tool_canonical": canonical, "training_line": training_line,
-               "yaml_sha256": sha256(HOME_YAML)})
+               "yaml_sha256": self.yaml_sha256})
 
     # -------------------------------------------------- generic segments
     def train_segment(self, exp: Path, label: str, task: str, iterations: int,
@@ -597,20 +671,28 @@ class Pipeline:
         raise PipelineError(f"{label}: model_{end}.pt missing after training")
 
     # ----------------------------------------------------------- step 2
-    def walk_probe(self, ckpt: Path, rep: int) -> dict:
+    def walk_probe(self, ckpt: Path, rep: int, *, wait: bool = True) -> dict | None:
+        """Probe one walking checkpoint (9 x 300); None if ``wait`` is False and the GPU is full."""
+
         out = self.state_dir / "walk_probe" / f"{ckpt.parent.name}__{ckpt.stem}_r{rep}.json"
         out.parent.mkdir(exist_ok=True)
         digest = sha256(ckpt)
         meta = out.with_suffix(".sha256")
         if not (out.exists() and meta.exists() and meta.read_text().strip() == digest):
-            self.gpu_job(self.args.probe_gpu_mib, f"probe_{ckpt.parent.name[-24:]}_{ckpt.stem}_r{rep}",
-                         [*UV, "python", "-m", "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
-                          "--checkpoint", str(ckpt), "--expected-sha256", digest, "--output", str(out),
-                          "--force"], "probe", allow_fail=True)
+            out.unlink(missing_ok=True)
+            rc = self.gpu_job(self.args.probe_gpu_mib, f"probe_{ckpt.parent.name[-24:]}_{ckpt.stem}_r{rep}",
+                              [*UV, "python", "-m", "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
+                               "--checkpoint", str(ckpt), "--expected-sha256", digest, "--output", str(out),
+                               "--force"], "probe", allow_fail=True, wait=wait)
+            if rc is None:
+                return None
             if not out.exists():
                 raise PipelineError(f"walking probe of {ckpt} wrote no receipt")
             meta.write_text(digest + "\n")
-        verdict = probe_verdict(out)
+        try:
+            verdict = probe_verdict(out)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise PipelineError(f"walking probe receipt {out} is malformed: {error!r}") from error
         verdict["checkpoint"] = str(ckpt)
         return verdict
 
@@ -644,6 +726,8 @@ class Pipeline:
         probed: dict[str, list[dict]] = {}
         failures: dict[str, int] = {}
         finals: set[int] = set()
+        training = {"running": True}
+        noted = {"gpu_full": False}
 
         def poll() -> None:
             runs = runs_with_suffix(WALK_EXP, base_label) + runs_with_suffix(WALK_EXP, cont_label)
@@ -655,14 +739,22 @@ class Pipeline:
                 if failures.get(str(ckpt), 0) >= 3:
                     continue
                 try:
-                    v = self.walk_probe(ckpt, 0)
-                except PipelineError as error:
-                    if error.secondary:
+                    # Never wait for GPU memory here: this runs inside the walking
+                    # job's loop, whose stall check must keep running.
+                    v = self.walk_probe(ckpt, 0, wait=not training["running"])
+                except Exception as error:  # noqa: BLE001 - a bad probe must not kill training
+                    if isinstance(error, PipelineError) and (error.secondary or error.code != EXIT_FAILED):
                         raise
                     failures[str(ckpt)] = failures.get(str(ckpt), 0) + 1
                     self.log(f"WARNING probe of {ckpt} failed ({failures[str(ckpt)]}/3): "
-                             f"{str(error).splitlines()[0]}")
+                             f"{str(error).splitlines()[0] if str(error) else repr(error)}")
                     continue
+                if v is None:
+                    if not noted["gpu_full"]:
+                        self.log("walking probes deferred: not enough free GPU memory now (retried every poll)")
+                        noted["gpu_full"] = True
+                    return
+                noted["gpu_full"] = False
                 probed[str(ckpt)] = [v]
                 self.log(f"probe {ckpt.parent.name}/{ckpt.name}: {'PASS' if v['ok'] else 'FAIL'} "
                          f"worst margin {v['worst_margin']:+.4f} ({v['worst']}) falls={v['falls']}")
@@ -679,6 +771,7 @@ class Pipeline:
         finals.add(cont_end)
         self.put("walk", "runs", {"base": str(base_run), "cont": str(cont_run), "base_end": base_end,
                                   "cont_end": cont_end})
+        training["running"] = False
         poll()
         for path, verdicts in (self.get("walk", "probes") or {}).items():
             probed.setdefault(path, [verdicts])
@@ -688,6 +781,7 @@ class Pipeline:
         for key in candidates:
             for rep in range(1, a.select_repeats):
                 probed[key].append(self.walk_probe(Path(key), rep))
+        self.put("walk", "candidates", {k: probed[k] for k in candidates})
         best, row, fallback = select_walker({k: probed[k] for k in candidates})
         table = ["checkpoint                                   repeats pass worst-case margin"]
         for key in candidates:
@@ -703,12 +797,21 @@ class Pipeline:
         else:
             self.log(f"walking selected {best}: {row['passes']}/{row['repeats']} probes pass, worst-case "
                      f"margin {row['worst_case_margin']:+.4f}")
+        self.install_walker(best, row, fallback)
+
+    def install_walker(self, best: str, row: dict, fallback: bool) -> None:
+        """Copy the selected walking checkpoint to checkpoints/<prefix>_walk[_<run>]/ and record it."""
+
         src = Path(best)
         dest_dir = REPO / "checkpoints" / f"{self.prefix}_walk"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / src.name
         if dest.exists() and sha256(dest) != sha256(src):
-            raise PipelineError(f"{dest} exists with other bytes; remove it or use another --run-prefix")
+            # Same iteration number from the other walking run: keep both apart.
+            dest_dir = REPO / "checkpoints" / f"{self.prefix}_walk_{src.parent.name[-24:]}"
+            dest = dest_dir / src.name
+            if dest.exists() and sha256(dest) != sha256(src):
+                raise PipelineError(f"{dest} exists with other bytes; remove it or use another --run-prefix")
+        dest_dir.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
             shutil.copy2(src, dest)
         if not (dest_dir / "params").exists() and (src.parent / "params").is_dir():
@@ -716,6 +819,27 @@ class Pipeline:
         self.put("walk", "selected", {"path": str(dest), "relative": str(dest.relative_to(REPO)),
                                       "sha256": sha256(dest), "from": str(src), "fallback": fallback,
                                       **row})
+
+    def reselect_walker(self, reason: str) -> bool:
+        """Drop the selected walker after a failed v12 start probe; select the next candidate.
+
+        Returns False when no candidate is left.
+        """
+
+        selected = self.get("walk", "selected")
+        rejected = list(self.get("walk", "rejected") or [])
+        rejected.append({"from": selected["from"], "sha256": selected["sha256"], "reason": reason})
+        self.put("walk", "rejected", rejected)
+        excluded = {r["from"] for r in rejected}
+        candidates = {k: v for k, v in (self.get("walk", "candidates") or {}).items() if k not in excluded}
+        if not candidates:
+            return False
+        best, row, fallback = select_walker(candidates)
+        self.log(f"walking: {Path(selected['from']).name} failed the v12 start probe ({reason}); "
+                 f"trying the next candidate {best} (worst-case margin {row['worst_case_margin']:+.4f}"
+                 f"{', FALLBACK' if fallback else ''})")
+        self.install_walker(best, row, fallback)
+        return True
 
     # ----------------------------------------------------------- step 3
     def getup_evaluate(self, label: str, ckpt: Path) -> dict:
@@ -858,14 +982,37 @@ class Pipeline:
                     return
                 time.sleep(5)
                 seen["done"] = True
-                v = probe_verdict(probe)
+                try:
+                    v = probe_verdict(probe)
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    raise SourceProbeFailed(f"malformed v12 source probe {probe}: {error!r}") from error
                 self.log(f"v12 source probe {probe.name}: {'PASS' if v['ok'] else 'FAIL'} worst margin "
                          f"{v['worst_margin']:+.4f} ({v['worst']}) below={v['below']}")
                 if not v["ok"]:
-                    raise PipelineError("the fresh v12 source probe is below the locomotion gate minimums; "
-                                        "the selected walker cannot bootstrap PICO v12")
+                    raise SourceProbeFailed(
+                        f"fresh v12 source probe below the locomotion gate minimums (worst margin "
+                        f"{v['worst_margin']:+.4f} {v['worst']})")
 
-            self.gpu_job(a.pico_gpu_mib, seg, cmd, "train", poll=watch)
+            try:
+                self.gpu_job(a.pico_gpu_mib, seg, cmd, "train", poll=watch)
+            except PipelineError as raised:
+                error = raised
+                if not isinstance(raised, SourceProbeFailed):
+                    # The trainer may exit on its own probe failure before watch() saw it.
+                    try:
+                        fresh = probe.exists() and probe.stat().st_mtime >= started
+                        bad = fresh and not probe_verdict(probe)["ok"]
+                    except (OSError, ValueError, KeyError, TypeError):
+                        bad = False
+                    if not bad or raised.secondary:
+                        raise
+                    error = SourceProbeFailed(f"v12 start refused the fresh source probe {probe.name}")
+                # Repeat probes vary by about +-0.01; the next-best candidate
+                # (already probed during selection) gets its own fresh probe.
+                if self.dry or not self.reselect_walker(str(error)):
+                    raise PipelineError(f"{error}; no other walking candidate is left "
+                                        f"(see {self.state_dir / 'walk_selection.txt'})") from error
+                return self.v12_train(seg, None)
             return
         if lift_to is not None:
             parent_dir = V12_EXP / prev
@@ -1247,9 +1394,11 @@ class Pipeline:
         self.log(f"PICO packaged {onnx.name} sha256 {sha256(onnx)[:12]} (runtime validator pass)")
 
     # ----------------------------------------------------------- step 6
-    def commit(self, repo: Path, paths: list[str], message: str) -> str | None:
+    def commit(self, repo: Path, paths: list[str], message: str, *, force_add: list[str] = ()) -> str | None:
         existing = [p for p in paths if (repo / p).exists() or self.git(repo, "ls-files", p)]
         self.git(repo, "add", "--", *existing)
+        if force_add:  # gitignored release files, archived like the centered release (5b5a9d0)
+            self.git(repo, "add", "-f", "--", *force_add)
         staged = self.capture(["git", "-C", str(repo), "diff", "--cached", "--quiet"]).returncode
         if staged == 0:
             return None
@@ -1302,21 +1451,72 @@ class Pipeline:
             "training": self.get("training"), "finished": f"{datetime.now():%F %T}",
         }
         if self.dry:
+            archive = self.release_archive()
+            record["archived_files"] = {rel_path: sha256(REPO / rel_path) for rel_path in archive}
+            self.log(f"dry run: {len(archive)} release files would be archived (not committed)")
             path = self.state_dir / "release_record.json"
             path.write_text(json.dumps(record, indent=1, sort_keys=True, default=str))
             self.log(f"dry run: training repo not committed; record written to {path}")
             self.put("commit", {"robot": robot_commit, "training": None})
             return
+        archive = self.release_archive()
+        record["archived_files"] = {rel_path: sha256(REPO / rel_path) for rel_path in archive}
         rel = f"config/releases/{h['tag']}.json"
         (REPO / "config" / "releases").mkdir(exist_ok=True)
         (REPO / rel).write_text(json.dumps(record, indent=1, sort_keys=True, default=str) + "\n")
         training_commit = self.commit(REPO, ["config/home_pose.yaml", rel],
                                       f"Retrain every policy at HOME {h['tag']}\n\n{body}\n\nRobot: "
-                                      f"{self.args.robot_branch} {robot_commit}.")
+                                      f"{self.args.robot_branch} {robot_commit}.\nArchived "
+                                      f"{len(archive)} release files (checkpoints, gate reports, probe "
+                                      "receipt, packaged ONNX).", force_add=archive)
         training_commit = training_commit or self.git(REPO, "rev-parse", "HEAD")
         self.log(f"training commit {training_commit[:12]} on {self.get('training', 'branch')}")
         self.push(REPO, self.get("training", "branch"))
         self.put("commit", {"robot": robot_commit, "training": training_commit})
+
+    def release_archive(self) -> list[str]:
+        """Repo-relative release files committed with the training release.
+
+        The same set the centered release archived (5b5a9d0): the final PICO
+        checkpoint with its params/git records, its stage-gate reports and
+        ONNX, the packaged deployment ONNX and receipt; plus what the robot
+        pins by SHA-256 (the selected walking checkpoint and its 9x300 probe
+        receipt) and the final get-up checkpoint, so every pin can be
+        re-validated from git on another machine.
+        """
+
+        files: list[Path] = []
+        pf, sel, gf = self.get("pico", "final"), self.get("walk", "selected"), self.get("getup", "final")
+        run = pf["run"]
+        run_dir = V12_EXP / run
+        files.append(run_dir / "model_14999.pt")
+        for sub in ("params", "git"):
+            if (run_dir / sub).is_dir():
+                files += sorted(p for p in (run_dir / sub).iterdir() if p.is_file())
+        gate_prefix = f"{run}_model_14999"
+        files += sorted(p for p in GATE_ROOT.glob(f"{gate_prefix}*") if p.is_file())
+        releases = REPO / "artifacts" / "teleop_v12_releases"
+        releases.mkdir(parents=True, exist_ok=True)
+        packaged = Path(self.get("export", "pico", "onnx"))
+        receipt = Path(self.get("export", "pico", "receipt"))
+        for src, name in ((packaged, f"{gate_prefix}.onnx"), (receipt, f"{gate_prefix}_deployment_receipt.json")):
+            dest = releases / name
+            if src.is_file() and (not dest.exists() or sha256(dest) != sha256(src)):
+                shutil.copyfile(src, dest)
+            files.append(dest)
+        walker = Path(sel["path"])
+        files.append(walker)
+        if (walker.parent / "params").is_dir():
+            files += sorted(p for p in (walker.parent / "params").iterdir() if p.is_file())
+        files.append(PROBE_ROOT / f"velocity_{sel['sha256'][:16]}_teleop83_raw_9x300.json")
+        getup_ckpt = Path(gf["checkpoint"])
+        files.append(getup_ckpt)
+        if (getup_ckpt.parent / "params").is_dir():
+            files += sorted(p for p in (getup_ckpt.parent / "params").iterdir() if p.is_file())
+        missing = [str(p) for p in files if not p.is_file()]
+        if missing:
+            raise PipelineError(f"release files missing, cannot archive the release: {missing}")
+        return sorted({str(p.resolve().relative_to(REPO)) for p in files})
 
     # ------------------------------------------------------------- flow
     def threaded(self, name: str, fn, errors: list) -> threading.Thread:
@@ -1356,7 +1556,16 @@ class Pipeline:
                 if error is not first[1]:
                     self.log(f"({name}: {error})")
             raise first[1]
-        self.step_export_install()
+        try:
+            self.step_export_install()
+        except PipelineError as error:
+            if error.secondary:
+                raise
+            raise PipelineError(
+                f"{error}\nThe robot tree {self.robot} is left half-installed (new walk/getup ONNX, run pins "
+                "and HOME literals, maybe the old pico_teleop.onnx, so its PICO validator can fail): rerun the "
+                "same command to resume step 5, or revert it with git -C "
+                f"{self.robot} checkout -- . (nothing there is committed yet).", error.code) from error
         self.step_commit()
         self.log("==== ALL STEPS DONE")
         return 0
@@ -1368,8 +1577,8 @@ def print_status(state_dir: Path) -> int:
         print(f"no state in {state_dir}")
         return 1
     state = json.loads(state_path.read_text())
-    print(json.dumps({k: state.get(k) for k in ("home_identity", "prefix", "dry_run", "created", "commit")},
-                     indent=1))
+    print(json.dumps({k: state.get(k) for k in ("home_identity", "prefix", "dry_run", "created", "commit",
+                                                "stopped")}, indent=1))
     walk = state.get("walk", {})
     if walk.get("selected"):
         print("walk selected:", walk["selected"]["path"], "fallback" if walk["selected"]["fallback"] else "")
@@ -1407,7 +1616,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--select-top", type=int, default=6, help="candidates re-probed for selection")
     p.add_argument("--select-repeats", type=int, default=3, help="probes per candidate")
     p.add_argument("--train-gpu-mib", type=int, default=11000, help="free GPU memory before a 4096-env job")
-    p.add_argument("--pico-gpu-mib", type=int, default=9000, help="free GPU memory before a v12 training job")
+    p.add_argument("--pico-gpu-mib", type=int, default=17000,
+                   help="free GPU memory before a v12 training job (2048 envs use about 16.1 GB)")
     p.add_argument("--probe-gpu-mib", type=int, default=3000, help="free GPU memory before a probe/eval/gate")
     p.add_argument("--dry-run", action="store_true", help="plumbing run with 2-3 iterations per stage")
     p.add_argument("--dry-run-walk-init", help="dry run: walking continues from this checkpoint (so the v12 "
@@ -1445,13 +1655,23 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, on_signal)
     try:
         return pipeline.execute()
-    except PipelineError as error:
+    except SystemExit:
+        raise
+    except BaseException as error:  # noqa: BLE001 - every stop is reported and cleans up
         pipeline.abort.set()
         pipeline.kill_all_children()
-        pipeline.log(f"STOPPED: {error}")
-        if pipeline.state_dir is not None:
-            pipeline.put("stopped", {"at": f"{datetime.now():%F %T}", "reason": str(error), "code": error.code})
-        return error.code
+        if isinstance(error, PipelineError):
+            code, reason = error.code, str(error)
+        else:
+            import traceback
+
+            code = EXIT_FAILED
+            reason = f"unexpected {type(error).__name__}: {error}\n" + "".join(
+                traceback.format_exception(error)).rstrip()
+        pipeline.log(f"STOPPED: {reason}")
+        if pipeline.owns_state:  # a refused second instance never touches the live run's state
+            pipeline.put("stopped", {"at": f"{datetime.now():%F %T}", "reason": reason, "code": code})
+        return code
 
 
 if __name__ == "__main__":

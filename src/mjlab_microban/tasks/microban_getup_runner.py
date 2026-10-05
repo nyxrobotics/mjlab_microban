@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -58,8 +59,42 @@ def getup_home_pose() -> dict[str, object]:
     }
 
 
+# Stamped HOME values are FK-derived (root z) or degree->radian conversions;
+# 1e-9 (rad / m) absorbs last-digit FK noise of another MuJoCo build while any
+# real HOME edit (>= 1e-12 deg in the YAML changes the hash, and a different
+# pose moves these values by far more) still mismatches through the joint names
+# or the HOME tag strings checked elsewhere.
+HOME_STAMP_TOLERANCE = 1.0e-9
+
+
+def home_pose_stamps_match(stamp: object, expected: object, tol: float = HOME_STAMP_TOLERANCE) -> bool:
+    """Structural equality of two HOME stamps with a float tolerance."""
+
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(stamp, Mapping)
+            and set(stamp) == set(expected)
+            and all(home_pose_stamps_match(stamp[key], expected[key], tol) for key in expected)
+        )
+    if isinstance(expected, (list, tuple)):
+        return (
+            isinstance(stamp, (list, tuple))
+            and len(stamp) == len(expected)
+            and all(home_pose_stamps_match(a, b, tol) for a, b in zip(stamp, expected))
+        )
+    if isinstance(expected, bool) or isinstance(stamp, bool):
+        return stamp is expected
+    if isinstance(expected, (int, float)):
+        return (
+            isinstance(stamp, (int, float))
+            and math.isfinite(float(stamp))
+            and abs(float(stamp) - float(expected)) <= tol
+        )
+    return stamp == expected
+
+
 def require_current_getup_home_pose(infos: dict) -> None:
-    if infos.get("microban_getup_home_pose") != getup_home_pose():
+    if not home_pose_stamps_match(infos.get("microban_getup_home_pose"), getup_home_pose()):
         raise ValueError(
             "Checkpoint has a different or unknown get-up HOME pose; "
             "train from scratch with the current task"
@@ -114,7 +149,7 @@ def require_recorded_getup_v5_env(env_yaml: Path) -> None:
     ):
         raise ValueError("Run was not trained from the centered HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
-        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-12):
+        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-9):
             raise ValueError(f"Run was not trained from the centered HOME root {key}")
     clip = action.get("clip")
     if not isinstance(clip, dict) or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [

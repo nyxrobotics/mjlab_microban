@@ -26,9 +26,15 @@
 文字列やHOMEスタンプが合わないため拒否される。中心HOMEのときだけ、手で丸めた足の横間隔 0.094 m
 （FKでは 0.0935 m）も維持される（`LEGACY_HOME_OVERRIDES`）。
 
+root z は FK 値を 1e-12 m に丸めて公開する。中心HOME（FK 0.17055488563355944、15桁丸めの境界から
+2 ulp）と前傾HOME（`481503d292`）は、今日公開した値（0.170554885633559 / 0.170430569776402）を
+`LEGACY_HOME_OVERRIDES` の `root_z_m` に固定し、読み込み時に FK との差が 1e-12 m 以内かを確認する。
+MuJoCo の更新などで FK が最終桁で揺れても、HOMEスタンプ・ロボット側yaml・テストの固定値は変わらない。
+
 ローダーは、関節名21個がそろっていること、左右対称であること（左右ペアの一致・反転に加えて、
 首ヨー `head` と `neck_roll` が 0）、MJCFの可動範囲内であること、`trunk_pitch_deg` で両足裏が水平
-（1e-9 rad 以内）であることを確認し、満たさなければ読み込みを拒否する。`-0.0` は `0.0` と同じ値として扱う
+（1e-9 rad 以内）であること、さらに足裏が床に平らに着くこと（足裏面の角48個すべてが、ワールド高さで
+床から 0.5 mm 以内、ロール約 0.7° まで。ロールした足裏は縁だけで立つので拒否する）を確認し、満たさなければ読み込みを拒否する。`-0.0` は `0.0` と同じ値として扱う
 （同じハッシュ・`tag`）。
 
 ## この学習ラインで再学習できるHOME
@@ -42,8 +48,9 @@ PICO v12 と救済段階の全タスクの環境設定が組み立てられる�
 | 変えたい値 | この学習ライン |
 | --- | --- |
 | 膝（左右同じ） | 可。`balance_home_pose.py --write` で股・足首を合わせればよい。膝 20° で歩行と起き上がりの数回の学習、v12 の開始時HOME照合とテレオペ環境のプローブが動くことを確認済み |
-| 股・足首ロール（左右反転）、首ピッチ | 可 |
-| 体幹ピッチ | 0 だけ。前傾HOMEの座標系は `forward-lean-v2` ブランチ |
+| 股・足首ロール（左右反転）、股ヨー | 足裏が床に平らに着く組み合わせだけ（ふつうは 足首ロール = −股ロール、股ヨー 0）。股ロールだけを変えると足裏がロールしてローダーが拒否する |
+| 首ピッチ | 可 |
+| 体幹ピッチ | 0 だけ。前傾HOMEは下の「前傾ラインへの移植」 |
 | 肩ピッチ | 0 だけ（PICO contract v12 のHOME revision） |
 | 肘・肩ロール | 手先の到達範囲が PICO 受信側で検証済みの ±0.064 m の箱に収まる範囲だけ。今の腕HOMEで x がすでに 0.0630 m なので、1つだけ動かす場合の目安は 肘 −22.4°〜−19.1°、肩ロール（左）−2.6°〜44.7°（MJCFの範囲内で） |
 | 首ヨー `head`、`neck_roll` | 0 だけ（左右対称でなくなるため、ローダーが拒否） |
@@ -60,9 +67,17 @@ home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.
 [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md)）:
 
 ```bash
-python3 scripts/retrain_all_for_home.py --robot-repo ../microban --robot-branch home-<label> \
+# 学習側: home-config ブランチ（このディレクトリがあるチェックアウト）で実行する
+# ロボット側: home-config ブランチ（src/home_pose.py があるもの）の作業ツリー。
+#   デプロイ用のチェックアウトをそのまま使わず、専用の worktree を作る:
+git -C ../microban fetch origin
+git -C ../microban worktree add -b home-<label> ../microban_home-<label> origin/home-config
+python3 scripts/retrain_all_for_home.py --robot-repo ../microban_home-<label> --robot-branch home-<label> \
     --training-branch home-<label>
 ```
+
+`--robot-repo` が `config/home_pose.yaml` を読まないロボットのチェックアウト（`src/home_pose.py` がない、
+たとえば `feature/neck-roll-pitch-camera`）なら、パイプラインも `write-robot` も最初に拒否する。
 
 以下はそのコマンドが行う内容（手で行う場合の手順）。
 
@@ -73,9 +88,10 @@ python3 scripts/retrain_all_for_home.py --robot-repo ../microban --robot-branch 
 3. `name` と `label` を新しい姿勢に合わせて直し（ツールは変えない。`tag` は `<label>_<hash>` になる）、
    `uv run python config/home_pose_tool.py show` で根元高さ・余裕・頭高さ・`tag`・`training_line` を確認する
    （学習タスクが受け付けないHOME、足裏が水平でないyamlは `error: ...` の1行で終了コード1）。
-4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban` でロボット側の
+4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_home-<label>` でロボット側の
    `config/home_pose.yaml` を書き出す（`--check` で最新か確認できる）。学習タスクが受け付けないHOMEは
-   書き出さない（`--force` で強制）。失敗はどれも `error: ...` の1行。
+   書き出せない（契約文字列と手先FKはその学習タスクのコードが作るため。`--force` はない）。
+   `config/home_pose.yaml` を読まないロボットのチェックアウトも拒否する。失敗はどれも `error: ...` の1行。
 5. すべてを最初から学習し直す: 歩行（`Mjlab-Velocity-Microban` 15000回とその続き、プローブで選択）、
    起き上がり5段階、PICO v12（`scripts/train_microban_teleop_v12.sh start --source ... --hand-pose-release`）。
    歩行チェックポイントには `microban_walk_home_pose` が記録され、v12の開始時に現在のHOMEと照合される。
@@ -108,15 +124,18 @@ uv run python config/balance_home_pose.py --no-training-check     # 学習ライ
   0°に戻して `--write` すると、ファイルはバイト単位で元に戻り `centered_home`（`bbef07cab8`）のままになる。
   許容誤差内で釣り合っていても正準形でない値（手で書いた全桁の値など）は、`--write` で正準形に直す
   （ハッシュが変わるので表示で知らせる）。`--check` は「`--write` しても何も変わらない」ときだけ 0 を返す。
-- **「水平」はピッチ方向の意味**: 体幹を傾けると、固定した股・足首ロールのため足裏にわずかなロールと
-  つま先の内向き（体幹 +10° でロール約 0.08°、ヨー約 0.87°）が残る。表に「sole roll / sole yaw」として表示する。
+- **「水平」**: ツールが合わせるのはピッチ方向。ロールは動かさないので、足裏がロールしていて床に縁でしか
+  触れないHOME（股ロールだけを変えた、股ヨーと膝を組み合わせた、など）は「HOME soles are not flat on the floor」
+  で拒否する（接地面の定義が床の高さ基準の `scripts/home_pipeline/home_check.py` と一致する）。体幹を傾けると、
+  固定した股・足首ロールのため足裏にわずかなロールとつま先の内向き（体幹 +10° でロール約 0.08°、ヨー約 0.87°）が
+  残るが、角48個すべてが床から 0.5 mm 以内なので受け付ける。表に「sole roll / sole yaw」として表示する。
   変更前のyamlで足裏が水平でない場合、接地を前提にした行（重心と足裏中央の差、かかと・つま先余裕、接地角数）は
   意味を持たないので `n/a` と表示する。
 - **拒否する場合**: 左右のピッチ値が違う、股・足首ピッチがない・数値でない（`true` や空欄も不可）・有限でない、
   他の関節が左右非対称・範囲外、体幹ピッチが ±90° 以上、収束しない、解がMJCFの可動範囲や学習のソフトリミット
   （範囲の中央90 %）の外、重心が足裏中央に届かない、ファイルがない・YAMLとして読めない・値の行が見つからない
   （flow形式など）。どの場合も `error: cannot balance FILE: 理由` の1行を出して終了コード1、yamlは変更しない。
-- **学習ラインの確認**: 書き換えが必要なとき、解いたHOMEでこのチェックアウトの学習タスクがimportできるかを
+- **学習ラインの確認**: 解いたHOME（書き換え不要なときはyamlのHOME）でこのチェックアウトの学習タスクがimportできるかを
   確認して「training line: OK / REFUSED: 理由」を表示する（上の表）。`--write` は REFUSED なら書かずに
   `error: cannot write FILE: ...` で終了コード1（`--force` で書く。そのときは警告を出す）。`--check` は重心だけを見る。
 - **書き換え**: `--write` は4つのピッチ値（`--trunk-pitch-deg` で変えたときは `trunk_pitch_deg` も）だけを、
@@ -147,3 +166,23 @@ a.sole_pitch_rad               # 左右の足裏の傾き（0で水平）
 a.heel_margin_m, a.toe_margin_m
 a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 ```
+
+## 前傾ラインへの移植（未実施）
+
+前傾HOME（体幹 +10°）は、値としてはこのyamlで正確に表せる（`balance_home_pose.py --trunk-pitch-deg 10`
+が `forward-lean-v2` の値を全桁で再現し、root z 0.170430569776402 も `LEGACY_HOME_OVERRIDES` で固定済み）。
+しかしこの学習ラインのコード（報酬の直立基準、重力方向、速度報酬の座標系、ロボットの姿勢判定など）は
+体幹 0 を前提にしており、`microban_constants.py` とロボットの `src/home_pose.py` は体幹ピッチ 0 以外を拒否する。
+前傾ラインを出荷するなら、次の順で移植する（前傾ジョブが終わってから、前傾の worktree とは別の作業ツリーで）:
+
+1. `forward-lean-v2` に `home-config` をマージする（`config/`、`home_pose*.py`、`microban_velocity_runner.py`、
+   パイプライン）。衝突する箇所は `HOME_FRAME` / `HOME_TRUNK_PITCH_RAD` の手書き定義で、yaml由来の値に置き換える。
+2. 体幹ピッチの拒否（`microban_constants.py`）を外し、`HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad` とする。
+   前傾ブランチがピッチに依存させた箇所（報酬の基準ピッチ、重力、リセットのヨー軸、エクスポータの重力、
+   手先の到達箱）は `git diff track-centered-home-clip origin/forward-lean-v2` に一覧がある。
+3. `config/home_pose.yaml` に前傾の値を書き（`balance_home_pose.py --trunk-pitch-deg 10 --write --force`）、
+   `label` を `forward_lean10` などにする。前傾ブランチのチェックポイントを捨てずに使うなら、
+   `LEGACY_HOME_OVERRIDES["481503d292"]` に前傾ブランチの契約文字列の `tag` を加える。
+4. ロボット側も同様に `forward-lean-home` に `home-config` をマージし、`src/home_pose.py` の体幹 0 の制限と
+   scheduler の起立判定（鉛直基準）を体幹ピッチ基準にする
+   （`git -C ../microban diff feature/neck-roll-pitch-camera origin/forward-lean-home`）。PICO は再パッケージする。

@@ -172,7 +172,11 @@ class AnalyzePoseTest(unittest.TestCase):
         lean = home_pose_from_values(
             joint_pos_deg=lean_joints_deg(), trunk_pitch_deg=10.0, label="forward_lean_home"
         )
-        self.assertEqual(lean.root_pos[2], LEAN_ROOT_Z)
+        # Full-digit lean values: not the pinned (12-decimal) lean HOME, so the
+        # published root z is the FK value rounded to 1e-12 m.
+        self.assertAlmostEqual(lean.analysis.root_pos[2], LEAN_ROOT_Z, delta=1.0e-15)
+        self.assertEqual(lean.root_pos[2], round(lean.analysis.root_pos[2], 12))
+        self.assertTrue(lean.analysis.soles_on_floor)
         self.assertEqual(
             lean.root_quat_wxyz,
             (
@@ -277,7 +281,7 @@ class YamlEditTest(unittest.TestCase):
         edited = load_home_pose(self.path)
         self.assertEqual(dict(edited.joint_pos_deg), lean_joints_deg())
         self.assertEqual(edited.trunk_pitch_deg, 10.0)
-        self.assertEqual(edited.root_pos[2], LEAN_ROOT_Z)
+        self.assertAlmostEqual(edited.root_pos[2], LEAN_ROOT_Z, delta=1.0e-12)
         # A changed HOME drops the centered compatibility overrides.
         self.assertEqual(edited.tag, f"centered_home_{edited.joint_hash}")
         self.assertNotEqual(edited.joint_hash, HOME.joint_hash)
@@ -330,6 +334,13 @@ class RobotYamlTest(unittest.TestCase):
             repo = Path(directory)
             (repo / "src").mkdir()
             (repo / "src" / "constants.py").write_text("")
+            # A robot tree that does not read the YAML (the pre-home-config
+            # deploy branch) is refused before anything is written.
+            with self.assertRaisesRegex(FileNotFoundError, "does not read config/home_pose.yaml"):
+                write_robot_home_pose(repo)
+            self.assertFalse((repo / "config").exists())
+            (repo / "src" / "home_pose.py").write_text("")
+            (repo / "src" / "constants.py").write_text("from home_pose import (\n)\n")
             path, up_to_date = write_robot_home_pose(repo, check=True)
             self.assertFalse(up_to_date)
             self.assertFalse(path.exists())
@@ -361,3 +372,90 @@ class WalkHomeStampTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloorContactAndRootZPinTest(unittest.TestCase):
+    """Review round 4: rolled soles and the root z rounding boundary."""
+
+    def centered_deg(self, **pairs) -> dict[str, float]:
+        joints = dict(HOME.joint_pos_deg)
+        for joint, (left, right) in pairs.items():
+            joints[f"left_{joint}"], joints[f"right_{joint}"] = left, right
+        return joints
+
+    def test_rolled_soles_are_refused(self):
+        # Hip roll 10 alone rolls each sole 5 deg: only an edge (4 corners)
+        # touches the floor, so the loader refuses it.
+        with self.assertRaisesRegex(ValueError, "not flat on the floor"):
+            home_pose_from_values(
+                joint_pos_deg=self.centered_deg(hip_roll=(10.0, -10.0)), trunk_pitch_deg=0.0
+            )
+        analysis = analyze_pose(radians(self.centered_deg(hip_roll=(10.0, -10.0))), 0.0)
+        self.assertFalse(analysis.soles_on_floor)
+        self.assertEqual(analysis.ground_contact_corner_count, 4)
+        self.assertAlmostEqual(math.degrees(analysis.sole_roll_rad[0]), 5.0, delta=1e-9)
+        # Ankle roll compensating the hip roll keeps the soles flat.
+        flat = home_pose_from_values(
+            joint_pos_deg=self.centered_deg(hip_roll=(10.0, -10.0), ankle_roll=(-10.0, 10.0)),
+            trunk_pitch_deg=0.0,
+        )
+        self.assertTrue(flat.analysis.soles_on_floor)
+        self.assertEqual(flat.analysis.ground_contact_corner_count, 48)
+
+    def test_current_and_lean_homes_are_on_the_floor(self):
+        self.assertTrue(HOME.analysis.soles_on_floor)
+        self.assertEqual(HOME.analysis.ground_contact_corner_count, 48)
+        self.assertEqual(HOME.analysis.sole_contact_lift_m, 0.0)
+        lean = home_pose_from_values(joint_pos_deg=lean_joints_deg(), trunk_pitch_deg=10.0)
+        self.assertTrue(lean.analysis.soles_on_floor)
+        self.assertLess(lean.analysis.sole_contact_lift_m, 1.0e-4)
+
+    def test_centered_root_z_is_pinned_not_rounded(self):
+        fk = HOME.analysis.root_pos[2]
+        # FK sits ~2 ulps below the 15-decimal rounding boundary; a 3-ulp
+        # drift would flip a 15-decimal rounding, the pin does not move.
+        drifted = fk
+        for _ in range(3):
+            drifted = math.nextafter(drifted, 1.0)
+        self.assertNotEqual(round(fk, 15), round(drifted, 15))
+        self.assertEqual(HOME.root_pos[2], 0.170554885633559)
+        self.assertLess(abs(HOME.root_pos[2] - fk), home_pose.ROOT_Z_PIN_TOLERANCE_M)
+        self.assertEqual(
+            home_pose.LEGACY_HOME_OVERRIDES[HOME.joint_hash]["root_z_m"], 0.170554885633559
+        )
+
+    def test_pinned_root_z_must_match_fk(self):
+        original = home_pose.LEGACY_HOME_OVERRIDES
+        try:
+            home_pose.LEGACY_HOME_OVERRIDES = {
+                HOME.joint_hash: {"tag": "centered_home", "root_z_m": 0.1706}
+            }
+            with self.assertRaisesRegex(ValueError, "differs from its published value"):
+                home_pose_from_values(
+                    joint_pos_deg=dict(HOME.joint_pos_deg), trunk_pitch_deg=0.0,
+                    label="centered_home",
+                )
+        finally:
+            home_pose.LEGACY_HOME_OVERRIDES = original
+
+    def test_home_stamps_tolerate_fk_noise_only(self):
+        from mjlab_microban.tasks.microban_getup_runner import (
+            getup_home_pose,
+            home_pose_stamps_match,
+        )
+
+        stamp = json.loads(json.dumps(getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        stamp["root_pos_m"][2] += 1.0e-12
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        stamp["root_pos_m"][2] += 1.0e-6
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        stamp = json.loads(json.dumps(getup_home_pose()))
+        stamp["joint_pos_rad"].pop("left_knee")
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertFalse(home_pose_stamps_match(None, getup_home_pose()))
+
+    def test_mjcf_range_message_is_unambiguous(self):
+        joints = self.centered_deg(knee=(135.0, 135.0))
+        with self.assertRaisesRegex(ValueError, r"134\.9999999999\d* \] deg|above the upper limit"):
+            home_pose_from_values(joint_pos_deg=joints, trunk_pitch_deg=0.0)

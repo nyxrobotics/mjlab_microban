@@ -9,7 +9,7 @@ import torch
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
+from mjlab_microban.tasks.microban_getup_runner import getup_home_pose, home_pose_stamps_match
 
 # Checkpoint marker: the full training HOME (joints, root position and root
 # quaternion), in the same JSON-safe form as get-up's microban_getup_home_pose.
@@ -28,7 +28,7 @@ def require_walk_home_pose(infos: object) -> None:
     stamp = infos.get(WALK_HOME_POSE_INFO_KEY) if isinstance(infos, Mapping) else None
     if stamp is None and HOME.tag in LEGACY_UNSTAMPED_WALK_HOME_TAGS:
         return
-    if stamp != getup_home_pose():
+    if not home_pose_stamps_match(stamp, getup_home_pose()):
         raise ValueError(
             "Walking checkpoint was not trained at the current HOME "
             f"({WALK_HOME_POSE_INFO_KEY} missing or different from "
