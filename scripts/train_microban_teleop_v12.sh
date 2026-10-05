@@ -21,6 +21,7 @@ Usage:
       [--hand-pose-release] [--dry-run-probe-receipt DRYRUN_FORCED_PASS_RECEIPT]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
+      [--seed N]
 
 Fresh start checks that the velocity checkpoint's run recorded the current
 HOME (config/home_pose.yaml) and the walking contract, hashes it, runs the 9x300 raw
@@ -47,6 +48,13 @@ release-eligible recipe switch, accepted only at the centered HOME and only for
 its pinned, gated canonical model_7099; its validated gate is passed to the
 runner and recorded in every later checkpoint.  A pose-release checkpoint is
 resumed with this option (it is refused without it).
+
+--seed N (default 42) sets --env.seed and --agent.seed of this training
+process only.  It is training randomness, not a gate: no checkpoint lineage
+marker, stage gate or package records it, every gate still evaluates with its
+own fixed seeds, and the run's params/ records the value used.  Use it to
+retrain a segment from the same gated parent when repeated same-seed attempts
+fail identically.
 EOF
 }
 fail() { echo "$*" >&2; exit 2; }
@@ -75,6 +83,7 @@ max_updates=0
 skip_gate=0
 dry_probe=""
 hand_pose_release=0
+train_seed=42
 while (( $# > 0 )); do
     case "$1" in
         --hand-pose-release)
@@ -108,6 +117,11 @@ while (( $# > 0 )); do
             [[ "${dry_probe##*/}" == DRYRUN_FORCED_PASS_* ]] \
                 || fail "--dry-run-probe-receipt accepts only a DRYRUN_FORCED_PASS_* receipt"
             shift 2
+            ;;
+        --seed)
+            (( $# >= 2 )) && [[ "$2" =~ ^(0|[1-9][0-9]{0,8})$ ]] \
+                || fail "--seed requires a non-negative integer"
+            train_seed="$2"; shift 2
             ;;
         --agent.run-name)
             (( $# >= 2 )) || fail "--agent.run-name requires NAME"
@@ -281,9 +295,9 @@ task=Mjlab-Teleop-V12-Microban
 if (( hand_pose_release == 1 )); then
     task=Mjlab-Teleop-V12-HandPoseRelease-Microban
 fi
-echo "[INFO] task=${task}"
+echo "[INFO] task=${task} seed=${train_seed}"
 exec uv run --locked train "${task}" \
-    --env.scene.num-envs "${num_envs}" --env.seed 42 --agent.seed 42 \
+    --env.scene.num-envs "${num_envs}" --env.seed "${train_seed}" --agent.seed "${train_seed}" \
     --agent.num-steps-per-env 24 --agent.max-iterations "${iterations}" \
     --agent.save-interval "${save_interval}" --agent.logger tensorboard \
     --agent.upload-model False --enable-nan-guard True \
