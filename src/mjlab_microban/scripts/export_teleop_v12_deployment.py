@@ -528,6 +528,55 @@ def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
     return MICROBAN_TELEOP_V12_RECIPE_REVISION
 
 
+def _onnx_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, str]:
+    """Ship the gate's norm-wise ONNX parity rule (already gate-validated).
+
+    The full-83 parity bound is per sample ``atol + rtol * max|expected|``
+    (teleop_v12_onnx_gate), so the absolute errors alone may exceed ``atol``.
+    The robot needs the rule, rtol, output magnitude and bound ratios to apply
+    the same cap the stage validator does.  A legacy absolute-only report
+    ships nothing and the robot keeps the plain ``atol`` cap.
+    """
+
+    if "parity_rule" not in onnx_evidence and "relative_tolerance" not in onnx_evidence:
+        return {}
+    from mjlab_microban.scripts.teleop_v12_onnx_gate import (
+        ONNX_PARITY_RELATIVE_TOLERANCE,
+        ONNX_PARITY_RULE,
+    )
+
+    if (
+        onnx_evidence.get("parity_rule") != ONNX_PARITY_RULE
+        or onnx_evidence.get("relative_tolerance") != ONNX_PARITY_RELATIVE_TOLERANCE
+    ):
+        raise ValueError("V12 ONNX parity rule evidence drifted")
+    values = {
+        "v12_onnx_parity_max_abs_expected_output": onnx_evidence.get(
+            "maximum_absolute_expected_output"
+        ),
+        "v12_onnx_reference_max_bound_ratio": onnx_evidence.get(
+            "reference_evaluator_maximum_bound_ratio"
+        ),
+        "v12_onnxruntime_cpu_max_bound_ratio": onnx_evidence.get(
+            "onnxruntime_cpu_maximum_bound_ratio"
+        ),
+    }
+    for name, value in values.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+            or (name.endswith("_bound_ratio") and float(value) > 1.0)
+        ):
+            raise ValueError(f"V12 ONNX parity rule evidence is invalid: {name}")
+    return {
+        "v12_onnx_parity_rule": ONNX_PARITY_RULE,
+        "v12_onnx_parity_relative_tolerance": str(ONNX_PARITY_RELATIVE_TOLERANCE),
+        **{name: str(float(value)) for name, value in values.items()},
+    }
+
+
 def _full_precision_csv(values: list[float]) -> str:
     """CSV of shortest round-trip floats (no 3-decimal rounding)."""
 
@@ -645,6 +694,8 @@ def build_v12_deployment_metadata(
         or not isinstance(onnx_evidence, Mapping)
     ):
         raise TypeError("Validated v12 gate evidence is incomplete")
+
+    onnx_parity_rule_metadata = _onnx_parity_rule_metadata(onnx_evidence)
 
     defaults = HOME_FRAME.joint_pos
     if not isinstance(defaults, Mapping):
@@ -820,6 +871,7 @@ def build_v12_deployment_metadata(
         "v12_onnxruntime_cpu_max_abs_error": str(
             onnx_evidence["onnxruntime_cpu_maximum_absolute_error"]
         ),
+        **onnx_parity_rule_metadata,
         "v12_neutral_legacy_parity_max_abs_error": str(
             neutral["maximum_absolute_error"]
         ),

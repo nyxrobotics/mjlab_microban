@@ -812,3 +812,57 @@ def test_runtime_smoke_corpus_comes_from_the_final_tracking_report():
     ):
         with pytest.raises(ValueError):
             _runtime_smoke_corpus(bad)
+
+
+def _normwise_onnx_evidence() -> dict[str, object]:
+    return {
+        "tolerance": 2.0e-5,
+        "parity_rule": (
+            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
+        ),
+        "relative_tolerance": 1.0e-6,
+        "maximum_absolute_expected_output": 46.55878829956055,
+        "onnxruntime_cpu_maximum_absolute_error": 2.47955322265625e-05,
+        "onnxruntime_cpu_maximum_bound_ratio": 0.451808363199234,
+        "reference_evaluator_maximum_absolute_error": 9.5367431640625e-06,
+        "reference_evaluator_maximum_bound_ratio": 0.1619720607995987,
+    }
+
+
+def test_onnx_parity_rule_metadata_ships_the_normwise_bound() -> None:
+    metadata = deployment._onnx_parity_rule_metadata(_normwise_onnx_evidence())
+    assert metadata == {
+        "v12_onnx_parity_rule": (
+            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
+        ),
+        "v12_onnx_parity_relative_tolerance": "1e-06",
+        "v12_onnx_parity_max_abs_expected_output": "46.55878829956055",
+        "v12_onnx_reference_max_bound_ratio": "0.1619720607995987",
+        "v12_onnxruntime_cpu_max_bound_ratio": "0.451808363199234",
+    }
+    # The robot's cap atol + rtol * magnitude covers the shipped CPU error.
+    cap = 2.0e-5 + float(metadata["v12_onnx_parity_relative_tolerance"]) * float(
+        metadata["v12_onnx_parity_max_abs_expected_output"]
+    )
+    assert 2.47955322265625e-05 <= cap
+
+
+def test_onnx_parity_rule_metadata_absent_for_absolute_only_report() -> None:
+    assert deployment._onnx_parity_rule_metadata({"tolerance": 2.0e-5}) == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("parity_rule", "elementwise_v0"),
+        ("relative_tolerance", 1.0e-5),
+        ("maximum_absolute_expected_output", math.nan),
+        ("onnxruntime_cpu_maximum_bound_ratio", 1.01),
+        ("reference_evaluator_maximum_bound_ratio", None),
+    ),
+)
+def test_onnx_parity_rule_metadata_rejects_drift(name: str, value: object) -> None:
+    evidence = _normwise_onnx_evidence()
+    evidence[name] = value
+    with pytest.raises(ValueError):
+        deployment._onnx_parity_rule_metadata(evidence)
