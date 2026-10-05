@@ -628,3 +628,24 @@ class DryRunToolsTest(unittest.TestCase):
             with self.assertRaises(ValueError):  # a rescue of a rescue
                 self.tools.corner_rescue_infos(infos, parent_sha256="a" * 64, report_sha256="b" * 64, mix=mix,
                                                provenance={})
+
+
+class SerialGpuTest(unittest.TestCase):
+    def test_one_gpu_job_at_a_time(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline(Path(d), "--serial-gpu")
+            self.assertTrue(p.args.sequential)
+            p.gpu_free_mib = lambda: 30000
+            seen = []
+
+            def run(name, cmd, kind, **kwargs):
+                # A nested non-waiting job (a walking probe from the training poll) is deferred.
+                seen.append(p.gpu_job(100, "nested", ["true"], "probe", wait=False))
+                return 0
+
+            p.run = run
+            self.assertEqual(p.gpu_job(100, "train", ["true"], "train"), 0)
+            self.assertEqual(seen, [None])
+            self.assertTrue(p.gpu_serial.acquire(blocking=False))  # released after the job
+            p.gpu_serial.release()
+        self.assertTrue(make_pipeline(None, "--dry-run", "--dry-run-plumbing").args.serial_gpu)

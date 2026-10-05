@@ -69,8 +69,9 @@ state dir is artifacts/home_pipeline/<tag>/ (a new HOME gets a new one).
 GPU: before each GPU job the command waits until the GPU has the free memory
 the job needs; a job whose log is not written for the stall limit is killed
 (only its own process group: this command never signals any other process)
-and the command exits 2 (rerun to resume).  Ctrl-C / SIGTERM stops its own
-children and exits.
+and the command exits 2 (rerun to resume).  --serial-gpu (the dry-run
+default) runs at most one of its GPU jobs at a time, for a GPU shared with
+another training.  Ctrl-C / SIGTERM stops its own children and exits.
 
 --dry-run exercises the whole plumbing in minutes at any HOME: 2-3 iterations
 per stage at 64 envs, PICO stage boundaries reached by clock lifts, every gate
@@ -294,6 +295,8 @@ class Pipeline:
         self.plumbing = bool(args.dry_run and args.dry_run_plumbing)
         self.lock = threading.RLock()
         self.gpu_lock = threading.Lock()
+        # --serial-gpu: at most one of this command's GPU jobs at a time.
+        self.gpu_serial = threading.Lock() if args.serial_gpu else None
         self.gpu_reservations: dict[int, tuple[int, float]] = {}
         self.gpu_reservation_seq = 0
         self.gpu_last_free = 0
@@ -499,11 +502,19 @@ class Pipeline:
         """
 
         waited, noted = 0, -1
+        serial = self.gpu_serial
         while True:
             self.check_abort()
+            if serial is not None and not serial.acquire(timeout=0 if not wait else GPU_POLL_S):
+                if not wait:
+                    return None
+                waited += GPU_POLL_S
+                continue
             reservation = self.gpu_reserve(need_mib)
             if reservation is not None:
                 break
+            if serial is not None:
+                serial.release()
             if not wait:
                 return None
             if noted < 0 or waited - noted >= 1800:
@@ -516,6 +527,8 @@ class Pipeline:
             return self.run(name, cmd, kind, **kwargs)
         finally:
             self.gpu_release(reservation)
+            if serial is not None:
+                serial.release()
 
     # --------------------------------------------------------- preflight
     def preflight(self) -> None:
@@ -1880,6 +1893,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--allow-dirty", action="store_true",
                    help="allow uncommitted training-repo changes besides config/home_pose.yaml")
     p.add_argument("--sequential", action="store_true", help="train get-up after walking instead of in parallel")
+    p.add_argument("--serial-gpu", action="store_true",
+                   help="run at most one GPU job of this command at a time (implies --sequential; walking "
+                   "probes then wait for the end of each training segment); default for --dry-run")
     p.add_argument("--redo-robot-pins", action="store_true",
                    help="re-apply the HOME literal substitution to the robot tests")
     p.add_argument("--commit-trailer", default=TRAILER_DEFAULT, help="text appended to commit messages")
@@ -1926,6 +1942,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.probe_every, args.probe_min = 1, 0
         args.select_top, args.select_repeats = min(args.select_top, 2), min(args.select_repeats, 2)
         args.train_gpu_mib = args.pico_gpu_mib = args.probe_gpu_mib = 2500
+        args.serial_gpu = True
+    if args.serial_gpu:
+        args.sequential = True
     elif args.dry_run_walk_init or args.dry_run_simulate_failures or args.dry_run_plumbing:
         p.error("--dry-run-* options need --dry-run")
     return args
