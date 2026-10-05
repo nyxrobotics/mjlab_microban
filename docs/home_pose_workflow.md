@@ -157,6 +157,14 @@ PICOの最終パッケージでは、転倒した DRYRUN チェックポイン�
 
 どちらもカナリア 3100/7100/10100 の最初のゲートを不合格とみなして1回だけ学習し直す経路も通った。
 
+再実測（2026-10-06、home-config 1059fe3、ロボット 2ffe8d2、同条件）: 前傾 yaml・`--dry-run-walk-init` 前傾 cont2
+`model_29000.pt`・`--dry-run-simulate-9999 retrain` で 3598 s、終了コード 0。カナリアは本来のクロックで評価
+（3099 / 7099 は `hmd_hand_activation_canary_*` など、10099 は `..._hand_rms_40mm_v1`）、試行1と救済4本が落ちて試行2が通り、
+パッケージは 10000（試行2の model_9999）と 10100（model_10099）の境界ゲートを resume 系譜で検証して記録
+（semantics `..._resume_ancestor_..._v2`）、`dry_run_not_deployable` 付き。ロボットのバリデータ pass、ロボットの
+テスト 272 passed / 2 skipped。同じパッケージを `MICROBAN_ALLOW_DRYRUN_POLICY` なしで `tools/validate_pico_policy.py`
+にかけると「DRY RUN package」で拒否される。膝15度の plumbing ドライランはこの版では再実行していない。
+
 ## 所要時間の目安（RTX 5000 Ada 1枚、他の学習と共用だった 2026-10 の実測から）
 
 | 段階 | 実測 | 
