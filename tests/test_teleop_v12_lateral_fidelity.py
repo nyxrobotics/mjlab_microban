@@ -188,6 +188,20 @@ class LateralFidelityEnvTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_lateral_fidelity(cfg, "8")
 
+    def test_corner_rescue_env_carries_the_term_only_when_asked(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_LATERAL_FIDELITY_ENV as KEY,
+            make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg as make,
+        )
+
+        with mock.patch.dict(os.environ, {KEY: ""}):
+            self.assertNotIn(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME, make().rewards)
+        with mock.patch.dict(os.environ, {KEY: "16"}):
+            cfg = make()
+        self.assertEqual(
+            cfg.rewards[MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME].weight, -16.0
+        )
+
     def test_weight_label_comes_from_the_launcher_environment(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHT_ENV, None)
