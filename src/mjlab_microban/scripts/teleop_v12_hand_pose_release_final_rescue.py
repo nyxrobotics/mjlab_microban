@@ -39,7 +39,7 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 
 
 def validate_parent(
-    checkpoint: Path, failed_gate_report: Path, mix: str
+    checkpoint: Path, failed_gate_report: Path, mix: str, seed: int = 42
 ) -> dict[str, Any]:
     """Authenticate model14900 and the same run's failed 15000 gate report."""
 
@@ -75,6 +75,7 @@ def validate_parent(
             None if corner is None else canonical_json_sha256(corner)
         ),
         sampler_mix=validate_hand_pose_release_final_rescue_mix(mix),
+        training_seed=seed,
     )
     if sha256_file(resolved) != digest:
         raise ValueError("Final rescue parent changed while validating")
@@ -103,13 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     parent.add_argument("checkpoint", type=Path)
     parent.add_argument("failed_final_gate_tracking_report", type=Path)
     parent.add_argument("--mix", required=True)
+    parent.add_argument("--seed", type=int, default=42)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = validate_parent(
-        args.checkpoint, args.failed_final_gate_tracking_report, args.mix
+        args.checkpoint, args.failed_final_gate_tracking_report, args.mix, args.seed
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0 if result.get("status") == "pass" else 1

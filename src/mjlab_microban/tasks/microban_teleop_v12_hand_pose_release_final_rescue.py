@@ -292,6 +292,22 @@ def _failed_scenarios(value: object, *, mix: str) -> list[str]:
     return list(value)
 
 
+def _training_seed(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value < 2**31
+    ):
+        raise ValueError("Pose-release final rescue training seed is malformed")
+    return value
+
+
+def _positive_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"Pose-release final rescue {label} is malformed")
+    return value
+
+
 def _parent_lineage_names() -> tuple[str, str]:
     from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
         HAND_POSE_RELEASE_LINEAGE_FRESH,
@@ -310,10 +326,14 @@ def hand_pose_release_final_rescue_marker(
     failed_gate_failed_scenarios: Sequence[str],
     inherited_corner_rescue_marker_sha256: str | None,
     sampler_mix: str,
+    training_seed: int = 42,
+    num_envs: int = 2_048,
 ) -> dict[str, Any]:
     """Return the marker embedded in every pose-release final-rescue save.
 
-    Only the recorded hashes, failed checks/scenarios and the mix vary; every
+    Only the recorded hashes, failed checks/scenarios, the mix, the training
+    seed (environment = agent seed, as the train CLI sets them) and the live
+    environment count (2048 from the launcher) vary; every
     other field is fixed by code.  The parent lineage follows from the
     inherited corner marker (fresh chain, or fresh chain through the
     pose-release model9900 corner rescue).
@@ -379,9 +399,9 @@ def hand_pose_release_final_rescue_marker(
             "target": MICROBAN_TELEOP_V12_FINAL_RESCUE_TARGET_OPTIMIZER_STEP,
         },
         "training": {
-            "environment_seed": 42,
-            "agent_seed": 42,
-            "num_envs": 2_048,
+            "environment_seed": _training_seed(training_seed),
+            "agent_seed": _training_seed(training_seed),
+            "num_envs": _positive_int(num_envs, "environment count"),
             "num_steps_per_env": 24,
         },
         "source_recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
@@ -432,7 +452,8 @@ def validate_hand_pose_release_final_rescue_marker(marker: object) -> dict[str, 
         raise ValueError("Pose-release final rescue lineage marker drifted")
     assert isinstance(marker, Mapping)
     failed_gate = marker.get("failed_final_gate")
-    if not isinstance(failed_gate, Mapping):
+    training = marker.get("training")
+    if not isinstance(failed_gate, Mapping) or not isinstance(training, Mapping):
         raise ValueError("Pose-release final rescue lineage marker drifted")
     try:
         expected = hand_pose_release_final_rescue_marker(
@@ -447,6 +468,8 @@ def validate_hand_pose_release_final_rescue_marker(marker: object) -> dict[str, 
                 "inherited_corner_rescue_marker_sha256"
             ),
             sampler_mix=marker.get("sampler_mix"),  # type: ignore[arg-type]
+            training_seed=training.get("agent_seed"),  # type: ignore[arg-type]
+            num_envs=training.get("num_envs"),  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("Pose-release final rescue lineage marker drifted") from exc

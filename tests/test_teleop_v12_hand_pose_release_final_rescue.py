@@ -264,6 +264,27 @@ def test_marker_round_trip_and_tamper_detection():
         validate_hand_pose_release_final_rescue_marker(tampered)
 
 
+def test_marker_records_the_training_seed():
+    assert _marker()["training"]["agent_seed"] == 42
+    marker = _marker(training_seed=43)
+    assert marker["training"]["environment_seed"] == marker["training"]["agent_seed"] == 43
+    assert validate_hand_pose_release_final_rescue_marker(marker) == marker
+    tampered = deepcopy(marker)
+    tampered["training"]["environment_seed"] = 42
+    with pytest.raises(ValueError):
+        validate_hand_pose_release_final_rescue_marker(tampered)
+    for seed in (-1, True, 2**31, "43"):
+        with pytest.raises(ValueError):
+            _marker(training_seed=seed)
+    # The live environment count is recorded, not assumed.
+    assert _marker()["training"]["num_envs"] == 2048
+    small = _marker(num_envs=16)
+    assert validate_hand_pose_release_final_rescue_marker(small)["training"]["num_envs"] == 16
+    for count in (0, -1, True, 16.0):
+        with pytest.raises(ValueError):
+            _marker(num_envs=count)
+
+
 def test_marker_requires_rescuable_failures_covered_by_the_mix():
     for overrides in (
         {"failed_gate_failed_checks": []},

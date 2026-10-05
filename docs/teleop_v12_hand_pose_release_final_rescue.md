@@ -37,8 +37,10 @@ twist-response, locomotion and ONNX check).
   requires the report's checkpoint to be the parent run's `model_14999.pt`
   whose bytes still hash to the report, and lists the failing scenarios;
 - mix: every failing scenario must be replayed by the selected mix;
-- replay: exactly 99 updates, seed 42, 2048 environments, 24 steps, to
-  `model_14999.pt` (completed 15000, Adam step 300000).
+- replay: exactly 99 updates, 2048 environments, 24 steps, to
+  `model_14999.pt` (completed 15000, Adam step 300000); training seed 42 by
+  default, `--seed N` for another draw (training randomness only, recorded in
+  the marker; every gate keeps its own fixed evaluation seeds).
 
 ## Mixes
 
@@ -95,7 +97,7 @@ From a clean commit:
 scripts/train_microban_teleop_v12_hand_pose_release_final_rescue.sh \
   logs/rsl_rl/mjlab_microban_teleop_v12/<RUN>/model_14900.pt \
   artifacts/teleop_v12_gates/<RUN>_model_14999_tracking.json \
-  --mix pr_v1 --agent.run-name lean_v12_pr_final_rescue_pr_v1_14901_to15000
+  --mix pr_v1 [--seed N] --agent.run-name lean_v12_pr_final_rescue_pr_v1_14901_to15000
 scripts/evaluate_microban_teleop_v12_stage.sh <RESCUE_RUN> 14999
 ```
 
