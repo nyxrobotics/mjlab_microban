@@ -39,14 +39,22 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_PROJECTED_GRAVITY,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
+from mjlab_microban.tasks.microban_velocity_runner import require_walk_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 
 TASK = "Mjlab-Velocity-Microban"
-CONTRACT_VERSION = "v3_centered_home_servo_range"
+# HOME-bound: HOME.tag is "centered_home" at the centered HOME (so this is
+# "v3_centered_home_servo_range") and "<label>_<joint hash>" at any other.
+CONTRACT_VERSION = f"v3_{HOME.tag}_servo_range"
 # WalkMove feeds back the ONNX model's own last raw output (mjlab last_action).
 PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 ACTION_SCALE = 1.0
@@ -257,6 +265,7 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
 def _inspect_checkpoint(path: Path) -> tuple[str, int]:
     before = _sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    require_walk_home_pose(checkpoint.get("infos"))
     actor = checkpoint.get("actor_state_dict")
     if not isinstance(actor, dict):
         raise ValueError("Checkpoint has no actor_state_dict")
@@ -331,11 +340,12 @@ def _validate_onnx(path: Path) -> None:
         raise ValueError("Walking ONNX must have one actions output of shape [1, 18]")
     _normalizer_arrays(model)
 
-    # Standing upright and a few commands, at HOME with zero previous action.
+    # Standing at HOME (HOME projected gravity) and a few commands, with zero
+    # previous action.
     evaluator = ReferenceEvaluator(model)
     for command in ((0.0, 0.0, 0.0), (0.3, 0.0, 0.0), (0.0, 0.0, 1.0)):
         observation = np.zeros((1, OBSERVATION_WIDTH), dtype=np.float32)
-        observation[0, 3:6] = (0.0, 0.0, -1.0)
+        observation[0, 3:6] = HOME_PROJECTED_GRAVITY
         observation[0, -3:] = command
         outputs = evaluator.run(None, {"obs": observation})
         if len(outputs) != 1 or outputs[0].shape != (1, ACTION_WIDTH):

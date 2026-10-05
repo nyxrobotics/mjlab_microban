@@ -16,7 +16,11 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    MICROBAN_ROBOT_CFG,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -254,8 +258,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    # HOME keeps the trunk vertical.
-    cfg.rewards["upright"].params["pitch"] = 0.0
+    # Trunk pitch at HOME (config/home_pose.yaml; 0 = vertical, the only
+    # value this training line supports, see microban_constants).
+    cfg.rewards["upright"].params["pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
     
@@ -301,7 +306,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"sensor_name": self_collision_sensor_cfg.name},
     )
 
-    # Foot-site separation is 0.072 m when standing straight
+    # Foot-site separation is about 0.0935 m at the centered HOME; min_dist
+    # must stay below the HOME separation.
     cfg.rewards["feet_distance"] = RewardTermCfg(
         func=feet_distance_penalty,
         weight=-1000.0,

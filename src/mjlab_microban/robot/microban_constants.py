@@ -20,12 +20,29 @@ assert MICROBAN_XML.exists(), f"XML not found: {MICROBAN_XML}"
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(MICROBAN_XML))
 
-# Shared reference pose of every policy (walking, tracking, get-up): trunk
-# vertical, knees straight, and opposite hip/ankle pitches that keep the soles
-# flat with the mass-weighted COM over the centre of the sole contact patches
-# (31 mm to the toe and to the heel; the earlier hip -10 deg pose leaned the
-# trunk 10 deg forward and left 24 mm to the toe).
-HOME_PITCH_RAD = float(np.deg2rad(1.198384259489))
+from mjlab_microban.robot.home_pose import HOME
+
+# Shared reference pose of every policy (walking, tracking, get-up), loaded
+# from config/home_pose.yaml (the single source of truth; see config/README.md).
+# Everything below is derived from that file by MuJoCo FK
+# (robot/home_pose.py): the centered HOME has the trunk vertical, knees
+# straight, and opposite hip/ankle pitches that keep the soles flat with the
+# mass-weighted COM over the centre of the sole contact patches (30.8 mm to the
+# toe and to the heel).
+HOME_PITCH_RAD = HOME.joint_pos_rad["left_hip_pitch"]
+HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad
+HOME_ROOT_POS = HOME.root_pos
+HOME_ROOT_QUAT_WXYZ = HOME.root_quat_wxyz
+HOME_PROJECTED_GRAVITY = HOME.projected_gravity
+# This training line's rewards, velocity/target frames, reset yaw and exporters
+# assume a vertical trunk at HOME.  A trunk-pitched HOME needs the
+# home-levelled frames of the forward-lean line (branch forward-lean-v2).
+if HOME_TRUNK_PITCH_RAD != 0.0:
+    raise NotImplementedError(
+        f"{HOME.path}: trunk_pitch_deg={HOME.trunk_pitch_deg!r}; this training code "
+        "supports only a vertical trunk at HOME (see branch forward-lean-v2 for "
+        "the home-levelled frames a pitched trunk needs)"
+    )
 # Every policy commands target = HOME + action on all body joints, with no
 # software clip, and observes its own raw previous output. The only bound is
 # the servo's own goal-position range: one turn, [-pi, pi) rad. The robot
@@ -38,30 +55,9 @@ SERVO_TARGET_RANGE_RAD = float(np.pi)
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     # The lowest sole collision corner is on the ground at this z.
-    pos=(0.0, 0.0, 0.170554885633559),
-    joint_pos={
-        "head": float(np.deg2rad(0.0)),
-        "neck_roll": float(np.deg2rad(0.0)),
-        "neck_pitch": float(np.deg2rad(0.0)),
-        "left_shoulder_roll": float(np.deg2rad(10.0)),
-        "right_shoulder_roll": float(np.deg2rad(-10.0)),
-        "left_shoulder_pitch": float(np.deg2rad(0.0)),
-        "right_shoulder_pitch": float(np.deg2rad(0.0)),
-        "left_elbow": float(np.deg2rad(-20.0)),
-        "right_elbow": float(np.deg2rad(-20.0)),
-        "left_hip_roll": float(np.deg2rad(5.0)),
-        "right_hip_roll": float(np.deg2rad(-5.0)),
-        "left_hip_pitch": HOME_PITCH_RAD,
-        "right_hip_pitch": HOME_PITCH_RAD,
-        "left_hip_yaw": float(np.deg2rad(0.0)),
-        "right_hip_yaw": float(np.deg2rad(0.0)),
-        "left_knee": float(np.deg2rad(0.0)),
-        "right_knee": float(np.deg2rad(0.0)),
-        "left_ankle_roll": float(np.deg2rad(-5.0)),
-        "right_ankle_roll": float(np.deg2rad(5.0)),
-        "left_ankle_pitch": -HOME_PITCH_RAD,
-        "right_ankle_pitch": -HOME_PITCH_RAD,
-    },
+    pos=HOME_ROOT_POS,
+    rot=HOME_ROOT_QUAT_WXYZ,
+    joint_pos=dict(HOME.joint_pos_rad),
     joint_vel={r".*": 0.0},
 )
 

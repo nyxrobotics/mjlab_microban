@@ -26,14 +26,14 @@ TELEOP_V12_HOME_JOINT_NAMES = (
 
 
 def teleop_v12_home_pose_marker() -> dict[str, Any]:
-    """Return the historical task-local HOME, with both shoulders at zero."""
+    """Return the shared HOME marker (both shoulder pitches are zero)."""
 
     shared_defaults = HOME_FRAME.joint_pos
     if not isinstance(shared_defaults, Mapping):
         raise TypeError("Contract-v12 HOME_FRAME joint pose is malformed")
     defaults = dict(shared_defaults)
-    defaults["left_shoulder_pitch"] = 0.0
-    defaults["right_shoulder_pitch"] = 0.0
+    if defaults.get("left_shoulder_pitch") != 0.0 or defaults.get("right_shoulder_pitch") != 0.0:
+        raise ValueError("Contract-v12 requires HOME shoulder pitch 0 (config/home_pose.yaml)")
     if len(set(TELEOP_V12_HOME_JOINT_NAMES)) != 21 or set(defaults) != set(
         TELEOP_V12_HOME_JOINT_NAMES
     ):

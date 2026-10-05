@@ -81,6 +81,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.mdp import (
     step_based_staged_curriculum,
@@ -121,15 +122,18 @@ _CALM_STAGE = {"calm_roll": 3, "calm_effort_strong": 4, "calm_push": 5}
 # Final (post-curriculum) standing_pose / hip_pose weights; 240/120 for the
 # HOME-stance sets (posture and every calm stage).
 _POSE_FINAL_WEIGHTS = {"v42": (30.0, 15.0), "redesign": (30.0, 15.0)}
-# Lateral distance between the two foot bodies at HOME, by forward kinematics.
-HOME_FEET_LATERAL_M = 0.094
+# Lateral distance between the two foot bodies at HOME, by forward kinematics
+# of config/home_pose.yaml (robot/home_pose.py; 0.1 mm rounding).  The
+# centered HOME keeps its historical 0.094 m target (FK 0.0935 m).
+HOME_FEET_LATERAL_M = HOME.feet_lateral_m
 
 # Virtual head height (trunk COM + 0.07324 m along the trunk's up axis, see
-# mdp._head_height) at HOME: 0.29653 m by MuJoCo forward kinematics. Kneeling
+# mdp._head_height) at HOME by MuJoCo forward kinematics, rounded to 0.1 mm
+# (robot/home_pose.py): 0.2965 m at the centered HOME (FK 0.29653). Kneeling
 # upright reaches 0.226-0.239 and the deepest flat-foot squat 0.222-0.227,
 # so the 0.9x standing gate (0.2669) is above both. 0.260 was tried on 09-28
 # and made a forearm-propped tripod (0.205) earn 91 % of the height reward.
-HEAD_STANDING_HEIGHT = 0.2965
+HEAD_STANDING_HEIGHT = HOME.head_standing_height_m
 STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # Despite the name, _head_height only uses .name to resolve the robot entity.
 HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))

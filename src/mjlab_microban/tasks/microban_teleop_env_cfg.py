@@ -472,13 +472,18 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "y": (0.0, 0.0),
         }
 
-    # Preserve the historical PICO actor's zero shoulder-pitch convention.
-    # The independent full-body task verifies this against the shared HOME.
+    # The PICO actor's HOME has both shoulder pitches at zero (the v12 HOME
+    # revision says "shoulder_zero").  This used to be forced here; it is now
+    # required of config/home_pose.yaml so the robot's NEUTRAL_POSE and the
+    # teleop HOME can never differ.
     teleop_joint_pos = cfg.scene.entities["robot"].init_state.joint_pos
     if teleop_joint_pos is None:
         raise ValueError("Microban teleop requires an explicit initial joint pose")
-    teleop_joint_pos["left_shoulder_pitch"] = 0.0
-    teleop_joint_pos["right_shoulder_pitch"] = 0.0
+    for name in ("left_shoulder_pitch", "right_shoulder_pitch"):
+        if teleop_joint_pos[name] != 0.0:
+            raise ValueError(
+                f"Microban teleop requires HOME {name} = 0 (config/home_pose.yaml)"
+            )
 
     # Head yaw + two neck axes are owned by the HMD controller.  Exact names make
     # accidental action-space growth fail loudly in the smoke test/exporter.

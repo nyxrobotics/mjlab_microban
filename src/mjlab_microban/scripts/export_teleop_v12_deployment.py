@@ -28,6 +28,7 @@ import torch
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx, list_to_csv_str
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
@@ -117,8 +118,9 @@ SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
         FINAL_COMPLETION_ALLOWANCE_PROFILE,
     )
 )
+# HOME-bound (HOME.tag, see microban_teleop_v12_env_cfg).
 PACKAGER_REVISION = (
-    "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
+    f"microban_teleop_v12_final_deployment_packager_v6_{HOME.tag}_servo_range"
 )
 RUNTIME_GUARD_FORMULA = "max(v12_absmax,source_absmax+delta_absmax)*multiplier"
 RUNTIME_GUARD_MULTIPLIER = 6.0

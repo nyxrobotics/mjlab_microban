@@ -52,6 +52,16 @@ Here is a video of the trained agent being transferred to the real robot: [https
   <img width="70%" alt="image" src="https://github.com/user-attachments/assets/dd91b082-faf0-4c73-a216-fe9b633f51b3" />
 </p>
 
+## HOME pose
+
+Every policy (walking, get-up, PICO teleop) is trained and deployed at one
+HOME pose, defined only in [`config/home_pose.yaml`](config/README.md).
+Root height, gravity at HOME, get-up targets, hand FK bounds and the HOME
+identity strings are derived from it by MuJoCo FK
+(`src/mjlab_microban/robot/home_pose.py`). Changing it means retraining every
+policy and regenerating the robot copy with
+`uv run python config/home_pose_tool.py write-robot --microban-repo ../microban`.
+
 ## Training your own agent
 
 You can modify the environment configuration at `src/mjlab_microban/tasks/microban_velocity_env_cfg.py`.

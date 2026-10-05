@@ -41,6 +41,7 @@ from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.robot.microban_constants import HOME_PROJECTED_GRAVITY
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
     MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M,
@@ -1897,8 +1898,9 @@ def deterministic_teleop_parity_inputs(
     lower, upper = _representative_observation_bounds()
     midpoint = (lower + upper) * np.float32(0.5)
     neutral = np.zeros(MICROBAN_TELEOP_OBSERVATION_WIDTH, dtype=np.float32)
-    # A level robot observes gravity along -Z in the body frame.
-    neutral[5] = -1.0
+    # Standing at HOME the trunk observes the HOME projected gravity
+    # ((0, 0, -1) for the vertical-trunk HOME).
+    neutral[3:6] = HOME_PROJECTED_GRAVITY
     rows = [neutral, lower, upper, midpoint]
     rng = np.random.default_rng(seed)
     if sample_count > len(rows):

@@ -29,7 +29,10 @@ from onnx.reference import ReferenceEvaluator
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.robot.microban_constants import SERVO_TARGET_RANGE_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_PROJECTED_GRAVITY,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD
 from mjlab_microban.tasks.microban_getup_runner import (
     GETUP_ANGULAR_VELOCITY_FRAME,
@@ -152,7 +155,7 @@ def _validate_onnx(path: Path) -> None:
     # Screen a small set of physically meaningful initial orientations for
     # non-finite output, the runtime's only actor fault.
     evaluator = ReferenceEvaluator(model)
-    for gravity in ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)):
+    for gravity in (HOME_PROJECTED_GRAVITY, (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)):
         observation = np.zeros((1, OBSERVATION_WIDTH), dtype=np.float32)
         observation[0, 3:6] = gravity
         outputs = evaluator.run(None, {"obs": observation})

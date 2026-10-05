@@ -8,11 +8,16 @@ joint order ``(shoulder_pitch, shoulder_roll, elbow)``.
 
 from __future__ import annotations
 
+import hashlib
 import math
 
 import torch
 
-MICROBAN_HAND_FK_REVISION = (
+from mjlab_microban.robot.home_pose import HOME
+
+# Revision of the FK box computed at the legacy arm HOME below; another arm
+# HOME appends its own hash (see _derive_hand_fk_bounds).
+_LEGACY_HAND_FK_REVISION = (
     "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_v2"
 )
 MICROBAN_HAND_SIDE_ORDER = ("left", "right")
@@ -26,10 +31,8 @@ MICROBAN_ARM_JOINT_UPPER_DEG = (
     (25.0, 30.0, -10.0),
     (25.0, -10.0, -10.0),
 )
-MICROBAN_ARM_HOME_JOINT_DEG = (
-    (0.0, 10.0, -20.0),
-    (0.0, -10.0, -20.0),
-)
+# The arm part of HOME (config/home_pose.yaml), (left, right) x (pitch, roll, elbow).
+MICROBAN_ARM_HOME_JOINT_DEG = HOME.arm_joint_deg()
 MICROBAN_ARM_JOINT_LOWER_RAD = tuple(
     tuple(math.radians(value) for value in side)
     for side in MICROBAN_ARM_JOINT_LOWER_DEG
@@ -43,13 +46,18 @@ MICROBAN_ARM_HOME_JOINT_RAD = tuple(
 )
 
 # A 401^3 grid per side over the complete joint box produced these exact-FK
-# extrema in trunk-frame metres.  The bilateral chains mirror only Y.
+# extrema in trunk-frame metres, as offsets from the hand FK at the legacy arm
+# HOME (0, +-10, -20) deg.  The bilateral chains mirror only Y.
 MICROBAN_HAND_FK_BOUND_GRID_POINTS_PER_AXIS = 401
-MICROBAN_HAND_FK_OFFSET_AABB_MIN_M = (
+_LEGACY_ARM_HOME_JOINT_DEG = (
+    (0.0, 10.0, -20.0),
+    (0.0, -10.0, -20.0),
+)
+_LEGACY_HAND_FK_OFFSET_AABB_MIN_M = (
     (-0.06120170602356862, -0.0034550417440758485, -0.0035619649312883805),
     (-0.06120170602356864, -0.0387512193701912, -0.0035619649312883944),
 )
-MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
+_LEGACY_HAND_FK_OFFSET_AABB_MAX_M = (
     (0.06289464331528255, 0.0387512193701912, 0.060477220857479266),
     (0.06289464331528258, 0.0034550417440758485, 0.060477220857479225),
 )
@@ -58,7 +66,7 @@ MICROBAN_HAND_FK_OFFSET_AABB_MAX_M = (
 # These are actor-normalizer denominators, not the wire protocol's ±0.08 m
 # command envelope.  The reachable joint/FK subset also remains strictly
 # inside the receiver's independently validated ±0.064 m live margin.
-MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0630, 0.0388, 0.0605)
+_LEGACY_HAND_TARGET_NORMALIZER_ABS_BOUND_M = (0.0630, 0.0388, 0.0605)
 MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M = (0.08, 0.08, 0.08)
 MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M = (0.064, 0.064, 0.064)
 
@@ -176,6 +184,61 @@ def microban_default_hand_positions(
         MICROBAN_ARM_HOME_JOINT_RAD, dtype=dtype, device=torch.device(device)
     )
     return microban_hand_positions_from_arm_joints(home)
+
+
+def _derive_hand_fk_bounds() -> tuple[
+    str,
+    tuple[tuple[float, float, float], tuple[float, float, float]],
+    tuple[tuple[float, float, float], tuple[float, float, float]],
+    tuple[float, float, float],
+]:
+    """Return (revision, offset AABB min, max, normalizer) at the current arm HOME.
+
+    The joint box's absolute hand-position AABB does not depend on HOME, so an
+    offset AABB at another arm HOME is the legacy one shifted by the FK
+    difference of the two HOMEs.  The legacy arm HOME keeps its recorded values
+    bit for bit.  Another arm HOME rounds the normalizer outward to 0.1 mm and
+    must stay inside the receiver's validated runtime box.
+    """
+
+    if MICROBAN_ARM_HOME_JOINT_DEG == _LEGACY_ARM_HOME_JOINT_DEG:
+        return (
+            _LEGACY_HAND_FK_REVISION,
+            _LEGACY_HAND_FK_OFFSET_AABB_MIN_M,
+            _LEGACY_HAND_FK_OFFSET_AABB_MAX_M,
+            _LEGACY_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+        )
+    to_rad = lambda table: torch.tensor(  # noqa: E731
+        [[math.radians(value) for value in side] for side in table], dtype=torch.float64
+    )
+    shift = microban_hand_positions_from_arm_joints(
+        to_rad(_LEGACY_ARM_HOME_JOINT_DEG)
+    ) - microban_hand_positions_from_arm_joints(to_rad(MICROBAN_ARM_HOME_JOINT_DEG))
+    low = torch.tensor(_LEGACY_HAND_FK_OFFSET_AABB_MIN_M, dtype=torch.float64) + shift
+    high = torch.tensor(_LEGACY_HAND_FK_OFFSET_AABB_MAX_M, dtype=torch.float64) + shift
+    extreme = torch.maximum(low.abs(), high.abs()).amax(dim=0)
+    normalizer = tuple(math.ceil(float(value) * 1.0e4 - 1.0e-9) / 1.0e4 for value in extreme)
+    for value, limit in zip(normalizer, MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M):
+        if value >= limit:
+            raise ValueError(
+                f"Arm HOME {MICROBAN_ARM_HOME_JOINT_DEG} moves the reachable hand box "
+                f"outside the runtime-validated +-{limit} m receiver box"
+            )
+    digest = hashlib.sha256(repr(MICROBAN_ARM_HOME_JOINT_DEG).encode("ascii")).hexdigest()
+    return (
+        f"{_LEGACY_HAND_FK_REVISION}_arm_home_{digest[:10]}",
+        tuple(tuple(float(v) for v in side) for side in low.tolist()),  # type: ignore[return-value]
+        tuple(tuple(float(v) for v in side) for side in high.tolist()),  # type: ignore[return-value]
+        normalizer,  # type: ignore[return-value]
+    )
+
+
+(
+    MICROBAN_HAND_FK_REVISION,
+    MICROBAN_HAND_FK_OFFSET_AABB_MIN_M,
+    MICROBAN_HAND_FK_OFFSET_AABB_MAX_M,
+    MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+) = _derive_hand_fk_bounds()
 
 
 def microban_hand_offsets_from_arm_joints(
