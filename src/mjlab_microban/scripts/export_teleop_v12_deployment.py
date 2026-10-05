@@ -893,10 +893,21 @@ def _final_rescue_metadata(
             "Final v12 gate does not record the checkpoint's pose-release final "
             "rescue marker"
         )
+    # The rescue trains on the final gate's own evaluator scenarios (exact
+    # commands, and for the push mixes also its fixed perturbation), so that
+    # gate is not a held-out test for them.  Say so in the package instead of
+    # leaving it implicit in the marker JSON.
+    replay = (
+        "evaluator_scenario_commands_and_perturbation"
+        if "scenario_push" in marker
+        else "evaluator_scenario_commands"
+    )
     return {
         "v12_final_rescue_marker_revision": str(marker["revision"]),
         "v12_final_rescue_marker_json": _json(marker),
         "v12_final_rescue_marker_sha256": _canonical_json_sha256(marker),
+        "v12_final_rescue_training_replay": replay,
+        "v12_final_rescue_final_gate_held_out": "false",
     }
 
 
