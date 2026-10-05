@@ -124,6 +124,18 @@ V12_POSE_RELEASE_CORNER_RESCUE_MIX_REVISIONS = {
     "lf90": _pose_release_corner_rescue("lf90", 90, 5, "pose_release_"),
 }
 
+# Pose-release final-scenario rescue of the 15000 boundary (forward-lean-v2
+# fc1c313; the forward-lean HOME keeps its published strings).
+V12_PR_FINAL_RESCUE_MARKER_REVISION = HOME.contract(
+    "v12_pr_final_rescue_marker_revision",
+    f"recorded_pose_release_model14900_failed_final_scenarios_replay_99_updates_{_TAG}_v1",
+)
+V12_PR_FINAL_RESCUE_SAMPLER_REVISION = _contract(
+    "v12_pr_final_rescue_sampler_revision",
+    f"episode_shared_twist_foot_hand_failed_scenario_replay_pose_release_{_TAG}_v1",
+    f"episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_pose_release_{_TAG}_v1",
+)
+
 # Independent upright full-body teleop task.
 UPRIGHT_FULLBODY_RECIPE_REVISION = _contract(
     "upright_fullbody_recipe_revision",

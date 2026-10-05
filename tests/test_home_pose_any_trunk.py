@@ -8,7 +8,9 @@ on exactly:
 * the forward-lean HOME (tests/fixtures/home_pose_forward_lean.yaml: what
   ``config/balance_home_pose.py --trunk-pitch-deg 10 --write`` writes into a copy
   of the centered YAML, with name/label edited) reproduces forward-lean-v2
-  (7ceb280; its walking and get-up tasks are those of forward-lean-centered-home).
+  with its pose-release final rescue (lean-final-rescue 5e316fe = forward-lean-v2
+  eb02a05 + fc1c313 + 5e316fe; its walking and get-up tasks are those of
+  forward-lean-centered-home).
 
 "Reproduces" means every module constant, every HOME-derived function result
 and the repr of every registered task's env / play / RL config and runner of
@@ -49,7 +51,7 @@ LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
 CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
 REFERENCES = {
     "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
-    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_7ceb280.json",
+    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_lean-final-rescue_5e316fe.json",
 }
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 import home_equivalence  # noqa: E402
@@ -272,6 +274,8 @@ class DerivedHomeStringsTest(unittest.TestCase):
                         " 'getup': c.GETUP_CONTRACT_VERSION, 'legacy': c.GETUP_LEGACY_STAMP,"
                         " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION,"
                         " 'corner': c.V12_CORNER_RESCUE_RECIPE_REVISION,"
+                        " 'pr_final': [c.V12_PR_FINAL_RESCUE_MARKER_REVISION,"
+                        " c.V12_PR_FINAL_RESCUE_SAMPLER_REVISION],"
                         " 'switch': c.V12_POSE_RELEASE_SWITCH_PARENT_SHA256}))",
                     )
                 )
@@ -288,6 +292,9 @@ class DerivedHomeStringsTest(unittest.TestCase):
                 )
                 self.assertIn(tag, result["packager"])
                 self.assertIn(tag, result["corner"])
+                # The pose-release final rescue's strings carry the HOME too.
+                self.assertTrue(all(tag in value for value in result["pr_final"]), result["pr_final"])
+                self.assertEqual("home_levelled" in result["pr_final"][1], pitch != 0.0)
 
 
 class ForwardLeanOnlyTestsTest(unittest.TestCase):
@@ -327,6 +334,30 @@ class ForwardLeanOnlyTestsTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-2000:])
         self.assertIn(f"{len(self.NODES)} passed", completed.stdout)
         self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
+
+    def test_pose_release_final_rescue_tests_pass_at_the_forward_lean_home(self):
+        """forward-lean-v2's final rescue (fc1c313/5e316fe) with its published strings."""
+
+        try:
+            import pytest  # noqa: F401
+        except ImportError:
+            self.skipTest("pytest is not installed")
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs",
+             "tests/test_teleop_v12_hand_pose_release_final_rescue.py"],
+            env=_environment(LEAN_YAML), cwd=REPO_ROOT, capture_output=True, text=True,
+            timeout=1800, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-2000:])
+        self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
+        marker = _run_python(LEAN_YAML, (
+            "from mjlab_microban.tasks import microban_teleop_v12_hand_pose_release_final_rescue as m;"
+            "print(m.MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MARKER_REVISION + ' ' + "
+            "m.MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SAMPLER_REVISION)"))
+        self.assertEqual(marker.split(), [
+            "recorded_pose_release_model14900_failed_final_scenarios_replay_99_updates_forward_lean_v1",
+            "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_pose_release_v1",
+        ])
 
 
 def _git_show(commit: str, path: str, destination: Path) -> bool:

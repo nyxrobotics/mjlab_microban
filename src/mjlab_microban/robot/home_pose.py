@@ -262,6 +262,14 @@ _FORWARD_LEAN_HOME_CONTRACTS = {
     "v12_pr_corner_rescue_lf90_sampler_revision": (
         "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_pose_release_v1"
     ),
+    "v12_pr_final_rescue_marker_revision": (
+        "recorded_pose_release_model14900_failed_final_scenarios_replay_"
+        "99_updates_forward_lean_v1"
+    ),
+    "v12_pr_final_rescue_sampler_revision": (
+        "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_"
+        "pose_release_v1"
+    ),
     "upright_fullbody_recipe_revision": (
         "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_"
         "receiver_box_hands_v6"

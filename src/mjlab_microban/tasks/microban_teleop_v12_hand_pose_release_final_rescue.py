@@ -43,6 +43,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
+from mjlab_microban.robot import home_contracts
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M,
     MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M,
@@ -80,12 +81,10 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID = (
     "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban"
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MARKER_REVISION = (
-    "recorded_pose_release_model14900_failed_final_scenarios_replay_"
-    "99_updates_forward_lean_v1"
+    home_contracts.V12_PR_FINAL_RESCUE_MARKER_REVISION
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SAMPLER_REVISION = (
-    "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_"
-    "pose_release_v1"
+    home_contracts.V12_PR_FINAL_RESCUE_SAMPLER_REVISION
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIX_ENV = (
     "MICROBAN_V12_PR_FINAL_RESCUE_MIX"
