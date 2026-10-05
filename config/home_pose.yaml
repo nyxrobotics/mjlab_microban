@@ -9,13 +9,15 @@
 # src/mjlab_microban/robot/microban/robot.xml).
 #
 # Changing HOME (see config/README.md):
-#   1. edit the values below (or run config/balance_home_pose.py),
-#   2. uv run python config/home_pose_tool.py show      # check derived values
-#   3. retrain walking, get-up and PICO v12 from scratch (old checkpoints and
-#      ONNX are refused: their HOME tag/stamp no longer matches),
+#   1. edit the values below,
+#   2. optionally re-centre the COM by moving only hip/ankle pitch:
+#      uv run python config/balance_home_pose.py [--write] [--trunk-pitch-deg X]
+#   3. uv run python config/home_pose_tool.py show      # check derived values
 #   4. uv run python config/home_pose_tool.py write-robot --microban-repo ../microban
-#      and install the new policies in the robot repo,
-#   5. commit both repos.
+#   5. retrain walking, get-up and PICO v12 from scratch (old checkpoints and
+#      ONNX are refused: their HOME tag/stamp no longer matches), install the
+#      new policies in the robot repo,
+#   6. run both test suites and commit both repos.
 #
 # Joint angles are in degrees, logical (training/MJCF) joint coordinates.  The
 # pose must be left/right mirror symmetric and the soles must be flat at

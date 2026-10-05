@@ -648,5 +648,18 @@ def rewrite_home_pose_yaml(
     return text
 
 
-HOME = load_home_pose()
-"""The HOME of this checkout (``config/home_pose.yaml``)."""
+def __getattr__(name: str) -> object:
+    """Load ``HOME`` (the HOME of this checkout) on first access.
+
+    ``from mjlab_microban.robot.home_pose import HOME`` loads and checks
+    ``config/home_pose.yaml`` once and caches the result.  Loading lazily
+    keeps this module importable while the YAML is being edited (for example
+    a knee change that ``config/balance_home_pose.py`` has not re-levelled
+    yet); only code that actually needs the HOME is refused.
+    """
+
+    if name == "HOME":
+        home = load_home_pose()
+        globals()["HOME"] = home
+        return home
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

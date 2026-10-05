@@ -33,17 +33,51 @@
 
 ## HOMEを変える手順
 
-1. `home_pose.yaml` を編集する。重心合わせだけなら `uv run python config/balance_home_pose.py` を使う。
-2. `uv run python config/home_pose_tool.py show` で、根元高さ・余裕・頭高さ・`tag` を確認する。
-3. すべてを最初から学習し直す: 歩行（`Mjlab-Velocity-Microban` 15000回とその続き、プローブで選択）、
+```text
+home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.py show / write-robot → 全ポリシー再学習 → 両リポジトリでコミット
+```
+
+1. `home_pose.yaml` を編集する（膝・腕・体幹ピッチなど）。
+2. （任意）`uv run python config/balance_home_pose.py` で重心を合わせる。既定は確認だけ（dry run）で、
+   `--write` を付けると股・足首ピッチの4つの値だけを書き換える（後述）。
+3. `uv run python config/home_pose_tool.py show` で、根元高さ・余裕・頭高さ・`tag` を確認する。
+   必要なら `name` と `label` も新しい姿勢に合わせて直す。
+4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban` でロボット側の
+   `config/home_pose.yaml` を書き出す（`--check` で最新か確認できる）。
+5. すべてを最初から学習し直す: 歩行（`Mjlab-Velocity-Microban` 15000回とその続き、プローブで選択）、
    起き上がり5段階、PICO v12（`scripts/train_microban_teleop_v12.sh start --source ... --hand-pose-release`）。
    歩行チェックポイントには `microban_walk_home_pose` が記録され、v12の開始時に現在のHOMEと照合される。
-4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban` でロボット側の
-   `config/home_pose.yaml` を書き出し、3つのポリシーをロボットの `src/agents/` に入れる。
-   ロボット側では `tests/test_shared_home.py` の固定値と、ランごとに変わる値
-   （`pico_hybrid.py` の歩行ソースSHA、`tools/validate_pico_policy.py` の `walk.onnx` SHA）も更新する。
-   PICOのパッケージは、そのロボット側ツリーに対して作る（`--microban-repo`）。
-5. 両方のリポジトリでテストを通し、コミットする。
+6. 3つのポリシーをロボットの `src/agents/` に入れる。ロボット側では `tests/test_shared_home.py` の固定値と、
+   ランごとに変わる値（`pico_hybrid.py` の歩行ソースSHA、`tools/validate_pico_policy.py` の `walk.onnx` SHA）
+   も更新する。PICOのパッケージは、そのロボット側ツリーに対して作る（`--microban-repo`）。
+7. 両方のリポジトリでテストを通し、コミットする。
+
+## 重心合わせツール（`balance_home_pose.py`）
+
+```bash
+uv run python config/balance_home_pose.py                         # 確認だけ: 変更前後の表を表示
+uv run python config/balance_home_pose.py --write                 # yamlを書き換える
+uv run python config/balance_home_pose.py --trunk-pitch-deg 10    # 体幹ピッチも変える（既定はyamlの値のまま）
+uv run python config/balance_home_pose.py --check                 # 釣り合っていなければ終了コード1
+uv run python config/balance_home_pose.py --yaml path/to/home.yaml
+```
+
+- **動かすのは股ピッチと足首ピッチだけ**（左右同じ値）。膝・腕・ロール・体幹ピッチなど他の値はそのまま。
+- **満たす条件は2つ**（`home_pose.py` の `analyze_pose` と同じ定義、`robot.xml` の MuJoCo FK）:
+  1. 体幹ピッチで両足裏が水平（`flat_sole_trunk_pitch_rad` = 目標の体幹ピッチ）
+  2. 全身重心のxが、足裏接地面（地面に触れている足裏collision boxの角）の前後範囲の中央に一致
+- **解き方**: 足裏を水平にした状態の2残差に対するNewton法（中心差分ヤコビアン）。収束しなければ股ピッチの
+  範囲を走査し、各点で足首が足裏を水平に保つ条件のもとでBrent法を使う。収束判定は 1e-13 rad、1e-13 m。
+- **拒否する場合**: 左右のピッチ値が違う、他の関節が左右非対称・範囲外、収束しない、
+  解がMJCFの可動範囲や学習のソフトリミット（範囲の中央90 %）の外、重心が足裏中央に届かない。
+  エラーのときyamlは変更しない。
+- **書き換え**: `--write` は4つのピッチ値（`--trunk-pitch-deg` で変えたときは `trunk_pitch_deg` も）だけを、
+  コメントと行の順序を残したまま、floatの全桁で書き換える。その後ローダーで読み直して検査する。
+  すでに釣り合っているyamlは変更しない（何度実行しても同じ）。
+- **再現できる今日の解**:
+  - 体幹 0°: 股 +1.198384259489°、足首 −1.198384259489°、root z 0.170554885633559、余裕 30.83/30.83 mm（現在のyamlがそのまま解）
+  - 体幹 +10°: 股 −14.166561199931117°、足首 +4.127976841869192°、root z 0.170430569776402、余裕 30.96/30.96 mm
+- この学習ラインは体幹ピッチ 0 だけに対応している。0以外を書いた場合はツールが注意を表示する。
 
 ## Pythonからの利用（重心合わせなどのツール向け）
 
