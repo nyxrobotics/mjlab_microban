@@ -284,7 +284,11 @@ the boundary it continues. Its gate records `boundary_completed_updates`
 Checkpoint infos carry no parent hash, so the packager follows the resume
 chain each run directory records in `params/agent.yaml` (`load_run: ^RUN$`,
 `load_checkpoint: ^model_N[.]pt$`) from the final checkpoint back to the first
-run that did not resume (or a corner-rescue seed copy without params).
+run that did not resume (or a corner-rescue seed copy without params). The
+pose-release final rescue's seed (`pr_final_rescue_seed_<sha16>/`) carries a
+byte copy of its parent run's `params/agent.yaml`, so the walk continues from
+the staged `model_14900` to the parent run's gated 10100 canary and 10000
+boundary (docs/teleop_v12_hand_pose_release_final_rescue.md).
 `--boundary-gate GATE.json` (repeatable) names earlier canonical-boundary or
 activation-canary gates explicitly. Each gate is fully revalidated. Its
 checkpoint must lie on that resume chain, so a sibling with the same markers

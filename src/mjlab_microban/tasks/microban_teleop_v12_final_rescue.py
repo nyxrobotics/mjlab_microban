@@ -201,42 +201,82 @@ def final_rescue_mix_probabilities(name: str) -> dict[str, float]:
     }
 
 
-@lru_cache(maxsize=1)
-def final_rescue_scenario_commands() -> dict[str, dict[str, Any]]:
-    """Return the evaluator's exact final-profile commands for both scenarios.
+# Every final-profile scenario with active hands, named by the reachable arm
+# poses whose FK offsets the evaluator uses (``_scenarios``: left from the first
+# name, right from the second, right roll mirrored).  The pose-release final
+# rescue may replay any final-profile scenario; scenarios without active hands
+# (``low_forward``, ``bounded_both_feet``) keep both hands inactive at HOME.
+_EVALUATOR_SCENARIO_HAND_POSE_NAMES = {
+    "max_hands_left": ("F", "B"),
+    "max_hands_right": ("B", "F"),
+    "max_keypoints_left": ("F", "B"),
+    "max_keypoints_right": ("B", "F"),
+    "mixed_forward_left": ("f", "b"),
+    "mixed_backward_right": ("b", "f"),
+}
+if any(
+    _EVALUATOR_SCENARIO_HAND_POSE_NAMES[name] != pose_names
+    for name, pose_names in _SCENARIO_HAND_POSE_NAMES.items()
+):
+    raise RuntimeError("Final rescue hand pose tables disagree")
 
-    Twist and foot targets are read from the tracking evaluator itself; the hand
-    targets are trained through the named arm joint tuples whose FK offsets the
-    evaluator uses, and they are checked against the evaluator's offsets.
+
+@lru_cache(maxsize=8)
+def evaluator_scenario_commands(
+    names: tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Return the evaluator's exact final-profile commands for ``names``.
+
+    Twist and foot targets are read from the tracking evaluator itself; active
+    hand targets are trained through the named arm joint tuples whose FK
+    offsets the evaluator uses, and they are checked against the evaluator's
+    offsets.  A scenario without active hands must have both hands inactive
+    with zero targets; its arm joints are the HOME pose.
     """
 
     # Lazy import: the evaluator imports the task package.
+    from mjlab_microban.robot.microban_hand_fk import MICROBAN_ARM_HOME_JOINT_DEG
     from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
         FINAL_DEPLOYED_ACCURACY_PROFILE,
         _scenarios,
     )
 
+    if not isinstance(names, tuple) or not names or len(set(names)) != len(names):
+        raise ValueError("Final rescue scenarios must be distinct names")
     by_name = {item.name: item for item in _scenarios(FINAL_DEPLOYED_ACCURACY_PROFILE)}
     poses = dict(MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG)
     result: dict[str, dict[str, Any]] = {}
-    for name in MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS:
+    for name in names:
+        if name not in by_name:
+            raise ValueError(f"{name!r} is not a final-profile evaluator scenario")
         scenario = by_name[name]
-        left_name, right_name = _SCENARIO_HAND_POSE_NAMES[name]
-        left = poses[left_name]
-        right = poses[right_name]
-        joints_deg = [
-            [float(left[0]), float(left[1]), float(left[2])],
-            [float(right[0]), -float(right[1]), float(right[2])],
-        ]
-        # HOME-levelled target frame, exactly as the evaluator builds it.
-        offsets = microban_hand_target_offsets_from_arm_joints(
-            torch.deg2rad(torch.tensor(joints_deg, dtype=torch.float64))
-        )
-        expected = torch.tensor(scenario.hand_target, dtype=torch.float64)
-        if not torch.allclose(offsets, expected, atol=1.0e-9, rtol=0.0):
-            raise RuntimeError(f"Final rescue hand joints drifted from {name}")
-        if tuple(scenario.hand_active) != (True, True):
-            raise RuntimeError(f"Final rescue scenario {name} must use both hands")
+        hand_active = tuple(bool(value) for value in scenario.hand_active)
+        if hand_active == (True, True):
+            pose_names = _EVALUATOR_SCENARIO_HAND_POSE_NAMES.get(name)
+            if pose_names is None:
+                raise RuntimeError(f"Final rescue has no hand poses for {name}")
+            left_name, right_name = pose_names
+            left = poses[left_name]
+            right = poses[right_name]
+            joints_deg = [
+                [float(left[0]), float(left[1]), float(left[2])],
+                [float(right[0]), -float(right[1]), float(right[2])],
+            ]
+            # HOME-levelled target frame, exactly as the evaluator builds it.
+            offsets = microban_hand_target_offsets_from_arm_joints(
+                torch.deg2rad(torch.tensor(joints_deg, dtype=torch.float64))
+            )
+            expected = torch.tensor(scenario.hand_target, dtype=torch.float64)
+            if not torch.allclose(offsets, expected, atol=1.0e-9, rtol=0.0):
+                raise RuntimeError(f"Final rescue hand joints drifted from {name}")
+            joint_pose_names: list[str] | None = [left_name, right_name]
+        elif hand_active == (False, False):
+            if any(float(value) != 0.0 for xyz in scenario.hand_target for value in xyz):
+                raise RuntimeError(f"Inactive-hand scenario {name} has hand targets")
+            joints_deg = [[float(value) for value in side] for side in MICROBAN_ARM_HOME_JOINT_DEG]
+            joint_pose_names = None
+        else:
+            raise RuntimeError(f"Final rescue scenario {name} must use both or no hands")
         result[name] = {
             "twist": [float(value) for value in scenario.twist],
             "foot_target": [
@@ -245,11 +285,35 @@ def final_rescue_scenario_commands() -> dict[str, dict[str, Any]]:
             "hand_target": [
                 [float(value) for value in xyz] for xyz in scenario.hand_target
             ],
-            "hand_active": [True, True],
-            "hand_joint_pose_names": [left_name, right_name],
+            "hand_active": list(hand_active),
+            "hand_joint_pose_names": joint_pose_names,
             "hand_joint_deg": joints_deg,
         }
     return result
+
+
+def final_rescue_scenario_commands() -> dict[str, dict[str, Any]]:
+    """Return the evaluator's exact final-profile commands for both scenarios."""
+
+    return deepcopy(evaluator_scenario_commands(MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS))
+
+
+def final_rescue_sampler_spec(mix: str) -> tuple[tuple[str, ...], dict[str, float]]:
+    """(replayed scenarios, ordinary + per-scenario probabilities) of any mix.
+
+    The canonical mixes (v1-v5) replay ``MICROBAN_TELEOP_V12_FINAL_RESCUE_
+    SCENARIOS``; the pose-release final rescue registers its own mixes
+    (``microban_teleop_v12_hand_pose_release_final_rescue``), each naming the
+    failed final-gate scenarios it replays.
+    """
+
+    if isinstance(mix, str) and mix in MICROBAN_TELEOP_V12_FINAL_RESCUE_MIXES:
+        return MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS, final_rescue_mix_probabilities(mix)
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        hand_pose_release_final_rescue_sampler_spec,
+    )
+
+    return hand_pose_release_final_rescue_sampler_spec(mix)
 
 
 class _FinalRescuePatternState:
@@ -262,12 +326,13 @@ class _FinalRescuePatternState:
     """
 
     def __init__(self, *, num_envs: int, device: torch.device | str, mix: str):
-        self.mix = validate_final_rescue_mix(mix)
-        probabilities = final_rescue_mix_probabilities(mix)
+        scenarios, probabilities = final_rescue_sampler_spec(mix)
+        self.mix = mix
+        self.scenarios = scenarios
         values = torch.tensor(
             [
                 probabilities["ordinary"],
-                *(probabilities[name] for name in MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS),
+                *(probabilities[name] for name in scenarios),
             ],
             dtype=torch.float64,
         )
@@ -283,7 +348,7 @@ class _FinalRescuePatternState:
     def _draw(self, count: int) -> torch.Tensor:
         draws = torch.rand(count, device=self.device, dtype=torch.float64)
         return torch.searchsorted(self._cumulative, draws, right=True).clamp_(
-            max=len(MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS)
+            max=len(self.scenarios)
         )
 
     def on_reset(self, term_key: str, env_ids: torch.Tensor) -> None:
@@ -323,10 +388,12 @@ def final_rescue_pattern_state(env: Any, mix: str) -> _FinalRescuePatternState:
     return state
 
 
-def _scenario_tensor(key: str, *, device: Any, dtype: torch.dtype) -> torch.Tensor:
-    commands = final_rescue_scenario_commands()
+def _scenario_tensor(
+    key: str, *, scenarios: tuple[str, ...], device: Any, dtype: torch.dtype
+) -> torch.Tensor:
+    commands = evaluator_scenario_commands(scenarios)
     return torch.tensor(
-        [commands[name][key] for name in MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS],
+        [commands[name][key] for name in scenarios],
         device=device,
         dtype=dtype,
     )
@@ -341,7 +408,10 @@ class FinalRescueTwistCommand(UniformVelocityCommandWithRotation):
         super().__init__(cfg, env)
         self._final_rescue = final_rescue_pattern_state(env, cfg.final_rescue_mix)
         self._scenario_twist = _scenario_tensor(
-            "twist", device=self.device, dtype=self.vel_command_b.dtype
+            "twist",
+            scenarios=self._final_rescue.scenarios,
+            device=self.device,
+            dtype=self.vel_command_b.dtype,
         )
 
     def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
@@ -376,7 +446,10 @@ class FinalRescueFootTargetCommand(ResetFixedFootTargetCommand):
         super().__init__(cfg, env)
         self._final_rescue = final_rescue_pattern_state(env, cfg.final_rescue_mix)
         self._scenario_foot = _scenario_tensor(
-            "foot_target", device=self.device, dtype=self.foot_target_offset_b.dtype
+            "foot_target",
+            scenarios=self._final_rescue.scenarios,
+            device=self.device,
+            dtype=self.foot_target_offset_b.dtype,
         )
 
     def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
@@ -389,11 +462,16 @@ class FinalRescueFootTargetCommand(ResetFixedFootTargetCommand):
         if len(ids) == 0:
             return
         value = self._scenario_foot[scenario]
-        norms = value.norm(dim=-1)
+        lifted = value.norm(dim=-1).gt(0.0)
+        # Both feet lifted (``bounded_both_feet``) uses the ordinary sampler's
+        # stationary two-foot regime; one lifted foot is single support.  The
+        # canonical scenarios lift at most one foot, so their flags are as
+        # before (single support, never both feet).
+        both = lifted.all(dim=-1)
         self.foot_target_offset_b[ids] = value
-        self.is_single_support_env[ids] = norms.gt(0.0).any(dim=-1)
-        self.lifted_foot_idx[ids] = norms.argmax(dim=-1)
-        self.is_both_feet_env[ids] = False
+        self.is_single_support_env[ids] = lifted.any(dim=-1) & ~both
+        self.lifted_foot_idx[ids] = value.norm(dim=-1).argmax(dim=-1)
+        self.is_both_feet_env[ids] = both
 
 
 class FinalRescueHandTargetCommand(ResetFixedHandTargetCommand):
@@ -405,11 +483,24 @@ class FinalRescueHandTargetCommand(ResetFixedHandTargetCommand):
         super().__init__(cfg, env)
         self._final_rescue = final_rescue_pattern_state(env, cfg.final_rescue_mix)
         dtype = self.hand_target_offset_b.dtype
+        scenarios = self._final_rescue.scenarios
         self._scenario_joints = torch.deg2rad(
-            _scenario_tensor("hand_joint_deg", device=self.device, dtype=dtype)
+            _scenario_tensor(
+                "hand_joint_deg", scenarios=scenarios, device=self.device, dtype=dtype
+            )
         )
-        self._scenario_offsets = microban_hand_target_offsets_from_arm_joints(
+        commands = evaluator_scenario_commands(scenarios)
+        self._scenario_active = torch.tensor(
+            [commands[name]["hand_active"] for name in scenarios],
+            dtype=torch.bool,
+            device=self.device,
+        )
+        offsets = microban_hand_target_offsets_from_arm_joints(
             self._scenario_joints, trunk_pitch=self.cfg.trunk_pitch
+        )
+        # Inactive hands carry a zero target, like the ordinary sampler.
+        self._scenario_offsets = torch.where(
+            self._scenario_active[..., None], offsets, torch.zeros_like(offsets)
         )
 
     def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
@@ -421,7 +512,7 @@ class FinalRescueHandTargetCommand(ResetFixedHandTargetCommand):
         ids, scenario = self._final_rescue.replay(env_ids)
         if len(ids) == 0:
             return
-        self.is_active[ids] = True
+        self.is_active[ids] = self._scenario_active[scenario]
         self.sampled_arm_joint_pos_rad[ids] = self._scenario_joints[scenario]
         self.hand_target_offset_b[ids] = self._scenario_offsets[scenario]
 
