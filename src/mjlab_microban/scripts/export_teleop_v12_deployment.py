@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -517,9 +518,16 @@ def _require_final_gate(
 
 
 BOUNDARY_STAGE_GATES_SEMANTICS = (
-    "packager_validated_earlier_boundary_gates_sharing_the_final_checkpoint_"
-    "carried_lineage_markers_v1"
+    "packager_validated_resume_ancestor_boundary_gates_sharing_the_final_"
+    "checkpoint_carried_lineage_markers_v2"
 )
+# A pose-release final must record the gates (and so the tracking profiles)
+# of its 10000 boundary and 10100 canary: both clocks have a hand-RMS
+# allowance profile on that recipe, so the record cannot be left to the
+# operator.  Missing explicit gates are discovered through the resume chain.
+POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES = (10_000, 10_100)
+_RESUME_LOAD_RUN_PATTERN = re.compile(r"\^([A-Za-z0-9][A-Za-z0-9_.-]*)\$")
+_RESUME_LOAD_CHECKPOINT_PATTERN = re.compile(r"\^(model_[0-9]+)\[\.\]pt\$")
 # Gate kinds (canonical_boundary flag, checkpoint_kind) the packager records:
 # canonical boundaries (3000/7000/10000) and their activation canaries
 # (3100/7100/10100), which the chain resumes from like a boundary.
@@ -543,18 +551,117 @@ _BOUNDARY_GATE_INHERITED_INFO_KEYS = (
 )
 
 
+def _agent_resume_fields(params: Path) -> dict[str, str]:
+    """Top-level ``resume``/``load_run``/``load_checkpoint`` of a run's agent.yaml."""
+
+    fields: dict[str, str] = {}
+    for line in params.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key in ("resume", "load_run", "load_checkpoint"):
+            fields[key] = value.strip().strip("'\"")
+    return fields
+
+
+def _resume_ancestry(checkpoint: Path) -> list[Path]:
+    """Checkpoints the final checkpoint's run chain resumed from, nearest first.
+
+    Each run directory records the exact checkpoint it resumed from in
+    ``params/agent.yaml`` (``load_run: ^RUN$``, ``load_checkpoint:
+    ^model_N[.]pt$``).  The walk ends at a run that did not resume, or whose
+    parent directory has no params (a corner-rescue seed copy).  Checkpoint
+    infos carry no parent hash, so this is the only record that separates a
+    true ancestor boundary from a sibling sharing the same lineage markers.
+    """
+
+    current = checkpoint.expanduser().resolve()
+    seen = {current}
+    chain: list[Path] = []
+    while True:
+        params = current.parent / "params" / "agent.yaml"
+        if not params.is_file():
+            return chain
+        fields = _agent_resume_fields(params)
+        if fields.get("resume") != "true":
+            return chain
+        run_match = _RESUME_LOAD_RUN_PATTERN.fullmatch(fields.get("load_run", ""))
+        checkpoint_match = _RESUME_LOAD_CHECKPOINT_PATTERN.fullmatch(
+            fields.get("load_checkpoint", "")
+        )
+        if run_match is None or checkpoint_match is None:
+            raise ValueError(f"Resume source in {params} is not one exact checkpoint")
+        parent = current.parent.parent / run_match[1] / f"{checkpoint_match[1]}.pt"
+        if not parent.is_file():
+            raise ValueError(f"Resume parent recorded in {params} is missing: {parent}")
+        parent = parent.resolve()
+        if parent in seen:
+            raise ValueError("Resume ancestry has a cycle")
+        seen.add(parent)
+        chain.append(parent)
+        current = parent
+
+
+def _discover_ancestor_boundary_gates(
+    checkpoint: Path, *, gate_root: Path, explicit: tuple[Path, ...]
+) -> tuple[Path, ...]:
+    """Explicit gates plus the stage gates of the required pose-release ancestors.
+
+    An ancestor ``model_{N-1}.pt`` for a required clock N whose gate
+    ``{run}_model_{N-1}_gate.json`` exists in ``gate_root`` is added unless an
+    explicit gate already covers that clock.
+    """
+
+    covered: set[int] = set()
+    for gate_path in explicit:
+        try:
+            completed = _load_json(gate_path).get("completed_updates")
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(completed, int):
+            covered.add(completed)
+    discovered: list[Path] = []
+    for ancestor in _resume_ancestry(checkpoint):
+        match = re.fullmatch(r"model_([0-9]+)\.pt", ancestor.name)
+        if match is None:
+            continue
+        completed = int(match[1]) + 1
+        if (
+            completed not in POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES
+            or completed in covered
+        ):
+            continue
+        gate_path = gate_root / f"{ancestor.parent.name}_{ancestor.stem}_gate.json"
+        if gate_path.is_file():
+            discovered.append(gate_path.resolve())
+            covered.add(completed)
+    return (*explicit, *discovered)
+
+
+def _checkpoint_recipe_revision(checkpoint: Path) -> str | None:
+    try:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        return payload["infos"].get("microban_teleop_recipe_revision")
+    except Exception:  # noqa: BLE001  (unreadable here is refused later by the actor loader)
+        return None
+
+
 def _boundary_stage_gate_lineage(
-    boundary_gates: tuple[Path, ...], *, final_infos: Mapping[str, Any]
+    boundary_gates: tuple[Path, ...],
+    *,
+    final_infos: Mapping[str, Any],
+    final_checkpoint: Path,
 ) -> list[dict[str, Any]]:
     """Validate earlier canonical-boundary gates and summarise their profiles.
 
     Each gate is fully revalidated (reports, ONNX, checkpoint identity) by
     ``validate_gate``; its checkpoint must be an earlier canonical boundary
-    that shares every carried lineage marker with the final checkpoint.  The
-    package then records which tracking profile (and allowance, if any)
-    judged each listed boundary so the robot can see it.
+    or activation canary in the final checkpoint's resume ancestry that
+    shares every carried lineage marker with it.  A pose-release final must
+    list its 10000 boundary and 10100 canary.  The package then records which
+    tracking profile (and allowance, if any) judged each listed boundary so
+    the robot can see it.
     """
 
+    ancestry = set(_resume_ancestry(final_checkpoint))
     entries: list[dict[str, Any]] = []
     seen: set[int] = set()
     for gate_path in boundary_gates:
@@ -562,6 +669,11 @@ def _boundary_stage_gate_lineage(
         gate_sha256 = sha256_file(gate_path)
         snapshot = _load_json(gate_path, expected_sha256=gate_sha256)
         checkpoint = resolve_bootstrap_artifact_path(str(snapshot.get("checkpoint", "")))
+        if checkpoint.expanduser().resolve() not in ancestry:
+            raise ValueError(
+                "Boundary stage gate checkpoint is not in the final checkpoint's "
+                f"resume ancestry: {checkpoint}"
+            )
         gate = validate_gate(gate_path, checkpoint)
         if gate != snapshot or sha256_file(gate_path) != gate_sha256:
             raise RuntimeError("Boundary stage gate changed while it was validated")
@@ -607,6 +719,16 @@ def _boundary_stage_gate_lineage(
                 ),
             }
         )
+    if final_infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        missing = sorted(set(POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES) - seen)
+        if missing:
+            raise ValueError(
+                "A pose-release final must record its 10000 boundary and 10100 "
+                f"canary gates; missing clocks {missing} (pass --boundary-gate "
+                "or keep the ancestors' gates in the gate directory)"
+            )
     return sorted(entries, key=lambda entry: entry["completed_updates"])
 
 
@@ -1400,6 +1522,14 @@ def package_v12_deployment(
     checkpoint = checkpoint.expanduser().resolve()
     boundary_gates = tuple(path.expanduser().resolve() for path in boundary_gates)
     gate_path = gate_path.expanduser().resolve()
+    if _checkpoint_recipe_revision(checkpoint) == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        # Discovery only; the requirement itself is enforced fail-closed on the
+        # captured checkpoint's infos in _boundary_stage_gate_lineage.
+        boundary_gates = _discover_ancestor_boundary_gates(
+            checkpoint, gate_root=gate_path.parent, explicit=boundary_gates
+        )
     output = output.expanduser().absolute()
     output = output.parent.resolve() / output.name
     if not checkpoint.is_file() or not gate_path.is_file():
@@ -1508,7 +1638,7 @@ def package_v12_deployment(
         )
         _require_deployable_lr_order_lineage(infos)
         boundary_stage_gates = _boundary_stage_gate_lineage(
-            boundary_gates, final_infos=infos
+            boundary_gates, final_infos=infos, final_checkpoint=checkpoint
         )
 
         _export_onnx_atomic(actor, temporary)
@@ -1562,7 +1692,9 @@ def package_v12_deployment(
         if validate_gate(gate_path, checkpoint) != gate:
             raise RuntimeError("V12 gate/report lineage changed before publication")
         if (
-            _boundary_stage_gate_lineage(boundary_gates, final_infos=infos)
+            _boundary_stage_gate_lineage(
+                boundary_gates, final_infos=infos, final_checkpoint=checkpoint
+            )
             != boundary_stage_gates
         ):
             raise RuntimeError("Boundary stage gates changed before publication")
@@ -1620,9 +1752,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help=(
-            "Earlier canonical-boundary stage gate of the same lineage (e.g. the "
-            "10000-update model_9999 gate); repeatable.  Each is revalidated and "
-            "its tracking profile is recorded in the package metadata."
+            "Earlier canonical-boundary or activation-canary stage gate in the "
+            "final checkpoint's resume ancestry; repeatable.  Each is revalidated "
+            "and its tracking profile is recorded in the package metadata.  A "
+            "pose-release final requires its 10000 and 10100 gates; ones not "
+            "given are discovered through the resume chain in the gate directory."
         ),
     )
     parser.add_argument("--force", action="store_true")
