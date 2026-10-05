@@ -125,7 +125,14 @@ def test_registered_ordinary_shares():
         name: mix["ordinary"]
         for name, mix in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIXES.items()
     }
-    assert shares == {"pr_v1": 0.50, "pr_v2": 0.70, "pr_v3": 0.30, "pr_v4": 0.50}
+    assert shares == {
+        "pr_v1": 0.50,
+        "pr_v2": 0.70,
+        "pr_v3": 0.30,
+        "pr_v4": 0.50,
+        "pr_v5": 0.50,
+        "pr_v6": 0.70,
+    }
     # The two mix registries never overlap.
     for name in shares:
         with pytest.raises(ValueError):
@@ -1073,3 +1080,187 @@ def test_parent_payload_refusals_are_pinned_to_their_checks(monkeypatch):
             ),
             checkpoint_sha256=SHA_PARENT,
         )
+
+
+# --- evaluator perturbation replay (pr_v5 / pr_v6) ------------------------------
+
+
+def test_scenario_push_mixes_repeat_the_pr_v1_and_pr_v2_shares():
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_MIXES,
+        hand_pose_release_final_rescue_uses_scenario_push,
+    )
+
+    mixes = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIXES
+    assert MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_MIXES == {
+        "pr_v5",
+        "pr_v6",
+    }
+    assert mixes["pr_v5"] == mixes["pr_v1"]
+    assert mixes["pr_v6"] == mixes["pr_v2"]
+    assert [m for m in sorted(mixes) if hand_pose_release_final_rescue_uses_scenario_push(m)] == [
+        "pr_v5",
+        "pr_v6",
+    ]
+
+
+def test_scenario_push_is_the_final_evaluator_perturbation():
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        _tracking_cfg,
+        tracking_profile_uses_perturbation,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH,
+    )
+
+    assert tracking_profile_uses_perturbation(final_gate_profile())
+    evaluator = _tracking_cfg(seed=42, steps=300, perturbation=True).events["push_robot"]
+    push = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH
+    assert tuple(evaluator.interval_range_s) == push["interval_range_s"]
+    assert evaluator.params["velocity_range"] == push["velocity_range"]
+    assert set(evaluator.params) == {"velocity_range"}
+    rescue = make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(mix="pr_v6")
+    replay = rescue.events["final_rescue_scenario_push"]
+    for key in ("mode", "is_global_time", "min_step_count_between_reset"):
+        assert getattr(replay, key) == getattr(evaluator, key)
+
+
+def test_scenario_push_env_cfg_splits_the_push_by_episode_kind():
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
+        make_microban_teleop_v12_hand_pose_release_env_cfg,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        push_ordinary_episodes,
+        push_replayed_episodes,
+    )
+
+    base = make_microban_teleop_v12_hand_pose_release_env_cfg(play=False)
+    for mix in ("pr_v1", "pr_v2", "pr_v3", "pr_v4"):
+        cfg = make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(mix=mix)
+        assert set(cfg.events) == set(base.events)
+        assert cfg.events["push_robot"].func is base.events["push_robot"].func
+        assert cfg.events["push_robot"].params == base.events["push_robot"].params
+    cfg = make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(mix="pr_v5")
+    assert set(cfg.events) == set(base.events) | {"final_rescue_scenario_push"}
+    ordinary = cfg.events["push_robot"]
+    assert ordinary.func is push_ordinary_episodes
+    assert ordinary.interval_range_s == base.events["push_robot"].interval_range_s
+    assert ordinary.params == {
+        "velocity_range": base.events["push_robot"].params["velocity_range"],
+        "final_rescue_mix": "pr_v5",
+    }
+    replay = cfg.events["final_rescue_scenario_push"]
+    assert replay.func is push_replayed_episodes
+    assert replay.interval_range_s == (1.0, 1.0)
+    assert replay.params == {
+        "velocity_range": {"x": (0.35, 0.35), "y": (-0.20, -0.20)},
+        "final_rescue_mix": "pr_v5",
+    }
+    # The staged curriculum keeps driving the ordinary push range.
+    from mjlab_microban.tasks.microban_teleop_env_cfg import _set_push_velocity_range
+
+    class _Env:
+        class event_manager:
+            @staticmethod
+            def get_term_cfg(name):
+                return cfg.events[name]
+
+    _set_push_velocity_range(_Env, x=(-0.5, 0.5), y=(-0.5, 0.5))
+    assert ordinary.params["velocity_range"] == {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}
+    assert ordinary.params["final_rescue_mix"] == "pr_v5"
+
+
+def test_scenario_push_terms_select_episodes_by_pattern(monkeypatch):
+    import mjlab.envs.mdp as envs_mdp
+
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        _PATTERN_STATE_ATTRIBUTE,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        push_ordinary_episodes,
+        push_replayed_episodes,
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        envs_mdp,
+        "push_by_setting_velocity",
+        lambda env, ids, velocity_range: calls.append((ids.tolist(), velocity_range)),
+    )
+
+    class _Env:
+        num_envs = 6
+        device = "cpu"
+
+    env = _Env()
+    state = _FinalRescuePatternState(num_envs=6, device="cpu", mix="pr_v6")
+    state.pattern = torch.tensor([0, 1, 0, 2, 1, 0])
+    setattr(env, _PATTERN_STATE_ATTRIBUTE, state)
+    ids = torch.tensor([0, 1, 2, 3, 4, 5])
+    push_ordinary_episodes(env, ids, {"x": (-0.5, 0.5)}, "pr_v6")
+    push_replayed_episodes(env, ids, {"x": (0.35, 0.35)}, "pr_v6")
+    push_replayed_episodes(env, torch.tensor([0, 2]), {"x": (0.35, 0.35)}, "pr_v6")
+    push_ordinary_episodes(env, None, {"x": (-0.5, 0.5)}, "pr_v6")
+    assert calls == [
+        ([0, 2, 5], {"x": (-0.5, 0.5)}),
+        ([1, 3, 4], {"x": (0.35, 0.35)}),
+        ([0, 2, 5], {"x": (-0.5, 0.5)}),
+    ]
+    with pytest.raises(ValueError):
+        push_ordinary_episodes(env, ids, {"x": (-0.5, 0.5)}, "pr_v1")
+
+
+def test_scenario_push_marker_records_the_push_only_for_its_mixes():
+    plain = _marker(sampler_mix="pr_v1")
+    assert "scenario_push" not in plain
+    pushed = _marker(sampler_mix="pr_v5")
+    assert validate_hand_pose_release_final_rescue_marker(pushed) == pushed
+    assert pushed["scenario_push"] == {
+        "source": "final_profile_tracking_evaluator_perturbation",
+        "scope": "replayed_episodes_only",
+        "interval_range_s": [1.0, 1.0],
+        "velocity_range": {"x": [0.35, 0.35], "y": [-0.20, -0.20]},
+        "ordinary_push": "staged_curriculum_random_push_on_ordinary_episodes_only",
+    }
+    without = dict(pushed)
+    del without["scenario_push"]
+    with pytest.raises(ValueError):
+        validate_hand_pose_release_final_rescue_marker(without)
+    grafted = dict(plain)
+    grafted["scenario_push"] = pushed["scenario_push"]
+    with pytest.raises(ValueError):
+        validate_hand_pose_release_final_rescue_marker(grafted)
+    # Same mix shares otherwise: only the mix name and the push record differ.
+    assert {k for k in pushed if pushed.get(k) != plain.get(k)} == {
+        "sampler_mix",
+        "scenario_push",
+    }
+
+
+def test_live_env_pushes_replayed_episodes_with_the_evaluator_kick():
+    from mjlab.envs import ManagerBasedRlEnv
+
+    cfg = make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(mix="pr_v5")
+    cfg.scene.num_envs = 32
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        env.reset()
+        state = env.command_manager.get_term("twist")._final_rescue
+        names = env.event_manager.active_terms["interval"]
+        assert "push_robot" in names and "final_rescue_scenario_push" in names
+        robot = env.scene["robot"]
+        before = robot.data.root_link_vel_w.clone()
+        ids = torch.arange(env.num_envs)
+        replayed = ids[state.pattern != 0]
+        ordinary = ids[state.pattern == 0]
+        assert len(replayed) > 0 and len(ordinary) > 0
+        term = env.event_manager.get_term_cfg("final_rescue_scenario_push")
+        term.func(env, ids, **term.params)
+        env.sim.forward()
+        after = robot.data.root_link_vel_w
+        delta = after - before
+        assert torch.allclose(delta[replayed, 0], torch.full((len(replayed),), 0.35), atol=1e-5)
+        assert torch.allclose(delta[replayed, 1], torch.full((len(replayed),), -0.20), atol=1e-5)
+        assert torch.count_nonzero(delta[ordinary]) == 0
+    finally:
+        env.close()

@@ -35,6 +35,10 @@ failed there:
   pr_v3  30 % ordinary, mixed_forward_left 45 %, bounded_both_feet 25 %
   pr_v4  50 % ordinary, mixed_forward_left 25 %, bounded_both_feet 15 %,
          mixed_backward_right 10 %
+  pr_v5  pr_v1 shares; replayed episodes take the evaluator's push
+  pr_v6  pr_v2 shares; replayed episodes take the evaluator's push
+         (fixed 0.35/-0.20 m/s x/y kick every 1.0 s instead of the ordinary
+         random push; ordinary episodes keep the ordinary push)
 The launcher validates both on CPU, stages the immutable parent, the report
 and the parent run's resume record (params/agent.yaml, so the packager's
 resume-ancestry walk reaches the gated 10100/10000 boundaries) under
