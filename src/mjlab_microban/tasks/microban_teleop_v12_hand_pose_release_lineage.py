@@ -78,6 +78,10 @@ HAND_POSE_RELEASE_RECIPE_SWITCH_REASON = (
 )
 
 HAND_POSE_RELEASE_LINEAGE_FRESH = "fresh_chain"
+# A fresh chain whose model_9900 went through the pose-release corner rescue
+# (microban_teleop_v12_corner_rescue, pose-release variant): its model_9999 and
+# that model's ordinary pose-release descendants.
+HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE = "fresh_chain_model9900_corner_rescue"
 HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH = "release_eligible_recipe_switch"
 HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH = "experimental_recipe_switch"
 
@@ -306,15 +310,44 @@ def hand_pose_release_lineage(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     ):
         raise ValueError("Checkpoint is not the hand pose-release recipe")
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION,
+        is_hand_pose_release_corner_rescue_marker,
+        validate_corner_rescue_lineage_marker,
+    )
+
+    corner = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     for key in _rescue_info_keys():
+        if key == MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY:
+            continue
         if infos.get(key) is not None:
             raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+    if corner is not None:
+        # Only the pose-release corner rescue is part of this lineage; its
+        # intermediate saves (9901..9998) are not consumable.
+        if not is_hand_pose_release_corner_rescue_marker(corner):
+            raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+        validate_corner_rescue_lineage_marker(corner)
+        if iteration is not None and (
+            isinstance(iteration, bool)
+            or not isinstance(iteration, int)
+            or iteration < MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION
+        ):
+            raise ValueError(
+                "Only model_9999 of a pose-release corner rescue (or a "
+                "descendant) is consumable"
+            )
     release = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
     experimental = infos.get(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY
     )
     if release is not None and experimental is not None:
         raise ValueError("A checkpoint cannot carry both pose-release switch markers")
+    if corner is not None and (release is not None or experimental is not None):
+        raise ValueError(
+            "The pose-release corner rescue applies only to a fresh pose-release chain"
+        )
     if experimental is not None:
         if not allow_experimental:
             raise ValueError(
@@ -327,6 +360,8 @@ def hand_pose_release_lineage(
         validate_hand_pose_release_switch_marker(experimental)
         return HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
     if release is None:
+        if corner is not None:
+            return HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE
         return HAND_POSE_RELEASE_LINEAGE_FRESH
     marker = validate_hand_pose_release_recipe_switch_marker(release)
     if iteration is not None and (

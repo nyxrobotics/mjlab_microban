@@ -238,6 +238,27 @@ register_mjlab_task(
     runner_cls=MicrobanTeleopV12CornerRescueOnPolicyRunner,
 )
 
+# Pose-release variant of the 9901->10000 corner rescue (fresh pose-release
+# chain's model_9900; 5/60/35 sampler; saves keep the pose-release recipe).
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (  # noqa: E402
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
+    MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
+    make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (  # noqa: E402
+    MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
+    env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
+    runner_cls=MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
+)
+
 # 14900->14999 final-scenario rescue; the sampler mix is read from
 # MICROBAN_V12_FINAL_RESCUE_MIX when the package is imported (launcher-set).
 register_mjlab_task(

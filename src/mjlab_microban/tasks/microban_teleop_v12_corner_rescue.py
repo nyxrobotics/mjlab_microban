@@ -11,6 +11,16 @@ literal SHA-256.  This revision records the parent checkpoint and its strict
 tracking report (failing only ``hand_tracking_rms``) in the marker instead; the
 runner re-hashes both when it loads the parent, and every consumer rebuilds the
 marker from those recorded values.  Clocks, sampler, and contract are unchanged.
+
+Active-hand arm pose-release variant (forward-lean HOME): the same 99-update
+replay from a fresh pose-release chain's model_9900 whose strict HMD/hand report
+fails only hand accuracy (RMS and/or P95).  Both bilateral corners failed there,
+so its sampler splits the replay 60/35 between LF+RB and LB+RF (5 % ordinary).
+Its checkpoints keep the pose-release recipe revision (the env is the
+pose-release env with only the hand sampler changed) and carry a pose-release
+variant of the marker under the same infos key; only its model_9999 and that
+model's ordinary pose-release descendants are consumable
+(``microban_teleop_v12_hand_pose_release_lineage``).
 """
 
 from __future__ import annotations
@@ -91,6 +101,23 @@ MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP = 200_000
 MICROBAN_TELEOP_V12_LF_RB_PROBABILITY = 0.90
 MICROBAN_TELEOP_V12_LB_RF_PROBABILITY = 0.05
 MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY = 0.05
+# Pose-release variant (see module doc).
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID = (
+    "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban"
+)
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION = (
+    "recorded_pose_release_model9900_uniform5_lf_rb60_lb_rf35_99_updates_"
+    "receiver_box_f_v1"
+)
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_SAMPLER_REVISION = (
+    "uniform_joint_box5pct_lf_rb60pct_lb_rf35pct_receiver_box_f_v1"
+)
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY = 0.60
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY = 0.35
+# The pose-release parent may fail any non-empty subset of these strict checks.
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_PARENT_FAILED_CHECKS = (
+    frozenset(("hand_tracking_rms", "hand_tracking_p95"))
+)
 MICROBAN_TELEOP_V12_CORNER_RESCUE_ACTIVE_COLUMNS = (
     *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     *TELEOP_V12_HAND_OBSERVATION_COLUMNS,
@@ -109,6 +136,13 @@ if not math.isclose(
     1.0,
 ):
     raise RuntimeError("Corner rescue sampler probabilities must sum to one")
+if not math.isclose(
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY
+    + MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY
+    + MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY,
+    1.0,
+):
+    raise RuntimeError("Pose-release corner rescue probabilities must sum to one")
 
 
 def assert_corner_rescue_optimizer_step(
@@ -220,11 +254,16 @@ def corner_pair_joint_targets(
     return torch.deg2rad(torch.tensor(values, device=device, dtype=dtype))
 
 
-def corner_pair_selection(selector: torch.Tensor) -> torch.Tensor:
+def corner_pair_selection(
+    selector: torch.Tensor,
+    *,
+    lf_rb_probability: float = MICROBAN_TELEOP_V12_LF_RB_PROBABILITY,
+) -> torch.Tensor:
     """Map uniform random values to uniform/LF+RB/LB+RF selection IDs.
 
     ``0`` preserves the ordinary sampler, ``1`` selects LF+RB, and ``2``
-    selects LB+RF.
+    selects LB+RF.  The ordinary remainder is always 5 %; the pose-release
+    variant passes its own LF+RB share (LB+RF takes the rest).
     """
 
     if not isinstance(selector, torch.Tensor) or not selector.is_floating_point():
@@ -233,7 +272,12 @@ def corner_pair_selection(selector: torch.Tensor) -> torch.Tensor:
         torch.any((selector < 0.0) | (selector >= 1.0)).item()
     ):
         raise ValueError("Corner-pair selector values must be in [0, 1)")
-    first_upper = MICROBAN_TELEOP_V12_LF_RB_PROBABILITY
+    if lf_rb_probability not in (
+        MICROBAN_TELEOP_V12_LF_RB_PROBABILITY,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+    ):
+        raise ValueError("Corner-pair LF+RB share is not a registered mix")
+    first_upper = lf_rb_probability
     # Derive the upper boundary from the remainder so the exact float 0.6
     # belongs to the ordinary branch rather than 0.4 + 0.2 rounding upward.
     second_upper = 1.0 - MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY
@@ -257,7 +301,9 @@ class CornerPairHandTargetCommand(ResetFixedHandTargetCommand):
             device=self.device,
             dtype=self.hand_target_offset_b.dtype,
         )
-        choice = corner_pair_selection(selector)
+        choice = corner_pair_selection(
+            selector, lf_rb_probability=self.cfg.lf_rb_probability
+        )
         pair_ids = env_ids[choice != 0]
         if len(pair_ids) == 0:
             return
@@ -276,7 +322,9 @@ class CornerPairHandTargetCommand(ResetFixedHandTargetCommand):
 
 @dataclass(kw_only=True)
 class CornerPairHandTargetCommandCfg(ResetFixedHandTargetCommandCfg):
-    """Uniform/LF+RB/LB+RF = 5/90/5 sampler configuration."""
+    """Uniform/LF+RB/LB+RF = 5/90/5 (pose-release variant 5/60/35) sampler."""
+
+    lf_rb_probability: float = MICROBAN_TELEOP_V12_LF_RB_PROBABILITY
 
     def build(self, env: Any) -> CornerPairHandTargetCommand:
         return CornerPairHandTargetCommand(self, env)
@@ -301,16 +349,89 @@ def canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _pose_release_parent_failed_checks(value: object) -> list[str]:
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or any(not isinstance(item, str) for item in value)
+        or len(set(value)) != len(value)
+        or not set(value)
+        <= MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_PARENT_FAILED_CHECKS
+    ):
+        raise ValueError(
+            "Pose-release corner rescue parent may fail only hand accuracy checks"
+        )
+    return sorted(value)
+
+
 def corner_rescue_marker(
     *,
     parent_checkpoint_sha256: str,
     parent_strict_tracking_report_sha256: str,
+    hand_pose_release: bool = False,
+    parent_strict_failed_checks: object = ("hand_tracking_rms",),
 ) -> dict[str, Any]:
     """Return the marker embedded in every rescue checkpoint.
 
-    Only the two recorded hashes vary; every other field is fixed by code.
+    Only the two recorded hashes vary (and, for the pose-release variant, the
+    recorded strict failed checks); every other field is fixed by code.
     """
 
+    marker = _canonical_corner_rescue_marker(
+        parent_checkpoint_sha256=parent_checkpoint_sha256,
+        parent_strict_tracking_report_sha256=parent_strict_tracking_report_sha256,
+    )
+    if not hand_pose_release:
+        return marker
+    marker["revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION
+    )
+    marker["parent_strict_failed_checks"] = _pose_release_parent_failed_checks(
+        parent_strict_failed_checks
+    )
+    marker["source_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    # Rescue saves keep the pose-release recipe; the marker names the replay.
+    marker["rescue_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    marker["rescue_task_id"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID
+    )
+    marker["parent_lineage"] = "fresh_pose_release_chain"
+    marker["sampler_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_SAMPLER_REVISION
+    )
+    marker["sampler_probabilities"] = {
+        "ordinary_uniform_independent": (
+            MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY
+        ),
+        "left_forward_right_backward": (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY
+        ),
+        "left_backward_right_forward": (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY
+        ),
+    }
+    marker["unchanged_contract"] = {
+        **marker["unchanged_contract"],
+        "pose_reward": "active_hand_arm_pose_release",
+    }
+    return marker
+
+
+def is_hand_pose_release_corner_rescue_marker(marker: object) -> bool:
+    return isinstance(marker, Mapping) and marker.get("revision") == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION
+    )
+
+
+def _canonical_corner_rescue_marker(
+    *,
+    parent_checkpoint_sha256: str,
+    parent_strict_tracking_report_sha256: str,
+) -> dict[str, Any]:
     return {
         "schema_version": 2,
         "revision": MICROBAN_TELEOP_V12_CORNER_RESCUE_MARKER_REVISION,
@@ -453,11 +574,18 @@ def validate_corner_rescue_lineage_marker(marker: object) -> dict[str, Any]:
 
     if not isinstance(marker, Mapping):
         raise ValueError("Corner rescue lineage marker drifted")
+    pose_release = is_hand_pose_release_corner_rescue_marker(marker)
     try:
         expected = corner_rescue_marker(
             parent_checkpoint_sha256=marker.get("parent_checkpoint_sha256"),  # type: ignore[arg-type]
             parent_strict_tracking_report_sha256=marker.get(  # type: ignore[arg-type]
                 "parent_strict_tracking_report_sha256"
+            ),
+            hand_pose_release=pose_release,
+            parent_strict_failed_checks=(
+                marker.get("parent_strict_failed_checks")
+                if pose_release
+                else ("hand_tracking_rms",)
             ),
         )
     except ValueError as exc:
@@ -504,6 +632,8 @@ def validate_corner_rescue_canonical_lineage(
         validate_final_rescue_consumable(infos, iteration=iteration)
         return None if marker is None else validate_corner_rescue_lineage_marker(marker)
     if recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION:
+        if is_hand_pose_release_corner_rescue_marker(marker):
+            raise ValueError("Pose-release corner marker on the canonical rescue recipe")
         if iteration != MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
             raise ValueError(
                 "Only final model9999 from the corner rescue is consumable"
@@ -519,11 +649,15 @@ def validate_corner_rescue_canonical_lineage(
             iteration=iteration,
             allow_experimental=allow_hand_pose_release_recipe,
         )
-        return None
+        # A pose-release corner rescue (its model_9999 or a descendant) carries
+        # the validated pose-release marker forward; a plain chain has none.
+        return None if marker is None else validate_corner_rescue_lineage_marker(marker)
     if recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION:
         raise ValueError("Checkpoint recipe is neither canonical nor corner rescue")
     if marker is None:
         return None
+    if is_hand_pose_release_corner_rescue_marker(marker):
+        raise ValueError("Pose-release corner marker on a canonical checkpoint")
     if iteration <= MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
         raise ValueError("Canonical corner-rescue descendant clock is invalid")
     return validate_corner_rescue_lineage_marker(marker)
@@ -555,6 +689,37 @@ def make_microban_teleop_v12_corner_rescue_env_cfg(play: bool = False):
     return cfg
 
 
+def make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
+    play: bool = False,
+):
+    """Pose-release env with only the hand sampler changed (5/60/35)."""
+
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
+        make_microban_teleop_v12_hand_pose_release_env_cfg,
+    )
+
+    cfg = make_microban_teleop_v12_hand_pose_release_env_cfg(play=play)
+    existing = cfg.commands["hand_target"]
+    cfg.commands["hand_target"] = CornerPairHandTargetCommandCfg(
+        resampling_time_range=existing.resampling_time_range,
+        rel_active=existing.rel_active,
+        trunk_pitch=existing.trunk_pitch,
+        lf_rb_probability=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+    )
+    if not play:
+        curriculum = cfg.curriculum.get("staged_curriculum")
+        stages = None if curriculum is None else curriculum.params.get("stages")
+        if not isinstance(stages, list):
+            raise TypeError("Corner rescue requires the v12 staged curriculum")
+        stages[:] = [
+            stage
+            for stage in stages
+            if int(stage.get("step", -1))
+            < MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_COMMON_STEP
+        ]
+    return cfg
+
+
 MicrobanTeleopV12CornerRescueRlCfg = deepcopy(MicrobanTeleopV12RlCfg)
 MicrobanTeleopV12CornerRescueRlCfg.experiment_name = (
     "mjlab_microban_teleop_v12"
@@ -567,4 +732,22 @@ MicrobanTeleopV12CornerRescueRlCfg.save_interval = (
 )
 MicrobanTeleopV12CornerRescueRlCfg.max_iterations = (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_PROCESS_UPDATES
+)
+
+
+def _hand_pose_release_corner_rescue_rl_cfg():
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
+        MicrobanTeleopV12HandPoseReleaseRlCfg,
+    )
+
+    cfg = deepcopy(MicrobanTeleopV12HandPoseReleaseRlCfg)
+    cfg.experiment_name = "mjlab_microban_teleop_v12"
+    cfg.wandb_project = "mjlab_microban_teleop_v12_hand_pose_release_corner_rescue"
+    cfg.save_interval = MICROBAN_TELEOP_V12_CORNER_RESCUE_PROCESS_UPDATES
+    cfg.max_iterations = MICROBAN_TELEOP_V12_CORNER_RESCUE_PROCESS_UPDATES
+    return cfg
+
+
+MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg = (
+    _hand_pose_release_corner_rescue_rl_cfg()
 )
