@@ -1183,7 +1183,7 @@ class FinalRescueRegistrationTest(unittest.TestCase):
 
     def test_arguments(self):
         args = make_pipeline().args
-        self.assertEqual(args.pr_final_rescue_mixes, ["pr_v1", "pr_v2", "pr_v3", "pr_v4"])
+        self.assertEqual(args.pr_final_rescue_mixes, ["pr_v1", "pr_v2", "pr_v3", "pr_v4", "pr_v5", "pr_v6"])
         self.assertEqual((args.v12_15000_attempts, args.dry_run_simulate_15000), (2, "pass"))
         for bad in (["--pr-final-rescue-mixes", "pr_v9"], ["--v12-15000-attempts", "0"],
                     ["--dry-run-simulate-15000", "rescue"]):
@@ -1221,7 +1221,7 @@ class FinalRescueRegistrationTest(unittest.TestCase):
                                                    mix="lf72", provenance={})
         for infos, lineage in ((base, HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE),
                                (corner, HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE)):
-            for mix in ("pr_v1", "pr_v4"):
+            for mix in ("pr_v1", "pr_v4", "pr_v6"):
                 out = dry_run_tools.final_rescue_infos(infos, parent_sha256="c" * 64, failed_sha256="d" * 64,
                                                        report_sha256="e" * 64, mix=mix, seed=43, provenance={})
                 self.assertEqual(hand_pose_release_lineage(out, iteration=14999), lineage)

@@ -126,8 +126,12 @@ python3 scripts/retrain_all_for_home.py --robot-repo ../microban_home-<label> --
 人手の介入なしで最後まで進むように、PICO v12 の 10000 境界は自動で段階的に救済する（9999 ゲート不合格 →
 model_9900 の pose-release コーナー救済を mix lf60, lf90, lf72, lf65 の順に → それも全部落ちたらゲート済みの
 model_7099 から 7100→10000 を学習し直す → 尽きたら止まる）。15000 境界も同じ（14999 ゲート不合格 → model_14900 の
-pose-release 最終シナリオ救済を mix pr_v1〜pr_v4 の順に → 全部落ちたらゲート済みの model_10099 から 10100→15000 を
-学習し直す → 尽きたら止まる）。同じ親からの再学習は学習シードを変える（42, 43, ...）。学習を回す前の配線確認は、どのHOMEでも
+pose-release 最終シナリオ救済を mix pr_v1〜pr_v6 の順に（pr_v5/pr_v6 は評価器の押しも再生）→ 全部落ちたらゲート済みの model_10099 から 10100→15000 を
+学習し直す → 尽きたら止まる）。同じ親からの再学習は学習シードを変える（42, 43, ...）。
+ただし前傾HOME（体幹 +10°）では、前傾チェーン自身が 15000 境界で 10 回（シード 42/42/43/44 の再学習4回と
+救済6回、pr_v5/pr_v6 を含む）試して全部 14999 ゲートに落ちている（forward-lean-v2 の
+`docs/teleop_v12_hand_pose_release_final_rescue.md`）。前傾 yaml でこのパイプラインを回すと、同じ仕組みなので
+15000 境界で止まる見込みが高い。通すには 10100→15000 のレシピ自体の変更が要る（前傾ブランチ側でもまだ無い）。学習を回す前の配線確認は、どのHOMEでも
 `--dry-run` で数十分（そのHOMEの歩行があれば `--dry-run-walk-init`、編集したばかりのHOMEなら
 `--dry-run-plumbing`）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md) の「ドライラン」。
 

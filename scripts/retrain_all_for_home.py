@@ -59,7 +59,7 @@ same command resumes after a crash, a stall or a fixed failure):
    twist_directional_response) tries the pose-release final-scenario rescues
    (scripts/train_microban_teleop_v12_hand_pose_release_final_rescue.sh
    MODEL_14900 FAILED_TRACKING_REPORT --mix M --seed S, one run per mix of
-   --pr-final-rescue-mixes, default pr_v1,pr_v2,pr_v3,pr_v4; a mix whose
+   --pr-final-rescue-mixes, default pr_v1,...,pr_v6; a mix whose
    scenarios do not cover every failed scenario is refused by the validator
    and skipped), each gated at 14999; if they all fail, 10100->15000 is
    retrained from the gated model_10099 with the next seed (run
@@ -220,7 +220,10 @@ V12_ACCURACY_CHECKS = {"hand_tracking_rms", "hand_tracking_p95", "foot_tracking_
 # microban_teleop_v12_hand_pose_release_final_rescue
 # MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_RESCUABLE_CHECKS.
 V12_FINAL_RESCUABLE_CHECKS = V12_ACCURACY_CHECKS | {"actual_soft_limits", "twist_directional_response"}
-V12_FINAL_RESCUE_MIXES = ("pr_v1", "pr_v2", "pr_v3", "pr_v4")
+# All mixes of MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIXES; pr_v5 /
+# pr_v6 (forward-lean-v2 005f55c) also replay the evaluator's fixed push on the
+# replayed episodes.
+V12_FINAL_RESCUE_MIXES = ("pr_v1", "pr_v2", "pr_v3", "pr_v4", "pr_v5", "pr_v6")
 # The stage trainer's default training seed (train_microban_teleop_v12.sh
 # --seed); retry k of a segment from the same parent trains with seed + k.
 V12_TRAIN_SEED = 42
@@ -1393,7 +1396,8 @@ class Pipeline:
         """Pose-release model_9900 corner rescues of a failed 9999 gate; return the passing run.
 
         The mixes of --pr-corner-rescue-mixes are tried in order (a repeated
-        mix is a new run: GPU nondeterminism), each gated at 9999 like any
+        mix is a new run that differs only by GPU nondeterminism: the corner
+        rescue launcher takes no seed; the default has no repeat), each gated at 9999 like any
         stage checkpoint.  A parent the rescue validator refuses (the 9999
         gate did not fail on hand accuracy only) skips the rescues.  A dry run
         records the validator's verdict and stands in for the 2048-env rescue
@@ -1540,7 +1544,7 @@ class Pipeline:
     def final_rescues(self, run: str, attempt: int, seed: int, trk: list[str], other: list[str]) -> str | None:
         """Pose-release final-scenario rescues of a failed 14999 gate; return the passing run.
 
-        forward-lean-v2 fc1c313/5e316fe: a 99-update replay (model_14900 ->
+        forward-lean-v2 fc1c313..cd0ea78: a 99-update replay (model_14900 ->
         model_14999) of the failed gate's scenarios.  Only a gate whose
         locomotion and ONNX checks passed and whose tracking failures are all
         rescuable is rescued.  Each mix of --pr-final-rescue-mixes is
@@ -2286,8 +2290,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    "its corner rescues, before the 9999 boundary stops the run")
     p.add_argument("--pr-final-rescue-mixes", default=",".join(V12_FINAL_RESCUE_MIXES),
                    help="sampler mixes of the pose-release final-scenario rescues tried, in order, after a "
-                   "failed 14999 gate (pr_v1-pr_v4; the validator refuses a mix that does not replay every "
-                   "failed scenario)")
+                   "failed 14999 gate (pr_v1-pr_v6; pr_v5/pr_v6 also replay the evaluator's push; the validator "
+                   "refuses a mix that does not replay every failed scenario)")
     p.add_argument("--v12-15000-attempts", type=int, default=2,
                    help="10100->15000 attempts (the first plus retrains from the gated model_10099, attempt k "
                    "with training seed 41+k), each with its final rescues, before the 15000 boundary stops "
