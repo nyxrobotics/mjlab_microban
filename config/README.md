@@ -39,6 +39,8 @@
 | 救済段階・upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
 | 固定値 | root z 0.170554885633559、足の横間隔 0.094 m（FK 0.0935） | root z 0.170430569776402、股・足首は前傾ブランチの全桁の値（yamlは12桁の正準値） | FK値 |
 | 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント、model_7099 からの pose-release 切替 | （なし。pose-release は新しいチェーンで学習） | （なし） |
+| pose-release の 10000 境界 / 10100 カナリア | 手先 RMS 0.035 m（中心ブランチのまま。0.040 m 許容プロファイルは存在しない）。パッケージの境界ゲートは渡したときだけ記録 | 手先 RMS 0.040 m 許容（e3271de / ec67f1e）。パッケージは 10000 と 10100 のゲートを resume 系譜（`params/agent.yaml`）でたどって必須（7ceb280） | 前傾HOMEと同じ |
+| HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 完全一致（同） | 1e-9 の許容（FK の最終桁の揺れ） |
 
 体幹ピッチ 0° のHOMEは中心ラインの仕組み（体幹座標系の目標、元の手先FK箱）、0° 以外は前傾ラインの仕組み
 （HOME水平化座標系の目標、水平なヘッドセットのHMD中立、受信箱 ±64 mm に収めた手先目標、F 評価姿勢 (−20, 25, −50)°）
@@ -235,11 +237,31 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 ## 等価性の確認（テスト）
 
 - `tests/test_home_pose_any_trunk.py`: 中心 yaml で `track-centered-home-clip`（5b5a9d0）、前傾 yaml で
-  `forward-lean-v2`（5442e88）のモジュール定数・HOME 由来の関数値・登録された全タスクの env/play/rl 設定と runner が
+  `forward-lean-v2`（7ceb280）のモジュール定数・HOME 由来の関数値・登録された全タスクの env/play/rl 設定と runner が
   一致すること（参照は `tests/fixtures/home_equivalence/*.json`、`tests/home_equivalence.py` で記録）。
   中心HOMEで許す差は、新しいコマンド設定フィールドの既定値（`trunk_pitch=0.0`、`lf_rb_probability=0.9`）と
-  HOMEスタンプを付ける歩行 runner だけ。
+  HOMEスタンプを付ける歩行 runner だけ（追跡プロファイル表も中心ブランチと同じ）。前傾HOMEにしかない仕組み
+  （0.040 m 許容、必須の境界ゲート）のテストは中心 yaml では skip され、`ForwardLeanOnlyTestsTest` が前傾 yaml で
+  実行する。
 - `MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1` で、両HOMEの歩行・起き上がりチェックポイントを CPU で再エクスポートし、
   公開済み ONNX（前傾 b33cd9ea / ce6cdc04、中心 c9cdd852 / 80cd7ddb）とバイト単位で一致することを確認する。
 - `MJLAB_MICROBAN_HOME_POSE_YAML=<yaml>` で、そのプロセスの HOME を別の yaml にできる（テスト・比較用。
   `retrain_all_for_home.py` はこれが設定されていると拒否する）。
+
+## 中心HOMEで元のブランチより厳しくなった確認（意図的）
+
+中心HOMEの値・文字列・学習設定・ゲートの判定基準は元のブランチと同じだが、次の確認は前傾ブランチの仕組みを
+全HOME共通にしたため、中心HOMEでも元のブランチ（学習 5b5a9d0 / ロボット a62a793）より厳しい。どれも
+拒否する側への変更で、デプロイ済みの成果物（walk.onnx c9cdd852、getup.onnx 80cd7ddb、pico_teleop.onnx）は通る。
+
+- 学習 `train_microban_teleop_v12.sh start`: 歩行ソースの run の `params/env.yaml`（HOME 関節・root、±π クリップ、
+  生の前回行動）と HOME スタンプを `export_walk_onnx.require_current_home_walk_checkpoint` で確認する
+  （5b5a9d0 は確認なし、前傾ブランチと同じ）。
+- 学習パッケージャ: `--boundary-gate` のチェックポイントは最終チェックポイントの resume 系譜上でなければ拒否
+  （兄弟 run は不可）。ドライランの証跡（`dry_run*` キー、`DRYRUN_*` の強制パスのプローブ受領書）を含むものは
+  `dry_run=True`（`scripts/home_pipeline/dry_run_tools.py package`）以外では拒否する。
+- ロボット `walk.py`: `home_pose` スタンプのない walk.onnx を拒否（a62a793 は受理）。`getup.py`: スタンプの
+  root 位置を z だけでなく x, y も比較。`pico_hybrid.py`: `v12_deployment_packager_revision` の一致を要求
+  （a62a793 は未確認。デプロイ済みと前回のパッケージはどちらも持つ）、学習HOMEマーカーは 1e-9 許容ではなく
+  JSON の完全一致。`dry_run_not_deployable` を持つパッケージ（ドライランの PICO）は
+  `MICROBAN_ALLOW_DRYRUN_POLICY=1`（ドライラン自身の検証・テストだけが設定する）がなければ拒否。

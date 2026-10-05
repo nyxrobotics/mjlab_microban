@@ -12,6 +12,7 @@ from pathlib import Path
 
 import torch
 
+from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
     microban_reachable_hand_evaluation_offsets,
@@ -765,9 +766,16 @@ class TeleopV12StageTest(unittest.TestCase):
                     FINAL_DEPLOYED_ACCURACY_PROFILE,
                 )
         # Every other clock except the 10000 boundary and the 10100 canary
-        # (hand-RMS allowances, tested below) keeps its profile for the
-        # pose-release lineage.
-        for completed in (3_000, 7_000, 7_100, 9_999, 10_099, 14_999):
+        # (hand-RMS allowances where the HOME has them, tested below) keeps
+        # its profile for the pose-release lineage.  At the centered HOME
+        # (no allowance) those two clocks keep theirs too, as on
+        # track-centered-home-clip.
+        clocks = (3_000, 7_000, 7_100, 9_999, 10_099, 14_999)
+        if not V12_HAND_RMS_40MM_BOUNDARY_PROFILES:
+            clocks += (10_000, 10_100)
+            self.assertNotIn(HMD_HAND_HAND_RMS_40MM_PROFILE, TRACKING_PROFILES)
+            self.assertNotIn(FOOT_CANARY_HAND_RMS_40MM_PROFILE, TRACKING_PROFILES)
+        for completed in clocks:
             with self.subTest(completed=completed):
                 self.assertEqual(
                     required_tracking_profile(completed, recipe_revision=pose_release),
@@ -826,6 +834,11 @@ class TeleopV12StageTest(unittest.TestCase):
                 with self.subTest(profile=profile):
                     self.assertIsNone(tracking_profile_completion_allowance(profile))
 
+    @unittest.skipUnless(
+        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
+        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
+        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
+    )
     def test_hand_rms_40mm_is_the_pose_release_10000_profile_only(self) -> None:
         pose_release = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
         allowance = HMD_HAND_HAND_RMS_40MM_PROFILE
@@ -930,6 +943,11 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(final_record["revision"], "completion_allowance_v1")
         self.assertNotIn("boundary_completed_updates", final_record)
 
+    @unittest.skipUnless(
+        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
+        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
+        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
+    )
     def test_hand_rms_40mm_is_the_pose_release_10100_canary_profile_only(
         self,
     ) -> None:
@@ -1000,6 +1018,11 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(record["relaxed_profile_hand_rms_m_max"], 0.035)
         self.assertIn("10100-canary", record["reason"])
 
+    @unittest.skipUnless(
+        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
+        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
+        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
+    )
     def test_pose_release_10000_gate_uses_and_records_the_hand_rms_allowance(
         self,
     ) -> None:

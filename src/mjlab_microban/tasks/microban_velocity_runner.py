@@ -68,6 +68,13 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
 if __name__ == "__main__":
     import sys
 
+    # The command-line check is the walking exporter's full one: the run's
+    # recorded params/env.yaml (HOME joints/root, +-pi clip, raw previous
+    # action) as well as the checkpoint's HOME stamp.
+    from mjlab_microban.scripts.export_walk_onnx import (
+        require_current_home_walk_checkpoint as require_walking_run,
+    )
+
     for argument in sys.argv[1:]:
-        require_current_home_walk_checkpoint(argument)
-        print(f"{argument}: trained at the current HOME ({HOME.tag})")
+        require_walking_run(Path(argument))
+        print(f"{argument}: trained at the current HOME ({HOME.tag}) under the walking contract")

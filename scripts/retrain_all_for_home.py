@@ -35,7 +35,10 @@ same command resumes after a crash, a stall or a fixed failure):
    (scripts/train_microban_teleop_v12.sh start --hand-pose-release), stage
    route 0 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000 with
    scripts/evaluate_microban_teleop_v12_stage.sh at every boundary.  Automatic
-   rescues: an accuracy-only canary failure is retrained once.  The 10000
+   rescues: an accuracy-only canary failure is retrained once (a retry
+   interrupted before it saved its checkpoint is rerun on resume; a gate whose
+   evaluator wrote no report is not a verdict and stops the run for a
+   re-evaluation on rerun).  The 10000
    boundary escalates on its own (the route the 2026-10 forward-lean chain
    took by hand): a failed 9999 gate tries the pose-release model_9900 corner
    rescues, one run per mix of --pr-corner-rescue-mixes (default lf60, lf90,
@@ -50,7 +53,9 @@ same command resumes after a crash, a stall or a fixed failure):
    (lineage fresh_chain_model9900_corner_rescue) or attempt is resumed as an
    ordinary pose-release checkpoint; the 15000 gate of the pose-release
    recipe is judged under its completion-allowance profile by the stage
-   evaluator.
+   evaluator.  At every HOME but the centered one the 10000 / 10100 gates are
+   judged with the 0.040 m hand-RMS allowance and the package must record
+   both (step 5 stops if either is missing).
 5. Export walk.onnx / getup.onnx, install them, the robot HOME yaml and the
    run pins (walking source / probe / walk.onnx SHA-256s, HOME literals of the
    robot tests) into --robot-repo, package PICO against that robot tree
@@ -74,10 +79,14 @@ default) runs at most one of its GPU jobs at a time, for a GPU shared with
 another training.  Ctrl-C / SIGTERM stops its own children and exits.
 
 --dry-run exercises the whole plumbing in minutes at any HOME: 2-3 iterations
-per stage at 64 envs, PICO stage boundaries reached by clock lifts, every gate
+per stage at 64 envs, PICO stage boundaries reached by clock lifts (every
+segment, canaries included, lifted to 3 updates before its real end and the
+lift's parent recorded in its params/agent.yaml), every gate
 evaluated and recorded but not enforced (plumbing mode; only
 --dry-run-simulate-failures decides the rescue route), the final package
-built by scripts/home_pipeline/dry_run_tools.py (artifacts labelled DRYRUN),
+built by scripts/home_pipeline/dry_run_tools.py (artifacts labelled DRYRUN,
+the package marked dry_run_not_deployable, which the robot refuses outside
+the dry run's own checks),
 the robot repo a scratch clone (origin push URL a local path), the robot
 commit local, and nothing pushed or committed in the training repo.  It needs
 one of:
@@ -181,6 +190,9 @@ V12_SEGMENTS = [
     ("10000_to10100", 10099, True),
     ("10100_to15000", 14999, False),
 ]
+# export_teleop_v12_deployment.DRY_RUN_POLICY_ALLOW_ENV: the robot runtime
+# accepts a dry_run_not_deployable PICO package only with this set to "1".
+DRY_RUN_POLICY_ALLOW_ENV = "MICROBAN_ALLOW_DRYRUN_POLICY"
 V12_ACCURACY_CHECKS = {"hand_tracking_rms", "hand_tracking_p95", "foot_tracking_rms",
                        "foot_tracking_p95"}
 V12_FINAL_PROFILES = {
@@ -630,12 +642,17 @@ class Pipeline:
                                     "(the pipeline does not switch the code under training)", EXIT_INPUT)
             self.git(REPO, "switch", "-c", branch)
             self.log(f"training repo: created branch {branch} from {current}")
-        dirty = [line[3:] for line in self.git(REPO, "status", "--porcelain", "--untracked-files=no")
-                 .splitlines() if line.strip()]
+        # Untracked (non-ignored) files count too: the 9999 corner rescue
+        # (ensure_committed_tree, train_microban_teleop_v12_corner_rescue.sh)
+        # trains only from a tree whose sole change is the HOME yaml, so a real
+        # run refuses anything else here instead of a day of GPU later.
+        dirty = sorted({line[3:] for line in self.git(REPO, "status", "--porcelain", "--untracked-files=all")
+                        .splitlines() if line.strip()})
         others = [p for p in dirty if p not in ("config/home_pose.yaml",)]
-        if others and not a.allow_dirty:
-            raise PipelineError("the training repo has uncommitted changes besides config/home_pose.yaml: "
-                                f"{others} (commit them, or pass --allow-dirty)", EXIT_INPUT)
+        if others and not (a.allow_dirty and self.dry):
+            raise PipelineError("the training repo has uncommitted or untracked files besides "
+                                f"config/home_pose.yaml: {others} (commit, remove or .gitignore them; "
+                                "--allow-dirty waives this only for --dry-run)", EXIT_INPUT)
         self.put("training", {"branch": branch, "head": self.git(REPO, "rev-parse", "HEAD"),
                               "dirty": dirty})
         # Robot repository.
@@ -706,9 +723,10 @@ class Pipeline:
                            timeout=900)
         if out.returncode != 0:
             raise PipelineError(
-                f"--dry-run-walk-init {seed} was not trained at the HOME of config/home_pose.yaml (its "
-                "microban_walk_home_pose stamp differs): use a walker of this HOME, or run from scratch with "
-                "--dry-run-plumbing\n" + (out.stderr or out.stdout).strip()[-600:], EXIT_INPUT)
+                f"--dry-run-walk-init {seed} was not trained at the HOME of config/home_pose.yaml under the "
+                "walking contract (its run's params/env.yaml or its microban_walk_home_pose stamp differs, as "
+                "train_microban_teleop_v12.sh start checks): use a walker of this HOME, or run from scratch "
+                "with --dry-run-plumbing\n" + (out.stderr or out.stdout).strip()[-600:], EXIT_INPUT)
         self.log(f"dry run: warm-start walker {seed} was trained at this HOME")
 
     # -------------------------------------------------- generic segments
@@ -1103,7 +1121,9 @@ class Pipeline:
         if lift_to is not None:
             parent_dir = V12_EXP / prev
             last = max(checkpoints(parent_dir))
-            lifted = f"{self.prefix}_v12_lift_{lift_to}"
+            # Named by the lifted checkpoint's bytes, so a different parent (a
+            # canary retry, another 9999 route) never reuses a stale lift.
+            lifted = f"{self.prefix}_v12_lift_{lift_to}_{sha256(parent_dir / f'model_{last}.pt')[:12]}"
             if not (V12_EXP / lifted / f"model_{lift_to}.pt").exists():
                 shutil.rmtree(V12_EXP / lifted, ignore_errors=True)
                 self.run(f"lift_{lift_to}", [*UV, "python", "scripts/home_pipeline/dry_run_tools.py",
@@ -1211,20 +1231,36 @@ class Pipeline:
         if not self.dry and self.gate_ok(run, end):
             self.log(f"gate {end}: the existing gate validates for {run}")
             rc, trk, other = 0, [], []
-        elif record and record.get("checkpoint_sha256") == digest:
+        elif record and record.get("checkpoint_sha256") == digest and not self.gate_crashed(record):
             rc, trk, other = record["rc"], record["tracking_failed"], record["other_failed"]
             self.log(f"gate {end} {run}: recorded rc={rc} tracking failed={trk} other failed={other}")
         elif self.dry and self.args.dry_run_gates == "final" and end != 14999:
             rc, trk, other = 0, [], []
         else:
             rc, trk, other = self.v12_gate(run, end)
-            self.put("pico", "gates", f"{run}_model_{end}", "checkpoint_sha256", digest)
+            crashed = self.gate_crashed({"tracking_failed": trk, "other_failed": other})
+            if crashed and not self.dry:
+                # An evaluator that died (e.g. OOM on the shared GPU) wrote no
+                # report: that is not a verdict on the checkpoint, so it is not
+                # cached and does not count as a failed gate; a rerun
+                # re-evaluates it.
+                raise PipelineError(f"the v12 gate evaluation of {run}/model_{end}.pt wrote no report (rc={rc}); "
+                                    "not a gate verdict: rerun to re-evaluate it")
+            if not crashed:
+                # Only a real verdict (every report written) is cached.
+                self.put("pico", "gates", f"{run}_model_{end}", "checkpoint_sha256", digest)
         if self.simulated_failure(key):
             self.log(f"dry run: simulating an accuracy-only failure of gate {end} ({key}, {run})")
             return False, ["hand_tracking_rms"], []
         if self.dry:
             return True, trk, other
         return rc == 0, trk, other
+
+    @staticmethod
+    def gate_crashed(record: dict) -> bool:
+        """A gate record without a verdict: some report was never written."""
+
+        return "<missing>" in (record.get("tracking_failed") or []) + (record.get("other_failed") or [])
 
     def check_recipe(self, run: str, end: int) -> None:
         ckpt = V12_EXP / run / f"model_{end}.pt"
@@ -1290,10 +1326,15 @@ class Pipeline:
         report = self.state_dir / "pico" / f"{parent.parent.name}_model_9900_strict_tracking.json"
         report.parent.mkdir(exist_ok=True)
         if not report.exists():
-            self.gpu_job(self.args.probe_gpu_mib, f"rescue_parent_report_a{attempt}", [
+            rc = self.gpu_job(self.args.probe_gpu_mib, f"rescue_parent_report_a{attempt}", [
                 *UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking", str(parent),
                 "--expected-sha256", sha256(parent), "--output", str(report), "--force"], "gate",
                 allow_fail=True)
+            if not report.exists() and not self.dry:
+                # The evaluator died without a report (not a verdict on the
+                # parent); a rerun evaluates it again instead of skipping rescues.
+                raise PipelineError(f"the strict tracking evaluation of the rescue parent {parent} wrote no "
+                                    f"report (rc={rc}); rerun to re-evaluate it")
         for index, mix in enumerate(self.args.pr_corner_rescue_mixes, 1):
             key = f"a{attempt}r{index}_{mix}"
             done = self.get("pico", "b9999", "rescues", key)
@@ -1407,10 +1448,10 @@ class Pipeline:
         prev: str | None = None
         for index, (suffix, real_end, canary) in enumerate(V12_SEGMENTS):
             seg = f"{self.prefix}_v12_{suffix}"
-            if self.dry and canary:
-                end = V12_SEGMENTS[index - 1][1] + 3
-            else:
-                end = real_end
+            # A dry run lifts every segment (canaries included) to 3 updates
+            # before its real end, so every gate and the packager's 10000 /
+            # 10100 boundary record see the real clocks.
+            end = real_end
             current = self.latest_v12(seg)
             if current and (V12_EXP / current / f"model_{end}.pt").is_file():
                 self.log(f"skip training {seg}: {current}/model_{end}.pt exists")
@@ -1420,7 +1461,7 @@ class Pipeline:
                     if not self.latest_v12(start_seg):
                         self.v12_train(start_seg, None)
                     self.v12_train(seg, self.latest_v12(start_seg), lift_to=end - 3)
-                elif self.dry and not canary:
+                elif self.dry:
                     self.v12_train(seg, prev, lift_to=end - 3)
                 else:
                     self.v12_train(seg, prev)
@@ -1431,19 +1472,31 @@ class Pipeline:
             self.check_recipe(current, end)
             if real_end == 9999:
                 prev = self.boundary_9999(prev, current)
+                self.put("pico", "segments", suffix, prev)
                 continue
             ok, trk, other = self.judged_gate(current, end, f"canary:{suffix}" if canary else f"stage:{suffix}")
-            if not ok and canary and trk and set(trk) <= V12_ACCURACY_CHECKS and not other \
-                    and not self.get("pico", "canary_retry", suffix):
-                self.put("pico", "canary_retry", suffix, current)
-                self.log(f"canary {end} failed on accuracy only {trk}; retraining it once "
-                         f"(failed run {current} kept)")
-                self.v12_train(seg, prev)
+            retried = self.get("pico", "canary_retry", suffix)
+            if not ok and canary and (
+                    (not retried and trk and set(trk) <= V12_ACCURACY_CHECKS and not other)
+                    or retried == current):
+                if retried == current:
+                    # Resumed after the retry was interrupted before it saved
+                    # model_<end>: the newest run is still the failed first one.
+                    self.log(f"canary {end}: resuming the interrupted retry of {current}")
+                else:
+                    self.put("pico", "canary_retry", suffix, current)
+                    self.log(f"canary {end} failed on accuracy only {trk}; retraining it once "
+                             f"(failed run {current} kept)")
+                failed_run = current
+                self.v12_train(seg, prev, lift_to=end - 3 if self.dry else None)
                 current = self.latest_v12(seg)
+                if current == failed_run or not (V12_EXP / current / f"model_{end}.pt").is_file():
+                    raise PipelineError(f"canary {end} retry of {failed_run} wrote no model_{end}.pt")
                 self.check_recipe(current, end)
                 ok, trk, other = self.judged_gate(current, end, f"canary:{suffix}")
             if not ok:
                 raise PipelineError(f"v12 gate {end} failed for {current}: tracking {trk}, other {other}")
+            self.put("pico", "segments", suffix, current)
             prev = current
         ckpt = V12_EXP / prev / "model_14999.pt"
         gate = GATE_ROOT / f"{prev}_model_14999_gate.json"
@@ -1470,10 +1523,17 @@ class Pipeline:
         out = self.capture([*UV, "python", "-c", code, str(ckpt)], timeout=600, check=True)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
+    def robot_env(self) -> dict[str, str]:
+        """Environment of the robot validator / tests (a dry run's own package is accepted there only)."""
+
+        env = {"PYTHONPATH": str(self.robot / "src"), "CUDA_VISIBLE_DEVICES": ""}
+        if self.dry:
+            env[DRY_RUN_POLICY_ALLOW_ENV] = "1"
+        return env
+
     def robot_python(self, args: list[str], *, timeout: float = 900) -> subprocess.CompletedProcess:
         return self.capture(["uv", "run", "--project", str(self.robot), "--locked", "python", *args],
-                            cwd=self.robot, env={"PYTHONPATH": str(self.robot / "src"),
-                                                 "CUDA_VISIBLE_DEVICES": ""}, timeout=timeout)
+                            cwd=self.robot, env=self.robot_env(), timeout=timeout)
 
     def install(self, src: Path, rel: str) -> bool:
         dest = self.robot / rel
@@ -1624,8 +1684,7 @@ class Pipeline:
         if report.get("status") == "pass":
             self.log(f"robot validator: pass (walk fallback {report.get('walk_fallback', {}).get('status')})")
         tests = self.capture(["uv", "run", "--project", str(self.robot), "--locked", "--with", "pytest", "python",
-                              "-m", "pytest", "-q", "tests"], cwd=self.robot,
-                             env={"PYTHONPATH": str(self.robot / "src"), "CUDA_VISIBLE_DEVICES": ""},
+                              "-m", "pytest", "-q", "tests"], cwd=self.robot, env=self.robot_env(),
                              timeout=3600)
         (out / "robot_tests.log").write_text(tests.stdout + tests.stderr)
         summary = (tests.stdout.strip().splitlines() or ["(no output)"])[-1]
@@ -1643,41 +1702,62 @@ class Pipeline:
         self.log(f"robot tests: {summary}")
         self.put("export", "robot_tests", summary)
 
+    def boundary_runs(self) -> list[tuple[str | None, int]]:
+        """(run, end) of the 10000 boundary and the 10100 canary the final continued from."""
+
+        canary = self.get("pico", "segments", "10000_to10100") or self.latest_v12(f"{self.prefix}_v12_10000_to10100")
+        return [(self.get("pico", "b9999", "passed", "run"), 9999), (canary, 10099)]
+
+    def required_boundary_clocks(self) -> set[int]:
+        """Clocks a pose-release package must record at this HOME (none at the centered HOME)."""
+
+        return set(self.home.get("v12_required_boundary_gate_clocks", [10_000, 10_100]))
+
     def boundary_gate_args(self) -> list[str]:
         """--boundary-gate for the 10000 boundary and the 10100 canary of the final lineage.
 
         The package records which tracking profile judged them (e.g. the 0.040 m
         hand-RMS allowance of the pose-release 10000 boundary), so the robot sees it.
+        Where the HOME requires them (every HOME but the centered one: the
+        packager refuses a pose-release final without both), a missing or
+        non-validating gate stops the run here; elsewhere it is left out.
         """
 
-        runs = [(self.get("pico", "b9999", "passed", "run"), 9999),
-                (self.latest_v12(f"{self.prefix}_v12_10000_to10100"), 10099)]
-        args = []
-        for run, end in runs:
+        required = self.required_boundary_clocks()
+        args, missing = [], []
+        for run, end in self.boundary_runs():
             gate = GATE_ROOT / f"{run}_model_{end}_gate.json"
             if run and gate.is_file() and self.gate_ok(run, end):
                 args += ["--boundary-gate", str(gate)]
+            elif end + 1 in required:
+                missing.append(f"{end + 1} ({run}/model_{end}: {gate.name} missing or not validating)")
+        if missing:
+            raise PipelineError("the pose-release package must record its 10000 boundary and 10100 canary gates "
+                                "at this HOME, but " + "; ".join(missing))
         return args
 
     def dry_boundary_args(self) -> list[str]:
-        """Dry run: the model_9999 that passed the 10000 boundary, for the dry packager.
+        """Dry run: the model_9999 / model_10099 the final continued from, for the dry packager.
 
-        dry_run_tools.py package builds it a forced gate and passes it as
-        --boundary-gate, so the packager's real boundary lineage check sees the
-        escalation's result (a stamped corner rescue's marker must be carried
-        by the final checkpoint; a retrained attempt shares every marker).  The
-        dry 10100 canary ends at 10002, not a canary iteration, so it is left out.
+        dry_run_tools.py package builds each a forced gate and passes it as
+        --boundary-gate, so the packager's real boundary checks run on the
+        escalation's result: the checkpoint must be on the final's resume
+        chain (lifted dry segments record their parent in params/agent.yaml),
+        a stamped corner rescue's marker must be carried by the final, and
+        where the HOME requires both clocks a missing one refuses packaging.
         """
 
-        run = self.get("pico", "b9999", "passed", "run")
-        prefix = GATE_ROOT / f"{run}_model_9999"
-        if not run or not all(Path(f"{prefix}{s}").is_file() for s in ("_9x300.json", "_tracking.json",
-                                                                       "_onnx.json")):
-            self.log("dry run: no evaluated 9999 boundary gate to pass to the packager")
-            return []
-        self.log(f"dry run: packaging with the 10000 boundary {run}/model_9999 "
-                 f"({self.get('pico', 'b9999', 'passed', 'kind')})")
-        return [str(V12_EXP / run / "model_9999.pt"), str(prefix)]
+        args = []
+        for run, end in self.boundary_runs():
+            prefix = GATE_ROOT / f"{run}_model_{end}"
+            if not run or not all(Path(f"{prefix}{s}").is_file() for s in ("_9x300.json", "_tracking.json",
+                                                                           "_onnx.json")):
+                self.log(f"dry run: no evaluated {end + 1} gate ({run}) to pass to the packager")
+                continue
+            self.log(f"dry run: packaging with the {end + 1} gate of {run}/model_{end}"
+                     + (f" ({self.get('pico', 'b9999', 'passed', 'kind')})" if end == 9999 else ""))
+            args += [str(V12_EXP / run / f"model_{end}.pt"), str(prefix)]
+        return args
 
     def check_receipt(self, receipt: Path, ckpt: Path, onnx: Path) -> None:
         """The binding finalize_microban_teleop_v12.sh applies to the packager report."""
@@ -1920,7 +2000,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--status", action="store_true", help="print the state of --state-dir and exit")
     p.add_argument("--no-push", action="store_true", help="commit but do not push")
     p.add_argument("--allow-dirty", action="store_true",
-                   help="allow uncommitted training-repo changes besides config/home_pose.yaml")
+                   help="--dry-run only: allow uncommitted or untracked training-repo files besides "
+                   "config/home_pose.yaml (a real run refuses them: the 9999 corner rescue trains only "
+                   "from a clean tree)")
     p.add_argument("--sequential", action="store_true", help="train get-up after walking instead of in parallel")
     p.add_argument("--serial-gpu", action="store_true",
                    help="run at most one GPU job of this command at a time (implies --sequential; walking "

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
 from mjlab_microban.scripts.teleop_v12_lr_recovery import (
     PINNED_RAW_MODEL_9200_SHA256,
@@ -59,6 +60,14 @@ from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD,
+)
+
+# The 0.040 m hand-RMS boundary allowance and the pose-release boundary-gate
+# requirement exist at every HOME but the centered one; their tests run at the
+# forward-lean HOME through tests/test_home_pose_any_trunk.py.
+needs_hand_rms_40mm = pytest.mark.skipif(
+    not V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
+    reason="no 0.040 m hand-RMS allowance at this HOME (the centered HOME)",
 )
 
 
@@ -868,6 +877,30 @@ def test_onnx_parity_rule_metadata_rejects_drift(name: str, value: object) -> No
         deployment._onnx_parity_rule_metadata(evidence)
 
 
+def _write_resume_params(run_dir: Path, parent: Path | None) -> None:
+    """Record ``parent`` as the run's exact resume source (params/agent.yaml)."""
+
+    params = run_dir / "params"
+    params.mkdir(parents=True, exist_ok=True)
+    if parent is None:
+        text = "resume: false\nload_run: .*\nload_checkpoint: model_.*.pt\n"
+    else:
+        text = (
+            "seed: 42\nresume: true\n"
+            f"load_run: ^{parent.parent.name}$\n"
+            f"load_checkpoint: ^{parent.stem}[.]pt$\n"
+        )
+    (params / "agent.yaml").write_text(text, encoding="utf-8")
+
+
+def _final_checkpoint_fixture(root: Path, parent: Path) -> Path:
+    checkpoint = root / "final" / "model_14999.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"final")
+    _write_resume_params(checkpoint.parent, parent)
+    return checkpoint
+
+
 def _boundary_gate_fixture(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -877,6 +910,7 @@ def _boundary_gate_fixture(
     completed: int = 10_000,
     kind: str = "canonical_boundary",
     profile: str = deployment.HMD_HAND_HAND_RMS_40MM_PROFILE,
+    parent: Path | None = None,
 ) -> Path:
     import torch
 
@@ -887,6 +921,7 @@ def _boundary_gate_fixture(
     checkpoint = root / name / f"model_{completed - 1}.pt"
     checkpoint.parent.mkdir(parents=True)
     torch.save({"iter": completed - 1, "infos": infos}, checkpoint)
+    _write_resume_params(checkpoint.parent, parent)
     gate = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
@@ -907,6 +942,7 @@ def _boundary_gate_fixture(
     return gate_path
 
 
+@needs_hand_rms_40mm
 def test_boundary_gates_record_the_10000_hand_rms_allowance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -936,15 +972,32 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
         parent_strict_failed_checks=("hand_tracking_rms",),
     )
     final_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = marker
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+    )
+
     boundary_infos = deepcopy(final_infos)
     gate_path = _boundary_gate_fixture(
         tmp_path, monkeypatch, name="rescue", infos=boundary_infos
     )
-    entries = deployment._boundary_stage_gate_lineage(
-        (gate_path,), final_infos=final_infos
+    canary = _boundary_gate_fixture(
+        tmp_path,
+        monkeypatch,
+        name="canary",
+        infos=deepcopy(final_infos),
+        completed=10_100,
+        kind="activation_canary",
+        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        parent=gate_path.parent / "model_9999.pt",
     )
-    assert validated == [gate_path.resolve()]
-    assert len(entries) == 1
+    final_checkpoint = _final_checkpoint_fixture(
+        tmp_path, canary.parent / "model_10099.pt"
+    )
+    entries = deployment._boundary_stage_gate_lineage(
+        (gate_path, canary), final_infos=final_infos, final_checkpoint=final_checkpoint
+    )
+    assert validated == [gate_path.resolve(), canary.resolve()]
+    assert len(entries) == 2
     entry = entries[0]
     assert entry["completed_updates"] == 10_000
     assert entry["checkpoint_kind"] == "canonical_boundary"
@@ -997,6 +1050,7 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     assert "v12_boundary_stage_gates_semantics" not in plain
 
 
+@needs_hand_rms_40mm
 def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1026,9 +1080,37 @@ def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
     boundary = _boundary_gate_fixture(
         tmp_path, monkeypatch, name="boundary", infos=deepcopy(final_infos)
     )
-    entries = deployment._boundary_stage_gate_lineage(
-        (canary, boundary), final_infos=final_infos
+    _write_resume_params(canary.parent, boundary.parent / "model_9999.pt")
+    final_checkpoint = _final_checkpoint_fixture(
+        tmp_path, canary.parent / "model_10099.pt"
     )
+    entries = deployment._boundary_stage_gate_lineage(
+        (canary, boundary), final_infos=final_infos, final_checkpoint=final_checkpoint
+    )
+    # The required pose-release ancestors are discovered through the resume
+    # chain when they are not listed explicitly.
+    gate_root = tmp_path / "gates"
+    gate_root.mkdir()
+    for gate, stem in ((boundary, "model_9999"), (canary, "model_10099")):
+        (gate_root / f"{gate.parent.name}_{stem}_gate.json").write_bytes(
+            gate.read_bytes()
+        )
+    discovered = deployment._discover_ancestor_boundary_gates(
+        final_checkpoint, gate_root=gate_root, explicit=()
+    )
+    assert sorted(path.name for path in discovered) == [
+        "boundary_model_9999_gate.json",
+        "canary_model_10099_gate.json",
+    ]
+    assert (
+        deployment._boundary_stage_gate_lineage(
+            discovered, final_infos=final_infos, final_checkpoint=final_checkpoint
+        )
+        == entries
+    )
+    assert deployment._discover_ancestor_boundary_gates(
+        final_checkpoint, gate_root=gate_root, explicit=(boundary,)
+    ) == (boundary, (gate_root / "canary_model_10099_gate.json").resolve())
     assert [entry["completed_updates"] for entry in entries] == [10_000, 10_100]
     assert [entry["checkpoint_kind"] for entry in entries] == [
         "canonical_boundary",
@@ -1049,6 +1131,9 @@ def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
         "final_clock",
         "interrupted_recovery",
         "duplicate_clock",
+        "sibling_not_ancestor",
+        pytest.param("missing_canary", marks=needs_hand_rms_40mm),
+        "broken_resume_record",
     ],
 )
 def test_boundary_gates_reject_foreign_or_nonboundary_gates(
@@ -1092,14 +1177,153 @@ def test_boundary_gates_reject_foreign_or_nonboundary_gates(
             "kind": "interrupted_recovery",
             "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
         }
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+    )
+
     gates = [
         _boundary_gate_fixture(
             tmp_path, monkeypatch, name="a", infos=boundary_infos, **fixture
         )
     ]
+    canary = _boundary_gate_fixture(
+        tmp_path,
+        monkeypatch,
+        name="canary",
+        infos=deepcopy(final_infos),
+        completed=10_100,
+        kind="activation_canary",
+        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        parent=gates[0].parent / f"model_{fixture.get('completed', 10_000) - 1}.pt",
+    )
+    final_checkpoint = _final_checkpoint_fixture(
+        tmp_path, canary.parent / "model_10099.pt"
+    )
+    if case != "missing_canary":
+        gates.append(canary)
     if case == "duplicate_clock":
         gates.append(
             _boundary_gate_fixture(tmp_path, monkeypatch, name="b", infos=boundary_infos)
         )
+        _write_resume_params(gates[0].parent, gates[-1].parent / "model_9999.pt")
+    if case == "sibling_not_ancestor":
+        # Same markers and clock, but not on the final's resume chain.
+        gates[0] = _boundary_gate_fixture(
+            tmp_path, monkeypatch, name="sibling", infos=boundary_infos
+        )
+    if case == "broken_resume_record":
+        (canary.parent / "params" / "agent.yaml").write_text(
+            "resume: true\nload_run: .*\nload_checkpoint: model_.*.pt\n",
+            encoding="utf-8",
+        )
     with pytest.raises(ValueError):
-        deployment._boundary_stage_gate_lineage(tuple(gates), final_infos=final_infos)
+        deployment._boundary_stage_gate_lineage(
+            tuple(gates), final_infos=final_infos, final_checkpoint=final_checkpoint
+        )
+
+
+def test_boundary_gate_controls_pass_on_the_exact_ancestry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection fixture above is valid except for each injected defect."""
+
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+    )
+
+    monkeypatch.setattr(
+        deployment,
+        "validate_gate",
+        lambda gate_path, _checkpoint: json.loads(gate_path.read_text("utf-8")),
+    )
+    monkeypatch.setattr(deployment, "resolve_bootstrap_artifact_path", Path)
+    *_, final_infos = _evidence(tmp_path)
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    boundary = _boundary_gate_fixture(
+        tmp_path, monkeypatch, name="a", infos=deepcopy(final_infos)
+    )
+    canary = _boundary_gate_fixture(
+        tmp_path,
+        monkeypatch,
+        name="canary",
+        infos=deepcopy(final_infos),
+        completed=10_100,
+        kind="activation_canary",
+        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        parent=boundary.parent / "model_9999.pt",
+    )
+    final_checkpoint = _final_checkpoint_fixture(
+        tmp_path, canary.parent / "model_10099.pt"
+    )
+    entries = deployment._boundary_stage_gate_lineage(
+        (boundary, canary), final_infos=final_infos, final_checkpoint=final_checkpoint
+    )
+    assert [entry["completed_updates"] for entry in entries] == [10_000, 10_100]
+    # A non-pose-release final may still be packaged without boundary gates.
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_RECIPE_REVISION
+    )
+    assert (
+        deployment._boundary_stage_gate_lineage(
+            (), final_infos=final_infos, final_checkpoint=final_checkpoint
+        )
+        == []
+    )
+
+
+@pytest.mark.skipif(
+    V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
+    reason="only the centered HOME has no required pose-release boundary gates",
+)
+def test_centered_pose_release_final_needs_no_boundary_gates(tmp_path: Path) -> None:
+    """track-centered-home-clip packaged its pose-release final without them."""
+
+    assert deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES == ()
+    *_, final_infos = _evidence(tmp_path)
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    final_checkpoint = tmp_path / "final_run" / "model_14999.pt"
+    # Its release archive keeps only the final run: the recorded resume parent
+    # is absent, which matters only once a boundary gate is listed.
+    (final_checkpoint.parent / "params").mkdir(parents=True)
+    (final_checkpoint.parent / "params" / "agent.yaml").write_text(
+        "resume: true\nload_run: ^absent_run$\nload_checkpoint: ^model_10099[.]pt$\n",
+        encoding="utf-8",
+    )
+    assert (
+        deployment._boundary_stage_gate_lineage(
+            (), final_infos=final_infos, final_checkpoint=final_checkpoint
+        )
+        == []
+    )
+    with pytest.raises(ValueError, match="Resume parent"):
+        deployment._resume_ancestry(final_checkpoint)
+
+
+def test_dry_run_evidence_is_refused_outside_dry_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(deployment, "resolve_bootstrap_artifact_path", Path)
+    probe = tmp_path / "velocity_probe.json"
+    probe.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+    assert deployment._dry_run_evidence(gate={"status": "pass"}, infos={}, probe_path=str(probe)) == []
+    forced = tmp_path / "DRYRUN_FORCED_PASS_velocity_probe.json"
+    forced.write_text(json.dumps({"dry_run_forced_pass_not_deployable": True}), encoding="utf-8")
+    assert deployment._dry_run_evidence(gate={}, infos={}, probe_path=str(forced)) == [
+        f"source probe receipt {forced.name}"
+    ]
+    renamed = tmp_path / "velocity_probe_copy.json"
+    renamed.write_text(forced.read_text(encoding="utf-8"), encoding="utf-8")
+    assert deployment._dry_run_evidence(
+        gate={"dry_run_status_forced_not_deployable": True},
+        infos={"dry_run_clock_lift_from": "x"},
+        probe_path=str(renamed),
+    ) == [
+        "gate dry_run_status_forced_not_deployable",
+        "checkpoint info dry_run_clock_lift_from",
+        "source probe receipt dry_run_forced_pass_not_deployable",
+    ]
+    assert deployment.DRY_RUN_METADATA_KEY == "dry_run_not_deployable"

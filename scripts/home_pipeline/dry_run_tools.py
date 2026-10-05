@@ -17,14 +17,18 @@ usage:
 
 lift-clock: copy a v12 checkpoint into a new run directory with its update
 clock lifted to ITERATION, so a dry run can cross every stage boundary
-(3000/3100/7000/7100/10000/10100/15000) with a few updates per segment.
+(3000/3100/7000/7100/10000/10100/15000) with a few updates per segment.  A
+source in a sibling run directory is recorded as the copy's resume parent in
+params/agent.yaml (load_run/load_checkpoint), as a resumed run records it.
 
 package: run the real v12 deployment packager (ONNX export, metadata, parity,
 robot runtime validator on MICROBAN_REPO, identity hashes of the robot tree)
 on a dry-run checkpoint whose stage reports fail on performance.  The
 locomotion/tracking reports are copied next to GATE_OUT with status forced
 to "pass" (marked ``dry_run_original_status``), their status/threshold
-validation is skipped, a short runtime smoke corpus (a DRYRUN checkpoint
+validation is skipped, the package carries ``dry_run_not_deployable`` (the
+robot runtime refuses it unless MICROBAN_ALLOW_DRYRUN_POLICY=1, which only
+the dry run sets for its own checks), a short runtime smoke corpus (a DRYRUN checkpoint
 that fell records fewer than 16 rows) is cycled to 16 rows, and the gate
 carries ``dry_run_status_forced_not_deployable``.  The locomotion summary
 and per-scenario pass fields the robot validator re-checks in the package
@@ -58,6 +62,8 @@ then validates a real corner-rescue lineage.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +95,20 @@ def lift_clock(source: str, destination_dir: str, iteration: str) -> int:
     out_dir.mkdir(parents=True, exist_ok=False)
     out = out_dir / f"model_{target}.pt"
     torch.save(payload, out)
+    source_path = Path(source).resolve()
+    match = re.fullmatch(r"model_([0-9]+)\.pt", source_path.name)
+    if match and source_path.parent.parent == out_dir.resolve().parent:
+        # Record the lift's parent the way a resumed run does, so the
+        # packager's resume-ancestry walk (export_teleop_v12_deployment
+        # _resume_ancestry) follows a dry chain through its lifted copies.
+        (out_dir / "params").mkdir()
+        (out_dir / "params" / "agent.yaml").write_text(
+            "resume: true\n"
+            f"load_run: ^{source_path.parent.name}$\n"
+            f"load_checkpoint: ^model_{match[1]}[.]pt$\n"
+            "dry_run_clock_lift: true\n",
+            encoding="utf-8",
+        )
     print(out)
     return 0
 
@@ -170,6 +190,9 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, r
         return loaded
 
     deployment.validate_gate = validate_gate
+    # The package is marked dry_run_not_deployable; the robot runtime refuses
+    # it unless this variable is "1" (only for the dry run's own validator).
+    os.environ[deployment.DRY_RUN_POLICY_ALLOW_ENV] = "1"
     receipt = deployment.package_v12_deployment(
         checkpoint=checkpoint_path,
         gate_path=gate_path,
@@ -177,6 +200,7 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, r
         microban_repo=Path(repo),
         force=True,
         boundary_gates=tuple(boundary_paths),
+        dry_run=True,
     )
     receipt["dry_run_status_forced_not_deployable"] = True
     receipt["dry_run_boundary_gates"] = [str(p) for p in boundary_paths]

@@ -14,6 +14,7 @@ from mjlab.envs.mdp.observations import builtin_sensor
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
 from mjlab_microban.robot import home_contracts
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
@@ -69,12 +70,18 @@ def getup_home_pose() -> dict[str, object]:
 # real HOME edit (>= 1e-12 deg in the YAML changes the hash, and a different
 # pose moves these values by far more) still mismatches through the joint names
 # or the HOME tag strings checked elsewhere.
-HOME_STAMP_TOLERANCE = 1.0e-9
+# The two HOMEs with published artifacts pin every stamped value
+# (home_pose.LEGACY_HOME_OVERRIDES), so they keep their branches' exact
+# comparison (stamp == HOME, recorded root atol 1e-12).
+HOME_STAMP_TOLERANCE = 0.0 if HOME.is_legacy else 1.0e-9
+HOME_ROOT_RECORDED_ATOL = 1.0e-12 if HOME.is_legacy else 1.0e-9
 
 
 def home_pose_stamps_match(stamp: object, expected: object, tol: float = HOME_STAMP_TOLERANCE) -> bool:
-    """Structural equality of two HOME stamps with a float tolerance."""
+    """Structural equality of two HOME stamps with a float tolerance (0: ``==``)."""
 
+    if tol == 0.0:
+        return stamp == expected
     if isinstance(expected, Mapping):
         return (
             isinstance(stamp, Mapping)
@@ -154,7 +161,9 @@ def require_recorded_getup_env(env_yaml: Path) -> None:
     ):
         raise ValueError("Run was not trained from the current HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
-        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-9):
+        if not np.allclose(
+            np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=HOME_ROOT_RECORDED_ATOL
+        ):
             raise ValueError(f"Run was not trained from the current HOME root {key}")
     clip = action.get("clip")
     if not isinstance(clip, dict) or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [

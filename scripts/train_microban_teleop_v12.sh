@@ -22,8 +22,8 @@ Usage:
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
 
-Fresh start checks that the velocity checkpoint was trained at the current
-HOME (config/home_pose.yaml), hashes it, runs the 9x300 raw
+Fresh start checks that the velocity checkpoint's run recorded the current
+HOME (config/home_pose.yaml) and the walking contract, hashes it, runs the 9x300 raw
 recurrence probe of it in the teleop task (must pass), publishes the pristine
 parity/ONNX bootstrap receipt, and writes model_pristine.pt.  The source path,
 its SHA-256 and the probe receipt are recorded in every checkpoint and
@@ -134,10 +134,12 @@ if [[ "${mode}" == "start" ]]; then
             || fail "Velocity source SHA-256 mismatch: ${actual_sha}"
     fi
     source_sha="${actual_sha}"
-    # The source must be a walking checkpoint trained at this checkout's HOME
-    # (config/home_pose.yaml): its microban_walk_home_pose stamp must match
-    # (unstamped checkpoints only at the centered HOME they predate).
-    uv run --locked python -m mjlab_microban.tasks.microban_velocity_runner "${source_path}" \
+    # The source must be a walking run trained at this checkout's HOME
+    # (config/home_pose.yaml): its recorded params/env.yaml (HOME joints and
+    # root, +-pi target clip, raw previous action) and its checkpoint's
+    # microban_walk_home_pose stamp must pass the walking exporter's contract
+    # checks (unstamped checkpoints only at the centered HOME they predate).
+    uv run --locked python -c 'import sys; from mjlab_microban.scripts.export_walk_onnx import require_current_home_walk_checkpoint as check; check(sys.argv[1])' "${source_path}" \
         || fail "Velocity source was not trained at the current HOME: ${source_path}"
     probe="${PROBE_ROOT}/velocity_${source_sha:0:16}_teleop83_raw_9x300.json"
     mkdir -p -- "${PROBE_ROOT}" "${BOOTSTRAP_ROOT}"

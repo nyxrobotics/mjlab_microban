@@ -443,19 +443,28 @@ class FloorContactAndRootZPinTest(unittest.TestCase):
 
     def test_home_stamps_tolerate_fk_noise_only(self):
         from mjlab_microban.tasks.microban_getup_runner import (
+            HOME_ROOT_RECORDED_ATOL,
+            HOME_STAMP_TOLERANCE,
             getup_home_pose,
             home_pose_stamps_match,
         )
 
+        # A derived HOME (FK-computed values) tolerates 1e-9 of FK noise.
         stamp = json.loads(json.dumps(getup_home_pose()))
-        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
         stamp["root_pos_m"][2] += 1.0e-12
-        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
+        # The HOMEs with published artifacts pin their values and compare
+        # exactly, as their branches did (stamp == HOME, root atol 1e-12).
+        self.assertTrue(HOME.is_legacy)
+        self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (0.0, 1.0e-12))
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
         stamp["root_pos_m"][2] += 1.0e-6
-        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
         stamp = json.loads(json.dumps(getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
         stamp["joint_pos_rad"].pop("left_knee")
-        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
         self.assertFalse(home_pose_stamps_match(None, getup_home_pose()))
 
     def test_mjcf_range_message_is_unambiguous(self):

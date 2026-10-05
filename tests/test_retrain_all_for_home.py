@@ -645,27 +645,238 @@ class UnmeasuredFootScenarioTest(unittest.TestCase):
 
 
 class BoundaryGateArgsTest(unittest.TestCase):
-    def test_validating_10000_and_10100_gates_are_passed_to_the_packager(self):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.original = pipeline.GATE_ROOT
+        pipeline.GATE_ROOT = self.root
+        self.p = make_pipeline(self.root / "state")
+        (self.root / "state").mkdir()
+        self.p.prefix = "home_x"
+        self.p.put("pico", "b9999", "passed", {"run": "rescue", "sha256": "0" * 64})
+        self.p.put("pico", "segments", "10000_to10100", "canary")
+        self.p.latest_v12 = lambda seg: "newer_canary_retry_not_continued_from"
+        (self.root / "rescue_model_9999_gate.json").write_text("{}")
+        (self.root / "canary_model_10099_gate.json").write_text("{}")
+
+    def tearDown(self):
+        pipeline.GATE_ROOT = self.original
+        self.tmp.cleanup()
+
+    def test_required_gates_of_the_continued_lineage_are_passed(self):
+        self.p.home = {"v12_required_boundary_gate_clocks": [10000, 10100]}
+        self.p.gate_ok = lambda run, end: True
+        self.assertEqual(self.p.boundary_gate_args(),
+                         ["--boundary-gate", str(self.root / "rescue_model_9999_gate.json"),
+                          "--boundary-gate", str(self.root / "canary_model_10099_gate.json")])
+
+    def test_a_missing_required_gate_stops_instead_of_being_dropped(self):
+        self.p.home = {"v12_required_boundary_gate_clocks": [10000, 10100]}
+        self.p.gate_ok = lambda run, end: run == "rescue"
+        with self.assertRaisesRegex(pipeline.PipelineError, "10100 .canary/model_10099"):
+            self.p.boundary_gate_args()
+        # An old state without the field requires both too.
+        self.p.home = {}
+        with self.assertRaisesRegex(pipeline.PipelineError, "10100"):
+            self.p.boundary_gate_args()
+
+    def test_centered_home_records_only_validating_gates(self):
+        self.p.home = {"v12_required_boundary_gate_clocks": []}
+        self.p.gate_ok = lambda run, end: run == "rescue"
+        self.assertEqual(self.p.boundary_gate_args(),
+                         ["--boundary-gate", str(self.root / "rescue_model_9999_gate.json")])
+
+    def test_dry_package_gets_the_10000_and_10100_gates(self):
+        self.assertEqual(self.p.dry_boundary_args(), [])
+        for run, end in (("rescue", 9999), ("canary", 10099)):
+            for suffix in ("_9x300.json", "_tracking.json", "_onnx.json"):
+                (self.root / f"{run}_model_{end}{suffix}").write_text("{}")
+        self.assertEqual(self.p.dry_boundary_args(), [
+            str(pipeline.V12_EXP / "rescue" / "model_9999.pt"), str(self.root / "rescue_model_9999"),
+            str(pipeline.V12_EXP / "canary" / "model_10099.pt"), str(self.root / "canary_model_10099")])
+
+
+class CanaryRetryResumeTest(unittest.TestCase):
+    """A canary retry interrupted before it saved model_<end> is retried on resume."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.original = pipeline.V12_EXP
+        pipeline.V12_EXP = root / "v12"
+        pipeline.V12_EXP.mkdir()
+        self.state = root / "state"
+        self.state.mkdir()
+        self.mk("2026-01-01_00-00-00_home_x_v12_0_to3000", 2999)
+        self.mk("2026-01-01_00-00-01_home_x_v12_3000_to3100", 3099)  # fails on accuracy only
+
+    def tearDown(self):
+        pipeline.V12_EXP = self.original
+        self.tmp.cleanup()
+
+    def mk(self, name: str, end: int) -> None:
+        (pipeline.V12_EXP / name).mkdir(exist_ok=True)
+        (pipeline.V12_EXP / name / f"model_{end}.pt").write_bytes(name.encode())
+
+    def run_pico(self, *, interrupt: bool, retry_fails: bool = False):
+        p = make_pipeline(self.state)
+        path = self.state / "state.json"
+        p.state = json.loads(path.read_text()) if path.exists() else {}
+        p.prefix = "home_x"
+        p.check_recipe = lambda run, end: None
+        calls = []
+
+        def judged_gate(run, end, key):
+            calls.append(("gate", run))
+            bad = run.endswith("00-00-01_home_x_v12_3000_to3100") or (retry_fails and "00-00-02" in run)
+            return (not bad), (["hand_tracking_rms"] if bad else []), []
+
+        def v12_train(seg, prev, lift_to=None):
+            calls.append(("train", seg))
+            if interrupt:
+                raise SystemExit(130)  # Ctrl-C while waiting for GPU memory
+            if seg.endswith("3000_to3100"):
+                self.mk("2026-01-01_00-00-02_home_x_v12_3000_to3100", 3099)
+                return
+            raise RuntimeError("later segments are not modelled")
+
+        p.judged_gate, p.v12_train = judged_gate, v12_train
+        return p, calls
+
+    def test_resume_runs_the_interrupted_retry(self):
+        p, calls = self.run_pico(interrupt=True)
+        with self.assertRaises(SystemExit):
+            p.step_pico()
+        self.assertEqual(calls[-1], ("train", "home_x_v12_3000_to3100"))
+        p, calls = self.run_pico(interrupt=False)
+        with self.assertRaisesRegex(RuntimeError, "not modelled"):
+            p.step_pico()  # the retry ran and passed; the chain went on to 3100->7000
+        self.assertIn(("gate", "2026-01-01_00-00-02_home_x_v12_3000_to3100"), calls)
+
+    def test_a_failed_retry_still_stops(self):
+        p, calls = self.run_pico(interrupt=False, retry_fails=True)
+        with self.assertRaisesRegex(pipeline.PipelineError, "v12 gate 3099 failed for 2026-01-01_00-00-02"):
+            p.step_pico()
+        self.assertEqual([c for c in calls if c[0] == "train"], [("train", "home_x_v12_3000_to3100")])
+
+
+class GateCrashTest(unittest.TestCase):
+    """An evaluator that died without reports is no verdict: not cached, not a failed gate."""
+
+    def test_crash_is_reevaluated_on_rerun(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            original = pipeline.GATE_ROOT
-            pipeline.GATE_ROOT = root
+            originals = pipeline.V12_EXP, pipeline.GATE_ROOT
+            pipeline.V12_EXP, pipeline.GATE_ROOT = root / "v12", root / "gates"
+            pipeline.GATE_ROOT.mkdir()
+            run = "2026-01-01_00-00-01_home_x_v12_3000_to3100"
+            (pipeline.V12_EXP / run).mkdir(parents=True)
+            (pipeline.V12_EXP / run / "model_3099.pt").write_bytes(b"ckpt")
+            (root / "state").mkdir()
             try:
-                p = make_pipeline(root / "state")
-                (root / "state").mkdir()
-                p.prefix = "home_x"
-                p.put("pico", "b9999", "passed", {"run": "rescue", "sha256": "0" * 64})
-                p.latest_v12 = lambda seg: "canary" if seg.endswith("_10000_to10100") else None
-                (root / "rescue_model_9999_gate.json").write_text("{}")
-                (root / "canary_model_10099_gate.json").write_text("{}")
-                p.gate_ok = lambda run, end: run == "rescue"
-                self.assertEqual(p.boundary_gate_args(),
-                                 ["--boundary-gate", str(root / "rescue_model_9999_gate.json")])
-                # A dry run packages with the evaluated (forced) 9999 boundary of the passed run.
-                self.assertEqual(p.dry_boundary_args(), [])
-                for suffix in ("_9x300.json", "_tracking.json", "_onnx.json"):
-                    (root / f"rescue_model_9999{suffix}").write_text("{}")
-                self.assertEqual(p.dry_boundary_args(), [str(pipeline.V12_EXP / "rescue" / "model_9999.pt"),
-                                                         str(root / "rescue_model_9999")])
+                evaluations = []
+
+                def make(writes_reports: bool):
+                    p = make_pipeline(root / "state")
+                    path = root / "state" / "state.json"
+                    p.state = json.loads(path.read_text()) if path.exists() else {}
+                    p.gate_ok = lambda r, e: False
+
+                    def gpu_job(need, name, cmd, kind, **kw):
+                        evaluations.append(name)
+                        if writes_reports:
+                            prefix = pipeline.GATE_ROOT / f"{run}_model_3099"
+                            for suffix in ("_9x300.json", "_tracking.json", "_onnx.json"):
+                                Path(f"{prefix}{suffix}").write_text(json.dumps({"checks": {"a": True}}))
+                            return 0
+                        return 137  # OOM-killed on the shared GPU
+
+                    p.gpu_job = gpu_job
+                    return p
+
+                with self.assertRaisesRegex(pipeline.PipelineError, "wrote no report"):
+                    make(False).judged_gate(run, 3099, "canary:3000_to3100")
+                self.assertIsNone(make(False).get("pico", "gates", f"{run}_model_3099", "checkpoint_sha256"))
+                self.assertEqual(make(True).judged_gate(run, 3099, "canary:3000_to3100"), (True, [], []))
+                self.assertEqual(len(evaluations), 2)
+                # A real verdict is cached: no third evaluation.
+                self.assertEqual(make(True).judged_gate(run, 3099, "canary:3000_to3100"), (True, [], []))
+                self.assertEqual(len(evaluations), 2)
             finally:
-                pipeline.GATE_ROOT = original
+                pipeline.V12_EXP, pipeline.GATE_ROOT = originals
+
+
+class UntrackedPreflightTest(unittest.TestCase):
+    """The training-repo check counts untracked files, as the 9999 corner rescue does."""
+
+    def test_untracked_files_are_refused_up_front(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True)  # noqa: E731
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.com")
+            git("config", "user.name", "t")
+            (repo / "config").mkdir()
+            (repo / "config" / "home_pose.yaml").write_text("a: 1\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            original = pipeline.REPO
+            pipeline.REPO = repo
+            try:
+                for extra, dry in (((), False), (("--allow-dirty",), False), (("--allow-dirty", "--dry-run",
+                                                                                "--dry-run-plumbing"), True)):
+                    p = make_pipeline(None, *extra)
+                    p.state_dir = repo / ".git" / "state"
+                    p.state_dir.mkdir(exist_ok=True)
+                    p.owns_state = True
+                    p.robot = repo  # the robot half is not under test
+                    p.args.robot_branch = "main"
+                    (repo / "config" / "home_pose.yaml").write_text("a: 2\n")
+                    (repo / "notes.txt").write_text("x\n")
+                    if dry:
+                        p.prepare_branches()
+                        continue
+                    with self.assertRaisesRegex(pipeline.PipelineError, "notes.txt"):
+                        p.prepare_branches()
+                (repo / "notes.txt").unlink()
+                p = make_pipeline(None)
+                p.state_dir = repo / ".git" / "state"
+                p.owns_state = True
+                p.robot = repo
+                p.args.robot_branch = "main"
+                p.prepare_branches()  # only the HOME yaml is changed
+            finally:
+                pipeline.REPO = original
+
+
+class LiftClockParentTest(unittest.TestCase):
+    """A dry lift records its parent like a resumed run, for the packager's ancestry walk."""
+
+    def test_lift_records_the_resume_parent(self):
+        sys.path.insert(0, str(REPO / "scripts" / "home_pipeline"))
+        import dry_run_tools
+        import torch
+
+        from mjlab_microban.tasks.microban_teleop_v12_actor import teleop_v12_active_adapter_columns
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "run_a").mkdir()
+            source = root / "run_a" / "model_9999.pt"
+            torch.save({"iter": 9999, "infos": {
+                "env_state": {"common_step_counter": 10000 * 24},
+                "active_actor_columns_at_save": list(teleop_v12_active_adapter_columns(10000 * 24))}}, source)
+            dry_run_tools.lift_clock(str(source), str(root / "lift"), "10096")
+            text = (root / "lift" / "params" / "agent.yaml").read_text()
+            self.assertIn("load_run: ^run_a$\n", text)
+            self.assertIn("load_checkpoint: ^model_9999[.]pt$\n", text)
+            from mjlab_microban.scripts.export_teleop_v12_deployment import _resume_ancestry
+
+            (root / "final").mkdir()
+            (root / "final" / "params").mkdir()
+            (root / "final" / "params" / "agent.yaml").write_text(
+                "resume: true\nload_run: ^lift$\nload_checkpoint: ^model_10096[.]pt$\n")
+            self.assertEqual(_resume_ancestry(root / "final" / "model_14999.pt"),
+                             [(root / "lift" / "model_10096.pt").resolve(), source.resolve()])

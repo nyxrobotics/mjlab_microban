@@ -237,6 +237,14 @@ under the allowance records the limits and this reason in
 
 ## 10000-boundary hand-RMS allowance (pose-release lineage)
 
+This allowance, its 10100 counterpart and the packager's requirement that a
+pose-release final records both gates exist at every HOME except the centered
+one (`home_contracts.V12_HAND_RMS_40MM_BOUNDARY_PROFILES`, false in the centered
+HOME's `LEGACY_HOME_OVERRIDES` entry). The centered line judged its 10000 / 10100
+clocks at 0.035 m (track-centered-home-clip 5b5a9d0), so there the profiles are
+unknown to every table and boundary gates are recorded only when passed
+explicitly.
+
 Profile
 `hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1_hand_rms_40mm_v1`
 is the 10000-update profile (model_9999 of a fresh pose-release segment or of a
@@ -283,17 +291,29 @@ RMS (max 0.0367 / 0.0372 m); a 100-update canary cannot be held tighter than
 the boundary it continues. Its gate records `boundary_completed_updates`
 10100.
 
-The packager does not see earlier gates through the final checkpoint, so it
-takes them explicitly: `--boundary-gate GATE.json` (repeatable) fully
-revalidates each earlier canonical-boundary or activation-canary gate, requires
-its checkpoint to
-share the final checkpoint's contract, recipe, bootstrap, HOME and site-order
-markers (and the final to carry its corner-rescue / recipe-switch /
-LR-migration markers unchanged), and records `v12_boundary_stage_gates_json`
-(clock, checkpoint kind, checkpoint and gate SHA-256, tracking profile,
-allowance record) with
-`v12_boundary_stage_gates_semantics` in the package. The robot runtime only
-checks the final `v12_tracking_profile`; the boundary record is informational.
+Checkpoint infos carry no parent hash, so the packager follows the resume
+chain each run directory records in `params/agent.yaml` (`load_run: ^RUN$`,
+`load_checkpoint: ^model_N[.]pt$`) from the final checkpoint back to the first
+run that did not resume (or a corner-rescue seed copy without params).
+`--boundary-gate GATE.json` (repeatable) names earlier canonical-boundary or
+activation-canary gates explicitly. Each gate is fully revalidated. Its
+checkpoint must lie on that resume chain, so a sibling with the same markers
+is refused. It must also share the final checkpoint's contract, recipe,
+bootstrap, HOME and site-order markers, and the final must carry its
+corner-rescue / recipe-switch / LR-migration markers unchanged. The packager
+records `v12_boundary_stage_gates_json` (clock, checkpoint kind, checkpoint
+and gate SHA-256, tracking profile, allowance record) with
+`v12_boundary_stage_gates_semantics`
+(`..._resume_ancestor_boundary_gates_..._v2`) in the package.
+
+A pose-release final must record both its 10000 boundary and its 10100
+canary, because both clocks have a hand-RMS allowance profile on that recipe.
+Any of the two that is not passed explicitly is discovered as
+`artifacts/teleop_v12_gates/{run}_model_{9999|10099}_gate.json` of the
+ancestor on the resume chain. If either is still missing, packaging is
+refused. So `scripts/finalize_microban_teleop_v12.sh` and the export wrapper
+record them without extra arguments. The robot runtime only checks the final
+`v12_tracking_profile`; the boundary record is informational.
 
 The command intentionally has no diagnostic/nonaccepted mode. If the final gate
 or its evidence is absent, stale, changed, non-final, or rejected by the current

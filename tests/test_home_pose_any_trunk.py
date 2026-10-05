@@ -8,7 +8,7 @@ on exactly:
 * the forward-lean HOME (tests/fixtures/home_pose_forward_lean.yaml: what
   ``config/balance_home_pose.py --trunk-pitch-deg 10 --write`` writes into a copy
   of the centered YAML, with name/label edited) reproduces forward-lean-v2
-  (ec67f1e; its walking and get-up tasks are those of forward-lean-centered-home).
+  (7ceb280; its walking and get-up tasks are those of forward-lean-centered-home).
 
 "Reproduces" means every module constant, every HOME-derived function result
 and the repr of every registered task's env / play / RL config and runner of
@@ -17,9 +17,11 @@ recorded with tests/home_equivalence.py) is equal here.  The only allowed
 differences are new names this tree adds, and at the centered HOME the new
 command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
 ``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
-their HOME (a subclass of mjlab's), and the 0.040 m hand-RMS profiles of the
-pose-release 10000 boundary / 10100 canary ported from forward-lean-v2
-(e3271de, ec67f1e), which extend the centered branch's profile tables.
+their HOME (a subclass of mjlab's).  The 0.040 m hand-RMS profiles of the
+pose-release 10000 boundary / 10100 canary (forward-lean-v2 e3271de, ec67f1e)
+and the packager's required 10000 / 10100 gates (7ceb280) exist at every HOME
+but the centered one, so the centered profile tables equal the reference too;
+ForwardLeanOnlyTestsTest runs their tests at the forward-lean HOME.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
@@ -47,7 +49,7 @@ LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
 CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
 REFERENCES = {
     "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
-    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_ec67f1e.json",
+    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_7ceb280.json",
 }
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 import home_equivalence  # noqa: E402
@@ -116,21 +118,6 @@ class HomeEquivalenceTest(unittest.TestCase):
             )
         for key, value in allowed.items():
             self.assertEqual(values.get(key), value)
-        extended = ()
-        if centered:
-            # Profile tables that only gained the ported 0.040 m hand-RMS
-            # profiles (their names must be in the value; nothing else differs
-            # from the forward-lean reference, which has them too).
-            extended = (
-                "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking."
-                "STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE",
-                "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES",
-                "const:mjlab_microban.scripts.export_teleop_v12_deployment."
-                "STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE",
-                "const:mjlab_microban.scripts.teleop_v12_stage.TRACKING_PROFILES",
-            )
-            for key in extended:
-                self.assertIn("_hand_rms_40mm_v1", values[key], key)
         current = home_equivalence.digest(values)
         expected = json.loads(reference.read_text())
         missing = sorted(set(expected) - set(current))
@@ -138,7 +125,6 @@ class HomeEquivalenceTest(unittest.TestCase):
             key
             for key in expected
             if key in current and current[key] != expected[key] and key not in allowed
-            and key not in extended
         )
         self.assertEqual(missing, [], "names of the reference branch missing here")
         self.assertEqual(different, [], "values that differ from the reference branch")
@@ -240,6 +226,24 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
         self.assertEqual(values(written), values(fixture))
 
 
+class RequiredBoundaryClocksTest(unittest.TestCase):
+    """The pipeline's HOME check reports the packager's required boundary clocks."""
+
+    def test_home_check_agrees_with_the_packager(self):
+        code = (
+            "import json, sys\n"
+            "sys.path.insert(0, 'scripts/home_pipeline')\n"
+            "import home_check\n"
+            "from mjlab_microban.robot.home_pose import HOME\n"
+            "from mjlab_microban.scripts import export_teleop_v12_deployment as d\n"
+            "print(json.dumps([home_check.check(HOME.path)['v12_required_boundary_gate_clocks'],"
+            " list(d.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES)]))"
+        )
+        for yaml_path, expected in ((CENTERED_YAML, []), (LEAN_YAML, [10000, 10100])):
+            with self.subTest(yaml=yaml_path.name):
+                self.assertEqual(json.loads(_run_python(yaml_path, code)), [expected, expected])
+
+
 class DerivedHomeStringsTest(unittest.TestCase):
     """Any other HOME gets "<label>_<hash>" strings of its trunk's mechanism."""
 
@@ -284,6 +288,45 @@ class DerivedHomeStringsTest(unittest.TestCase):
                 )
                 self.assertIn(tag, result["packager"])
                 self.assertIn(tag, result["corner"])
+
+
+class ForwardLeanOnlyTestsTest(unittest.TestCase):
+    """Tests skipped at the centered HOME pass at the forward-lean HOME.
+
+    The 0.040 m hand-RMS boundary allowance and the required pose-release
+    10000 / 10100 boundary gates exist at every HOME but the centered one.
+    """
+
+    NODES = (
+        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
+        "test_hand_rms_40mm_is_the_pose_release_10000_profile_only",
+        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
+        "test_hand_rms_40mm_is_the_pose_release_10100_canary_profile_only",
+        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
+        "test_pose_release_10000_gate_uses_and_records_the_hand_rms_allowance",
+        "tests/test_teleop_v12_deployment.py::"
+        "test_boundary_gates_record_the_10000_hand_rms_allowance",
+        "tests/test_teleop_v12_deployment.py::"
+        "test_boundary_gates_record_the_10100_canary_hand_rms_allowance",
+        "tests/test_teleop_v12_deployment.py::"
+        "test_boundary_gates_reject_foreign_or_nonboundary_gates[missing_canary]",
+        "tests/test_teleop_v12_deployment.py::"
+        "test_boundary_gate_controls_pass_on_the_exact_ancestry",
+    )
+
+    def test_forward_lean_only_tests_pass_at_the_forward_lean_home(self):
+        try:
+            import pytest  # noqa: F401
+        except ImportError:
+            self.skipTest("pytest is not installed")
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs", *self.NODES],
+            env=_environment(LEAN_YAML), cwd=REPO_ROOT, capture_output=True, text=True,
+            timeout=1800, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-2000:])
+        self.assertIn(f"{len(self.NODES)} passed", completed.stdout)
+        self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
 
 
 def _git_show(commit: str, path: str, destination: Path) -> bool:

@@ -48,7 +48,7 @@ from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
+from mjlab_microban.tasks.microban_getup_runner import HOME_ROOT_RECORDED_ATOL, getup_home_pose
 from mjlab_microban.tasks.microban_velocity_runner import require_walk_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -245,7 +245,9 @@ def require_recorded_walk_contract(env_yaml: Path) -> None:
     ):
         raise ValueError("Run was not trained from the current HOME joint pose")
     for key, expected in (("pos", HOME_FRAME.pos), ("rot", HOME_FRAME.rot)):
-        if not np.allclose(np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=1e-9):
+        if not np.allclose(
+            np.asarray(init_state[key], dtype=np.float64), expected, rtol=0, atol=HOME_ROOT_RECORDED_ATOL
+        ):
             raise ValueError(f"Run was not trained from the current HOME root {key}")
     clip = action.get("clip")
     if clip is None or list(clip) != [".*"] or [float(v) for v in clip[".*"]] != [

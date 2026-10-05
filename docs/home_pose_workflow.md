@@ -40,8 +40,9 @@ tail -f artifacts/home_pipeline/<tag>_<hash>/STATUS.log
   で戻す。デプロイ中のチェックアウトを使わないのはこのため。
 - `--training-branch`: 学習リポジトリのコミット先（省略時は今のブランチ。なければ今のHEADから作る）。
   学習中のコードは切り替えないので、既存の別ブランチへは自分で切り替えてから実行する。
-- 学習リポジトリで変更してよい追跡ファイルは `config/home_pose.yaml` だけ（ほかの変更は先にコミット、
-  または `--allow-dirty`）。
+- 学習リポジトリで変更してよいファイルは `config/home_pose.yaml` だけ。追跡外（.gitignore されていない）の
+  ファイルも数える（9999 のコーナー救済はクリーンなツリーでしか学習しないので、本番では最初に拒否する）。
+  `--allow-dirty` はドライランでだけ効く。
 - `--no-push`: コミットまでしてpushしない。`--sequential`: 起き上がりを歩行と並列にしない。
 - `--commit-trailer TEXT`: コミットメッセージの末尾に付ける行（既定は空。エージェントが実行するときは
   `Co-Authored-By: ...` を渡す）。
@@ -55,7 +56,7 @@ tail -f artifacts/home_pipeline/<tag>_<hash>/STATUS.log
 | 1. HOME | `scripts/home_pipeline/home_check.py`（重心と足裏接地面）、`balance_home_pose.py --check`、`home_pose_tool.py show`（学習ライン）、`write-robot`（ロボット側yaml） | 重心が足裏の前後範囲の外なら拒否。中心から 0.5 mm 以上ずれている、足裏がロールしていて床に触れる角が減る、正準の解でない、は警告。yamlは書き換えない |
 | 2. 歩行 | `Mjlab-Velocity-Microban` 15000回（4096 env）→ 続きを30000まで。1000回ごとのチェックポイントを、GPUに空きがあれば学習中に、なければ学習後にPICOテレオペ環境の 9×300 プローブで評価。合格した上位6候補を計3回ずつプローブし、全回の最悪マージンが最大のものを選ぶ | 全回合格の候補がなければ、最悪マージン最大のものを使い **FALLBACK** と記録。v12の開始時プローブ（新しく1回）で落ちたら、次の候補に替えて開始し直す（候補がなくなったら止まる）。選んだものは `checkpoints/<prefix>_walk/` にコピー |
 | 3. 起き上がり | 段階1〜5（2500 → ImuDelay +1500 → std 0.5 にリセット → CalmRoll +8000 → CalmEffortStrong +6500 → CalmPush +3000、段階3以降 entropy 0.001）。各段階のあと `scripts/home_pipeline/getup_eval.py` で評価（遅延0-3+ノイズの2シード、0.3 m/s 押し、姿勢）。歩行と並列 | 最終段階: 倒れた状態からの起立 ≥ 85 %、押しで転倒 ≤ 10 %、立位の関節速度 ≤ 0.3 rad/s、姿勢評価で立ち続け ≥ 80 % |
-| 4. PICO v12 | 選んだ歩行から pose-release の新規チェーン（`train_microban_teleop_v12.sh start --hand-pose-release`）、0→3000→3100→7000→7100→10000→10100→15000、境界ごとに `evaluate_microban_teleop_v12_stage.sh` | 各ゲート。自動救済: カナリア（3099/7099/10099）が精度だけで落ちたら1回だけ再学習。10000 境界は人手なしで段階的に進める（2026-10 の前傾チェーンで手でやった順序）: 9999 が落ちたら model_9900 の pose-release コーナー救済を `--pr-corner-rescue-mixes`（既定 lf60,lf90,lf72,lf65。同じ mix を繰り返し並べれば別の run になる＝GPU の非決定性で結果が変わる）の順に1本ずつ学習して 9999 でゲート（`train_microban_teleop_v12_corner_rescue.sh --hand-pose-release --mix M`。親は新しい pose-release チェーンの model_9900 で、厳密評価が手先精度だけで落ちたものに限る。それ以外で落ちた親は救済を飛ばす）→ 全部落ちたらゲート済みの model_7099 から 7100→10000 を新しい試行として学習し直す（run `<prefix>_v12_7100_to10000_a2`、ゲートし、落ちたらその model_9900 から同じ救済）→ `--v12-9999-attempts`（既定 2）回で尽きたら止まる。最初の救済の前に `config/home_pose.yaml` を学習ブランチにコミットする（救済の起動スクリプトはクリーンなツリーでしか学習しない）。通った救済の model_9999（系譜 `fresh_chain_model9900_corner_rescue`）または再学習した試行を、通常の pose-release として続きを学習する。10000 境界（model_9999）と 10100 カナリアは pose-release レシピでは手先 RMS 0.040 m まで許容するプロファイル（`*_hand_rms_40mm_v1`、forward-lean-v2 e3271de / ec67f1e から移植、ユーザー判断「手は 0.04mまで許容でいいんじゃない？」）、15000 は completion-allowance プロファイルで評価される（どれも評価スクリプトが自動で選ぶ。パッケージには 10000/10100 のゲートを `--boundary-gate` で渡し、どのプロファイルで判定したかをメタデータに残す） |
+| 4. PICO v12 | 選んだ歩行から pose-release の新規チェーン（`train_microban_teleop_v12.sh start --hand-pose-release`）、0→3000→3100→7000→7100→10000→10100→15000、境界ごとに `evaluate_microban_teleop_v12_stage.sh` | 各ゲート。自動救済: カナリア（3099/7099/10099）が精度だけで落ちたら1回だけ再学習（再学習が model を保存する前に中断されても、再開時にその再学習からやり直す）。評価スクリプトが報告を書かずに落ちた（GPU の OOM など）ゲートは判定として記録せず、その場で止まり、再実行で評価し直す。10000 境界は人手なしで段階的に進める（2026-10 の前傾チェーンで手でやった順序）: 9999 が落ちたら model_9900 の pose-release コーナー救済を `--pr-corner-rescue-mixes`（既定 lf60,lf90,lf72,lf65。同じ mix を繰り返し並べれば別の run になる＝GPU の非決定性で結果が変わる）の順に1本ずつ学習して 9999 でゲート（`train_microban_teleop_v12_corner_rescue.sh --hand-pose-release --mix M`。親は新しい pose-release チェーンの model_9900 で、厳密評価が手先精度だけで落ちたものに限る。それ以外で落ちた親は救済を飛ばす）→ 全部落ちたらゲート済みの model_7099 から 7100→10000 を新しい試行として学習し直す（run `<prefix>_v12_7100_to10000_a2`、ゲートし、落ちたらその model_9900 から同じ救済）→ `--v12-9999-attempts`（既定 2）回で尽きたら止まる。最初の救済の前に `config/home_pose.yaml` を学習ブランチにコミットする（救済の起動スクリプトはクリーンなツリーでしか学習しない）。通った救済の model_9999（系譜 `fresh_chain_model9900_corner_rescue`）または再学習した試行を、通常の pose-release として続きを学習する。10000 境界（model_9999）と 10100 カナリアは、中心HOME以外の pose-release レシピでは手先 RMS 0.040 m まで許容するプロファイル（`*_hand_rms_40mm_v1`、forward-lean-v2 e3271de / ec67f1e から移植、ユーザー判断「手は 0.04mまで許容でいいんじゃない？」）、中心HOMEでは中心ブランチと同じ 0.035 m。15000 は completion-allowance プロファイルで評価される（どれも評価スクリプトが自動で選ぶ）。パッケージには続きを学習した 10000/10100 のゲートを `--boundary-gate` で渡し、どのプロファイルで判定したかをメタデータに残す。中心HOME以外ではパッケージャーが両方を resume 系譜上に必須とする（forward-lean-v2 7ceb280）ので、どちらかが無い・検証が通らなければ段階5で止まる |
 | 5. 書き出し・導入 | walk.onnx / getup.onnx を書き出してロボットへ。ロボット側ピン（`pico_hybrid.py` の歩行ソースSHA・反復数・プローブSHA、`validate_pico_policy.py` の walk.onnx SHA）、歩行テスト用フィクスチャの再生成、テストに固定されたHOMEのピン（`test_shared_home.py` の `TRAINING_HOME_DEG` と `test_pico_hybrid.py` の `PACKAGER_V12_HOME_POSE_JSON`・実行ピン）を更新。それ以外のHOMEに依存する期待値は、ロボットのテストが `config/home_pose.yaml` から読む（robot home-config 31cfafa 以降）。そのロボットツリーに対してPICOをパッケージ（実ロボットのバリデータ込み）して導入 | `tools/validate_pico_policy.py` が pass、ロボットのテストスイートが全部通る |
 | 6. コミット | ロボット: `--robot-branch` にコミットしてpush。学習: `config/home_pose.yaml`、記録 `config/releases/<tag>.json`、リリース一式（中心HOMEの 5b5a9d0 と同じ: PICO model_14999.pt と params/git、ゲート報告とONNX、パッケージONNXと受領書。加えてロボットがSHAで固定する選択歩行チェックポイントとその 9×300 プローブ受領書、起き上がり最終チェックポイント。gitignore対象なので `git add -f`）をコミットしてpush | 1〜5がすべて通ったときだけ |
 
@@ -88,13 +89,15 @@ tail -f artifacts/home_pipeline/<tag>_<hash>/STATUS.log
 ## ドライラン
 
 配線だけを数十分〜1時間で確かめる。どのHOMEでも通る。各段階 2〜3 反復・64 env、PICOの境界はクロックを
-持ち上げて越える、ゲートは評価して記録するだけ（plumbing mode: 強制しない。救済の経路を決めるのは
+持ち上げて越える（カナリアも含め各区間を本来の終わりの3反復前に持ち上げるので、ゲートは本来のクロック
+3099/7099/10099 などで評価される。持ち上げたコピーは `params/agent.yaml` に親を resume と同じ形で記録する）、ゲートは評価して記録するだけ（plumbing mode: 強制しない。救済の経路を決めるのは
 `--dry-run-simulate-failures` だけ）、最終パッケージは `scripts/home_pipeline/dry_run_tools.py`（`DRYRUN` と表示、
 配備不可）。GPUジョブは1本ずつ（`--serial-gpu` がドライランの既定。起き上がりも歩行のあと）。ロボット側は
 スクラッチのクローン（originのpush URLがローカルパス）でなければ拒否し、ロボットのコミットはローカルだけ、
 学習リポジトリにはコミットもpushもしない（ドライランの救済は yaml をコミットしない）。次のどちらかが必要:
 
-- `--dry-run-walk-init WALKER`: そのHOMEで学習した（HOMEスタンプが一致する）歩行チェックポイントから続ける。
+- `--dry-run-walk-init WALKER`: そのHOMEで学習した歩行チェックポイントから続ける（`train_microban_teleop_v12.sh start`
+  と同じ確認: run の `params/env.yaml` の HOME・±π クリップ・生の前回行動と、HOMEスタンプ）。
   最初に照合し、違えば終了コード3で止まる。v12 の開始時プローブが本物で通るので、ロボットのバリデータと
   テストも強制する。例: 前傾の yaml なら前傾の cont2 `model_29000.pt`、中心なら `model_20000.pt`。
 - `--dry-run-plumbing`: 歩行から全部ゼロから（編集したばかりのHOME、例えば膝15度）。3反復の歩行は歩けないので、
@@ -134,9 +137,13 @@ pose-release コーナー救済の系譜マーカーを付ける。そのあと�
 PICOの最終パッケージでは、転倒した DRYRUN チェックポイントの短い smoke コーパス（16行未満）を16行に繰り返して
 パッケージャーに渡す（本番の最終ゲートは全シナリオ完走が条件なので常に16行）。
 
-最終パッケージには 10000 境界を越えた model_9999（スタンプした救済、または学習し直した試行）にも同じ強制合格の
-ゲート（`DRYRUN_boundary_gate_*.json`）を作り `--boundary-gate` で渡すので、パッケージャー本物の境界系譜チェック
-（救済マーカーを最終チェックポイントが引き継いでいるか等）が走り、境界のプロファイルがパッケージに記録される。
+最終パッケージには 10000 境界を越えた model_9999（スタンプした救済、または学習し直した試行）と、そこから続けた
+10100 カナリアの model_10099 にも同じ強制合格のゲート（`DRYRUN_boundary_gate_*.json`）を作り `--boundary-gate` で
+渡すので、パッケージャー本物の境界チェック（resume 系譜上にあるか、救済マーカーを最終チェックポイントが引き継いで
+いるか、中心HOME以外では両方そろっているか）が走り、境界のプロファイルがパッケージに記録される。
+ドライランのパッケージはメタデータ `dry_run_not_deployable` を持ち、ロボットは `MICROBAN_ALLOW_DRYRUN_POLICY=1`
+（ドライラン自身のバリデータ・テスト呼び出しだけが設定する）がなければ拒否する。本物のパッケージャーは
+ドライランの証跡（ゲート・チェックポイントの `dry_run*` キー、`DRYRUN_*` の強制合格プローブ受領書）を拒否する。
 ゼロからの policy は全シナリオで転ぶので、ロボットのバリデータがメタデータで再確認する歩行の合格欄
 （転倒数・完走数・方向数・ソフトリミット超過）も force-probe と同様に合格値に書き換える（測った値は
 `dry_run_original_*`）。

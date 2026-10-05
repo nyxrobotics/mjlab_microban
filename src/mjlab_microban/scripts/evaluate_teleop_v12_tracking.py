@@ -83,6 +83,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_HAND_RMS_MAX_M,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
 )
+from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     teleop_v12_action_clip_cfg,
     MICROBAN_TELEOP_V12_ACTION_CLIP,
@@ -194,8 +195,13 @@ HMD_HAND_HAND_RMS_40MM_PROFILE = (
 )
 HAND_RMS_40MM_HAND_RMS_MAX_M = 0.040
 HAND_RMS_40MM_BOUNDARY_COMPLETED_UPDATES = 10_000
+# Only where the HOME has the allowance (robot/home_contracts.py; not at the
+# centered HOME, whose line judged these clocks at 0.035 m): elsewhere the
+# profiles below are unknown to every table, so no gate can claim them.
 HAND_RMS_40MM_RECIPE_REVISIONS = frozenset(
     (MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,)
+    if V12_HAND_RMS_40MM_BOUNDARY_PROFILES
+    else ()
 )
 HAND_RMS_40MM_REASON = (
     "10000-boundary hand-RMS allowance for the active-hand arm pose-release "
@@ -230,22 +236,23 @@ FOOT_CANARY_HAND_RMS_40MM_REASON = (
 # Hand-RMS allowance profile -> the deployed-accuracy profile it relaxes (only
 # hand RMS differs), the strict profile whose structure it uses, the one
 # boundary clock it applies to, and its recorded reason.
+_HAND_RMS_40MM = V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 DEPLOYED_ACCURACY_PROFILE_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
     FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-}
+} if _HAND_RMS_40MM else {}
 STRICT_PROFILE_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HMD_HAND_PROFILE,
     FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_ACTIVATION_CANARY_PROFILE,
-}
+} if _HAND_RMS_40MM else {}
 COMPLETED_UPDATES_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HAND_RMS_40MM_BOUNDARY_COMPLETED_UPDATES,
     FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_CANARY_HAND_RMS_40MM_COMPLETED_UPDATES,
-}
+} if _HAND_RMS_40MM else {}
 REASON_BY_HAND_RMS_40MM_PROFILE = {
     HMD_HAND_HAND_RMS_40MM_PROFILE: HAND_RMS_40MM_REASON,
     FOOT_CANARY_HAND_RMS_40MM_PROFILE: FOOT_CANARY_HAND_RMS_40MM_REASON,
-}
+} if _HAND_RMS_40MM else {}
 # Stricter profiles an allowance boundary also accepts (they pass tighter
 # accuracy limits with the same scenarios and checks).
 STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE = {
@@ -253,13 +260,19 @@ STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE = {
         FINAL_DEPLOYED_ACCURACY_PROFILE,
         FINAL_PROFILE,
     ),
-    HMD_HAND_HAND_RMS_40MM_PROFILE: (
-        HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-        HMD_HAND_PROFILE,
-    ),
-    FOOT_CANARY_HAND_RMS_40MM_PROFILE: (
-        FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-        FOOT_ACTIVATION_CANARY_PROFILE,
+    **(
+        {
+            HMD_HAND_HAND_RMS_40MM_PROFILE: (
+                HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
+                HMD_HAND_PROFILE,
+            ),
+            FOOT_CANARY_HAND_RMS_40MM_PROFILE: (
+                FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
+                FOOT_ACTIVATION_CANARY_PROFILE,
+            ),
+        }
+        if _HAND_RMS_40MM
+        else {}
     ),
 }
 DEADLINE_FALLBACK_PROFILE = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
@@ -281,8 +294,10 @@ TRACKING_PROFILES = (
     WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE,
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_COMPLETION_ALLOWANCE_PROFILE,
-    HMD_HAND_HAND_RMS_40MM_PROFILE,
-    FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+) + (
+    (HMD_HAND_HAND_RMS_40MM_PROFILE, FOOT_CANARY_HAND_RMS_40MM_PROFILE)
+    if _HAND_RMS_40MM
+    else ()
 )
 
 # Strict limits (the strict profiles above).
