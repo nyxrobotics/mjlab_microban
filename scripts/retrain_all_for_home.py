@@ -39,7 +39,7 @@ same command resumes after a crash, a stall or a fixed failure):
    boundary escalates on its own (the route the 2026-10 forward-lean chain
    took by hand): a failed 9999 gate tries the pose-release model_9900 corner
    rescues, one run per mix of --pr-corner-rescue-mixes (default lf60, lf90,
-   lf72, lf72; scripts/train_microban_teleop_v12_corner_rescue.sh
+   lf72, lf65; scripts/train_microban_teleop_v12_corner_rescue.sh
    --hand-pose-release --mix M, whose validator accepts only a fresh
    pose-release parent failing hand accuracy only), each gated at 9999; if
    they all fail, 7100->10000 is retrained from the gated model_7099 as a new
@@ -1581,8 +1581,8 @@ class Pipeline:
                                           "mjlab_microban.scripts.export_teleop_v12_deployment",
                                           "--checkpoint", str(pico_ckpt), "--stage-gate",
                                           self.get("pico", "final", "gate"), "--microban-repo", str(self.robot),
-                                          "--output", str(pico_out), "--force"], "cpu",
-                         env={"CUDA_VISIBLE_DEVICES": ""}, stdout_path=receipt)
+                                          *self.boundary_gate_args(), "--output", str(pico_out), "--force"],
+                         "cpu", env={"CUDA_VISIBLE_DEVICES": ""}, stdout_path=receipt)
             self.check_receipt(receipt, pico_ckpt, pico_out)
             self.put("export", "pico", {"checkpoint": str(pico_ckpt), "checkpoint_sha256": sha256(pico_ckpt),
                                         "onnx": str(pico_out), "onnx_sha256": sha256(pico_out),
@@ -1642,6 +1642,22 @@ class Pipeline:
                                 "update must be edited by hand, then rerun: completed steps are skipped)")
         self.log(f"robot tests: {summary}")
         self.put("export", "robot_tests", summary)
+
+    def boundary_gate_args(self) -> list[str]:
+        """--boundary-gate for the 10000 boundary and the 10100 canary of the final lineage.
+
+        The package records which tracking profile judged them (e.g. the 0.040 m
+        hand-RMS allowance of the pose-release 10000 boundary), so the robot sees it.
+        """
+
+        runs = [(self.get("pico", "b9999", "passed", "run"), 9999),
+                (self.latest_v12(f"{self.prefix}_v12_10000_to10100"), 10099)]
+        args = []
+        for run, end in runs:
+            gate = GATE_ROOT / f"{run}_model_{end}_gate.json"
+            if run and gate.is_file() and self.gate_ok(run, end):
+                args += ["--boundary-gate", str(gate)]
+        return args
 
     def check_receipt(self, receipt: Path, ckpt: Path, onnx: Path) -> None:
         """The binding finalize_microban_teleop_v12.sh applies to the packager report."""
@@ -1912,17 +1928,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="with --dry-run-simulate-failures: retrain = every corner rescue of attempt 1 fails, the "
                    "retrained attempt 2 passes; rescue = the second rescue mix passes; stop = everything fails")
     p.add_argument("--dry-envs", type=int, default=64)
-    p.add_argument("--pr-corner-rescue-mixes", default="lf60,lf90,lf72,lf72",
+    p.add_argument("--pr-corner-rescue-mixes", default="lf60,lf90,lf72,lf65",
                    help="sampler mixes of the pose-release corner rescues tried, in order, after a failed 9999 "
-                   "gate (a repeated mix is a new run); the order of the 2026-10 forward-lean chain")
+                   "gate (lf60, lf65, lf72, lf90; a repeated mix is a new run); the 2026-10 forward-lean chain "
+                   "tried lf60, lf90 and lf72, and registered lf65 for a more balanced parent")
     p.add_argument("--v12-9999-attempts", type=int, default=2,
                    help="7100->10000 attempts (the first plus retrains from the gated model_7099), each with "
                    "its corner rescues, before the 9999 boundary stops the run")
     args = p.parse_args(argv)
     mixes = [m.strip() for m in args.pr_corner_rescue_mixes.split(",") if m.strip()]
-    bad = [m for m in mixes if m not in ("lf60", "lf72", "lf90")]
+    bad = [m for m in mixes if m not in ("lf60", "lf65", "lf72", "lf90")]
     if bad:
-        p.error(f"--pr-corner-rescue-mixes: unknown mix(es) {bad} (lf60, lf72, lf90)")
+        p.error(f"--pr-corner-rescue-mixes: unknown mix(es) {bad} (lf60, lf65, lf72, lf90)")
     args.pr_corner_rescue_mixes = mixes
     if args.v12_9999_attempts < 1:
         p.error("--v12-9999-attempts must be at least 1")

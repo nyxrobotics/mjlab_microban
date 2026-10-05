@@ -230,9 +230,70 @@ chain (`scripts/train_microban_teleop_v12.sh start --source WALK.pt
 recipe-switch parent. A HOME whose trunk leans forward labels its foot/hand
 target columns `robot_home_levelled_trunk_xyz_forward_left_up` and is packaged
 by packager v7 (forward-lean) or a `<tag>` revision.
-Every other boundary and every other lineage keeps its profile. A gate judged
+Every other boundary and every other lineage keeps its profile (except the
+10000 hand-RMS allowance below). A gate judged
 under the allowance records the limits and this reason in
 `tracking_profile_completion_allowance`.
+
+## 10000-boundary hand-RMS allowance (pose-release lineage)
+
+Profile
+`hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1_hand_rms_40mm_v1`
+is the 10000-update profile (model_9999 of a fresh pose-release segment or of a
+pose-release model_9900 corner rescue, both of which keep the pose-release
+recipe revision) of the active-hand arm pose-release recipe only. It is the
+HMD/hand deployed-accuracy profile with exactly one change:
+
+| limit | deployed-accuracy HMD/hand | hand-RMS allowance |
+| --- | --- | --- |
+| hand RMS | 0.035 m | 0.040 m |
+| hand P95 | 0.05 m | 0.05 m |
+| foot RMS | 0.05 m | 0.05 m |
+| foot P95 | 0.08 m | 0.08 m |
+
+Scenarios, checks (falls, finiteness, soft limits, raw-action recurrence,
+forced HMD motion, coverage, hand ablation, twist), locomotion and ONNX gates
+are unchanged; the deployed-accuracy and strict HMD/hand profiles are also
+accepted at that boundary. Interrupted 7101..9999 clocks, the 15000 final and
+every other lineage keep their profiles; the 10100 canary has its own
+counterpart (below).
+
+Reason (2026-10-05): the forward-lean pose-release model_9999 checkpoints (two
+fresh 7100->10000 segments and eleven model_9900 corner rescues) passed every
+non-accuracy check and missed only the 0.035 m hand RMS by a few millimetres in
+one bilateral corner (best max(L, R) about 0.0365 m). User decision: "手は
+0.04mまで許容でいいんじゃない？". The gate records the limits and reason in
+`tracking_profile_completion_allowance` (revision `hand_rms_40mm_v1`,
+`boundary_completed_updates` 10000).
+
+### 10100-canary counterpart
+
+Profile
+`whole_body_foot_activation_canary_reachable_safety_v1_deployed_accuracy_v1_hand_rms_40mm_v1`
+is the 10100-update (model_10099 activation canary) profile of the same
+pose-release recipe only: the foot-activation canary deployed-accuracy profile
+with hand RMS 0.040 m instead of 0.035 m and nothing else changed (hand P95
+0.05 m, foot 0.05 / 0.08 m, scenarios, checks, ablation, locomotion, ONNX);
+the deployed-accuracy and strict canary profiles stay accepted there and the
+interrupted 10001..10099 clocks keep the deployed-accuracy canary profile.
+Reason (2026-10-05, same user decision): two forward-lean 10099 canaries
+resumed from the 0.040 m-gated model_9999 (itself 0.0365 m) passed every
+non-accuracy check, locomotion and hand P95 and missed only the 0.035 m hand
+RMS (max 0.0367 / 0.0372 m); a 100-update canary cannot be held tighter than
+the boundary it continues. Its gate records `boundary_completed_updates`
+10100.
+
+The packager does not see earlier gates through the final checkpoint, so it
+takes them explicitly: `--boundary-gate GATE.json` (repeatable) fully
+revalidates each earlier canonical-boundary or activation-canary gate, requires
+its checkpoint to
+share the final checkpoint's contract, recipe, bootstrap, HOME and site-order
+markers (and the final to carry its corner-rescue / recipe-switch /
+LR-migration markers unchanged), and records `v12_boundary_stage_gates_json`
+(clock, checkpoint kind, checkpoint and gate SHA-256, tracking profile,
+allowance record) with
+`v12_boundary_stage_gates_semantics` in the package. The robot runtime only
+checks the final `v12_tracking_profile`; the boundary record is informational.
 
 The command intentionally has no diagnostic/nonaccepted mode. If the final gate
 or its evidence is absent, stale, changed, non-final, or rejected by the current

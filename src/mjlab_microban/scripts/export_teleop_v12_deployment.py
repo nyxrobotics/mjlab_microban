@@ -40,6 +40,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FINAL_COMPLETION_ALLOWANCE_PROFILE,
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_PROFILE,
+    HMD_HAND_HAND_RMS_40MM_PROFILE,  # noqa: F401  (re-exported for callers/tests)
     STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE,
     STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE,
     required_tracking_profile,
@@ -72,6 +73,9 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
+from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+)
 from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
     MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
@@ -84,6 +88,9 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
@@ -93,6 +100,7 @@ from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
     ACTOR_SWAP_BLOCKS,
     BILATERAL_SITE_ORDER_INFO_KEY,
     CRITIC_SWAP_BLOCKS,
+    MIGRATION_INFO_KEY,
     MIGRATION_REVISION,
     validate_bilateral_site_order_checkpoint,
     validate_lr_order_migration_marker,
@@ -509,6 +517,100 @@ def _require_final_gate(
         raise ValueError("Final contract-v12 checkpoint must be named model_14999.pt")
 
 
+BOUNDARY_STAGE_GATES_SEMANTICS = (
+    "packager_validated_earlier_boundary_gates_sharing_the_final_checkpoint_"
+    "carried_lineage_markers_v1"
+)
+# Gate kinds (canonical_boundary flag, checkpoint_kind) the packager records:
+# canonical boundaries (3000/7000/10000) and their activation canaries
+# (3100/7100/10100), which the chain resumes from like a boundary.
+_BOUNDARY_GATE_KINDS = (
+    (True, "canonical_boundary"),
+    (False, "activation_canary"),
+)
+# Lineage markers every descendant checkpoint carries forward unchanged.
+_BOUNDARY_GATE_SHARED_INFO_KEYS = (
+    "microban_teleop_training_contract_version",
+    "microban_teleop_recipe_revision",
+    TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    TELEOP_V12_HOME_POSE_INFO_KEY,
+    BILATERAL_SITE_ORDER_INFO_KEY,
+)
+# Markers a boundary checkpoint may carry; a descendant carries them unchanged.
+_BOUNDARY_GATE_INHERITED_INFO_KEYS = (
+    MIGRATION_INFO_KEY,
+    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+)
+
+
+def _boundary_stage_gate_lineage(
+    boundary_gates: tuple[Path, ...], *, final_infos: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Validate earlier canonical-boundary gates and summarise their profiles.
+
+    Each gate is fully revalidated (reports, ONNX, checkpoint identity) by
+    ``validate_gate``; its checkpoint must be an earlier canonical boundary
+    that shares every carried lineage marker with the final checkpoint.  The
+    package then records which tracking profile (and allowance, if any)
+    judged each listed boundary so the robot can see it.
+    """
+
+    entries: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for gate_path in boundary_gates:
+        gate_path = gate_path.expanduser().resolve()
+        gate_sha256 = sha256_file(gate_path)
+        snapshot = _load_json(gate_path, expected_sha256=gate_sha256)
+        checkpoint = resolve_bootstrap_artifact_path(str(snapshot.get("checkpoint", "")))
+        gate = validate_gate(gate_path, checkpoint)
+        if gate != snapshot or sha256_file(gate_path) != gate_sha256:
+            raise RuntimeError("Boundary stage gate changed while it was validated")
+        completed = gate.get("completed_updates")
+        kind = (gate.get("canonical_boundary"), gate.get("checkpoint_kind"))
+        if (
+            kind not in _BOUNDARY_GATE_KINDS
+            or not isinstance(completed, int)
+            or isinstance(completed, bool)
+            or completed >= FINAL_COMPLETED_UPDATES
+            or completed in seen
+        ):
+            raise ValueError(
+                "Boundary stage gates must be distinct earlier canonical "
+                "boundaries or activation canaries"
+            )
+        seen.add(completed)
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if sha256_file(checkpoint) != gate["checkpoint_sha256"]:
+            raise RuntimeError("Boundary checkpoint changed while it was validated")
+        infos = payload["infos"]
+        for key in _BOUNDARY_GATE_SHARED_INFO_KEYS:
+            if infos.get(key) != final_infos.get(key):
+                raise ValueError(
+                    f"Boundary gate checkpoint lineage marker {key} differs "
+                    "from the final checkpoint"
+                )
+        for key in _BOUNDARY_GATE_INHERITED_INFO_KEYS:
+            if infos.get(key) is not None and infos.get(key) != final_infos.get(key):
+                raise ValueError(
+                    f"Final checkpoint does not carry boundary marker {key}"
+                )
+        entries.append(
+            {
+                "completed_updates": completed,
+                "checkpoint_kind": gate["checkpoint_kind"],
+                "iteration": gate["iteration"],
+                "checkpoint_sha256": gate["checkpoint_sha256"],
+                "stage_gate_sha256": gate_sha256,
+                "tracking_profile": gate["tracking_profile"],
+                "tracking_profile_completion_allowance": gate.get(
+                    "tracking_profile_completion_allowance"
+                ),
+            }
+        )
+    return sorted(entries, key=lambda entry: entry["completed_updates"])
+
+
 def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
     """Recipe string the package declares to the robot.
 
@@ -650,8 +752,13 @@ def build_v12_deployment_metadata(
     onnx_report: Mapping[str, Any],
     packager_parity: Mapping[str, float],
     microban_source_identity: Mapping[str, str],
+    boundary_stage_gates: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, list | str | float]:
-    """Translate only already-validated gate evidence to the robot wire contract."""
+    """Translate only already-validated gate evidence to the robot wire contract.
+
+    ``boundary_stage_gates`` (from ``_boundary_stage_gate_lineage``) adds the
+    profile that judged each listed earlier boundary of the lineage.
+    """
 
     _require_final_gate(
         gate,
@@ -1005,6 +1112,11 @@ def build_v12_deployment_metadata(
         ),
         **microban_source_identity,
     }
+    if boundary_stage_gates:
+        metadata["v12_boundary_stage_gates_semantics"] = BOUNDARY_STAGE_GATES_SEMANTICS
+        metadata["v12_boundary_stage_gates_json"] = _json(
+            [dict(entry) for entry in boundary_stage_gates]
+        )
     missing = REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
     if missing:
         raise RuntimeError(
@@ -1284,8 +1396,10 @@ def package_v12_deployment(
     output: Path,
     microban_repo: Path,
     force: bool = False,
+    boundary_gates: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
+    boundary_gates = tuple(path.expanduser().resolve() for path in boundary_gates)
     gate_path = gate_path.expanduser().resolve()
     output = output.expanduser().absolute()
     output = output.parent.resolve() / output.name
@@ -1339,6 +1453,10 @@ def package_v12_deployment(
         {
             "checkpoint": checkpoint,
             "stage_gate": gate_path,
+            **{
+                f"boundary_stage_gate_{index}": path
+                for index, path in enumerate(boundary_gates)
+            },
             **{f"{name}_report": path for name, path in report_paths.items()},
             "stage_gate_onnx": resolve_bootstrap_artifact_path(gate["onnx"]["path"]),
             "packager_source": Path(__file__).resolve(),
@@ -1390,6 +1508,9 @@ def package_v12_deployment(
             infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
         )
         _require_deployable_lr_order_lineage(infos)
+        boundary_stage_gates = _boundary_stage_gate_lineage(
+            boundary_gates, final_infos=infos
+        )
 
         _export_onnx_atomic(actor, temporary)
         _validate_graph_contract(temporary)
@@ -1408,6 +1529,7 @@ def package_v12_deployment(
             onnx_report=onnx_report,
             packager_parity=initial_parity,
             microban_source_identity=microban_source_identity,
+            boundary_stage_gates=boundary_stage_gates,
         )
         existing = _read_onnx_metadata(temporary)
         overlap = set(existing).intersection(metadata)
@@ -1440,6 +1562,11 @@ def package_v12_deployment(
             raise RuntimeError("V12 stage gate changed while deployment was packaged")
         if validate_gate(gate_path, checkpoint) != gate:
             raise RuntimeError("V12 gate/report lineage changed before publication")
+        if (
+            _boundary_stage_gate_lineage(boundary_gates, final_infos=infos)
+            != boundary_stage_gates
+        ):
+            raise RuntimeError("Boundary stage gates changed before publication")
         if sha256_file(Path(__file__).resolve()) != metadata.get(
             "v12_deployment_packager_source_sha256"
         ):
@@ -1467,6 +1594,7 @@ def package_v12_deployment(
             "checkpoint_sha256": checkpoint_sha256,
             "stage_gate_sha256": gate_sha256,
             "completed_updates": FINAL_COMPLETED_UPDATES,
+            "boundary_stage_gates": boundary_stage_gates,
             "parity": final_parity,
             "microban_runtime_source_identity": microban_source_identity,
             "microban_runtime_validator": runtime_report,
@@ -1487,6 +1615,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(__file__).resolve().parents[4] / "microban",
         help="Physical Microban repository containing the real runtime validator",
     )
+    parser.add_argument(
+        "--boundary-gate",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Earlier canonical-boundary stage gate of the same lineage (e.g. the "
+            "10000-update model_9999 gate); repeatable.  Each is revalidated and "
+            "its tracking profile is recorded in the package metadata."
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -1499,6 +1638,7 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         microban_repo=args.microban_repo,
         force=args.force,
+        boundary_gates=tuple(args.boundary_gate),
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
     return 0

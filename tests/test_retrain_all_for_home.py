@@ -306,7 +306,7 @@ class DryRunSmokeCorpusTest(unittest.TestCase):
 class ArgumentsTest(unittest.TestCase):
     def test_rescue_mixes_and_dry_run_options(self):
         args = make_pipeline().args
-        self.assertEqual(args.pr_corner_rescue_mixes, ["lf60", "lf90", "lf72", "lf72"])
+        self.assertEqual(args.pr_corner_rescue_mixes, ["lf60", "lf90", "lf72", "lf65"])
         self.assertEqual(args.v12_9999_attempts, 2)
         args = make_pipeline(None, "--pr-corner-rescue-mixes", "lf72, lf90").args
         self.assertEqual(args.pr_corner_rescue_mixes, ["lf72", "lf90"])
@@ -484,7 +484,7 @@ class CornerRescueMixesTest(unittest.TestCase):
         self.validator(0)
         self.p.judged_gate = lambda run, end, key: (False, ["hand_tracking_rms"], [])
         self.assertIsNone(self.p.corner_rescues("first", 1))
-        self.assertEqual([m for m in self.trained if m != "commit"], ["lf60", "lf90", "lf72", "lf72"])
+        self.assertEqual([m for m in self.trained if m != "commit"], ["lf60", "lf90", "lf72", "lf65"])
         runs = {v["run"] for v in self.p.get("pico", "b9999", "rescues").values()}
         self.assertEqual(len(runs), 4)
 
@@ -614,3 +614,24 @@ class UnmeasuredFootScenarioTest(unittest.TestCase):
         self.assertTrue(_measured_within({"rms": 0.01}, "rms", 0.02))
         self.assertFalse(_measured_within({"rms": 0.03}, "rms", 0.02))
         self.assertFalse(_measured_within({"rms": None, "sample_count": 0}, "rms", 0.02))
+
+
+class BoundaryGateArgsTest(unittest.TestCase):
+    def test_validating_10000_and_10100_gates_are_passed_to_the_packager(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            original = pipeline.GATE_ROOT
+            pipeline.GATE_ROOT = root
+            try:
+                p = make_pipeline(root / "state")
+                (root / "state").mkdir()
+                p.prefix = "home_x"
+                p.put("pico", "b9999", "passed", {"run": "rescue", "sha256": "0" * 64})
+                p.latest_v12 = lambda seg: "canary" if seg.endswith("_10000_to10100") else None
+                (root / "rescue_model_9999_gate.json").write_text("{}")
+                (root / "canary_model_10099_gate.json").write_text("{}")
+                p.gate_ok = lambda run, end: run == "rescue"
+                self.assertEqual(p.boundary_gate_args(),
+                                 ["--boundary-gate", str(root / "rescue_model_9999_gate.json")])
+            finally:
+                pipeline.GATE_ROOT = original

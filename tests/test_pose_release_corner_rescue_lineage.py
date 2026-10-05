@@ -1,7 +1,7 @@
 """Lineages the automatic 9999 escalation of scripts/retrain_all_for_home.py produces.
 
 The pipeline continues a fresh pose-release chain from either a passing
-pose-release model_9900 corner rescue (any registered mix: lf60, lf72, lf90)
+pose-release model_9900 corner rescue (any registered mix: lf60, lf65, lf72, lf90)
 or a retrained 7100->10000 attempt from the gated model_7099.  Every lineage
 validator must accept both, for model_9999 and its ordinary descendants (the
 10100 canary, the 15000 final and the deployment package), and refuse the
@@ -29,7 +29,7 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
     hand_pose_release_lineage,
 )
 
-MIXES = ("lf60", "lf72", "lf90")
+MIXES = ("lf60", "lf65", "lf72", "lf90")
 
 
 def rescue_infos(mix: str, failed=("hand_tracking_rms",)) -> dict:

@@ -119,6 +119,7 @@ def _pose_release_corner_rescue(mix: str, lf_rb: int, lb_rf: int, sampler_suffix
 # Pose-release corner rescue sampler mixes (name -> marker/sampler revision).
 V12_POSE_RELEASE_CORNER_RESCUE_MIX_REVISIONS = {
     "lf60": _pose_release_corner_rescue("lf60", 60, 35, ""),
+    "lf65": _pose_release_corner_rescue("lf65", 65, 30, "pose_release_"),
     "lf72": _pose_release_corner_rescue("lf72", 72, 23, "pose_release_"),
     "lf90": _pose_release_corner_rescue("lf90", 90, 5, "pose_release_"),
 }

@@ -8,7 +8,7 @@ on exactly:
 * the forward-lean HOME (tests/fixtures/home_pose_forward_lean.yaml: what
   ``config/balance_home_pose.py --trunk-pitch-deg 10 --write`` writes into a copy
   of the centered YAML, with name/label edited) reproduces forward-lean-v2
-  (5442e88; its walking and get-up tasks are those of forward-lean-centered-home).
+  (ec67f1e; its walking and get-up tasks are those of forward-lean-centered-home).
 
 "Reproduces" means every module constant, every HOME-derived function result
 and the repr of every registered task's env / play / RL config and runner of
@@ -17,7 +17,9 @@ recorded with tests/home_equivalence.py) is equal here.  The only allowed
 differences are new names this tree adds, and at the centered HOME the new
 command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
 ``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
-their HOME (a subclass of mjlab's).
+their HOME (a subclass of mjlab's), and the 0.040 m hand-RMS profiles of the
+pose-release 10000 boundary / 10100 canary ported from forward-lean-v2
+(e3271de, ec67f1e), which extend the centered branch's profile tables.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
@@ -45,7 +47,7 @@ LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
 CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
 REFERENCES = {
     "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
-    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_5442e88.json",
+    "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_ec67f1e.json",
 }
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 import home_equivalence  # noqa: E402
@@ -114,6 +116,21 @@ class HomeEquivalenceTest(unittest.TestCase):
             )
         for key, value in allowed.items():
             self.assertEqual(values.get(key), value)
+        extended = ()
+        if centered:
+            # Profile tables that only gained the ported 0.040 m hand-RMS
+            # profiles (their names must be in the value; nothing else differs
+            # from the forward-lean reference, which has them too).
+            extended = (
+                "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking."
+                "STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE",
+                "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES",
+                "const:mjlab_microban.scripts.export_teleop_v12_deployment."
+                "STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE",
+                "const:mjlab_microban.scripts.teleop_v12_stage.TRACKING_PROFILES",
+            )
+            for key in extended:
+                self.assertIn("_hand_rms_40mm_v1", values[key], key)
         current = home_equivalence.digest(values)
         expected = json.loads(reference.read_text())
         missing = sorted(set(expected) - set(current))
@@ -121,6 +138,7 @@ class HomeEquivalenceTest(unittest.TestCase):
             key
             for key in expected
             if key in current and current[key] != expected[key] and key not in allowed
+            and key not in extended
         )
         self.assertEqual(missing, [], "names of the reference branch missing here")
         self.assertEqual(different, [], "values that differ from the reference branch")

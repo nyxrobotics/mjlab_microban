@@ -241,6 +241,13 @@ _FORWARD_LEAN_HOME_CONTRACTS = {
     "v12_pr_corner_rescue_lf60_sampler_revision": (
         "uniform_joint_box5pct_lf_rb60pct_lb_rf35pct_receiver_box_f_v1"
     ),
+    "v12_pr_corner_rescue_lf65_marker_revision": (
+        "recorded_pose_release_model9900_uniform5_lf_rb65_lb_rf30_99_updates_"
+        "receiver_box_f_v1"
+    ),
+    "v12_pr_corner_rescue_lf65_sampler_revision": (
+        "uniform_joint_box5pct_lf_rb65pct_lb_rf30pct_receiver_box_f_pose_release_v1"
+    ),
     "v12_pr_corner_rescue_lf72_marker_revision": (
         "recorded_pose_release_model9900_uniform5_lf_rb72_lb_rf23_99_updates_"
         "receiver_box_f_v1"
