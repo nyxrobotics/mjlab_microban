@@ -22,6 +22,7 @@ Usage:
       [--hand-pose-release]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
+      [--seed N]
 
 Fresh start checks that the velocity checkpoint's run recorded the current
 (forward-lean) HOME, hashes it, runs the 9x300 raw
@@ -44,6 +45,13 @@ route is a fresh pose-release chain: start --source ... --hand-pose-release.
 No canonical model_7099 is pinned as a recipe-switch parent here, so resuming
 a canonical v11 checkpoint with this option is refused.  A pose-release
 checkpoint is resumed with this option (it is refused without it).
+
+--seed N (default 42) sets --env.seed and --agent.seed of this training
+process only.  It is training randomness, not a gate: no checkpoint lineage
+marker, stage gate or package records it, every gate still evaluates with its
+own fixed seeds, and the run's params/ records the value used.  Use it to
+retrain a segment from the same gated parent when repeated same-seed attempts
+fail identically.
 EOF
 }
 fail() { echo "$*" >&2; exit 2; }
@@ -71,6 +79,7 @@ num_envs=2048
 max_updates=0
 skip_gate=0
 hand_pose_release=0
+train_seed=42
 while (( $# > 0 )); do
     case "$1" in
         --hand-pose-release)
@@ -98,6 +107,11 @@ while (( $# > 0 )); do
             max_updates="$2"; shift 2
             ;;
         --dry-run-skip-gate) skip_gate=1; shift ;;
+        --seed)
+            (( $# >= 2 )) && [[ "$2" =~ ^(0|[1-9][0-9]{0,8})$ ]] \
+                || fail "--seed requires a non-negative integer"
+            train_seed="$2"; shift 2
+            ;;
         --agent.run-name)
             (( $# >= 2 )) || fail "--agent.run-name requires NAME"
             [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] \
@@ -252,9 +266,9 @@ task=Mjlab-Teleop-V12-Microban
 if (( hand_pose_release == 1 )); then
     task=Mjlab-Teleop-V12-HandPoseRelease-Microban
 fi
-echo "[INFO] task=${task}"
+echo "[INFO] task=${task} seed=${train_seed}"
 exec uv run --locked train "${task}" \
-    --env.scene.num-envs "${num_envs}" --env.seed 42 --agent.seed 42 \
+    --env.scene.num-envs "${num_envs}" --env.seed "${train_seed}" --agent.seed "${train_seed}" \
     --agent.num-steps-per-env 24 --agent.max-iterations "${iterations}" \
     --agent.save-interval "${save_interval}" --agent.logger tensorboard \
     --agent.upload-model False --enable-nan-guard True \
