@@ -270,3 +270,25 @@ register_mjlab_task(
     rl_cfg=MicrobanTeleopV12FinalRescueRlCfg,
     runner_cls=MicrobanTeleopV12FinalRescueOnPolicyRunner,
 )
+
+# Pose-release variant of the 14900->14999 final-scenario rescue (pose-release
+# model_14900 of a run whose 14999 gate failed; saves keep the pose-release
+# recipe).  The mix is read from MICROBAN_V12_PR_FINAL_RESCUE_MIX at import.
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (  # noqa: E402
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID,
+    MicrobanTeleopV12HandPoseReleaseFinalRescueRlCfg,
+    make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg,
+)
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_runner import (  # noqa: E402
+    MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID,
+    env_cfg=make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(
+        play=True
+    ),
+    rl_cfg=MicrobanTeleopV12HandPoseReleaseFinalRescueRlCfg,
+    runner_cls=MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner,
+)

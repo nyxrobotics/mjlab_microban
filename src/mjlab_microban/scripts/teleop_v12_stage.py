@@ -464,6 +464,11 @@ def _validate_tracking_report(
     ):
         raise ValueError("Tracking report scenario set/order drifted")
     scenarios = _tracking_scenarios(profile)
+    # Rescue tooling (never a gate: gates pass no allowed failures) may accept
+    # a report failing these two per-scenario checks; the evidence must still
+    # be well formed and the recomputed checks must match the report.
+    soft_limit_failure_allowed = "actual_soft_limits" in allowed_failed_checks
+    twist_failure_allowed = "twist_directional_response" in allowed_failed_checks
     for result, scenario in zip(results, scenarios, strict=True):
         assert isinstance(result, dict)
         expected_command = {
@@ -487,10 +492,19 @@ def _validate_tracking_report(
             or result.get("raw_action_recurrence_verified_steps") != 300
             or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
             or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
-            or float(result["maximum_actual_soft_limit_violation_rad"])
-            > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            or (
+                not soft_limit_failure_allowed
+                and float(result["maximum_actual_soft_limit_violation_rad"])
+                > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+            )
             or result.get("hmd_motion_evidence_passed") is not True
-            or result.get("twist_directional_response_passed") is not True
+            or (
+                result.get("twist_directional_response_passed") is not True
+                and not (
+                    twist_failure_allowed
+                    and result.get("twist_directional_response_passed") is False
+                )
+            )
             or not isinstance(coverage, dict)
             or coverage.get("passed") is not True
             or coverage.get("foot_target_expected") is not expects_foot
@@ -649,9 +663,16 @@ def _validate_tracking_report(
                 != DIRECTIONAL_RESPONSE_MINIMUM[axis]
                 or item.get("passed")
                 is not (signed >= DIRECTIONAL_RESPONSE_MINIMUM[axis])
-                or signed < DIRECTIONAL_RESPONSE_MINIMUM[axis]
+                or (
+                    not twist_failure_allowed
+                    and signed < DIRECTIONAL_RESPONSE_MINIMUM[axis]
+                )
             ):
                 raise ValueError("Tracking directional response failed")
+        if result.get("twist_directional_response_passed") is not all(
+            response[axis].get("passed") is True for axis in expected_axes
+        ):
+            raise ValueError("Tracking directional response summary is inconsistent")
         _require_action_envelope(
             result.get("raw_action_envelope"),
             label=f"Tracking/{scenario.name}",

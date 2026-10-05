@@ -699,9 +699,20 @@ def validate_corner_rescue_canonical_lineage(
     marker = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     # Imported here: the final-rescue module imports this one.
     from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
         MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
         validate_final_rescue_consumable,
     )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        is_hand_pose_release_final_rescue_marker,
+    )
+
+    if recipe != MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION and (
+        is_hand_pose_release_final_rescue_marker(
+            infos.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY)
+        )
+    ):
+        raise ValueError("Pose-release final rescue marker on a non-pose-release recipe")
 
     if recipe == MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION:
         # The final-scenario rescue (model14900 -> model14999) is consumable
