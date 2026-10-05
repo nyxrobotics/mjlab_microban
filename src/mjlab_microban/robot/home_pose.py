@@ -591,8 +591,8 @@ def load_home_pose(path: Path | str = HOME_POSE_YAML) -> HomePose:
 
 
 _YAML_VALUE_LINE = re.compile(
-    r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z_][A-Za-z0-9_]*):(?P<gap>[ \t]+)"
-    r"(?P<value>[^#\s][^#]*?)(?P<tail>[ \t]*(?:#.*)?)$"
+    r"^(?P<indent>[ \t]*)(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P=quote):"
+    r"(?P<gap>[ \t]+)(?P<value>[^#\s][^#]*?)(?P<tail>[ \t]*(?:#.*)?)$"
 )
 
 
@@ -605,7 +605,7 @@ def rewrite_home_pose_yaml(
     """Rewrite HOME values in place, keeping every comment and line.
 
     Only the value text of the named keys changes (``repr`` of the float, so
-    it round-trips exactly).  Returns the new file text.  The result is
+    it round-trips exactly); quoted keys and line endings are kept.  Returns the new file text.  The result is
     re-parsed and must contain exactly the requested values.
     """
 
@@ -614,7 +614,8 @@ def rewrite_home_pose_yaml(
     unknown = set(updates) - set(HOME_JOINT_NAMES)
     if unknown:
         raise KeyError(f"Unknown HOME joints {sorted(unknown)}")
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    # Bytes in, bytes out: keeps CRLF (or any) line endings exactly.
+    lines = path.read_bytes().decode("utf-8").splitlines(keepends=True)
     seen: set[str] = set()
     in_joints = False
     out = []
@@ -623,15 +624,16 @@ def rewrite_home_pose_yaml(
         newline = line[len(body) :]
         match = _YAML_VALUE_LINE.match(body)
         if body and not body[0].isspace() and not body.startswith("#"):
-            in_joints = body.split(":", 1)[0] == "joint_pos_deg"
+            in_joints = body.split(":", 1)[0].strip("\"'") == "joint_pos_deg"
         if match is not None:
             key = match["key"]
             indented = bool(match["indent"])
+            quoted = f"{match['quote']}{key}{match['quote']}"
             if in_joints and indented and key in updates:
-                body = f"{match['indent']}{key}:{match['gap']}{updates[key]!r}{match['tail']}"
+                body = f"{match['indent']}{quoted}:{match['gap']}{updates[key]!r}{match['tail']}"
                 seen.add(key)
             elif not indented and key == "trunk_pitch_deg" and trunk_pitch_deg is not None:
-                body = f"{key}:{match['gap']}{float(trunk_pitch_deg)!r}{match['tail']}"
+                body = f"{quoted}:{match['gap']}{float(trunk_pitch_deg)!r}{match['tail']}"
                 seen.add(key)
         out.append(body + newline)
     wanted = set(updates) | ({"trunk_pitch_deg"} if trunk_pitch_deg is not None else set())
@@ -644,7 +646,7 @@ def rewrite_home_pose_yaml(
             raise AssertionError(f"rewrite of {name} did not round-trip")
     if trunk_pitch_deg is not None and float(document["trunk_pitch_deg"]) != float(trunk_pitch_deg):
         raise AssertionError("rewrite of trunk_pitch_deg did not round-trip")
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return text
 
 
