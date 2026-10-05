@@ -1004,6 +1004,38 @@ def _checkpoint_kind(completed: int, sanitization: object) -> str:
     return "interrupted_recovery"
 
 
+def pose_release_final_rescue_gate_marker(
+    infos: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """The pose-release final-rescue marker a gate records, or ``None``.
+
+    A pose-release checkpoint carrying the final-rescue infos key (only the
+    rescue's model_14999 is consumable; the lineage loaders enforce that) has
+    its marker rebuilt from its recorded values and copied verbatim into the
+    gate, so the gate (and the package built from it) names the rescue.  The
+    canonical v11 final rescue keeps its existing gate content.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        validate_hand_pose_release_final_rescue_marker,
+    )
+
+    if infos.get("microban_teleop_recipe_revision") != (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        return None
+    marker = infos.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY)
+    if marker is None:
+        return None
+    return (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+        validate_hand_pose_release_final_rescue_marker(marker),
+    )
+
+
 def next_training_target(completed: int) -> tuple[int, bool]:
     """Return the next enforced endpoint and whether it is an activation canary."""
 
@@ -1153,6 +1185,9 @@ def create_gate(
         result[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
             validate_hand_pose_release_recipe_switch_marker(recipe_switch)
         )
+    pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
+    if pose_release_final_rescue is not None:
+        result[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
     if deadline_source:
         deadline_marker = deadline_fallback_marker(
             selected_checkpoint_sha256=checkpoint_sha,
@@ -1302,6 +1337,9 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         exact[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
             validate_hand_pose_release_recipe_switch_marker(recipe_switch)
         )
+    pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
+    if pose_release_final_rescue is not None:
+        exact[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
     checkpoint_deadline = (
         validate_deadline_fallback_marker(
             gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)

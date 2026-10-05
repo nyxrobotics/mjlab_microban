@@ -614,3 +614,194 @@ def test_packager_ancestry_crosses_the_staged_seed(tmp_path):
         (segment.parent / "params" / "agent.yaml").read_bytes()
     )
     assert deployment._resume_ancestry(final) == [seed.resolve(), canary.resolve()]
+
+
+# --- the gate and the package record the rescue marker ----------------------
+
+
+def _rescue_gate_fixture(root: Path, *, final: dict | None, corner: dict | None):
+    """A pose-release model_14999 (optionally a final rescue) and its reports."""
+
+    from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
+    from mjlab_microban.tasks.microban_teleop_v12_actor import (
+        TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+        teleop_v12_active_adapter_columns,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+    from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
+        TELEOP_V12_HOME_POSE_INFO_KEY,
+        teleop_v12_home_pose_marker,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+        BILATERAL_SITE_ORDER_INFO_KEY,
+    )
+
+    helpers = _stage_helpers()
+    root.mkdir(parents=True, exist_ok=True)
+    infos = {
+        "microban_teleop_training_contract_version": "12",
+        "microban_teleop_recipe_revision": (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        ),
+        BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+        "adapter_gradient_schedule_revision": (
+            TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+        ),
+        "active_actor_columns_at_save": list(
+            teleop_v12_active_adapter_columns(15_000 * 24)
+        ),
+        "env_state": {"common_step_counter": 15_000 * 24},
+    }
+    if corner is not None:
+        infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = corner
+    if final is not None:
+        infos[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] = final
+    checkpoint = root / "model_14999.pt"
+    torch.save({"iter": 14_999, "infos": infos}, checkpoint)
+    identity = {
+        "sha256": sha256_file(checkpoint),
+        "iteration": 14_999,
+        "completed_updates": 15_000,
+    }
+    onnx_path = root / "policy.onnx"
+    onnx_path.write_bytes(b"unit-test-onnx")
+    reports = {
+        "locomotion_report": root / "locomotion.json",
+        "tracking_report": root / "tracking.json",
+        "onnx_report": root / "onnx.json",
+    }
+    reports["locomotion_report"].write_text(
+        json.dumps(helpers._locomotion_report(identity))
+    )
+    reports["tracking_report"].write_text(
+        json.dumps(
+            helpers._tracking_report(identity, profile=FINAL_COMPLETION_ALLOWANCE_PROFILE)
+        )
+    )
+    reports["onnx_report"].write_text(
+        json.dumps(helpers._onnx_report(identity, onnx_path))
+    )
+    return checkpoint, reports, infos
+
+
+@pytest.mark.parametrize("with_corner", [False, True])
+def test_final_gate_records_and_requires_the_rescue_marker(tmp_path, with_corner):
+    from mjlab_microban.scripts.teleop_v12_stage import create_gate, validate_gate
+
+    corner = _corner() if with_corner else None
+    marker = _marker(corner=corner, failed_gate_failed_scenarios=["mixed_forward_left"])
+    checkpoint, reports, _ = _rescue_gate_fixture(
+        tmp_path / "rescue", final=marker, corner=corner
+    )
+    gate = create_gate(checkpoint=checkpoint, **reports)
+    assert gate["tracking_profile"] == FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert gate[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] == marker
+    assert gate.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY) == corner
+    gate_path = tmp_path / "rescue_gate.json"
+    gate_path.write_text(json.dumps(gate))
+    assert validate_gate(gate_path, checkpoint) == gate
+
+    missing = deepcopy(gate)
+    del missing[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY]
+    other = deepcopy(gate)
+    other[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] = _marker(
+        corner=corner, sampler_mix="pr_v3", failed_gate_failed_scenarios=["mixed_forward_left"]
+    )
+    reseeded = deepcopy(gate)
+    reseeded[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] = _marker(
+        corner=corner, training_seed=43, failed_gate_failed_scenarios=["mixed_forward_left"]
+    )
+    for tampered in (missing, other, reseeded):
+        gate_path.write_text(json.dumps(tampered))
+        with pytest.raises(ValueError, match="identity mismatch"):
+            validate_gate(gate_path, checkpoint)
+
+    # An ordinary pose-release final records no marker and refuses one.
+    plain_checkpoint, plain_reports, _ = _rescue_gate_fixture(
+        tmp_path / "plain", final=None, corner=corner
+    )
+    plain = create_gate(checkpoint=plain_checkpoint, **plain_reports)
+    assert MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY not in plain
+    plain_path = tmp_path / "plain_gate.json"
+    plain_path.write_text(json.dumps(plain))
+    assert validate_gate(plain_path, plain_checkpoint) == plain
+    plain_path.write_text(
+        json.dumps({**plain, MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: marker})
+    )
+    with pytest.raises(ValueError):
+        validate_gate(plain_path, plain_checkpoint)
+
+
+def test_package_metadata_names_the_rescue_marker():
+    from mjlab_microban.scripts.export_teleop_v12_deployment import (
+        _final_rescue_metadata,
+    )
+
+    corner = _corner()
+    marker = _marker(corner=corner)
+    infos = _infos(corner=corner, final=marker)
+    gate = {MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: deepcopy(marker)}
+    metadata = _final_rescue_metadata(gate, infos)
+    assert set(metadata) == {
+        "v12_final_rescue_marker_revision",
+        "v12_final_rescue_marker_json",
+        "v12_final_rescue_marker_sha256",
+    }
+    assert json.loads(metadata["v12_final_rescue_marker_json"]) == marker
+    assert metadata["v12_final_rescue_marker_sha256"] == canonical_json_sha256(marker)
+    assert metadata["v12_final_rescue_marker_revision"] == marker["revision"]
+    # Every value is a string (ONNX metadata_props).
+    assert all(isinstance(value, str) for value in metadata.values())
+    for bad_gate in (
+        {},
+        {MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(corner=corner, sampler_mix="pr_v3")},
+        {MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(corner=corner, training_seed=43)},
+    ):
+        with pytest.raises(ValueError):
+            _final_rescue_metadata(bad_gate, infos)
+    # A tampered checkpoint marker is refused before the comparison.
+    tampered = deepcopy(marker)
+    tampered["sampler_probabilities"]["ordinary"] = 0.9
+    with pytest.raises(ValueError):
+        _final_rescue_metadata(
+            {MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: tampered},
+            _infos(corner=corner, final=tampered),
+        )
+    # An ordinary final ships no rescue fields and refuses a gate naming one.
+    plain = _infos(corner=corner, final=None)
+    assert _final_rescue_metadata({}, plain) == {}
+    with pytest.raises(ValueError):
+        _final_rescue_metadata(gate, plain)
+
+
+# --- a load re-checks that the failed report is from the parent's run --------
+
+
+def test_runner_load_resolves_the_staged_parent_run(tmp_path):
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_runner import (
+        staged_hand_pose_release_final_rescue_source,
+    )
+
+    run = tmp_path / "lean_v12_pr_10100_to15000"
+    seed = tmp_path / "pr_final_rescue_seed_0123456789abcdef"
+    for directory in (run, seed):
+        directory.mkdir()
+        (directory / "model_14900.pt").write_bytes(b"parent")
+    staged = seed / "model_14900.pt"
+    record = seed / "parent_run.txt"
+    # A hand-staged seed without the launcher's record is refused.
+    with pytest.raises(ValueError, match="parent run"):
+        staged_hand_pose_release_final_rescue_source(staged)
+    record.write_text(f"{run.name}\n", encoding="utf-8")
+    assert staged_hand_pose_release_final_rescue_source(staged) == (
+        run / "model_14900.pt"
+    ).resolve()
+    for bad in (f"{seed.name}\n", "../x\n", "a\nb\n", "missing_run\n", ""):
+        record.write_text(bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            staged_hand_pose_release_final_rescue_source(staged)
+    record.write_text(f"{run.name}\n", encoding="utf-8")
+    (run / "model_14900.pt").write_bytes(b"different")
+    with pytest.raises(ValueError):
+        staged_hand_pose_release_final_rescue_source(staged)
