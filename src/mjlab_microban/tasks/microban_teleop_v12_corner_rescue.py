@@ -15,7 +15,10 @@ marker from those recorded values.  Clocks, sampler, and contract are unchanged.
 Active-hand arm pose-release variant (forward-lean HOME): the same 99-update
 replay from a fresh pose-release chain's model_9900 whose strict HMD/hand report
 fails only hand accuracy (RMS and/or P95).  Both bilateral corners failed there,
-so its sampler splits the replay 60/35 between LF+RB and LB+RF (5 % ordinary).
+so its registered sampler mixes split the replay between LF+RB and LB+RF (5 %
+ordinary): ``lf60`` = 60/35 and ``lf90`` = 90/5 (the canonical split), chosen
+by the launcher through ``MICROBAN_V12_PR_CORNER_RESCUE_MIX`` and recorded in
+the marker revision.
 Its checkpoints keep the pose-release recipe revision (the env is the
 pose-release env with only the hand sampler changed) and carry a pose-release
 variant of the marker under the same infos key; only its model_9999 and that
@@ -114,6 +117,35 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_SAMPLER_REVISION = (
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY = 0.60
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY = 0.35
+# Registered pose-release sampler mixes (name -> marker/sampler revisions and
+# LF+RB / LB+RF shares; the ordinary remainder is always 5 %).
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIX_ENV = (
+    "MICROBAN_V12_PR_CORNER_RESCUE_MIX"
+)
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_DEFAULT_MIX = "lf60"
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES: dict[str, dict[str, Any]] = {
+    "lf60": {
+        "marker_revision": (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION
+        ),
+        "sampler_revision": (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_SAMPLER_REVISION
+        ),
+        "lf_rb": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+        "lb_rf": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY,
+    },
+    "lf90": {
+        "marker_revision": (
+            "recorded_pose_release_model9900_uniform5_lf_rb90_lb_rf5_99_updates_"
+            "receiver_box_f_v1"
+        ),
+        "sampler_revision": (
+            "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_pose_release_v1"
+        ),
+        "lf_rb": 0.90,
+        "lb_rf": 0.05,
+    },
+}
 # The pose-release parent may fail any non-empty subset of these strict checks.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_PARENT_FAILED_CHECKS = (
     frozenset(("hand_tracking_rms", "hand_tracking_p95"))
@@ -136,13 +168,39 @@ if not math.isclose(
     1.0,
 ):
     raise RuntimeError("Corner rescue sampler probabilities must sum to one")
-if not math.isclose(
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY
-    + MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY
-    + MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY,
-    1.0,
-):
-    raise RuntimeError("Pose-release corner rescue probabilities must sum to one")
+for _mix in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES.values():
+    if not math.isclose(
+        _mix["lf_rb"] + _mix["lb_rf"] + MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY,
+        1.0,
+    ):
+        raise RuntimeError("Pose-release corner rescue probabilities must sum to one")
+
+
+def hand_pose_release_corner_rescue_mix(name: str) -> dict[str, Any]:
+    try:
+        return dict(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES[name])
+    except KeyError as exc:
+        raise ValueError(f"Unknown pose-release corner rescue mix {name!r}") from exc
+
+
+def selected_hand_pose_release_corner_rescue_mix() -> str:
+    """Mix named by the launcher's environment variable (default lf60)."""
+
+    import os
+
+    name = os.environ.get(
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIX_ENV,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_DEFAULT_MIX,
+    )
+    hand_pose_release_corner_rescue_mix(name)
+    return name
+
+
+def hand_pose_release_corner_rescue_mix_for_lf_rb(lf_rb_probability: float) -> str:
+    for name, mix in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES.items():
+        if mix["lf_rb"] == lf_rb_probability:
+            return name
+    raise ValueError("Hand sampler share is not a registered pose-release mix")
 
 
 def assert_corner_rescue_optimizer_step(
@@ -274,7 +332,10 @@ def corner_pair_selection(
         raise ValueError("Corner-pair selector values must be in [0, 1)")
     if lf_rb_probability not in (
         MICROBAN_TELEOP_V12_LF_RB_PROBABILITY,
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+        *(
+            mix["lf_rb"]
+            for mix in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES.values()
+        ),
     ):
         raise ValueError("Corner-pair LF+RB share is not a registered mix")
     first_upper = lf_rb_probability
@@ -370,6 +431,7 @@ def corner_rescue_marker(
     parent_strict_tracking_report_sha256: str,
     hand_pose_release: bool = False,
     parent_strict_failed_checks: object = ("hand_tracking_rms",),
+    pose_release_mix: str = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_DEFAULT_MIX,
 ) -> dict[str, Any]:
     """Return the marker embedded in every rescue checkpoint.
 
@@ -383,9 +445,8 @@ def corner_rescue_marker(
     )
     if not hand_pose_release:
         return marker
-    marker["revision"] = (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION
-    )
+    mix = hand_pose_release_corner_rescue_mix(pose_release_mix)
+    marker["revision"] = mix["marker_revision"]
     marker["parent_strict_failed_checks"] = _pose_release_parent_failed_checks(
         parent_strict_failed_checks
     )
@@ -400,19 +461,14 @@ def corner_rescue_marker(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID
     )
     marker["parent_lineage"] = "fresh_pose_release_chain"
-    marker["sampler_revision"] = (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_SAMPLER_REVISION
-    )
+    marker["sampler_mix"] = pose_release_mix
+    marker["sampler_revision"] = mix["sampler_revision"]
     marker["sampler_probabilities"] = {
         "ordinary_uniform_independent": (
             MICROBAN_TELEOP_V12_UNIFORM_REMAINDER_PROBABILITY
         ),
-        "left_forward_right_backward": (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY
-        ),
-        "left_backward_right_forward": (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LB_RF_PROBABILITY
-        ),
+        "left_forward_right_backward": mix["lf_rb"],
+        "left_backward_right_forward": mix["lb_rf"],
     }
     marker["unchanged_contract"] = {
         **marker["unchanged_contract"],
@@ -421,9 +477,16 @@ def corner_rescue_marker(
     return marker
 
 
+def _hand_pose_release_mix_for_marker_revision(revision: object) -> str | None:
+    for name, mix in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES.items():
+        if mix["marker_revision"] == revision:
+            return name
+    return None
+
+
 def is_hand_pose_release_corner_rescue_marker(marker: object) -> bool:
-    return isinstance(marker, Mapping) and marker.get("revision") == (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MARKER_REVISION
+    return isinstance(marker, Mapping) and (
+        _hand_pose_release_mix_for_marker_revision(marker.get("revision")) is not None
     )
 
 
@@ -587,6 +650,11 @@ def validate_corner_rescue_lineage_marker(marker: object) -> dict[str, Any]:
                 if pose_release
                 else ("hand_tracking_rms",)
             ),
+            pose_release_mix=(
+                _hand_pose_release_mix_for_marker_revision(marker.get("revision"))
+                if pose_release
+                else MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_DEFAULT_MIX
+            ),
         )
     except ValueError as exc:
         raise ValueError("Corner rescue lineage marker drifted") from exc
@@ -692,7 +760,7 @@ def make_microban_teleop_v12_corner_rescue_env_cfg(play: bool = False):
 def make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
     play: bool = False,
 ):
-    """Pose-release env with only the hand sampler changed (5/60/35)."""
+    """Pose-release env with only the hand sampler changed (registered mix)."""
 
     from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
         make_microban_teleop_v12_hand_pose_release_env_cfg,
@@ -704,7 +772,9 @@ def make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
         resampling_time_range=existing.resampling_time_range,
         rel_active=existing.rel_active,
         trunk_pitch=existing.trunk_pitch,
-        lf_rb_probability=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+        lf_rb_probability=hand_pose_release_corner_rescue_mix(
+            selected_hand_pose_release_corner_rescue_mix()
+        )["lf_rb"],
     )
     if not play:
         curriculum = cfg.curriculum.get("staged_curriculum")

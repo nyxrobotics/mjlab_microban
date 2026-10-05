@@ -15,7 +15,7 @@ usage() {
     cat <<'EOF_USAGE'
 Usage:
   scripts/train_microban_teleop_v12_corner_rescue.sh MODEL_9900 PARENT_TRACKING_REPORT \
-    [--hand-pose-release] [--agent.run-name NAME]
+    [--hand-pose-release [--mix lf60|lf90]] [--agent.run-name NAME]
 
 MODEL_9900 must be a canonical contract-v12 model_9900.pt (HMD+hand columns
 active, foot columns exact zero, Adam step 198020). PARENT_TRACKING_REPORT
@@ -28,7 +28,7 @@ override other than the output run name is accepted.
 --hand-pose-release: MODEL_9900 is a fresh active-hand arm pose-release
 chain's model_9900 whose strict HMD/hand report fails only hand accuracy
 (RMS and/or P95); trains Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban
-(pose-release env, 5/60/35 sampler).  Its model_9999 keeps the pose-release
+(pose-release env; sampler mix lf60 = 5/60/35 by default, lf90 = 5/90/5).  Its model_9999 keeps the pose-release
 recipe; gate it with scripts/evaluate_microban_teleop_v12_stage.sh RUN 9999 and
 resume it with train_microban_teleop_v12.sh resume RUN --hand-pose-release.
 EOF_USAGE
@@ -50,6 +50,13 @@ if (( $# > 0 )) && [[ "$1" == "--hand-pose-release" ]]; then
     hand_pose_release=1
     output_run_name="v12_pr_corner_rescue_v1_9901_to10000"
     shift
+    export MICROBAN_V12_PR_CORNER_RESCUE_MIX=lf60
+    if (( $# > 0 )) && [[ "$1" == "--mix" ]]; then
+        (( $# >= 2 )) && [[ "$2" == lf60 || "$2" == lf90 ]] \
+            || fail "--mix must be lf60 or lf90"
+        export MICROBAN_V12_PR_CORNER_RESCUE_MIX="$2"
+        shift 2
+    fi
 fi
 if (( $# > 0 )); then
     [[ "$1" == "--agent.run-name" && $# == 2 ]] \

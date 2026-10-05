@@ -73,6 +73,31 @@ class HandPoseReleaseCornerRescueTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_corner_rescue_lineage_marker(tampered)
 
+    def test_registered_mixes_round_trip(self) -> None:
+        for name, share in (("lf60", 0.60), ("lf90", 0.90)):
+            with self.subTest(mix=name):
+                marker = corner_rescue_marker(
+                    parent_checkpoint_sha256=PARENT_SHA,
+                    parent_strict_tracking_report_sha256=REPORT_SHA,
+                    hand_pose_release=True,
+                    parent_strict_failed_checks=("hand_tracking_rms",),
+                    pose_release_mix=name,
+                )
+                self.assertEqual(marker["sampler_mix"], name)
+                self.assertEqual(
+                    marker["sampler_probabilities"]["left_forward_right_backward"],
+                    share,
+                )
+                self.assertTrue(is_hand_pose_release_corner_rescue_marker(marker))
+                self.assertEqual(validate_corner_rescue_lineage_marker(marker), marker)
+        with self.assertRaises(ValueError):
+            corner_rescue_marker(
+                parent_checkpoint_sha256=PARENT_SHA,
+                parent_strict_tracking_report_sha256=REPORT_SHA,
+                hand_pose_release=True,
+                pose_release_mix="lf50",
+            )
+
     def test_canonical_marker_is_unchanged(self) -> None:
         canonical = corner_rescue_marker(
             parent_checkpoint_sha256=PARENT_SHA,

@@ -427,7 +427,7 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_runner import ( 
 class MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner(
     MicrobanTeleopV12HandPoseReleaseOnPolicyRunner
 ):
-    """99-update 5/60/35 corner replay from a fresh pose-release model_9900.
+    """99-update corner replay (registered mix) from a fresh pose-release model_9900.
 
     Saves keep the pose-release recipe revision; the base runner writes the
     pose-release corner marker (bound here after the parent is validated) into
@@ -470,11 +470,19 @@ class MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner(
             raise ValueError("Corner rescue parent or its report changed while loading")
         if self.teleop_v12_corner_rescue is not None:
             raise RuntimeError("Pose-release corner rescue parent carried a rescue")
+        from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+            hand_pose_release_corner_rescue_mix_for_lf_rb,
+        )
+
+        hand = self.env.unwrapped.command_manager.get_term("hand_target")
         self.teleop_v12_corner_rescue = corner_rescue_marker(
             parent_checkpoint_sha256=before,
             parent_strict_tracking_report_sha256=report_sha256,
             hand_pose_release=True,
             parent_strict_failed_checks=failed,
+            pose_release_mix=hand_pose_release_corner_rescue_mix_for_lf_rb(
+                hand.cfg.lf_rb_probability
+            ),
         )
         self._assert_corner_rescue_environment()
         self._assert_live_foot_adapter_zero()
@@ -505,16 +513,16 @@ class MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner(
 
     def _assert_corner_rescue_environment(self) -> None:
         from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY,
+            hand_pose_release_corner_rescue_mix_for_lf_rb,
         )
 
         MicrobanTeleopV12CornerRescueOnPolicyRunner._assert_corner_rescue_environment(
             self
         )
         hand = self.env.unwrapped.command_manager.get_term("hand_target")
-        if hand.cfg.lf_rb_probability != (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_LF_RB_PROBABILITY
-        ):
+        mix = hand_pose_release_corner_rescue_mix_for_lf_rb(hand.cfg.lf_rb_probability)
+        marker = self.teleop_v12_corner_rescue
+        if marker is not None and marker.get("sampler_mix") != mix:
             raise RuntimeError("Pose-release corner rescue sampler mix drifted")
         self._assert_hand_pose_release_environment()
 

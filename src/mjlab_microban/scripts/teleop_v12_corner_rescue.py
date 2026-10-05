@@ -67,6 +67,9 @@ def validate_parent_checkpoint(
     strict hand accuracy (RMS and/or P95).
     """
 
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        selected_hand_pose_release_corner_rescue_mix,
+    )
     from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
         validate_hand_pose_release_corner_rescue_parent_payload,
         validate_hand_pose_release_corner_rescue_parent_report,
@@ -116,6 +119,11 @@ def validate_parent_checkpoint(
             parent_strict_tracking_report_sha256=report_digest,
             hand_pose_release=hand_pose_release,
             parent_strict_failed_checks=failed,
+            **(
+                {"pose_release_mix": selected_hand_pose_release_corner_rescue_mix()}
+                if hand_pose_release
+                else {}
+            ),
         ),
     }
 
