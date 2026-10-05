@@ -805,3 +805,271 @@ def test_runner_load_resolves_the_staged_parent_run(tmp_path):
     (run / "model_14900.pt").write_bytes(b"different")
     with pytest.raises(ValueError):
         staged_hand_pose_release_final_rescue_source(staged)
+
+
+# --- wiring: the packager entry point writes the marker fields ---------------
+
+
+def test_build_deployment_metadata_writes_the_rescue_marker(tmp_path):
+    from test_teleop_v12_deployment import (
+        _bootstrap,
+        _evidence,
+        _microban_identity,
+        _sha,
+    )
+
+    from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
+
+    corner = _corner()
+    marker = _marker(corner=corner)
+    checkpoint = tmp_path / "model_14999.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate, locomotion, tracking, onnx_report, infos = _evidence(tmp_path)
+    infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = corner
+    gate["checkpoint_sha256"] = _sha(checkpoint)
+    gate["tracking_profile"] = FINAL_COMPLETION_ALLOWANCE_PROFILE
+
+    def build(gate_value: dict, infos_value: dict) -> dict:
+        return deployment.build_v12_deployment_metadata(
+            checkpoint=checkpoint,
+            checkpoint_sha256=_sha(checkpoint),
+            gate_path=gate_path,
+            gate=gate_value,
+            infos=infos_value,
+            bootstrap=_bootstrap(),
+            locomotion=locomotion,
+            tracking=tracking,
+            onnx_report=onnx_report,
+            packager_parity={
+                "reference_maximum_absolute_error": 1.0e-6,
+                "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
+            },
+            microban_source_identity=_microban_identity(),
+        )
+
+    keys = {
+        "v12_final_rescue_marker_revision",
+        "v12_final_rescue_marker_json",
+        "v12_final_rescue_marker_sha256",
+    }
+    # An ordinary pose-release final ships none of the rescue fields.
+    plain = build(deepcopy(gate), deepcopy(infos))
+    assert not keys.intersection(plain)
+    assert plain["v12_tracking_profile"] == FINAL_COMPLETION_ALLOWANCE_PROFILE
+
+    rescue_infos = {**deepcopy(infos), MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: marker}
+    rescue_gate = {**deepcopy(gate), MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: marker}
+    metadata = build(rescue_gate, rescue_infos)
+    assert keys <= set(metadata)
+    assert json.loads(metadata["v12_final_rescue_marker_json"]) == marker
+    assert metadata["v12_final_rescue_marker_sha256"] == canonical_json_sha256(marker)
+    assert metadata["v12_final_rescue_marker_revision"] == marker["revision"]
+    assert {
+        key: value for key, value in metadata.items() if key not in keys
+    } == plain
+    for bad_gate, bad_infos in (
+        (deepcopy(gate), rescue_infos),  # gate omits the checkpoint's marker
+        (
+            {
+                **deepcopy(gate),
+                MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(
+                    corner=corner, sampler_mix="pr_v3"
+                ),
+            },
+            rescue_infos,
+        ),
+        (rescue_gate, deepcopy(infos)),  # gate names a rescue the final lacks
+    ):
+        with pytest.raises(ValueError, match="final rescue"):
+            build(bad_gate, bad_infos)
+
+
+# --- wiring: every runner load re-checks the staged parent's own run ---------
+
+
+class _ReachedPoseReleaseLoad(Exception):
+    pass
+
+
+def test_runner_load_refuses_a_hand_made_seed_folder(tmp_path, monkeypatch):
+    from mjlab_microban.tasks import (
+        microban_teleop_v12_hand_pose_release_final_rescue_runner as runner_module,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_FAILED_GATE_REPORT_FILENAME,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_PARENT_RUN_FILENAME,
+    )
+
+    def reached(self, *args, **kwargs):
+        raise _ReachedPoseReleaseLoad
+
+    monkeypatch.setattr(
+        runner_module.MicrobanTeleopV12HandPoseReleaseOnPolicyRunner, "load", reached
+    )
+    load = (
+        runner_module.MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner.load
+    )
+
+    run = tmp_path / "lean_v12_pr_10100_to15000"
+    other = tmp_path / "lean_v12_pr_10100_to15000_other"
+    for directory in (run, other):
+        directory.mkdir()
+        torch.save(_parent_payload(), directory / "model_14900.pt")
+        (directory / "model_14999.pt").write_bytes(directory.name.encode())
+
+    def stage(name: str, *, failed_run: Path, record: str | None) -> Path:
+        seed = tmp_path / name
+        seed.mkdir()
+        staged = seed / "model_14900.pt"
+        staged.write_bytes((run / "model_14900.pt").read_bytes())
+        failed = failed_run / "model_14999.pt"
+        report = _failed_final_report()
+        report["checkpoint"]["path"] = str(failed)
+        report["checkpoint"]["sha256"] = sha256_file(failed)
+        (
+            seed
+            / MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_FAILED_GATE_REPORT_FILENAME
+        ).write_text(json.dumps(report), encoding="utf-8")
+        if record is not None:
+            (
+                seed / MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_PARENT_RUN_FILENAME
+            ).write_text(f"{record}\n", encoding="utf-8")
+        return staged
+
+    # The launcher's staging reaches the pose-release load.
+    good = stage("pr_final_rescue_seed_good", failed_run=run, record=run.name)
+    with pytest.raises(_ReachedPoseReleaseLoad):
+        load(object(), str(good))
+    # A hand-made seed without the parent-run record never reaches it, even
+    # though its failed report and model_14900 are internally consistent.
+    unrecorded = stage("pr_final_rescue_seed_unrecorded", failed_run=run, record=None)
+    with pytest.raises(ValueError, match="parent run"):
+        load(object(), str(unrecorded))
+    # A failed report from another run than the recorded parent run.
+    crossed = stage("pr_final_rescue_seed_crossed", failed_run=other, record=run.name)
+    with pytest.raises(ValueError, match="not from the parent's run"):
+        load(object(), str(crossed))
+    # A recorded parent run whose model_14900 is not the staged copy.
+    torch.save(
+        _parent_payload(**{MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: None}),
+        other / "model_14900.pt",
+    )
+    swapped = stage("pr_final_rescue_seed_swapped", failed_run=other, record=other.name)
+    with pytest.raises(ValueError, match="differs from its run"):
+        load(object(), str(swapped))
+
+
+# --- lineage and parent refusals pinned to their own checks ------------------
+
+
+def _pinned_release_switch_marker(monkeypatch) -> dict:
+    from mjlab_microban.tasks import (
+        microban_teleop_v12_hand_pose_release_lineage as lineage_module,
+    )
+
+    monkeypatch.setattr(
+        lineage_module,
+        "HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256",
+        "d" * 64,
+    )
+    return lineage_module.hand_pose_release_recipe_switch_marker(
+        parent_checkpoint_path="repo://logs/rsl_rl/v12/run_7000_to7100/model_7099.pt",
+        parent_checkpoint_sha256="d" * 64,
+        parent_stage_gate_path="repo://artifacts/teleop_v12_gates/run_model_7099_gate.json",
+        parent_stage_gate_sha256="b" * 64,
+    )
+
+
+_EXPERIMENTAL_SWITCH = {
+    "schema_version": 1,
+    "release_eligible": False,
+    "parent_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+    "recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    "parent_checkpoint_sha256": "0" * 64,
+    "parent_iteration": 7099,
+}
+
+
+def test_lineage_refuses_a_final_rescue_on_a_recipe_switch(monkeypatch):
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+        HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH,
+        HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+    )
+
+    release = _pinned_release_switch_marker(monkeypatch)
+    release_infos = {
+        **_infos(corner=None, final=None),
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: release,
+    }
+    experimental_infos = {
+        **_infos(corner=None, final=None),
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY: deepcopy(
+            _EXPERIMENTAL_SWITCH
+        ),
+    }
+    # The switch lineages themselves classify as before.
+    assert (
+        hand_pose_release_lineage(release_infos, iteration=14_999, verify_parent=False)
+        == HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH
+    )
+    assert (
+        hand_pose_release_lineage(
+            experimental_infos,
+            iteration=14_999,
+            allow_experimental=True,
+            verify_parent=False,
+        )
+        == HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
+    )
+    # A forged model_14999 adding the (otherwise valid) final-rescue marker.
+    for infos, allow_experimental in (
+        (release_infos, False),
+        (experimental_infos, True),
+    ):
+        forged = {**infos, MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker()}
+        for kwargs in (
+            {"iteration": 14_999, "verify_parent": False},
+            {"verify_parent": False},
+        ):
+            with pytest.raises(ValueError, match="apply only to a fresh"):
+                hand_pose_release_lineage(
+                    forged, allow_experimental=allow_experimental, **kwargs
+                )
+
+
+def test_parent_payload_refusals_are_pinned_to_their_checks(monkeypatch):
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_runner import (
+        validate_hand_pose_release_final_rescue_parent_payload,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+    )
+
+    with pytest.raises(ValueError, match="already carries a final rescue"):
+        validate_hand_pose_release_final_rescue_parent_payload(
+            _parent_payload(
+                **{MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(corner=_corner())}
+            ),
+            checkpoint_sha256=SHA_PARENT,
+        )
+    # A release-eligible recipe-switch model_14900 is a valid pose-release
+    # checkpoint, but not a fresh chain: the rescue refuses it.
+    release = _pinned_release_switch_marker(monkeypatch)
+    with pytest.raises(ValueError, match="must be a fresh pose-release chain"):
+        validate_hand_pose_release_final_rescue_parent_payload(
+            _parent_payload(
+                **{
+                    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: None,
+                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: release,
+                }
+            ),
+            checkpoint_sha256=SHA_PARENT,
+        )
