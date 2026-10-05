@@ -754,10 +754,24 @@ def test_package_metadata_names_the_rescue_marker():
         "v12_final_rescue_marker_revision",
         "v12_final_rescue_marker_json",
         "v12_final_rescue_marker_sha256",
+        "v12_final_rescue_training_replay",
+        "v12_final_rescue_final_gate_held_out",
     }
     assert json.loads(metadata["v12_final_rescue_marker_json"]) == marker
     assert metadata["v12_final_rescue_marker_sha256"] == canonical_json_sha256(marker)
     assert metadata["v12_final_rescue_marker_revision"] == marker["revision"]
+    # The package says the final gate's scenarios were trained on.
+    assert metadata["v12_final_rescue_final_gate_held_out"] == "false"
+    assert metadata["v12_final_rescue_training_replay"] == "evaluator_scenario_commands"
+    pushed = _marker(corner=corner, sampler_mix="pr_v5")
+    pushed_metadata = _final_rescue_metadata(
+        {MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: deepcopy(pushed)},
+        _infos(corner=corner, final=pushed),
+    )
+    assert pushed_metadata["v12_final_rescue_training_replay"] == (
+        "evaluator_scenario_commands_and_perturbation"
+    )
+    assert pushed_metadata["v12_final_rescue_final_gate_held_out"] == "false"
     # Every value is a string (ONNX metadata_props).
     assert all(isinstance(value, str) for value in metadata.values())
     for bad_gate in (
@@ -863,6 +877,8 @@ def test_build_deployment_metadata_writes_the_rescue_marker(tmp_path):
         "v12_final_rescue_marker_revision",
         "v12_final_rescue_marker_json",
         "v12_final_rescue_marker_sha256",
+        "v12_final_rescue_training_replay",
+        "v12_final_rescue_final_gate_held_out",
     }
     # An ordinary pose-release final ships none of the rescue fields.
     plain = build(deepcopy(gate), deepcopy(infos))
