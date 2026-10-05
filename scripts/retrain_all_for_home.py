@@ -1568,6 +1568,9 @@ class Pipeline:
                 and self.get("export", "pico", "checkpoint_sha256") == sha256(pico_ckpt)):
             if self.dry:
                 prefix = GATE_ROOT / f"{self.get('pico', 'final', 'run')}_model_14999"
+                if not all(Path(f"{prefix}{s}").is_file() for s in ("_9x300.json", "_tracking.json")):
+                    # e.g. an evaluator that crashed on a fallen plumbing policy: re-evaluate.
+                    self.v12_gate(self.get("pico", "final", "run"), 14999)
                 self.run("package_pico_DRYRUN", [*UV_ONNX, "python", "scripts/home_pipeline/dry_run_tools.py",
                                                  "package", str(pico_ckpt), str(prefix),
                                                  str(out / "DRYRUN_gate_model_14999.json"), str(pico_out),

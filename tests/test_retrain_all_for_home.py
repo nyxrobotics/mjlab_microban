@@ -603,3 +603,14 @@ class SerialGpuTest(unittest.TestCase):
             self.assertTrue(p.gpu_serial.acquire(blocking=False))  # released after the job
             p.gpu_serial.release()
         self.assertTrue(make_pipeline(None, "--dry-run", "--dry-run-plumbing").args.serial_gpu)
+
+
+class UnmeasuredFootScenarioTest(unittest.TestCase):
+    """A from-scratch plumbing policy can fall before a foot target is sampled."""
+
+    def test_unmeasured_error_fails_instead_of_crashing(self):
+        from mjlab_microban.scripts.evaluate_teleop_v12_tracking import _measured_within
+
+        self.assertTrue(_measured_within({"rms": 0.01}, "rms", 0.02))
+        self.assertFalse(_measured_within({"rms": 0.03}, "rms", 0.02))
+        self.assertFalse(_measured_within({"rms": None, "sample_count": 0}, "rms", 0.02))

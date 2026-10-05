@@ -1108,15 +1108,24 @@ def _acceptance(
                 for value in xyz
             )
         ]
+        # A commanded foot scenario that measured no sample (the robot fell
+        # before the target phase) fails the check instead of crashing.
         checks["foot_tracking_rms"] = bool(active_foot) and all(
-            float(value["rms"]) <= foot_tracking_rms_max_m(profile)
+            _measured_within(value, "rms", foot_tracking_rms_max_m(profile))
             for value in active_foot
         )
         checks["foot_tracking_p95"] = bool(active_foot) and all(
-            float(value["p95"]) <= foot_tracking_p95_max_m(profile)
+            _measured_within(value, "p95", foot_tracking_p95_max_m(profile))
             for value in active_foot
         )
     return checks, "pass" if all(checks.values()) else "fail"
+
+
+def _measured_within(error: dict[str, Any], key: str, limit: float) -> bool:
+    """``error[key] <= limit``; an unmeasured (None) error is not within it."""
+
+    value = error.get(key)
+    return value is not None and float(value) <= limit
 
 
 def _aggregate_action_envelopes(results: list[dict[str, Any]]) -> dict[str, Any]:
