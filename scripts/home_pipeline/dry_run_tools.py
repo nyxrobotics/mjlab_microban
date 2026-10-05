@@ -14,6 +14,9 @@ usage:
   uv run --locked python scripts/home_pipeline/dry_run_tools.py \
       stamp-corner-rescue PARENT_MODEL_9900.pt PARENT_REPORT.json \
       SOURCE_MODEL_9999.pt DEST_RUN_DIR MIX
+  uv run --locked python scripts/home_pipeline/dry_run_tools.py \
+      stamp-final-rescue PARENT_MODEL_14900.pt FAILED_TRACKING_REPORT.json \
+      FAILED_MODEL_14999.pt DEST_RUN_DIR MIX SEED
 
 lift-clock: copy a v12 checkpoint into a new run directory with its update
 clock lifted to ITERATION, so a dry run can cross every stage boundary
@@ -57,6 +60,17 @@ corner-rescue lineage marker of MIX bound to the parent's and its strict
 report's SHA-256 (``dry_run_synthetic_corner_rescue`` marks it).  Every
 downstream consumer (ordinary pose-release resume, stage gates, packager)
 then validates a real corner-rescue lineage.
+
+stamp-final-rescue: the dry-run stand-in for the pose-release final-scenario
+rescue of a failed 14999 gate (whose real launcher needs 2048 envs and the
+exact model_14900 clock/Adam step): copy the failed run's model_14999 into
+DEST_RUN_DIR with the exact pose-release final-rescue marker of MIX and SEED
+bound to the parent's, the failed checkpoint's and the report's SHA-256 (the
+failed checks/scenarios are synthetic: actual_soft_limits on the mix's
+scenarios; ``dry_run_synthetic_final_rescue`` marks it), and lay out the
+launcher's seed directory (pr_final_rescue_seed_<sha16>/ with the parent, the
+report and the failed run's params/agent.yaml; DEST resumes from it), so the
+packager's lineage check and resume-ancestry walk run on the result.
 """
 
 from __future__ import annotations
@@ -326,6 +340,104 @@ def stamp_corner_rescue(parent: str, report: str, source: str, destination_dir: 
     return 0
 
 
+def final_rescue_infos(infos: dict, *, parent_sha256: str, failed_sha256: str, report_sha256: str,
+                       mix: str, seed: int, provenance: dict) -> dict:
+    """Infos of a dry model_14999 stamped with the pose-release final-rescue marker (pure)."""
+
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        FINAL_PROFILE,
+        required_tracking_scenario_names,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        canonical_json_sha256,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+        hand_pose_release_final_rescue_marker,
+        hand_pose_release_final_rescue_scenarios,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+        HAND_POSE_RELEASE_LINEAGE_FRESH,
+        HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE,
+        HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE,
+        HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE,
+        hand_pose_release_lineage,
+    )
+
+    before = hand_pose_release_lineage(infos, iteration=14999, verify_parent=False)
+    if before not in (HAND_POSE_RELEASE_LINEAGE_FRESH, HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE):
+        raise ValueError("stamp-final-rescue needs a fresh pose-release chain's model_14999")
+    corner = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    out = dict(infos)
+    out[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] = hand_pose_release_final_rescue_marker(
+        parent_checkpoint_sha256=parent_sha256,
+        failed_gate_checkpoint_sha256=failed_sha256,
+        failed_gate_tracking_report_sha256=report_sha256,
+        failed_gate_failed_checks=("actual_soft_limits",),
+        failed_gate_failed_scenarios=[name for name in required_tracking_scenario_names(FINAL_PROFILE)
+                                      if name in hand_pose_release_final_rescue_scenarios(mix)],
+        inherited_corner_rescue_marker_sha256=None if corner is None else canonical_json_sha256(corner),
+        sampler_mix=mix,
+        training_seed=seed,
+    )
+    out["dry_run_synthetic_final_rescue"] = {**provenance, "mix": mix, "seed": seed, "not_deployable": True}
+    expected = (HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE if corner is None
+                else HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE)
+    if hand_pose_release_lineage(out, iteration=14999, verify_parent=False) != expected:
+        raise AssertionError("stamped lineage is not the pose-release final rescue")
+    return out
+
+
+def stamp_final_rescue(parent: str, report: str, source: str, destination_dir: str, mix: str,
+                       seed: str) -> int:
+    import hashlib
+    import shutil
+
+    import torch
+
+    def digest(path: str | Path) -> str:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    payload = torch.load(source, map_location="cpu", weights_only=False)
+    if payload.get("iter") != 14999 or Path(parent).name != "model_14900.pt":
+        raise SystemExit("stamp-final-rescue needs a model_14900 parent and a model_14999 source")
+    parent_sha = digest(parent)
+    payload["infos"] = final_rescue_infos(
+        payload["infos"], parent_sha256=parent_sha, failed_sha256=digest(source),
+        report_sha256=digest(report), mix=mix, seed=int(seed),
+        provenance={"parent": str(Path(parent).resolve()), "failed_report": str(Path(report).resolve()),
+                    "source": str(Path(source).resolve())})
+    out_dir = Path(destination_dir)
+    # The launcher's staged seed: parent, failed report and the failed run's
+    # resume record, so the ancestry walk continues to the 10100 canary.
+    seed_dir = out_dir.parent / f"pr_final_rescue_seed_{parent_sha[:16]}"
+    (seed_dir / "params").mkdir(parents=True, exist_ok=True)
+    for src, dst in ((parent, seed_dir / "model_14900.pt"),
+                     (report, seed_dir / "failed_final_gate_tracking.json"),
+                     (Path(source).parent / "params" / "agent.yaml", seed_dir / "params" / "agent.yaml")):
+        if not Path(dst).exists():
+            shutil.copyfile(src, dst)
+        if digest(dst) != digest(src):
+            raise SystemExit(f"existing rescue seed file differs: {dst}")
+    (seed_dir / "parent_run.txt").write_text(Path(source).parent.name + "\n", encoding="utf-8")
+    out_dir.mkdir(parents=True, exist_ok=False)
+    (out_dir / "params").mkdir()
+    (out_dir / "params" / "agent.yaml").write_text(
+        "resume: true\n"
+        f"load_run: ^{seed_dir.name}$\n"
+        "load_checkpoint: ^model_14900[.]pt$\n"
+        "dry_run_synthetic_final_rescue: true\n",
+        encoding="utf-8",
+    )
+    out = out_dir / "model_14999.pt"
+    torch.save(payload, out)
+    print(out)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 1 and argv[0] == "lift-clock" and len(argv) == 4:
         return lift_clock(*argv[1:])
@@ -335,6 +447,8 @@ def main(argv: list[str]) -> int:
         return force_probe(*argv[1:])
     if len(argv) >= 1 and argv[0] == "stamp-corner-rescue" and len(argv) == 6:
         return stamp_corner_rescue(*argv[1:])
+    if len(argv) >= 1 and argv[0] == "stamp-final-rescue" and len(argv) == 7:
+        return stamp_final_rescue(*argv[1:])
     print(__doc__, file=sys.stderr)
     return 2
 

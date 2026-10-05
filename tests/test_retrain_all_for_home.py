@@ -731,8 +731,10 @@ class CanaryRetryResumeTest(unittest.TestCase):
             bad = run.endswith("00-00-01_home_x_v12_3000_to3100") or (retry_fails and "00-00-02" in run)
             return (not bad), (["hand_tracking_rms"] if bad else []), []
 
-        def v12_train(seg, prev, lift_to=None):
+        def v12_train(seg, prev, lift_to=None, seed=None):
             calls.append(("train", seg))
+            if seg.endswith("3000_to3100"):
+                self.assertEqual(seed, 43)  # a canary retry trains with a new seed
             if interrupt:
                 raise SystemExit(130)  # Ctrl-C while waiting for GPU memory
             if seg.endswith("3000_to3100"):
@@ -792,16 +794,19 @@ class GateCrashTest(unittest.TestCase):
                         return 137  # OOM-killed on the shared GPU
 
                     p.gpu_job = gpu_job
+                    p.run = lambda name, cmd, kind, **kw: evaluations.append(name) or 0  # gate create
                     return p
 
                 with self.assertRaisesRegex(pipeline.PipelineError, "wrote no report"):
                     make(False).judged_gate(run, 3099, "canary:3000_to3100")
                 self.assertIsNone(make(False).get("pico", "gates", f"{run}_model_3099", "checkpoint_sha256"))
                 self.assertEqual(make(True).judged_gate(run, 3099, "canary:3000_to3100"), (True, [], []))
-                self.assertEqual(len(evaluations), 2)
-                # A real verdict is cached: no third evaluation.
+                # Three evaluators each time (one by one, as the stage script), then the gate create.
+                self.assertEqual(len(evaluations), 7)
+                self.assertEqual(evaluations[-1], "gate_3099_create")
+                # A real verdict is cached: no further evaluation.
                 self.assertEqual(make(True).judged_gate(run, 3099, "canary:3000_to3100"), (True, [], []))
-                self.assertEqual(len(evaluations), 2)
+                self.assertEqual(len(evaluations), 7)
             finally:
                 pipeline.V12_EXP, pipeline.GATE_ROOT = originals
 
@@ -880,3 +885,346 @@ class LiftClockParentTest(unittest.TestCase):
                 "resume: true\nload_run: ^lift$\nload_checkpoint: ^model_10096[.]pt$\n")
             self.assertEqual(_resume_ancestry(root / "final" / "model_14999.pt"),
                              [(root / "lift" / "model_10096.pt").resolve(), source.resolve()])
+
+
+class RealGateVerdictTest(unittest.TestCase):
+    """A real gate failing on tracking is a verdict (every evaluator runs), not a crash.
+
+    scripts/evaluate_microban_teleop_v12_stage.sh (set -e) stops after the
+    tracking evaluator returns 1 for "fail", so its ONNX report is never
+    written; the pipeline runs the evaluators one by one instead.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.originals = pipeline.V12_EXP, pipeline.GATE_ROOT
+        pipeline.V12_EXP, pipeline.GATE_ROOT = root / "v12", root / "gates"
+        self.run_name = "2026-01-01_00-00-01_home_x_v12_3000_to3100"
+        (pipeline.V12_EXP / self.run_name).mkdir(parents=True)
+        (pipeline.V12_EXP / self.run_name / "model_3099.pt").write_bytes(b"ckpt")
+        self.state = root / "state"
+        self.state.mkdir()
+        self.jobs: list = []
+
+    def tearDown(self):
+        pipeline.V12_EXP, pipeline.GATE_ROOT = self.originals
+        self.tmp.cleanup()
+
+    def make(self, verdicts: dict):
+        """verdicts: evaluator -> (rc, checks or None for "no report written")."""
+
+        p = make_pipeline(self.state)
+        path = self.state / "state.json"
+        p.state = json.loads(path.read_text()) if path.exists() else {}
+        p.gate_ok = lambda r, e: False
+        names = {"loco": "_9x300.json", "tracking": "_tracking.json", "onnx": "_onnx.json"}
+
+        def gpu_job(need, name, cmd, kind, **kw):
+            evaluator = name.rsplit("_", 1)[1]
+            self.jobs.append(evaluator)
+            rc, checks = verdicts[evaluator]
+            if checks is not None:
+                out = Path(cmd[cmd.index("--output") + 1])
+                self.assertEqual(out.name, f"{self.run_name}_model_3099{names[evaluator]}")
+                out.write_text(json.dumps({"status": "pass" if rc == 0 else "fail", "checks": checks}))
+            return rc
+
+        p.gpu_job = gpu_job
+        p.run = lambda name, cmd, kind, **kw: self.jobs.append(name) or 0
+        return p
+
+    def test_tracking_failure_is_a_cached_verdict(self):
+        verdicts = {"loco": (0, {"a": True}), "tracking": (1, {"hand_tracking_rms": False, "b": True}),
+                    "onnx": (0, {"c": True})}
+        got = self.make(verdicts).judged_gate(self.run_name, 3099, "canary:3000_to3100")
+        self.assertEqual(got, (False, ["hand_tracking_rms"], []))
+        self.assertEqual(self.jobs, ["loco", "tracking", "onnx"])  # no gate create after a failure
+        self.assertEqual(self.make(verdicts).judged_gate(self.run_name, 3099, "canary:3000_to3100"), got)
+        self.assertEqual(len(self.jobs), 3)  # cached
+
+    def test_locomotion_failure_still_runs_tracking_and_onnx(self):
+        verdicts = {"loco": (1, {"falls": False}), "tracking": (0, {"a": True}), "onnx": (0, {"c": True})}
+        got = self.make(verdicts).judged_gate(self.run_name, 3099, "canary:3000_to3100")
+        self.assertEqual(got, (False, [], ["falls"]))
+
+    def test_a_missing_report_is_still_a_crash(self):
+        verdicts = {"loco": (0, {"a": True}), "tracking": (137, None), "onnx": (0, {"c": True})}
+        with self.assertRaisesRegex(pipeline.PipelineError, "wrote no report"):
+            self.make(verdicts).judged_gate(self.run_name, 3099, "canary:3000_to3100")
+
+    def test_stale_reports_are_removed_before_evaluating(self):
+        pipeline.GATE_ROOT.mkdir(parents=True)
+        stale = pipeline.GATE_ROOT / f"{self.run_name}_model_3099_tracking.json"
+        stale.write_text(json.dumps({"checks": {"a": True}}))
+        verdicts = {"loco": (0, {"a": True}), "tracking": (137, None), "onnx": (0, {"c": True})}
+        with self.assertRaisesRegex(pipeline.PipelineError, "wrote no report"):
+            self.make(verdicts).judged_gate(self.run_name, 3099, "canary:3000_to3100")
+        self.assertFalse(stale.exists())
+
+    def test_a_refused_gate_create_is_a_failed_verdict(self):
+        verdicts = {"loco": (0, {"a": True}), "tracking": (0, {"b": True}), "onnx": (0, {"c": True})}
+        p = self.make(verdicts)
+        p.run = lambda name, cmd, kind, **kw: 2
+        self.assertEqual(p.judged_gate(self.run_name, 3099, "canary:3000_to3100"),
+                         (False, [], ["stage_gate_create"]))
+
+
+class TrainingSeedTest(unittest.TestCase):
+    """Retrains from the same gated parent use a new seed (forward-lean-v2 eb02a05)."""
+
+    def commands(self, **kwargs) -> list[str]:
+        p = make_pipeline()
+        cmds = []
+        p.gpu_job = lambda need, name, cmd, kind, **kw: cmds.append(cmd)
+        p.v12_train("seg", "parent_run", **kwargs)
+        return cmds[0]
+
+    def test_seed_flag(self):
+        self.assertNotIn("--seed", self.commands())
+        self.assertNotIn("--seed", self.commands(seed=42))
+        cmd = self.commands(seed=43)
+        self.assertEqual(cmd[cmd.index("--seed") + 1], "43")
+
+    def test_trainer_accepts_seed(self):
+        text = (REPO / "scripts" / "train_microban_teleop_v12.sh").read_text()
+        self.assertIn('--env.seed "${train_seed}" --agent.seed "${train_seed}"', text)
+        self.assertNotIn("--env.seed 42", text)
+
+    def test_canary_retry_and_9999_attempt_use_new_seeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            original = pipeline.V12_EXP
+            pipeline.V12_EXP = root / "v12"
+            pipeline.V12_EXP.mkdir()
+            try:
+                p = make_pipeline(root / "state")
+                (root / "state").mkdir()
+                p.prefix = "home_x"
+                seeds = []
+
+                def v12_train(seg, prev, lift_to=None, seed=None):
+                    seeds.append((seg, seed))
+                    (pipeline.V12_EXP / f"2026-01-01_00-00-09_{seg}").mkdir()
+                    (pipeline.V12_EXP / f"2026-01-01_00-00-09_{seg}" / "model_9999.pt").write_bytes(b"x")
+
+                p.v12_train = v12_train
+                p.attempt_9999("p7099", 2)
+                self.assertEqual(seeds, [("home_x_v12_7100_to10000_a2", 43)])
+            finally:
+                pipeline.V12_EXP = original
+        source = (REPO / "scripts" / "retrain_all_for_home.py").read_text()
+        self.assertIn("lift_to=end - 3 if self.dry else None, seed=V12_TRAIN_SEED + 1)", source)
+
+
+class Boundary15000Test(unittest.TestCase):
+    """The automatic 15000-boundary escalation: gate -> final rescues -> retrain (new seed) -> stop."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.v12 = root / "v12"
+        self.v12.mkdir()
+        self.original_v12 = pipeline.V12_EXP
+        pipeline.V12_EXP = self.v12
+        (root / "state").mkdir()
+        self.p = make_pipeline(root / "state")
+        self.p.prefix = "home_x"
+        self.p.check_recipe = lambda run, end: None
+        self.calls: list = []
+
+    def tearDown(self):
+        pipeline.V12_EXP = self.original_v12
+        self.tmp.cleanup()
+
+    def make_run(self, name: str) -> str:
+        (self.v12 / name).mkdir(exist_ok=True)
+        (self.v12 / name / "model_14999.pt").write_bytes(name.encode())
+        return name
+
+    def wire(self, gates: dict[str, bool], rescues: dict[int, str | None]):
+        def judged_gate(run, end, key):
+            self.calls.append(("gate", run, key))
+            return gates[key], ([] if gates[key] else ["twist_directional_response"]), []
+
+        def final_rescues(run, attempt, seed, trk, other):
+            self.calls.append(("rescues", run, attempt, seed))
+            return rescues.get(attempt)
+
+        def attempt_15000(parent, attempt):
+            self.calls.append(("retrain", parent, attempt))
+            return self.make_run(f"r_a{attempt}")
+
+        self.p.judged_gate, self.p.final_rescues = judged_gate, final_rescues
+        self.p.attempt_15000 = attempt_15000
+
+    def test_passing_gate(self):
+        self.wire({"15000:a1": True}, {})
+        self.assertEqual(self.p.boundary_15000("p10099", self.make_run("first")), "first")
+        self.assertEqual(self.p.get("pico", "b15000", "passed", "kind"), "segment")
+
+    def test_rescue_then_resume_skips_everything(self):
+        self.wire({"15000:a1": False}, {1: self.make_run("frescue_pr_v2")})
+        self.assertEqual(self.p.boundary_15000("p10099", self.make_run("first")), "frescue_pr_v2")
+        self.assertEqual(self.p.get("pico", "b15000", "passed", "kind"), "final_rescue")
+        self.calls.clear()
+        self.assertEqual(self.p.boundary_15000("p10099", "first"), "frescue_pr_v2")
+        self.assertEqual(self.calls, [])
+
+    def test_retrain_with_the_next_seed_after_every_rescue_failed(self):
+        self.wire({"15000:a1": False, "15000:a2": True}, {})
+        self.assertEqual(self.p.boundary_15000("p10099", self.make_run("first")), "r_a2")
+        self.assertEqual(self.calls, [("gate", "first", "15000:a1"), ("rescues", "first", 1, 42),
+                                      ("retrain", "p10099", 2), ("gate", "r_a2", "15000:a2")])
+        self.assertEqual(self.p.get("pico", "b15000", "attempts", "2", "seed"), 43)
+
+    def test_stops_after_the_last_attempt(self):
+        self.wire({"15000:a1": False, "15000:a2": False}, {})
+        with self.assertRaisesRegex(pipeline.PipelineError, "15000 boundary failed after 2 attempt"):
+            self.p.boundary_15000("p10099", self.make_run("first"))
+        self.assertEqual([c[0] for c in self.calls], ["gate", "rescues", "retrain", "gate", "rescues"])
+        self.assertIsNone(self.p.get("pico", "b15000", "passed"))
+
+    def test_attempt_trains_from_the_gated_10099_with_its_seed(self):
+        p = make_pipeline(self.p.state_dir)
+        p.prefix = "home_x"
+        seeds = []
+
+        def v12_train(seg, prev, lift_to=None, seed=None):
+            seeds.append((seg, prev, seed))
+            self.make_run(f"2026-01-01_00-00-09_{seg}")
+
+        p.v12_train = v12_train
+        p.attempt_15000("p10099", 3)
+        self.assertEqual(seeds, [("home_x_v12_10100_to15000_a3", "p10099", 44)])
+
+
+class FinalRescueMixesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.v12 = root / "v12"
+        self.v12.mkdir()
+        self.originals = pipeline.V12_EXP, pipeline.GATE_ROOT
+        pipeline.V12_EXP, pipeline.GATE_ROOT = self.v12, root / "gates"
+        (root / "state").mkdir()
+        self.p = make_pipeline(root / "state")
+        self.p.prefix = "home_x"
+        (self.v12 / "first").mkdir()
+        (self.v12 / "first" / "model_14900.pt").write_bytes(b"parent")
+        (self.v12 / "first" / "model_14999.pt").write_bytes(b"first")
+        self.p.check_recipe = lambda run, end: None
+        self.p.ensure_committed_tree = lambda boundary=9999: self.trained.append(f"commit{boundary}")
+        self.trained: list = []
+        self.validated: list = []
+
+        def gpu_job(need, name, cmd, kind, **kwargs):
+            self.assertEqual(cmd[0], "scripts/train_microban_teleop_v12_hand_pose_release_final_rescue.sh")
+            self.assertEqual(Path(cmd[2]).name, "first_model_14999_tracking.json")
+            seg = cmd[cmd.index("--agent.run-name") + 1]
+            self.trained.append((cmd[cmd.index("--mix") + 1], cmd[cmd.index("--seed") + 1]))
+            run = self.v12 / f"2026-01-01_00-00-0{len(self.trained)}_{seg}"
+            run.mkdir()
+            (run / "model_14999.pt").write_bytes(seg.encode())
+
+        self.p.gpu_job = gpu_job
+
+    def tearDown(self):
+        pipeline.V12_EXP, pipeline.GATE_ROOT = self.originals
+        self.tmp.cleanup()
+
+    def validator(self, accepted: set[str]):
+        def capture(cmd, **kwargs):
+            mix = cmd[cmd.index("--mix") + 1]
+            self.validated.append((mix, cmd[cmd.index("--seed") + 1]))
+            ok = mix in accepted
+            return unittest.mock.Mock(returncode=0 if ok else 1, stdout="",
+                                      stderr="" if ok else "ValueError: mix does not replay every failed scenario")
+        self.p.capture = capture
+
+    def test_refused_mixes_are_skipped_and_the_first_passing_rescue_wins(self):
+        self.validator({"pr_v2", "pr_v4"})
+        self.p.judged_gate = lambda run, end, key: (key == "frescue:a1r4_pr_v4", [], [])
+        rescue = self.p.final_rescues("first", 1, 42, ["twist_directional_response"], [])
+        self.assertTrue(rescue.endswith("_home_x_v12_pr_final_rescue_a1r4_pr_v4_14901_to15000"))
+        self.assertEqual(self.validated, [("pr_v1", "42"), ("pr_v2", "42"), ("pr_v3", "42"), ("pr_v4", "42")])
+        self.assertEqual(self.trained, ["commit15000", ("pr_v2", "42"), "commit15000", ("pr_v4", "42")])
+        self.assertFalse(self.p.get("pico", "b15000", "rescues", "a1r1_pr_v1", "passed"))
+        # A rerun skips refused and failed mixes and reuses the trained rescue.
+        self.trained.clear()
+        self.validated.clear()
+        self.assertEqual(self.p.final_rescues("first", 1, 42, ["twist_directional_response"], []), rescue)
+        self.assertEqual(self.trained, [])
+        self.assertEqual(self.validated, [("pr_v4", "42")])
+
+    def test_unrescuable_gates_are_not_rescued(self):
+        self.validator({"pr_v1"})
+        self.p.judged_gate = lambda run, end, key: self.fail("no rescue gate")
+        for trk, other in ((["twist_directional_response"], ["falls"]), (["hmd_motion"], []), ([], ["onnx"])):
+            self.assertIsNone(self.p.final_rescues("first", 1, 42, trk, other))
+        self.assertEqual(self.validated, [])
+
+    def test_no_model_14900(self):
+        (self.v12 / "first" / "model_14900.pt").unlink()
+        self.validator({"pr_v1"})
+        self.assertIsNone(self.p.final_rescues("first", 1, 42, ["actual_soft_limits"], []))
+        self.assertEqual(self.validated, [])
+
+
+class FinalRescueRegistrationTest(unittest.TestCase):
+    def test_pipeline_mixes_match_the_registered_mixes(self):
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIXES as MIXES,
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_RESCUABLE_CHECKS as RESCUABLE,
+        )
+
+        self.assertEqual(set(pipeline.V12_FINAL_RESCUE_MIXES), set(MIXES))
+        self.assertEqual(pipeline.V12_FINAL_RESCUABLE_CHECKS, set(RESCUABLE))
+
+    def test_arguments(self):
+        args = make_pipeline().args
+        self.assertEqual(args.pr_final_rescue_mixes, ["pr_v1", "pr_v2", "pr_v3", "pr_v4"])
+        self.assertEqual((args.v12_15000_attempts, args.dry_run_simulate_15000), (2, "pass"))
+        for bad in (["--pr-final-rescue-mixes", "pr_v9"], ["--v12-15000-attempts", "0"],
+                    ["--dry-run-simulate-15000", "rescue"]):
+            with self.assertRaises(SystemExit):
+                with unittest.mock.patch("sys.stderr"):
+                    make_pipeline(None, *bad)
+
+    def test_simulated_15000_routes(self):
+        keys = ["15000:a1", "frescue:a1r1_pr_v1", "frescue:a1r2_pr_v2", "15000:a2", "frescue:a2r1_pr_v1"]
+        expected = {"pass": [False] * 5, "rescue": [True, True, False, False, True],
+                    "retrain": [True, True, True, False, True], "stop": [True] * 5}
+        for mode, want in expected.items():
+            with tempfile.TemporaryDirectory() as d:
+                p = make_pipeline(Path(d), "--dry-run", "--dry-run-plumbing", "--dry-run-simulate-failures",
+                                  "--dry-run-simulate-15000", mode)
+                self.assertEqual([p.simulated_failure(k) for k in keys], want, mode)
+
+    def test_stamped_final_rescue_carries_the_final_lineage(self):
+        sys.path.insert(0, str(REPO / "scripts" / "home_pipeline"))
+        import dry_run_tools
+
+        from mjlab_microban.tasks.microban_teleop_v12_actor import teleop_v12_active_adapter_columns
+        from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION as PR,
+        )
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE,
+            HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE,
+            hand_pose_release_lineage,
+        )
+
+        base = {"microban_teleop_recipe_revision": PR, "env_state": {"common_step_counter": 15000 * 24},
+                "active_actor_columns_at_save": list(teleop_v12_active_adapter_columns(15000 * 24))}
+        corner = dry_run_tools.corner_rescue_infos(base, parent_sha256="a" * 64, report_sha256="b" * 64,
+                                                   mix="lf72", provenance={})
+        for infos, lineage in ((base, HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE),
+                               (corner, HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE)):
+            for mix in ("pr_v1", "pr_v4"):
+                out = dry_run_tools.final_rescue_infos(infos, parent_sha256="c" * 64, failed_sha256="d" * 64,
+                                                       report_sha256="e" * 64, mix=mix, seed=43, provenance={})
+                self.assertEqual(hand_pose_release_lineage(out, iteration=14999), lineage)
+                with self.assertRaises(ValueError):  # a rescue of a rescue
+                    dry_run_tools.final_rescue_infos(out, parent_sha256="c" * 64, failed_sha256="d" * 64,
+                                                     report_sha256="e" * 64, mix=mix, seed=43, provenance={})
