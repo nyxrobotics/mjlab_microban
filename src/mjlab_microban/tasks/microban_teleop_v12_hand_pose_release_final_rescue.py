@@ -98,6 +98,11 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_FAILED_GATE_REPORT_FILENAME =
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SEED_PREFIX = (
     "pr_final_rescue_seed_"
 )
+# ... and the parent run's directory name (one line), so every load re-checks
+# that the failed report's model_14999 is from the parent's own run.
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_PARENT_RUN_FILENAME = (
+    "parent_run.txt"
+)
 
 # Registered mixes: ordinary share first, then the replayed scenarios in
 # sampler order.  pr_v1-pr_v3 replay the two scenarios that failed both

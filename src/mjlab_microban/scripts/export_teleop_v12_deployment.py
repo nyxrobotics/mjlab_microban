@@ -55,7 +55,10 @@ from mjlab_microban.scripts.teleop_v12_lr_recovery import (
     PINNED_SOURCE_COMPLETED_UPDATES,
     PINNED_SOURCE_ITERATION,
 )
-from mjlab_microban.scripts.teleop_v12_stage import validate_gate
+from mjlab_microban.scripts.teleop_v12_stage import (
+    pose_release_final_rescue_gate_marker,
+    validate_gate,
+)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -860,6 +863,43 @@ def _runtime_guard(envelope: Mapping[str, Any]) -> list[float]:
     return result
 
 
+def _final_rescue_metadata(
+    gate: Mapping[str, Any], infos: Mapping[str, Any]
+) -> dict[str, str]:
+    """Name a pose-release final rescue in the package (else nothing).
+
+    The rescue's model_14999 keeps the plain pose-release recipe, so its
+    marker (rebuilt from its recorded values and recorded verbatim by the
+    final gate) is what identifies the parent, the failed gate it replayed and
+    the mix.  A gate that omits or alters it is refused.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
+    )
+
+    rescue = pose_release_final_rescue_gate_marker(dict(infos))
+    if rescue is None:
+        if infos.get("microban_teleop_recipe_revision") == (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        ) and gate.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY) is not None:
+            raise ValueError(
+                "Final v12 gate names a final rescue its checkpoint does not carry"
+            )
+        return {}
+    key, marker = rescue
+    if gate.get(key) != marker:
+        raise ValueError(
+            "Final v12 gate does not record the checkpoint's pose-release final "
+            "rescue marker"
+        )
+    return {
+        "v12_final_rescue_marker_revision": str(marker["revision"]),
+        "v12_final_rescue_marker_json": _json(marker),
+        "v12_final_rescue_marker_sha256": _canonical_json_sha256(marker),
+    }
+
+
 def build_v12_deployment_metadata(
     *,
     checkpoint: Path,
@@ -1233,6 +1273,7 @@ def build_v12_deployment_metadata(
         ),
         **microban_source_identity,
     }
+    metadata.update(_final_rescue_metadata(gate, infos))
     if boundary_stage_gates:
         metadata["v12_boundary_stage_gates_semantics"] = BOUNDARY_STAGE_GATES_SEMANTICS
         metadata["v12_boundary_stage_gates_json"] = _json(

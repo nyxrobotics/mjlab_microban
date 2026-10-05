@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from mjlab_microban.tasks.microban_teleop_v12_final_rescue_runner import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_FAILED_GATE_REPORT_FILENAME,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_PARENT_RUN_FILENAME,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_RESCUABLE_CHECKS,
     failed_final_gate_scenarios,
     final_gate_profile,
@@ -189,6 +191,45 @@ def validate_hand_pose_release_failed_final_gate_report(
     }
 
 
+_RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def staged_hand_pose_release_final_rescue_source(staged_parent: Path) -> Path:
+    """The parent run's own model_14900 behind a staged rescue seed copy.
+
+    The launcher records the parent run's directory name next to the staged
+    parent; the source must sit beside the seed folder and still hold the
+    same bytes, so a load re-checks the failed report against the real run.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+
+    staged = Path(staged_parent).expanduser().resolve(strict=True)
+    record = staged.parent / (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_PARENT_RUN_FILENAME
+    )
+    if record.is_symlink() or not record.is_file():
+        raise ValueError(
+            "Pose-release final rescue seed does not record its parent run "
+            f"({record.name}); stage it with the launcher"
+        )
+    lines = record.read_text(encoding="utf-8").splitlines()
+    if (
+        len(lines) != 1
+        or _RUN_NAME.fullmatch(lines[0]) is None
+        or lines[0] in (".", "..")
+        or lines[0] == staged.parent.name
+    ):
+        raise ValueError("Pose-release final rescue parent run record is malformed")
+    source = staged.parent.parent / lines[0] / staged.name
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f"Pose-release final rescue parent run checkpoint is missing: {source}")
+    source = source.resolve(strict=True)
+    if source == staged or sha256_file(source) != sha256_file(staged):
+        raise ValueError("Staged pose-release final rescue parent differs from its run")
+    return source
+
+
 class MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner(
     MicrobanTeleopV12FinalRescueOnPolicyRunner,
     MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
@@ -223,7 +264,12 @@ class MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner(
         failed_report = resolved.parent / (
             MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_FAILED_GATE_REPORT_FILENAME
         )
-        failed = validate_hand_pose_release_failed_final_gate_report(failed_report)
+        # Same run as the parent (the marker's same_run_as_parent), re-checked
+        # here as well as by the launcher's validate-parent step.
+        failed = validate_hand_pose_release_failed_final_gate_report(
+            failed_report,
+            parent_checkpoint=staged_hand_pose_release_final_rescue_source(resolved),
+        )
         if failed["checkpoint_sha256"] == before:
             raise ValueError("The failed final gate cannot name the parent itself")
         # Skip the canonical final-rescue load; the pose-release load (and the

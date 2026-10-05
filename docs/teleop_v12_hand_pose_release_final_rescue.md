@@ -80,10 +80,21 @@ consumer rebuilds it from those values (`hand_pose_release_lineage`):
 - the marker is refused on any other recipe, and the canonical final-rescue
   marker is refused on the pose-release recipe.
 
-The package declares the pose-release recipe and the completion-allowance
-profile exactly like an ordinary pose-release final, so the robot runtime
-(`microban_lean` `src/moves/pico_hybrid.py`, `tools/validate_pico_policy.py`)
-needs no new table entry.
+The rescue's 14999 stage gate records the rebuilt marker verbatim under the
+same key (next to the corner marker), and `validate_gate` refuses a gate that
+omits it, names a different one, or names one its checkpoint does not carry.
+The package adds `v12_final_rescue_marker_revision`,
+`v12_final_rescue_marker_json` and `v12_final_rescue_marker_sha256`
+(canonical sorted-key JSON SHA-256) after checking the gate's marker equals
+the checkpoint's, so an installed `pico_teleop.onnx` names its parent, the
+failed gate it replayed, the mix and the seed. An ordinary final has none of
+these fields.
+
+The package otherwise declares the pose-release recipe and the
+completion-allowance profile exactly like an ordinary pose-release final, so
+the robot runtime (`microban_lean` `src/moves/pico_hybrid.py`,
+`tools/validate_pico_policy.py`) needs no new table entry; it reads no
+lineage fields and has no exact metadata key-set check.
 
 The launcher stages a copy of the parent run's `params/agent.yaml` next to the
 staged parent, so the packager's resume-ancestry walk continues from the seed
@@ -107,5 +118,9 @@ validate-parent MODEL_14900 REPORT --mix pr_vN`), stages the parent, the
 report, the parent run's resume record and `parent_run.txt` under
 `pr_final_rescue_seed_<sha16>/`, and trains
 `Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban` (mix read from
-`MICROBAN_V12_PR_FINAL_RESCUE_MIX`). A passing gate is packaged and installed
+`MICROBAN_V12_PR_FINAL_RESCUE_MIX`). Every runner load re-reads
+`parent_run.txt`, requires the parent run's own `model_14900.pt` beside the
+seed to hold the staged bytes, and re-validates the staged report against
+that run (its `model_14999` in the same directory, bytes unchanged), so a
+hand-staged seed cannot skip the same-run check. A passing gate is packaged and installed
 with the ordinary finalize procedure using the rescue run name.
