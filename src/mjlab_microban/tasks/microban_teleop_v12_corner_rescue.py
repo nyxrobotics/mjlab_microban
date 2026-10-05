@@ -477,9 +477,12 @@ def validate_corner_rescue_canonical_lineage(
 
     Intermediate rescue checkpoints are intentionally not consumable.  The first
     ordinary runner save after resuming model9999 returns to the canonical recipe
-    while retaining the immutable historical marker.  With
-    ``allow_hand_pose_release_recipe`` an unmarked checkpoint of the opt-in
-    active-hand arm pose-release recipe is also accepted (it has no rescue).
+    while retaining the immutable historical marker.  A checkpoint of the
+    active-hand arm pose-release recipe is accepted when its lineage is
+    release-eligible (fresh chain, or the recorded model_7099 switch whose
+    parent checkpoint and stage gate are re-validated here); with
+    ``allow_hand_pose_release_recipe`` the experimental switch is accepted too.
+    It never carries a rescue, so the result is ``None``.
     """
 
     if not isinstance(infos, Mapping):
@@ -488,17 +491,34 @@ def validate_corner_rescue_canonical_lineage(
         raise TypeError("Contract-v12 checkpoint iteration must be an integer")
     recipe = infos.get("microban_teleop_recipe_revision")
     marker = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
+    # Imported here: the final-rescue module imports this one.
+    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION,
+        validate_final_rescue_consumable,
+    )
+
+    if recipe == MICROBAN_TELEOP_V12_FINAL_RESCUE_RECIPE_REVISION:
+        # The final-scenario rescue (model14900 -> model14999) is consumable
+        # only as its final model14999. Its marker re-validates the inherited
+        # corner-rescue lineage, which stays the result for every caller.
+        validate_final_rescue_consumable(infos, iteration=iteration)
+        return None if marker is None else validate_corner_rescue_lineage_marker(marker)
     if recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION:
         if iteration != MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_ITERATION:
             raise ValueError(
                 "Only final model9999 from the corner rescue is consumable"
             )
         return validate_corner_rescue_marker(infos, iteration=iteration)
-    if allow_hand_pose_release_recipe and recipe == (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-    ):
-        if marker is not None:
-            raise ValueError("Hand pose-release checkpoints cannot carry a rescue")
+    if recipe == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION:
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            hand_pose_release_lineage,
+        )
+
+        hand_pose_release_lineage(
+            infos,
+            iteration=iteration,
+            allow_experimental=allow_hand_pose_release_recipe,
+        )
         return None
     if recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION:
         raise ValueError("Checkpoint recipe is neither canonical nor corner rescue")

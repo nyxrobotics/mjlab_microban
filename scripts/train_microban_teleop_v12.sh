@@ -19,8 +19,9 @@ usage() {
 Usage:
   scripts/train_microban_teleop_v12.sh start --source VELOCITY_MODEL.pt [--source-sha256 SHA]
       [--canary] [--agent.run-name NAME] [--num-envs N] [--max-updates N]
+      [--hand-pose-release]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
-      [--num-envs N] [--max-updates N] [--dry-run-skip-gate]
+      [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
 
 Fresh start checks that the velocity checkpoint's run recorded the current
 (forward-lean) HOME, hashes it, runs the 9x300 raw
@@ -35,6 +36,14 @@ and must never be used for a release chain. Resume requires a schema-v2 hash-bou
 runs stop at 3000/7000/10000/15000. A boundary that activates push, HMD/hand,
 or feet is followed by a mandatory 100-update canary and a second gate before
 the remaining stage may run. --canary also limits any other segment to 100.
+
+--hand-pose-release trains Mjlab-Teleop-V12-HandPoseRelease-Microban (the
+active-hand arm pose-release recipe, forward-lean HOME string) through the
+same stage route and gates.  At the forward-lean HOME the intended release
+route is a fresh pose-release chain: start --source ... --hand-pose-release.
+No canonical model_7099 is pinned as a recipe-switch parent here, so resuming
+a canonical v11 checkpoint with this option is refused.  A pose-release
+checkpoint is resumed with this option (it is refused without it).
 EOF
 }
 fail() { echo "$*" >&2; exit 2; }
@@ -61,8 +70,12 @@ source_sha=""
 num_envs=2048
 max_updates=0
 skip_gate=0
+hand_pose_release=0
 while (( $# > 0 )); do
     case "$1" in
+        --hand-pose-release)
+            (( hand_pose_release == 0 )) || fail "Duplicate --hand-pose-release"
+            hand_pose_release=1; shift ;;
         --canary) (( canary == 0 )) || fail "Duplicate --canary"; canary=1; shift ;;
         --source)
             (( $# >= 2 )) || fail "--source requires a checkpoint path"
@@ -193,6 +206,24 @@ else
             ;;
         *) fail "Unknown validated resume mode: ${resume_mode}" ;;
     esac
+    recipe_kind="$(uv run --locked python -m \
+        mjlab_microban.scripts.teleop_v12_stage checkpoint-recipe \
+        "${checkpoint}" --shell)"
+    if (( hand_pose_release == 1 )); then
+        [[ "${resume_mode}" == canonical ]] \
+            || fail "--hand-pose-release has no deadline-fallback route"
+        case "${recipe_kind}" in
+            hand_pose_release) ;;
+            canonical)
+                # Forward-lean HOME: no pinned switch parent (see
+                # microban_teleop_v12_hand_pose_release_lineage.py).
+                fail "No release-eligible recipe switch at the forward-lean HOME; start a fresh chain with: start --source VELOCITY_MODEL.pt --hand-pose-release"
+                ;;
+            *) fail "--hand-pose-release cannot resume a ${recipe_kind} checkpoint" ;;
+        esac
+    elif [[ "${recipe_kind}" == hand_pose_release ]]; then
+        fail "Checkpoint uses the hand pose-release recipe; pass --hand-pose-release"
+    fi
     read -r target mandatory_activation_canary < <(
         uv run --locked python -m mjlab_microban.scripts.teleop_v12_stage \
             route "${completed}" --shell
@@ -217,7 +248,12 @@ if (( mandatory_activation_canary == 1 )); then
 fi
 echo "[INFO] v12 completed=${completed} target=${target} process_updates=${iterations}"
 
-exec uv run --locked train Mjlab-Teleop-V12-Microban \
+task=Mjlab-Teleop-V12-Microban
+if (( hand_pose_release == 1 )); then
+    task=Mjlab-Teleop-V12-HandPoseRelease-Microban
+fi
+echo "[INFO] task=${task}"
+exec uv run --locked train "${task}" \
     --env.scene.num-envs "${num_envs}" --env.seed 42 --agent.seed 42 \
     --agent.num-steps-per-env 24 --agent.max-iterations "${iterations}" \
     --agent.save-interval "${save_interval}" --agent.logger tensorboard \

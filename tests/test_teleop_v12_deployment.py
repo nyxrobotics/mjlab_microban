@@ -48,6 +48,7 @@ from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -231,7 +232,10 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
             "learned_minus_source": summary(-1.0, 1.0),
             "scenario_count": 12,
             "step_count": 3_600,
-        }
+        },
+        "runtime_smoke_observations": [
+            [0.0] * 5 + [-1.0] + [0.001 * row] * 77 for row in range(16)
+        ],
     }
     onnx_report = {
         "gate": "microban_teleop_v12_checkpoint_onnx",
@@ -281,6 +285,55 @@ def test_final_gate_rejects_every_nonfinal_identity(
             gate,
             checkpoint=checkpoint,
             checkpoint_sha256="1" * 64,
+        )
+
+
+def test_pose_release_final_gate_profile_is_the_completion_allowance(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "model_14999.pt"
+    gate, *_ = _evidence(tmp_path)
+    expected = deployment._expected_final_tracking_profile(
+        {
+            "microban_teleop_recipe_revision": (
+                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            )
+        }
+    )
+    assert expected == deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert expected in deployment.SUPPORTED_FINAL_TRACKING_PROFILES
+    for accepted in (
+        deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE,
+        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
+        deployment.FINAL_PROFILE,
+    ):
+        gate["tracking_profile"] = accepted
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=expected,
+        )
+    gate["tracking_profile"] = deployment.DEADLINE_FINAL_FALLBACK_PROFILE
+    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=expected,
+        )
+    # The canonical v11 lineage keeps the deployed-accuracy final profile.
+    canonical = deployment._expected_final_tracking_profile(
+        {"microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION}
+    )
+    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
+    gate["tracking_profile"] = deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=canonical,
         )
 
 
@@ -751,3 +804,74 @@ def test_runtime_rejection_preserves_last_known_good_output(
     assert output.read_bytes() == b"last-known-good"
     assert not list(tmp_path.glob(".*.tmp"))
     assert not list(tmp_path.glob(".*.captured"))
+
+
+def test_runtime_smoke_corpus_comes_from_the_final_tracking_report():
+    from mjlab_microban.scripts.export_teleop_v12_deployment import _runtime_smoke_corpus
+
+    rows = [[0.0] * 5 + [-1.0] + [0.0] * 77 for _ in range(16)]
+    assert _runtime_smoke_corpus({"runtime_smoke_observations": rows}) == rows
+    for bad in (
+        {},
+        {"runtime_smoke_observations": rows[:7]},
+        {"runtime_smoke_observations": rows * 5},
+        {"runtime_smoke_observations": [row[:82] for row in rows]},
+        {"runtime_smoke_observations": [[float("nan")] * 83] + rows[1:]},
+        {"runtime_smoke_observations": [[True] * 83] + rows[1:]},
+    ):
+        with pytest.raises(ValueError):
+            _runtime_smoke_corpus(bad)
+
+
+def _normwise_onnx_evidence() -> dict[str, object]:
+    return {
+        "tolerance": 2.0e-5,
+        "parity_rule": (
+            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
+        ),
+        "relative_tolerance": 1.0e-6,
+        "maximum_absolute_expected_output": 46.55878829956055,
+        "onnxruntime_cpu_maximum_absolute_error": 2.47955322265625e-05,
+        "onnxruntime_cpu_maximum_bound_ratio": 0.451808363199234,
+        "reference_evaluator_maximum_absolute_error": 9.5367431640625e-06,
+        "reference_evaluator_maximum_bound_ratio": 0.1619720607995987,
+    }
+
+
+def test_onnx_parity_rule_metadata_ships_the_normwise_bound() -> None:
+    metadata = deployment._onnx_parity_rule_metadata(_normwise_onnx_evidence())
+    assert metadata == {
+        "v12_onnx_parity_rule": (
+            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
+        ),
+        "v12_onnx_parity_relative_tolerance": "1e-06",
+        "v12_onnx_parity_max_abs_expected_output": "46.55878829956055",
+        "v12_onnx_reference_max_bound_ratio": "0.1619720607995987",
+        "v12_onnxruntime_cpu_max_bound_ratio": "0.451808363199234",
+    }
+    # The robot's cap atol + rtol * magnitude covers the shipped CPU error.
+    cap = 2.0e-5 + float(metadata["v12_onnx_parity_relative_tolerance"]) * float(
+        metadata["v12_onnx_parity_max_abs_expected_output"]
+    )
+    assert 2.47955322265625e-05 <= cap
+
+
+def test_onnx_parity_rule_metadata_absent_for_absolute_only_report() -> None:
+    assert deployment._onnx_parity_rule_metadata({"tolerance": 2.0e-5}) == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("parity_rule", "elementwise_v0"),
+        ("relative_tolerance", 1.0e-5),
+        ("maximum_absolute_expected_output", math.nan),
+        ("onnxruntime_cpu_maximum_bound_ratio", 1.01),
+        ("reference_evaluator_maximum_bound_ratio", None),
+    ),
+)
+def test_onnx_parity_rule_metadata_rejects_drift(name: str, value: object) -> None:
+    evidence = _normwise_onnx_evidence()
+    evidence[name] = value
+    with pytest.raises(ValueError):
+        deployment._onnx_parity_rule_metadata(evidence)

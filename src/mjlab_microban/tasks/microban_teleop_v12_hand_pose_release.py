@@ -11,8 +11,11 @@ shoulder-pitch, shoulder-roll and elbow of each hand whose target is active are
 left out of the mean.  An inactive hand's arm and all other joints keep the v11
 term.  Before update 7000 no hand is active, so the term equals v11 bit for bit.
 
-It is a separate recipe revision with its own task; the canonical task, stage
-gates and exporter are unchanged and keep refusing it.
+It is a separate recipe revision with its own task.  Stage gates, evaluators
+and the exporter accept it when its lineage is release-eligible: a fresh chain,
+or the recorded switch at the gated canonical model_7099
+(``microban_teleop_v12_hand_pose_release_lineage``).  The experimental switch
+from any other v11 checkpoint stays evidence-only.
 """
 
 from __future__ import annotations
@@ -156,12 +159,17 @@ def make_microban_teleop_v12_hand_pose_release_env_cfg(
 
 @dataclass
 class MicrobanTeleopV12HandPoseReleaseRunnerCfg(MicrobanTeleopV12RunnerCfg):
-    """Adds the explicit experiment switch for resuming a v11 checkpoint."""
+    """Adds the explicit recipe-switch options for resuming a v11 checkpoint."""
 
     # Resuming a v11 checkpoint into this recipe mixes two recipes in one
     # lineage.  It is refused unless this flag is set, and every save of such a
     # run records a not-for-release switch marker.  A fresh chain leaves it off.
     experimental_recipe_switch: bool = False
+    # Release-eligible switch: the stage gate (path + SHA-256) of the pinned
+    # canonical model_7099 being resumed.  Every save records the parent and
+    # gate, re-validated by every consumer.  Exclusive with the experiment flag.
+    release_recipe_switch_gate: str = ""
+    release_recipe_switch_gate_sha256: str = ""
 
 
 MicrobanTeleopV12HandPoseReleaseRlCfg = MicrobanTeleopV12HandPoseReleaseRunnerCfg(

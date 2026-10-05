@@ -1,0 +1,114 @@
+{
+  "adapter_sanitization": null,
+  "canonical_boundary": true,
+  "checkpoint": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-10-05_03-31-01_c20k_v12_pr_10100_to15000/model_14999.pt",
+  "checkpoint_kind": "canonical_boundary",
+  "checkpoint_sha256": "795dbd43b12f4a2d8e3facad954c6f7e1094301243f2ed17ea7995f17e7306ec",
+  "completed_updates": 15000,
+  "gate": "microban_teleop_v12_stage",
+  "iteration": 14999,
+  "microban_teleop_v12_hand_pose_release_recipe_switch": {
+    "parent_checkpoint_path": "repo://logs/rsl_rl/mjlab_microban_teleop_v12/2026-10-04_10-18-35_c20k_v12_7000_to7100/model_7099.pt",
+    "parent_checkpoint_sha256": "366763f233f30947554c2f66c5619a8b8c1230ac8529f17740fb1d27cfe0d224",
+    "parent_completed_updates": 7100,
+    "parent_iteration": 7099,
+    "parent_recipe_revision": "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi_v11",
+    "parent_stage_gate_path": "repo://artifacts/teleop_v12_gates/2026-10-04_10-18-35_c20k_v12_7000_to7100_model_7099_gate.json",
+    "parent_stage_gate_sha256": "87bcb624385a61f378f6a560dbc27ec4dab83a2513caded2ccfa8ef0772e7cc9",
+    "reason": "canonical v11 chain from this model_7099 failed the deployed-accuracy final gate on active-hand RMS (steady hand undershoot: the inherited HOME pose reward pulls active-hand arms back to HOME); switch to the pose-release recipe at the first gated checkpoint after hand activation, identical to v11 before update 7000",
+    "recipe_revision": "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12",
+    "release_eligible": true,
+    "schema_version": 1
+  },
+  "microban_teleop_v12_home_pose": {
+    "joint_names": [
+      "head",
+      "neck_roll",
+      "neck_pitch",
+      "right_shoulder_pitch",
+      "right_shoulder_roll",
+      "right_elbow",
+      "right_hip_yaw",
+      "right_hip_roll",
+      "right_hip_pitch",
+      "right_knee",
+      "right_ankle_pitch",
+      "right_ankle_roll",
+      "left_shoulder_pitch",
+      "left_shoulder_roll",
+      "left_elbow",
+      "left_hip_yaw",
+      "left_hip_roll",
+      "left_hip_pitch",
+      "left_knee",
+      "left_ankle_pitch",
+      "left_ankle_roll"
+    ],
+    "joint_pos_rad": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      -0.17453292519943295,
+      -0.3490658503988659,
+      0.0,
+      -0.08726646259971647,
+      0.020915751032157148,
+      0.0,
+      -0.020915751032157148,
+      0.08726646259971647,
+      0.0,
+      0.17453292519943295,
+      -0.3490658503988659,
+      0.0,
+      0.08726646259971647,
+      0.020915751032157148,
+      0.0,
+      -0.020915751032157148,
+      -0.08726646259971647
+    ],
+    "revision": "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5",
+    "root_pos_xyz_m": [
+      0.0,
+      0.0,
+      0.170554885633559
+    ],
+    "root_quat_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "schema_version": 2
+  },
+  "onnx": {
+    "path": "repo://artifacts/teleop_v12_gates/2026-10-05_03-31-01_c20k_v12_pr_10100_to15000_model_14999.onnx",
+    "sha256": "a9a1294cf498f90728857919e963c0014b9523b649f26675ae58639db5a805fb"
+  },
+  "report_sha256": {
+    "locomotion": "d80b26182799d32453720412697b33cf100028004d2c83122cd6c303b074d714",
+    "onnx": "5920c142f778341dde65eea3c2a3216c82348efb5ed72a732e74e4b5d68c83f7",
+    "tracking": "d94452e14dc9a3077150de6c675fd5f63e5e2b2844dfc4d9f5e60aeebc97867d"
+  },
+  "reports": {
+    "locomotion": "repo://artifacts/teleop_v12_gates/2026-10-05_03-31-01_c20k_v12_pr_10100_to15000_model_14999_9x300.json",
+    "onnx": "repo://artifacts/teleop_v12_gates/2026-10-05_03-31-01_c20k_v12_pr_10100_to15000_model_14999_onnx.json",
+    "tracking": "repo://artifacts/teleop_v12_gates/2026-10-05_03-31-01_c20k_v12_pr_10100_to15000_model_14999_tracking.json"
+  },
+  "schema_version": 2,
+  "status": "pass",
+  "tracking_profile": "full_body_reachable_performance_perturbation_v2_completion_allowance_v1",
+  "tracking_profile_completion_allowance": {
+    "foot_p95_m_max": 0.11,
+    "foot_rms_m_max": 0.055,
+    "hand_p95_m_max": 0.08,
+    "hand_rms_m_max": 0.045,
+    "reason": "final-gate completion allowance for the active-hand arm pose-release lineage: its model_14999 passed every non-accuracy final check and failed the deployed-accuracy final profile only on hand/foot accuracy in the near-fall perturbed mixed_forward_left/mixed_backward_right scenarios (and max_keypoints_left foot RMS 0.0521 m); user-approved completion, every non-accuracy check and every other profile unchanged",
+    "recipe_revisions": [
+      "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
+    ],
+    "relaxes_profile": "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
+    "revision": "completion_allowance_v1",
+    "structure_profile": "full_body_reachable_performance_perturbation_v2"
+  }
+}

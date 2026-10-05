@@ -45,13 +45,17 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = (
     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
     "receiver_box_hands_v17"
 )
-# Opt-in successor recipe: identical to v11 except that the inherited HOME
-# pose reward drops the shoulder-pitch/shoulder-roll/elbow joints of every hand
-# whose target is active (an inactive hand's arm and every other joint keep the
-# v11 term).  It changes nothing before hand targets activate at update 7000.
-# Only its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or
-# records it; canonical gates, stage files and the exporter still accept only
-# the v11 recipe (and the corner rescue), so it needs its own fresh chain.
+# Forward-lean pose-release recipe (v18 = v17 + pose release): identical to
+# the canonical recipe except that the inherited HOME pose reward drops the
+# shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
+# active (an inactive hand's arm and every other joint keep the canonical
+# term).  It changes nothing before hand targets activate at update 7000.  Only
+# its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or records
+# it.  Stage gates and the exporter accept its release-eligible lineages
+# (microban_teleop_v12_hand_pose_release_lineage); at the forward-lean HOME
+# that is a fresh pose-release chain (wrapper ``start --hand-pose-release``),
+# judged at 15000 under the final completion-allowance profile, and the
+# package declares this string to the robot.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"

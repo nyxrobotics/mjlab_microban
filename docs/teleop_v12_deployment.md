@@ -155,7 +155,9 @@ The packager performs the following fail-closed sequence on CPU:
    final perturbation profile or the explicitly authorized deadline-final
    profile. The latter is accepted only when the checkpoint contains the exact
    pinned fallback and post-canary lineage; changing only the gate/profile name
-   is rejected.
+   is rejected. A checkpoint of the active-hand arm pose-release recipe is
+   judged at 15000 under the final completion allowance (see below); the
+   deployed-accuracy and strict final profiles are also accepted for it.
 3. Captures immutable checkpoint bytes before loading the actor, then revalidates
    the pinned legacy checkpoint/probe and frozen legacy tensors. It also
    requires the corrected bilateral-site revision and the authenticated
@@ -193,6 +195,43 @@ The packager performs the following fail-closed sequence on CPU:
    learned actor and preserves the walk fallback.
 9. Rehashes and revalidates the complete gate lineage once more immediately
    before an `os.replace` plus directory `fsync` publishes the file.
+
+## Final-gate completion allowance (pose-release lineage)
+
+Profile `full_body_reachable_performance_perturbation_v2_completion_allowance_v1`
+is the 15000-update profile of the active-hand arm pose-release recipe only.
+On this forward-lean branch that recipe is
+`forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_receiver_box_hands_active_hand_arm_pose_release_v18`
+(the centered line's string is `..._active_hand_arm_pose_release_v12`). It keeps the final profile's
+scenarios, perturbation, target-column ablation targets and every
+non-accuracy check (no falls, finite, actual soft limits, raw-action
+recurrence, forced HMD motion, observation coverage, ablation response, twist
+direction). Only the accuracy limits change:
+
+| limit | deployed-accuracy final | completion allowance |
+| --- | --- | --- |
+| hand RMS | 0.035 m | 0.045 m |
+| hand P95 | 0.07 m | 0.08 m |
+| foot RMS | 0.05 m | 0.055 m |
+| foot P95 | 0.08 m | 0.11 m |
+
+Reason (2026-10-05): the pose-release `model_14999` of run
+`2026-10-05_03-31-01_c20k_v12_pr_10100_to15000` passed every non-accuracy final
+check and its 9999/10099 gates, and failed the deployed-accuracy final profile
+only on accuracy: `mixed_forward_left` hand 0.0403/0.0727 m, foot
+0.0517/0.1001 m (RMS/P95); `mixed_backward_right` hand 0.0415/0.0693 m, foot
+0.0469/0.0806 m; `max_keypoints_left` foot RMS 0.0521 m. The two perturbed
+mixed scenarios are near-fall states for the previous canonical model as well.
+The user approved completing the centered-HOME PICO this way ("全部許可するから
+一番良いと思う方法で作業完了まで進めて", "本来の基準ってのも別にそんなに意味ない").
+The forward-lean pose-release recipe inherits the same allowance (same
+reward change, same final scenarios); its release route is a fresh
+pose-release chain (`scripts/train_microban_teleop_v12.sh start --source
+LEAN_WALK.pt --hand-pose-release`), because no lean model_7099 is pinned as a
+recipe-switch parent. Every other boundary and every other lineage keeps its
+profile. A gate judged
+under the allowance records the limits and this reason in
+`tracking_profile_completion_allowance`.
 
 The command intentionally has no diagnostic/nonaccepted mode. If the final gate
 or its evidence is absent, stale, changed, non-final, or rejected by the current

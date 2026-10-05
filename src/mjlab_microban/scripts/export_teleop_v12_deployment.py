@@ -36,9 +36,12 @@ from mjlab_microban.robot.microban_hand_fk import (
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DEADLINE_FINAL_FALLBACK_PROFILE,
+    FINAL_COMPLETION_ALLOWANCE_PROFILE,
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_PROFILE,
     STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE,
+    STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE,
+    required_tracking_profile,
 )
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
@@ -76,6 +79,7 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
@@ -104,9 +108,15 @@ from mjlab_microban.teleop_v12_safety import (
 FINAL_ITERATION = 14_999
 FINAL_COMPLETED_UPDATES = 15_000
 # FINAL_PROFILE is the stricter legacy final profile; a gate made under it
-# also satisfies the canonical deployed-accuracy profile.
+# also satisfies the canonical deployed-accuracy profile.  The completion
+# allowance is the pose-release lineage's final profile (lineage-bound below).
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
-    (FINAL_DEPLOYED_ACCURACY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
+    (
+        FINAL_DEPLOYED_ACCURACY_PROFILE,
+        FINAL_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
+        FINAL_COMPLETION_ALLOWANCE_PROFILE,
+    )
 )
 PACKAGER_REVISION = (
     "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
@@ -249,6 +259,9 @@ REQUIRED_V12_RUNTIME_METADATA_KEYS = frozenset(
         "runtime_raw_action_guard_multiplier",
         "runtime_raw_action_guard_absmax_json",
         "runtime_raw_action_guard_semantics",
+        "v12_runtime_smoke_corpus_semantics",
+        "v12_runtime_smoke_observations_json",
+        "v12_runtime_smoke_observations_sha256",
         "observation_schema_version",
         "observation_width",
         "action_width",
@@ -339,6 +352,44 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
 
+RUNTIME_SMOKE_CORPUS_SEMANTICS = (
+    "final_tracking_rollout_actor_observations_first_scored_and_last_step_v1"
+)
+RUNTIME_SMOKE_CORPUS_MIN_ROWS = 8
+RUNTIME_SMOKE_CORPUS_MAX_ROWS = 64
+
+
+def _runtime_smoke_corpus(tracking: Mapping[str, Any]) -> list[list[float]]:
+    """Real actor observations from the final tracking rollouts.
+
+    The robot's startup ONNX self-test runs these through ONNX Runtime and
+    compares the outputs with the runtime guard, which comes from the raw
+    actions of the same rollouts.
+    """
+
+    rows = tracking.get("runtime_smoke_observations")
+    if (
+        not isinstance(rows, list)
+        or not RUNTIME_SMOKE_CORPUS_MIN_ROWS <= len(rows) <= RUNTIME_SMOKE_CORPUS_MAX_ROWS
+    ):
+        raise ValueError("Final tracking report lacks a runtime smoke corpus")
+    corpus: list[list[float]] = []
+    for row in rows:
+        if (
+            not isinstance(row, list)
+            or len(row) != 83
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in row
+            )
+        ):
+            raise ValueError("Final tracking runtime smoke corpus is malformed")
+        corpus.append([float(value) for value in row])
+    return corpus
+
+
 def _canonical_json_sha256(value: object) -> str:
     payload = json.dumps(
         value,
@@ -407,7 +458,10 @@ def _expected_final_tracking_profile(infos: Mapping[str, Any]) -> str:
             raise ValueError(
                 "Final deadline-fallback checkpoint is missing post-canary lineage"
             )
-        return FINAL_DEPLOYED_ACCURACY_PROFILE
+        return required_tracking_profile(
+            FINAL_COMPLETED_UPDATES,
+            recipe_revision=infos.get("microban_teleop_recipe_revision"),
+        )
     validate_deadline_fallback_marker(deadline)
     validate_deadline_post_canary_marker(post_canary)
     return DEADLINE_FINAL_FALLBACK_PROFILE
@@ -440,6 +494,9 @@ def _require_final_gate(
         STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE.get(
             expected_tracking_profile, expected_tracking_profile
         ),
+        *STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE.get(
+            expected_tracking_profile, ()
+        ),
     }:
         mismatches.append("tracking_profile")
     if mismatches:
@@ -449,6 +506,76 @@ def _require_final_gate(
         )
     if checkpoint.name != f"model_{FINAL_ITERATION}.pt":
         raise ValueError("Final contract-v12 checkpoint must be named model_14999.pt")
+
+
+def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
+    """Recipe string the package declares to the robot.
+
+    A release-eligible active-hand arm pose-release checkpoint (lineage already
+    re-validated by the gate and actor loaders) declares its own recipe; every
+    other accepted lineage (v11 and its rescues) declares the v11 recipe.
+    """
+
+    if infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            hand_pose_release_lineage,
+        )
+
+        # Refuses the experimental switch (no allow flag here).
+        hand_pose_release_lineage(infos, verify_parent=False)
+        return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    return MICROBAN_TELEOP_V12_RECIPE_REVISION
+
+
+def _onnx_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, str]:
+    """Ship the gate's norm-wise ONNX parity rule (already gate-validated).
+
+    The full-83 parity bound is per sample ``atol + rtol * max|expected|``
+    (teleop_v12_onnx_gate), so the absolute errors alone may exceed ``atol``.
+    The robot needs the rule, rtol, output magnitude and bound ratios to apply
+    the same cap the stage validator does.  A legacy absolute-only report
+    ships nothing and the robot keeps the plain ``atol`` cap.
+    """
+
+    if "parity_rule" not in onnx_evidence and "relative_tolerance" not in onnx_evidence:
+        return {}
+    from mjlab_microban.scripts.teleop_v12_onnx_gate import (
+        ONNX_PARITY_RELATIVE_TOLERANCE,
+        ONNX_PARITY_RULE,
+    )
+
+    if (
+        onnx_evidence.get("parity_rule") != ONNX_PARITY_RULE
+        or onnx_evidence.get("relative_tolerance") != ONNX_PARITY_RELATIVE_TOLERANCE
+    ):
+        raise ValueError("V12 ONNX parity rule evidence drifted")
+    values = {
+        "v12_onnx_parity_max_abs_expected_output": onnx_evidence.get(
+            "maximum_absolute_expected_output"
+        ),
+        "v12_onnx_reference_max_bound_ratio": onnx_evidence.get(
+            "reference_evaluator_maximum_bound_ratio"
+        ),
+        "v12_onnxruntime_cpu_max_bound_ratio": onnx_evidence.get(
+            "onnxruntime_cpu_maximum_bound_ratio"
+        ),
+    }
+    for name, value in values.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+            or (name.endswith("_bound_ratio") and float(value) > 1.0)
+        ):
+            raise ValueError(f"V12 ONNX parity rule evidence is invalid: {name}")
+    return {
+        "v12_onnx_parity_rule": ONNX_PARITY_RULE,
+        "v12_onnx_parity_relative_tolerance": str(ONNX_PARITY_RELATIVE_TOLERANCE),
+        **{name: str(float(value)) for name, value in values.items()},
+    }
 
 
 def _full_precision_csv(values: list[float]) -> str:
@@ -569,6 +696,8 @@ def build_v12_deployment_metadata(
     ):
         raise TypeError("Validated v12 gate evidence is incomplete")
 
+    onnx_parity_rule_metadata = _onnx_parity_rule_metadata(onnx_evidence)
+
     defaults = HOME_FRAME.joint_pos
     if not isinstance(defaults, Mapping):
         raise TypeError("Microban HOME_FRAME has no joint pose")
@@ -589,6 +718,7 @@ def build_v12_deployment_metadata(
     ):
         raise ValueError("Final v12 checkpoint HOME pose differs from exporter defaults")
     guard = _runtime_guard(tracking_envelope)
+    smoke_corpus_json = _json(_runtime_smoke_corpus(tracking))
     source = bootstrap.source
     probe = bootstrap.probe
     lr_order_migration = _require_deployable_lr_order_lineage(infos)
@@ -641,7 +771,7 @@ def build_v12_deployment_metadata(
         "microban_teleop_training_contract_version": (
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ),
-        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        "microban_teleop_recipe_revision": _deployment_recipe_revision(infos),
         "v12_home_pose_revision": home_pose["revision"],
         "v12_training_home_pose_json": _json(home_pose),
         "checkpoint_filename": checkpoint.name,
@@ -742,6 +872,7 @@ def build_v12_deployment_metadata(
         "v12_onnxruntime_cpu_max_abs_error": str(
             onnx_evidence["onnxruntime_cpu_maximum_absolute_error"]
         ),
+        **onnx_parity_rule_metadata,
         "v12_neutral_legacy_parity_max_abs_error": str(
             neutral["maximum_absolute_error"]
         ),
@@ -789,6 +920,11 @@ def build_v12_deployment_metadata(
         "runtime_raw_action_guard_multiplier": str(RUNTIME_GUARD_MULTIPLIER),
         "runtime_raw_action_guard_absmax_json": _json(guard),
         "runtime_raw_action_guard_semantics": RUNTIME_GUARD_SEMANTICS,
+        "v12_runtime_smoke_corpus_semantics": RUNTIME_SMOKE_CORPUS_SEMANTICS,
+        "v12_runtime_smoke_observations_json": smoke_corpus_json,
+        "v12_runtime_smoke_observations_sha256": hashlib.sha256(
+            smoke_corpus_json.encode("ascii")
+        ).hexdigest(),
         "observation_schema_version": "2",
         "observation_width": "83",
         "action_width": "18",

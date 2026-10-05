@@ -40,6 +40,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     required_tracking_profile,
     required_tracking_scenario_names,
     target_column_ablation_observation_columns,
+    tracking_profile_completion_allowance,
     tracking_profile_uses_perturbation,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
@@ -99,7 +100,13 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
+)
+from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+    validate_hand_pose_release_recipe_switch_marker,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -378,18 +385,22 @@ def _validate_tracking_report(
     *,
     profile_override: str | None = None,
     allowed_failed_checks: frozenset[str] = frozenset(),
+    recipe_revision: object = None,
 ) -> str:
     """Validate one tracking report; return the profile it was judged under.
 
-    Without an override the canonical (deployed-accuracy) profile and, for
-    reports made before that change, its stricter legacy profile are accepted.
+    Without an override the canonical profile for this clock and training
+    recipe (deployed-accuracy, or the pose-release final completion allowance)
+    and its accepted stricter profiles are accepted.
     """
 
     completed = int(expected_identity["completed_updates"])
     if profile_override is not None and profile_override not in TRACKING_PROFILES:
         raise ValueError("Tracking report profile override is invalid")
     if profile_override is None:
-        accepted = accepted_tracking_profiles(completed)
+        accepted = accepted_tracking_profiles(
+            completed, recipe_revision=recipe_revision
+        )
         profile = (
             report.get("profile")
             if report.get("profile") in accepted
@@ -1016,7 +1027,9 @@ def create_gate(
         "completed_updates": completed,
     }
     _validate_locomotion_report(locomotion, expected_report_identity)
-    tracking_profile = required_tracking_profile(completed)
+    tracking_profile = required_tracking_profile(
+        completed, recipe_revision=infos.get("microban_teleop_recipe_revision")
+    )
     if deadline_source:
         assert deadline_fallback_strict_report is not None
         deadline_fallback_strict_report = deadline_fallback_strict_report.resolve()
@@ -1059,7 +1072,9 @@ def create_gate(
         )
     else:
         tracking_profile = _validate_tracking_report(
-            tracking, expected_report_identity
+            tracking,
+            expected_report_identity,
+            recipe_revision=infos.get("microban_teleop_recipe_revision"),
         )
     parity_tolerance = (
         MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
@@ -1102,9 +1117,19 @@ def create_gate(
             "sha256": onnx_sha,
         },
     }
+    allowance = tracking_profile_completion_allowance(tracking_profile)
+    if allowance is not None:
+        # The gate records why its accuracy limits are wider than canonical.
+        result["tracking_profile_completion_allowance"] = allowance
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
+    recipe_switch = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
+    if recipe_switch is not None:
+        # Re-validated with its parent files by _checkpoint_identity above.
+        result[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
+            validate_hand_pose_release_recipe_switch_marker(recipe_switch)
+        )
     if deadline_source:
         deadline_marker = deadline_fallback_marker(
             selected_checkpoint_sha256=checkpoint_sha,
@@ -1228,8 +1253,18 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
                     else (
                         gate.get("tracking_profile")
                         if gate.get("tracking_profile")
-                        in accepted_tracking_profiles(completed)
-                        else required_tracking_profile(completed)
+                        in accepted_tracking_profiles(
+                            completed,
+                            recipe_revision=infos.get(
+                                "microban_teleop_recipe_revision"
+                            ),
+                        )
+                        else required_tracking_profile(
+                            completed,
+                            recipe_revision=infos.get(
+                                "microban_teleop_recipe_revision"
+                            ),
+                        )
                     )
                 )
             )
@@ -1239,6 +1274,11 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         exact[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
+    recipe_switch = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
+    if recipe_switch is not None:
+        exact[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
+            validate_hand_pose_release_recipe_switch_marker(recipe_switch)
+        )
     checkpoint_deadline = (
         validate_deadline_fallback_marker(
             gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
@@ -1343,6 +1383,23 @@ def gate_resume_mode(gate_path: Path, checkpoint: Path) -> str:
     return "canonical"
 
 
+def checkpoint_recipe_kind(checkpoint: Path) -> str:
+    """Validate a stage checkpoint's lineage and name its training recipe.
+
+    ``canonical`` for the v11 recipe (and its rescue lineages), or
+    ``hand_pose_release`` for a release-eligible pose-release checkpoint.  The
+    wrapper uses it to pick the training task for a resume.
+    """
+
+    _, _, _, infos = _checkpoint_identity(checkpoint.resolve())
+    recipe = infos.get("microban_teleop_recipe_revision")
+    if recipe == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION:
+        return "hand_pose_release"
+    if recipe == MICROBAN_TELEOP_V12_RECIPE_REVISION:
+        return "canonical"
+    return "rescue"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1379,6 +1436,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume_mode.add_argument("gate", type=Path)
     resume_mode.add_argument("checkpoint", type=Path)
     resume_mode.add_argument("--shell", action="store_true")
+    recipe = subparsers.add_parser("checkpoint-recipe")
+    recipe.add_argument("checkpoint", type=Path)
+    recipe.add_argument("--shell", action="store_true")
     return parser
 
 
@@ -1400,6 +1460,13 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 flush=True,
             )
+        return 0
+    if args.command == "checkpoint-recipe":
+        kind = checkpoint_recipe_kind(args.checkpoint)
+        if args.shell:
+            print(kind, flush=True)
+        else:
+            print(json.dumps({"recipe": kind}, sort_keys=True), flush=True)
         return 0
     if args.command == "resume-mode":
         mode = gate_resume_mode(args.gate, args.checkpoint)
