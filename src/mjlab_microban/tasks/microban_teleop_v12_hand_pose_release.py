@@ -170,6 +170,12 @@ class MicrobanTeleopV12HandPoseReleaseRunnerCfg(MicrobanTeleopV12RunnerCfg):
     # gate, re-validated by every consumer.  Exclusive with the experiment flag.
     release_recipe_switch_gate: str = ""
     release_recipe_switch_gate_sha256: str = ""
+    # Lateral-fidelity variant start: the stage gate (path + SHA-256) of the
+    # gated fresh-chain pose-release model_7099 being resumed into the
+    # lateral-fidelity task (microban_teleop_v12_lateral_fidelity).  Later
+    # resumes carry the marker forward and leave these empty.
+    lateral_fidelity_switch_gate: str = ""
+    lateral_fidelity_switch_gate_sha256: str = ""
 
 
 MicrobanTeleopV12HandPoseReleaseRlCfg = MicrobanTeleopV12HandPoseReleaseRunnerCfg(

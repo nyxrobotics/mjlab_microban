@@ -29,7 +29,7 @@ override other than the output run name is accepted.
 chain's model_9900 whose strict HMD/hand report fails only hand accuracy
 (RMS and/or P95); trains Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban
 (pose-release env; sampler mix lf60 = 5/60/35 by default, lf65 = 5/65/30, lf72 = 5/72/23, lf90 = 5/90/5).  Its model_9999 keeps the pose-release
-recipe; gate it with scripts/evaluate_microban_teleop_v12_stage.sh RUN 9999 and
+recipe (and a lateral-fidelity parent's lateral-deficit term and marker); gate it with scripts/evaluate_microban_teleop_v12_stage.sh RUN 9999 and
 resume it with train_microban_teleop_v12.sh resume RUN --hand-pose-release.
 EOF_USAGE
 }
@@ -91,6 +91,28 @@ cd -- "${PROJECT_ROOT}"
 uv run --locked python -m mjlab_microban.scripts.teleop_v12_corner_rescue \
     validate-parent "${source_checkpoint}" "${parent_tracking_report}" \
     "${validate_args[@]}" >/dev/null
+
+if (( hand_pose_release == 1 )); then
+    # A lateral-fidelity parent (microban_teleop_v12_lateral_fidelity) keeps
+    # its lateral-deficit term at the recorded weight; the runner refuses any
+    # parent/env mismatch.
+    lateral_fidelity="$(uv run --locked python -c 'import sys, torch
+from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY as KEY,
+    lateral_fidelity_weight_label, validate_lateral_fidelity_marker)
+infos = torch.load(sys.argv[1], map_location="cpu", weights_only=False)["infos"]
+marker = infos.get(KEY)
+print("none" if marker is None else lateral_fidelity_weight_label(
+    validate_lateral_fidelity_marker(marker)["reward_weight"]))' "${source_checkpoint}" | tail -n 1)"
+    case "${lateral_fidelity}" in
+        none) export MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY="" ;;
+        8|16)
+            export MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY="${lateral_fidelity}"
+            echo "[INFO] lateral-fidelity parent: weight label ${lateral_fidelity}"
+            ;;
+        *) fail "Unreadable lateral-fidelity marker on the parent" ;;
+    esac
+fi
 
 seed_run="corner_rescue_seed_${source_sha:0:16}"
 seed_dir="${LOG_ROOT}/${seed_run}"

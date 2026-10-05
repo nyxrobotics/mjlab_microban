@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -1036,6 +1037,43 @@ def pose_release_final_rescue_gate_marker(
     )
 
 
+def lateral_fidelity_gate_marker(
+    infos: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """(infos key, validated marker) of a lateral-fidelity checkpoint, or None.
+
+    The parent files and gate were re-validated by the lineage check of
+    ``_checkpoint_identity``; this only records the marker in the gate.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
+        validate_lateral_fidelity_marker,
+    )
+
+    marker = infos.get(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY)
+    if marker is None:
+        return None
+    return (
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
+        validate_lateral_fidelity_marker(marker),
+    )
+
+
+def checkpoint_lateral_fidelity_weight_label(checkpoint: Path) -> str:
+    """``none`` or the registered weight label of a validated checkpoint."""
+
+    from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+        lateral_fidelity_weight_label,
+    )
+
+    _, _, _, infos = _checkpoint_identity(checkpoint.resolve())
+    marker = lateral_fidelity_gate_marker(infos)
+    if marker is None:
+        return "none"
+    return lateral_fidelity_weight_label(marker[1]["reward_weight"])
+
+
 def next_training_target(completed: int) -> tuple[int, bool]:
     """Return the next enforced endpoint and whether it is an activation canary."""
 
@@ -1188,6 +1226,9 @@ def create_gate(
     pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
     if pose_release_final_rescue is not None:
         result[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
+    lateral_fidelity = lateral_fidelity_gate_marker(infos)
+    if lateral_fidelity is not None:
+        result[lateral_fidelity[0]] = lateral_fidelity[1]
     if deadline_source:
         deadline_marker = deadline_fallback_marker(
             selected_checkpoint_sha256=checkpoint_sha,
@@ -1340,6 +1381,9 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
     if pose_release_final_rescue is not None:
         exact[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
+    lateral_fidelity = lateral_fidelity_gate_marker(infos)
+    if lateral_fidelity is not None:
+        exact[lateral_fidelity[0]] = lateral_fidelity[1]
     checkpoint_deadline = (
         validate_deadline_fallback_marker(
             gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
@@ -1500,6 +1544,8 @@ def build_parser() -> argparse.ArgumentParser:
     recipe = subparsers.add_parser("checkpoint-recipe")
     recipe.add_argument("checkpoint", type=Path)
     recipe.add_argument("--shell", action="store_true")
+    lateral = subparsers.add_parser("checkpoint-lateral-fidelity")
+    lateral.add_argument("checkpoint", type=Path)
     return parser
 
 
@@ -1528,6 +1574,9 @@ def main(argv: list[str] | None = None) -> int:
             print(kind, flush=True)
         else:
             print(json.dumps({"recipe": kind}, sort_keys=True), flush=True)
+        return 0
+    if args.command == "checkpoint-lateral-fidelity":
+        print(checkpoint_lateral_fidelity_weight_label(args.checkpoint), flush=True)
         return 0
     if args.command == "resume-mode":
         mode = gate_resume_mode(args.gate, args.checkpoint)

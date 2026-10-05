@@ -230,6 +230,22 @@ register_mjlab_task(
     runner_cls=MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
 )
 
+# Lateral-fidelity variant of the pose-release recipe (restart at a gated
+# fresh-chain model_7099).  The weight label is read from
+# MICROBAN_V12_LATERAL_FIDELITY_WEIGHT when the package is imported.
+from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (  # noqa: E402
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_TASK_ID,
+    make_microban_teleop_v12_lateral_fidelity_env_cfg,
+)
+
+register_mjlab_task(
+    task_id=MICROBAN_TELEOP_V12_LATERAL_FIDELITY_TASK_ID,
+    env_cfg=make_microban_teleop_v12_lateral_fidelity_env_cfg(),
+    play_env_cfg=make_microban_teleop_v12_lateral_fidelity_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV12HandPoseReleaseRlCfg,
+    runner_cls=MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
+)
+
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
     env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(),

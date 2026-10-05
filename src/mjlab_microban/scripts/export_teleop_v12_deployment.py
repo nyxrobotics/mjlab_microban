@@ -56,6 +56,7 @@ from mjlab_microban.scripts.teleop_v12_lr_recovery import (
     PINNED_SOURCE_ITERATION,
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
+    lateral_fidelity_gate_marker,
     pose_release_final_rescue_gate_marker,
     validate_gate,
 )
@@ -93,6 +94,9 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+)
+from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -551,6 +555,7 @@ _BOUNDARY_GATE_INHERITED_INFO_KEYS = (
     MIGRATION_INFO_KEY,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
 )
 
 
@@ -908,6 +913,41 @@ def _final_rescue_metadata(
         "v12_final_rescue_marker_sha256": _canonical_json_sha256(marker),
         "v12_final_rescue_training_replay": replay,
         "v12_final_rescue_final_gate_held_out": "false",
+    }
+
+
+def _lateral_fidelity_metadata(
+    gate: Mapping[str, Any], infos: Mapping[str, Any]
+) -> dict[str, str]:
+    """Name the lateral-fidelity variant in the package (else nothing).
+
+    Its checkpoints keep the plain pose-release recipe string, so the marker
+    (rebuilt from its recorded values, recorded verbatim by the final gate) is
+    what tells the robot that the 7100 -> 15000 segments trained with the
+    mixed-command lateral-deficit term, and from which gated model_7099.
+    """
+
+    lateral = lateral_fidelity_gate_marker(dict(infos))
+    if lateral is None:
+        if gate.get(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY) is not None:
+            raise ValueError(
+                "Final v12 gate names a lateral-fidelity marker its checkpoint "
+                "does not carry"
+            )
+        return {}
+    key, marker = lateral
+    if gate.get(key) != marker:
+        raise ValueError(
+            "Final v12 gate does not record the checkpoint's lateral-fidelity marker"
+        )
+    return {
+        "v12_lateral_fidelity_revision": str(marker["revision"]),
+        "v12_lateral_fidelity_reward_weight": str(marker["reward_weight"]),
+        "v12_lateral_fidelity_parent_checkpoint_sha256": str(
+            marker["parent_checkpoint_sha256"]
+        ),
+        "v12_lateral_fidelity_marker_json": _json(marker),
+        "v12_lateral_fidelity_marker_sha256": _canonical_json_sha256(marker),
     }
 
 
@@ -1285,6 +1325,7 @@ def build_v12_deployment_metadata(
         **microban_source_identity,
     }
     metadata.update(_final_rescue_metadata(gate, infos))
+    metadata.update(_lateral_fidelity_metadata(gate, infos))
     if boundary_stage_gates:
         metadata["v12_boundary_stage_gates_semantics"] = BOUNDARY_STAGE_GATES_SEMANTICS
         metadata["v12_boundary_stage_gates_json"] = _json(

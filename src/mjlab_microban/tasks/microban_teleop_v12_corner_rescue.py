@@ -124,6 +124,10 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIX_ENV = (
     "MICROBAN_V12_PR_CORNER_RESCUE_MIX"
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_DEFAULT_MIX = "lf60"
+# Lateral-fidelity weight label of a lateral-fidelity parent (empty: none).
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_LATERAL_FIDELITY_ENV = (
+    "MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY"
+)
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_MIXES: dict[str, dict[str, Any]] = {
     "lf60": {
         "marker_revision": (
@@ -794,13 +798,29 @@ def make_microban_teleop_v12_corner_rescue_env_cfg(play: bool = False):
 def make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
     play: bool = False,
 ):
-    """Pose-release env with only the hand sampler changed (registered mix)."""
+    """Pose-release env with only the hand sampler changed (registered mix).
+
+    For a lateral-fidelity parent the launcher also sets
+    ``MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY`` to the parent's weight
+    label, which adds the same lateral-deficit term; the runner refuses a
+    parent/env mismatch either way.
+    """
+
+    import os
 
     from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
         make_microban_teleop_v12_hand_pose_release_env_cfg,
     )
+    from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+        apply_lateral_fidelity,
+    )
 
     cfg = make_microban_teleop_v12_hand_pose_release_env_cfg(play=play)
+    lateral_fidelity = os.environ.get(
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_LATERAL_FIDELITY_ENV, ""
+    )
+    if lateral_fidelity:
+        apply_lateral_fidelity(cfg, lateral_fidelity)
     existing = cfg.commands["hand_target"]
     cfg.commands["hand_target"] = CornerPairHandTargetCommandCfg(
         resampling_time_range=existing.resampling_time_range,

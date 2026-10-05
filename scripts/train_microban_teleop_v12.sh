@@ -22,7 +22,7 @@ Usage:
       [--hand-pose-release]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
-      [--seed N]
+      [--lateral-fidelity [--lateral-fidelity-weight 8|16]] [--seed N]
 
 Fresh start checks that the velocity checkpoint's run recorded the current
 (forward-lean) HOME, hashes it, runs the 9x300 raw
@@ -45,6 +45,16 @@ route is a fresh pose-release chain: start --source ... --hand-pose-release.
 No canonical model_7099 is pinned as a recipe-switch parent here, so resuming
 a canonical v11 checkpoint with this option is refused.  A pose-release
 checkpoint is resumed with this option (it is refused without it).
+
+--lateral-fidelity (with --hand-pose-release) trains
+Mjlab-Teleop-V12-HandPoseRelease-LateralFidelity-Microban: the pose-release
+recipe plus the mixed-command lateral-deficit penalty
+(microban_teleop_v12_lateral_fidelity).  Resuming an unmarked fresh-chain
+pose-release model_7099 starts the variant: its stage gate is passed to the
+runner, which records parent and gate in every save.  A marked checkpoint is
+resumed only with this option, at the weight its marker records.
+--lateral-fidelity-weight picks the registered weight label for the start
+(8 = -8, the default; 16 = -16, the declared fallback).
 
 --seed N (default 42) sets --env.seed and --agent.seed of this training
 process only.  It is training randomness, not a gate: no checkpoint lineage
@@ -79,12 +89,22 @@ num_envs=2048
 max_updates=0
 skip_gate=0
 hand_pose_release=0
+lateral_fidelity=0
+lateral_fidelity_weight=""
 train_seed=42
 while (( $# > 0 )); do
     case "$1" in
         --hand-pose-release)
             (( hand_pose_release == 0 )) || fail "Duplicate --hand-pose-release"
             hand_pose_release=1; shift ;;
+        --lateral-fidelity)
+            (( lateral_fidelity == 0 )) || fail "Duplicate --lateral-fidelity"
+            lateral_fidelity=1; shift ;;
+        --lateral-fidelity-weight)
+            (( $# >= 2 )) && [[ "$2" == 8 || "$2" == 16 ]] \
+                || fail "--lateral-fidelity-weight must be 8 or 16"
+            lateral_fidelity_weight="$2"; shift 2
+            ;;
         --canary) (( canary == 0 )) || fail "Duplicate --canary"; canary=1; shift ;;
         --source)
             (( $# >= 2 )) || fail "--source requires a checkpoint path"
@@ -121,6 +141,14 @@ while (( $# > 0 )); do
         *) fail "Unsupported override: $1" ;;
     esac
 done
+
+if (( lateral_fidelity == 1 )); then
+    (( hand_pose_release == 1 )) || fail "--lateral-fidelity requires --hand-pose-release"
+    [[ "${mode}" == resume ]] \
+        || fail "--lateral-fidelity restarts a gated pose-release model_7099 (resume only)"
+elif [[ -n "${lateral_fidelity_weight}" ]]; then
+    fail "--lateral-fidelity-weight requires --lateral-fidelity"
+fi
 
 cd -- "${PROJECT_ROOT}"
 completed=0
@@ -238,6 +266,33 @@ else
     elif [[ "${recipe_kind}" == hand_pose_release ]]; then
         fail "Checkpoint uses the hand pose-release recipe; pass --hand-pose-release"
     fi
+    if [[ "${recipe_kind}" == hand_pose_release ]]; then
+        recorded_lf="$(uv run --locked python -m \
+            mjlab_microban.scripts.teleop_v12_stage checkpoint-lateral-fidelity \
+            "${checkpoint}" | tail -n 1)"
+    else
+        recorded_lf=none
+    fi
+    if (( lateral_fidelity == 1 )); then
+        if [[ "${recorded_lf}" == none ]]; then
+            (( iteration == 7099 )) \
+                || fail "The lateral-fidelity variant starts only at a gated pose-release model_7099"
+            (( skip_gate == 0 )) || fail "The lateral-fidelity start needs the stage gate"
+            lateral_fidelity_weight="${lateral_fidelity_weight:-8}"
+            gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"
+            runner_args+=(
+                --agent.lateral-fidelity-switch-gate "${gate}"
+                --agent.lateral-fidelity-switch-gate-sha256 "${gate_sha}"
+            )
+        else
+            [[ -z "${lateral_fidelity_weight}" || "${lateral_fidelity_weight}" == "${recorded_lf}" ]] \
+                || fail "Checkpoint records lateral-fidelity weight ${recorded_lf}, not ${lateral_fidelity_weight}"
+            lateral_fidelity_weight="${recorded_lf}"
+        fi
+        export MICROBAN_V12_LATERAL_FIDELITY_WEIGHT="${lateral_fidelity_weight}"
+    elif [[ "${recorded_lf}" != none ]]; then
+        fail "Checkpoint uses the lateral-fidelity variant; pass --lateral-fidelity"
+    fi
     read -r target mandatory_activation_canary < <(
         uv run --locked python -m mjlab_microban.scripts.teleop_v12_stage \
             route "${completed}" --shell
@@ -265,6 +320,10 @@ echo "[INFO] v12 completed=${completed} target=${target} process_updates=${itera
 task=Mjlab-Teleop-V12-Microban
 if (( hand_pose_release == 1 )); then
     task=Mjlab-Teleop-V12-HandPoseRelease-Microban
+fi
+if (( lateral_fidelity == 1 )); then
+    task=Mjlab-Teleop-V12-HandPoseRelease-LateralFidelity-Microban
+    echo "[INFO] lateral-fidelity weight label=${MICROBAN_V12_LATERAL_FIDELITY_WEIGHT}"
 fi
 echo "[INFO] task=${task} seed=${train_seed}"
 exec uv run --locked train "${task}" \

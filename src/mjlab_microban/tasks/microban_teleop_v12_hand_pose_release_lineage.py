@@ -122,9 +122,14 @@ def _parent_forbidden_info_keys() -> tuple[str, ...]:
         TELEOP_V12_PREVIEW_INFO_KEY,
     )
 
+    from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
+    )
+
     return (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
         *_rescue_info_keys(),
         TELEOP_V12_PREVIEW_INFO_KEY,
         "preview_non_deployable",
@@ -305,6 +310,10 @@ def hand_pose_release_lineage(
 ) -> str:
     """Classify (and validate) the lineage of a pose-release-recipe checkpoint.
 
+    A ``microban_teleop_v12_lateral_fidelity`` marker (the lateral-fidelity
+    variant restarted at a gated fresh-chain model_7099) is validated here and
+    keeps the fresh-chain classification.
+
     Returns ``fresh_chain`` (or its corner-rescue / final-rescue variants:
     ``fresh_chain_model9900_corner_rescue``,
     ``fresh_chain_model14900_final_rescue``,
@@ -376,6 +385,23 @@ def hand_pose_release_lineage(
     )
     if release is not None and experimental is not None:
         raise ValueError("A checkpoint cannot carry both pose-release switch markers")
+    from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
+        validate_lateral_fidelity_infos,
+    )
+
+    if infos.get(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY) is not None:
+        # The lateral-fidelity variant restarts a fresh chain at its gated
+        # model_7099; it may go through the corner rescue, but not through a
+        # recipe switch or the (unadapted) pose-release final rescue.
+        if release is not None or experimental is not None or final is not None:
+            raise ValueError(
+                "The lateral-fidelity variant applies only to a fresh "
+                "pose-release chain (optionally through the corner rescue)"
+            )
+        validate_lateral_fidelity_infos(
+            infos, iteration=iteration, verify_parent=verify_parent
+        )
     if (corner is not None or final is not None) and (
         release is not None or experimental is not None
     ):

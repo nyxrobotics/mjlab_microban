@@ -91,6 +91,25 @@ class MicrobanTeleopV12HandPoseReleaseOnPolicyRunner(
         switch = cfg.pop("experimental_recipe_switch", False)
         release_gate = cfg.pop("release_recipe_switch_gate", "") or ""
         release_gate_sha256 = cfg.pop("release_recipe_switch_gate_sha256", "") or ""
+        lf_gate = cfg.pop("lateral_fidelity_switch_gate", "") or ""
+        lf_gate_sha256 = cfg.pop("lateral_fidelity_switch_gate_sha256", "") or ""
+        if not isinstance(lf_gate, str) or not isinstance(lf_gate_sha256, str):
+            raise TypeError("lateral_fidelity_switch_gate options must be strings")
+        lf_switch = bool(lf_gate or lf_gate_sha256)
+        if lf_switch and (
+            not lf_gate
+            or len(lf_gate_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in lf_gate_sha256)
+        ):
+            raise ValueError(
+                "lateral_fidelity_switch_gate requires the gate path and its SHA-256"
+            )
+        if lf_switch and not cfg.get("resume", False):
+            raise ValueError("The lateral-fidelity start applies only to a resume")
+        self.lateral_fidelity_switch_gate = lf_gate if lf_switch else None
+        self.lateral_fidelity_switch_gate_sha256 = lf_gate_sha256 if lf_switch else None
+        # Lateral-fidelity marker carried by every save of this run, or None.
+        self.teleop_v12_lateral_fidelity: dict[str, Any] | None = None
         if type(switch) is not bool:
             raise TypeError("experimental_recipe_switch must be a boolean")
         if not isinstance(release_gate, str) or not isinstance(
@@ -218,11 +237,20 @@ class MicrobanTeleopV12HandPoseReleaseOnPolicyRunner(
             validate_hand_pose_release_switch_marker(marker)
         else:
             raise ValueError("Hand pose release resumes only v11 or its own recipe")
+        lateral_fidelity = self._lateral_fidelity_for_parent(
+            payload, infos, checkpoint=resolved, checkpoint_sha256=before
+        )
         loaded = super().load(
             str(resolved), load_cfg=load_cfg, strict=strict, map_location=map_location
         )
         if sha256_file(resolved) != before:
             raise ValueError("Hand pose-release parent changed while loading")
+        if self.lateral_fidelity_switch_gate is not None and sha256_file(
+            Path(self.lateral_fidelity_switch_gate).resolve()
+        ) != (self.lateral_fidelity_switch_gate_sha256):
+            raise ValueError("Lateral-fidelity start gate changed while loading")
+        self.teleop_v12_lateral_fidelity = lateral_fidelity
+        self._assert_lateral_fidelity_environment()
         if release_switch and recipe == MICROBAN_TELEOP_V12_RECIPE_REVISION:
             assert self.release_recipe_switch_gate is not None
             if sha256_file(Path(self.release_recipe_switch_gate).resolve()) != (
@@ -234,9 +262,93 @@ class MicrobanTeleopV12HandPoseReleaseOnPolicyRunner(
         self._assert_hand_pose_release_environment()
         return loaded
 
+    def _lateral_fidelity_for_parent(
+        self,
+        payload: dict,
+        infos: dict,
+        *,
+        checkpoint: Path,
+        checkpoint_sha256: str,
+    ) -> dict[str, Any] | None:
+        """The lateral-fidelity marker this run will carry (validated), or None."""
+
+        from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+            installed_lateral_fidelity_weight,
+            lateral_fidelity_marker,
+            validate_lateral_fidelity_infos,
+            validate_lateral_fidelity_parent_payload,
+            verify_lateral_fidelity_parent,
+        )
+
+        if self.lateral_fidelity_switch_gate is None:
+            return validate_lateral_fidelity_infos(
+                infos, iteration=payload.get("iter"), verify_parent=True
+            )
+        weight = installed_lateral_fidelity_weight(self.env)
+        if weight is None:
+            raise ValueError(
+                "The lateral-fidelity start trains only under "
+                "Mjlab-Teleop-V12-HandPoseRelease-LateralFidelity-Microban"
+            )
+        validate_lateral_fidelity_parent_payload(payload)
+        gate_path = Path(self.lateral_fidelity_switch_gate).expanduser().resolve(
+            strict=True
+        )
+        if sha256_file(gate_path) != self.lateral_fidelity_switch_gate_sha256:
+            raise ValueError("Lateral-fidelity start gate SHA-256 mismatch")
+        marker = lateral_fidelity_marker(
+            parent_checkpoint_path=portable_bootstrap_artifact_path(checkpoint),
+            parent_checkpoint_sha256=checkpoint_sha256,
+            parent_stage_gate_path=portable_bootstrap_artifact_path(gate_path),
+            parent_stage_gate_sha256=self.lateral_fidelity_switch_gate_sha256,  # type: ignore[arg-type]
+            weight=weight,
+        )
+        # Same validator every consumer runs: hashes + full stage gate.
+        verify_lateral_fidelity_parent(marker)
+        return marker
+
+    def _assert_lateral_fidelity_environment(self) -> None:
+        """The live term exists exactly when a marker is bound, at its weight."""
+
+        from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+            installed_lateral_fidelity_weight,
+            validate_lateral_fidelity_marker,
+        )
+
+        weight = installed_lateral_fidelity_weight(self.env)
+        marker = self.teleop_v12_lateral_fidelity
+        if marker is None:
+            if weight is not None:
+                raise RuntimeError(
+                    "The lateral-fidelity term trains only a checkpoint carrying "
+                    "its marker (start it with the lateral-fidelity switch gate)"
+                )
+            return
+        marker = validate_lateral_fidelity_marker(marker)
+        if weight is None:
+            raise RuntimeError(
+                "A lateral-fidelity checkpoint trains only under its own task "
+                "(Mjlab-Teleop-V12-HandPoseRelease-LateralFidelity-Microban)"
+            )
+        if weight != marker["reward_weight"]:
+            raise RuntimeError(
+                f"Lateral-fidelity weight {weight} differs from the checkpoint's "
+                f"{marker['reward_weight']}"
+            )
+
     def _contract_infos(self, infos: dict | None = None) -> dict:
         self._assert_hand_pose_release_environment()
+        self._assert_lateral_fidelity_environment()
         result = super()._contract_infos(infos)
+        if self.teleop_v12_lateral_fidelity is not None:
+            from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+                MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
+                validate_lateral_fidelity_marker,
+            )
+
+            result[MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY] = (
+                validate_lateral_fidelity_marker(self.teleop_v12_lateral_fidelity)
+            )
         result["microban_teleop_recipe_revision"] = (
             MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
         )
