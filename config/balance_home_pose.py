@@ -8,6 +8,7 @@ Usage (from the training repository root)::
     uv run python config/balance_home_pose.py --trunk-pitch-deg 10 --write
     uv run python config/balance_home_pose.py --check         # exit 1 unless balanced
     uv run python config/balance_home_pose.py --yaml other_home.yaml
+    uv run python config/balance_home_pose.py --write --force  # HOME for another training line
 
 Two unknowns, two equations.  The unknowns are the hip pitch and the ankle
 pitch, applied to both legs with the same value (the repository's mirror
@@ -49,12 +50,21 @@ the table shows both.
 when ``--trunk-pitch-deg`` differs from the YAML), keeps every comment, line
 and line ending, then re-loads the file through the HOME loader (and restores
 the original bytes if that fails).  A YAML that already holds the canonical
-solution is left untouched.
+solution is left untouched.  Values are written with a guaranteed decimal
+point (``1.0e-05``) and -0.0 as 0.0, so the same pose has one HOME hash.
+
+Before writing, the balanced HOME is checked against this checkout's training
+tasks (``mjlab_microban.robot.home_pose_training``: a subprocess imports
+``mjlab_microban.tasks`` at that HOME).  A HOME they refuse -- a pitched trunk,
+shoulder pitch other than 0, an arm HOME outside the PICO receiver box -- is
+not written unless ``--force`` is given; ``--no-training-check`` skips the
+check.  ``--check`` looks at the balance only.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import itertools
 import math
 import sys
@@ -77,13 +87,16 @@ from mjlab_microban.robot.home_pose import (
     MICROBAN_XML,
     PoseAnalysis,
     analyze_pose,
+    describe_home_yaml_error,
     home_pose_from_values,
     joint_limits_rad,
     load_home_pose,
+    normalized_float,
     read_home_pose_yaml,
     rewrite_home_pose_yaml,
     validate_home_inputs,
 )
+from mjlab_microban.robot.home_pose_training import check_training_line
 
 SIDES = ("left", "right")
 HIP = "hip_pitch"
@@ -114,6 +127,14 @@ START_HIP_RAD = 0.0
 START_ANKLE_RAD = 0.0
 
 
+# Shown when the training tasks refuse a HOME (see home_pose_training).
+TRAINING_LINE_HINT = (
+    "This checkout retrains only at HOMEs its tasks accept: trunk_pitch_deg 0 (a pitched "
+    "trunk needs branch forward-lean-v2), shoulder pitch 0 (PICO contract v12) and an arm "
+    "HOME whose reachable hand box stays inside the PICO receiver's +-0.064 m box."
+)
+
+
 class BalanceError(ValueError):
     """The HOME cannot be balanced (the message says why)."""
 
@@ -132,6 +153,8 @@ class BalanceResult:
     iterations: int
     before_within_tolerance: bool = False
     """The YAML pitches already met the solver tolerances (maybe not canonical)."""
+    name: str = ""
+    label: str = "home"
 
     @property
     def updates_deg(self) -> dict[str, float]:
@@ -437,7 +460,10 @@ def balance_joint_pos(
     if yaml_trunk_pitch_deg is None:
         yaml_trunk_pitch_deg = trunk_pitch_deg
     _check_inputs(joint_pos_deg, trunk_pitch_deg)
-    before_deg = {name: float(joint_pos_deg[name]) for name in HOME_JOINT_NAMES}
+    # -0.0 is 0.0 (same pose, same YAML text and HOME hash).
+    trunk_pitch_deg = normalized_float(trunk_pitch_deg)
+    yaml_trunk_pitch_deg = normalized_float(yaml_trunk_pitch_deg)
+    before_deg = {name: normalized_float(joint_pos_deg[name]) for name in HOME_JOINT_NAMES}
     base_rad = {name: float(np.deg2rad(value)) for name, value in before_deg.items()}
     target_rad = float(np.deg2rad(float(trunk_pitch_deg)))
     before = analyze_pose(base_rad, float(np.deg2rad(float(yaml_trunk_pitch_deg))))
@@ -516,21 +542,8 @@ def balance_home_yaml(
     path = Path(path)
     try:
         document = read_home_pose_yaml(path)
-    except FileNotFoundError:
-        raise BalanceError("no such file") from None
-    except IsADirectoryError:
-        raise BalanceError("is a directory, not a YAML file") from None
-    except OSError as error:
-        raise BalanceError(f"cannot read: {error.strerror or error}") from error
-    except UnicodeDecodeError as error:
-        raise BalanceError(f"not UTF-8 text ({error.reason})") from error
-    except yaml.YAMLError as error:
-        mark = getattr(error, "problem_mark", None)
-        problem = getattr(error, "problem", None) or " ".join(str(error).split())
-        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-        raise BalanceError(f"invalid YAML{where}: {problem}") from error
-    except ValueError as error:
-        raise BalanceError(_strip_path(str(error), path)) from error
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        raise BalanceError(describe_home_yaml_error(error, path)) from error
     joint_pos_deg = document["joint_pos_deg"]
     yaml_pitch = document["trunk_pitch_deg"]
     if isinstance(yaml_pitch, bool) or not isinstance(yaml_pitch, (int, float)):
@@ -540,11 +553,14 @@ def balance_home_yaml(
     target = float(yaml_pitch) if trunk_pitch_deg is None else float(trunk_pitch_deg)
     if not math.isfinite(target):
         raise BalanceError("the trunk pitch must be finite")
-    return balance_joint_pos(
+    result = balance_joint_pos(
         joint_pos_deg,  # type: ignore[arg-type]
         target,
         yaml_trunk_pitch_deg=float(yaml_pitch),
         path=path,
+    )
+    return dataclasses.replace(
+        result, name=str(document["name"]), label=str(document["label"])
     )
 
 
@@ -621,7 +637,7 @@ def _table(result: BalanceResult) -> str:
     tilted = f"n/a (sole pitch {tilt_deg:+.3f} deg)"
 
     def deg(value: float) -> str:
-        return f"{value:+.15g}"
+        return f"{normalized_float(value):+.15g}"
 
     def mm(value: float) -> str:
         return f"{value * 1e3:+.6f}"
@@ -669,8 +685,10 @@ def _table(result: BalanceResult) -> str:
             " / ".join(f"{math.degrees(v):+.3e}" for v in before.sole_pitch_rad),
             " / ".join(f"{math.degrees(v):+.3e}" for v in after.sole_pitch_rad),
         ),
-        ("sole roll L / R [deg]", pair(roll_b), pair(roll_a)),
-        ("sole yaw L / R [deg]", pair(yaw_b), pair(yaw_a)),
+        # Roll/yaw of a tilted sole (up to upside down at large knee bends)
+        # are not the ground-contact quantities either.
+        ("sole roll L / R [deg]", contact(pair(roll_b)), pair(roll_a)),
+        ("sole yaw L / R [deg]", contact(pair(yaw_b)), pair(yaw_a)),
         ("root z [m]", f"{before.root_pos[2]:.15f}", f"{after.root_pos[2]:.15f}"),
         ("root quat wxyz", quat(before.root_quat_wxyz), quat(after.root_quat_wxyz)),
         (
@@ -723,6 +741,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit 1 unless the YAML already holds the canonical balanced values",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "with --write: write even if this checkout's training tasks refuse the balanced "
+            "HOME (for a HOME meant for another training line)"
+        ),
+    )
+    parser.add_argument(
+        "--no-training-check",
+        action="store_true",
+        help="skip the training-line check (importing the training tasks at the new HOME)",
+    )
     arguments = parser.parse_args(argv)
 
     try:
@@ -749,11 +780,35 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.check:
         print("NOT balanced (run with --write to fix).")
         return 1
+    training = None
+    if not arguments.no_training_check:
+        training = check_training_line(
+            result.after_deg,
+            result.trunk_pitch_deg,
+            name=result.name,
+            label=result.label,
+            path=result.path or "candidate HOME",
+        )
+        if training.ok:
+            print(
+                "training line: OK (this checkout's training tasks load at the balanced HOME)"
+            )
+        else:
+            print(f"training line: REFUSED: {training.error}")
+            print(f"  {TRAINING_LINE_HINT}")
     if not arguments.write:
         print(
             "Dry run: re-run with --write to rewrite the hip/ankle pitch values in the YAML."
         )
         return 0
+    if training is not None and not training.ok and not arguments.force:
+        print(
+            f"error: cannot write {arguments.yaml}: this checkout cannot retrain at the "
+            f"balanced HOME ({training.error}); fix the edit, or pass --force to write a HOME "
+            "meant for another training line (file left unchanged)",
+            file=sys.stderr,
+        )
+        return 1
     try:
         write_balanced_yaml(result)
         home = load_home_pose(result.path)
@@ -770,14 +825,18 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Wrote {result.path} ({changed}); re-loaded: tag {home.tag}, hash {home.joint_hash}."
     )
-    if home.trunk_pitch_deg != 0.0:
+    if training is not None and not training.ok:
         print(
-            "Note: this training line accepts only trunk_pitch_deg 0.0 at import; a pitched trunk "
-            "needs the home-levelled frames of branch forward-lean-v2."
+            "WARNING: written with --force; this checkout's training tasks will not import "
+            "until the HOME is changed back (or the YAML is moved to a training line that "
+            "accepts it)."
         )
     print(
         "Next steps (config/README.md):\n"
-        "  1. review name/label in the YAML and run: uv run python config/home_pose_tool.py show\n"
+        "  1. name and label are unchanged; edit them to describe the new pose:\n"
+        f"       name:  {result.name!r}\n"
+        f"       label: {result.label!r} (tag is now {home.tag})\n"
+        "     then run: uv run python config/home_pose_tool.py show\n"
         "  2. uv run python config/home_pose_tool.py write-robot --microban-repo ../microban\n"
         "  3. retrain walking, get-up and PICO v12 from scratch at the new HOME, install the\n"
         "     policies in the robot repo, package PICO against it\n"

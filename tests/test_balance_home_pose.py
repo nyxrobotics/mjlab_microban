@@ -19,10 +19,13 @@ import numpy as np
 from mjlab_microban.robot import home_pose
 from mjlab_microban.robot.home_pose import (
     HOME_JOINT_NAMES,
+    home_joint_hash,
     home_pose_from_values,
     load_home_pose,
     rewrite_home_pose_yaml,
+    yaml_float_text,
 )
+from mjlab_microban.robot.home_pose_training import TrainingLineCheck, check_training_line
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -56,9 +59,19 @@ def with_pairs(joints: dict[str, float], **pairs: float) -> dict[str, float]:
     return joints
 
 
-def run_cli(*argv: str) -> tuple[int, str, str]:
+def fake_training_line(joint_pos_deg, trunk_pitch_deg, **_):
+    """Stand-in for the (seconds-long) task import: refuse only a pitched trunk."""
+
+    if float(trunk_pitch_deg) != 0.0:
+        return TrainingLineCheck(False, "NotImplementedError: fake: vertical trunk only")
+    return TrainingLineCheck(True)
+
+
+def run_cli(*argv: str, training=fake_training_line) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(
+        balance, "check_training_line", side_effect=training
+    ):
         code = balance.main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
@@ -375,11 +388,20 @@ class CliTest(unittest.TestCase):
 
     def test_write_with_a_new_trunk_pitch(self):
         before = self.path.read_text()
-        code, out, _ = run_cli(
+        # This training line refuses a pitched trunk: no write without --force.
+        code, out, err = run_cli(
             "--yaml", str(self.path), "--trunk-pitch-deg", "10", "--write"
         )
+        self.assertEqual(code, 1)
+        self.assertIn("training line: REFUSED", out)
+        self.assertIn("pass --force", err)
+        self.assertIn("file left unchanged", err)
+        self.assertEqual(self.path.read_text(), before)
+        code, out, _ = run_cli(
+            "--yaml", str(self.path), "--trunk-pitch-deg", "10", "--write", "--force"
+        )
         self.assertEqual(code, 0)
-        self.assertIn("only trunk_pitch_deg 0.0", out)
+        self.assertIn("WARNING: written with --force", out)
         changes = self.changed_lines(before, self.path.read_text())
         self.assertEqual(
             sorted(old.split(":")[0].strip() for old, _ in changes),
@@ -408,9 +430,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(run_cli("--yaml", str(self.path), "--write")[0], 0)
         self.assertEqual(self.path.read_bytes(), original)
         # Trunk 10 and back.
-        args = ("--yaml", str(self.path), "--write", "--trunk-pitch-deg")
+        args = ("--yaml", str(self.path), "--write", "--force", "--trunk-pitch-deg")
         self.assertEqual(run_cli(*args, "10")[0], 0)
         self.assertEqual(run_cli(*args, "0")[0], 0)
+        self.assertEqual(self.path.read_bytes(), original)
+        # -0 is 0: same file, same identity.
+        self.assertEqual(run_cli(*args, "10")[0], 0)
+        self.assertEqual(run_cli(*args, "-0")[0], 0)
         self.assertEqual(self.path.read_bytes(), original)
         home = load_home_pose(self.path)
         self.assertEqual((home.joint_hash, home.tag), (identity.joint_hash, "centered_home"))
@@ -439,8 +465,57 @@ class CliTest(unittest.TestCase):
         for row in ("COM - sole centre (x) [mm]", "heel margin [mm]", "toe margin [mm]",
                     "sole contact corners"):
             self.assertIn("n/a (sole pitch +14.942 deg)", rows[row])
-        self.assertIn("sole roll L / R [deg]", out)
-        self.assertIn("sole yaw L / R [deg]", out)
+        for row in ("sole roll L / R [deg]", "sole yaw L / R [deg]"):
+            self.assertIn("n/a (sole pitch +14.942 deg)", rows[row])
+        self.assertNotIn("-0 ", out.replace("+0 ", ""))
+
+    def test_negative_zero_and_tiny_values(self):
+        text = self.path.read_text().replace("trunk_pitch_deg: 0.0", "trunk_pitch_deg: -0.0")
+        text = text.replace("  left_knee: 0.0", "  left_knee: -0.0")
+        self.path.write_text(text)
+        home = load_home_pose(self.path)
+        self.assertEqual((home.joint_hash, home.tag), ("bbef07cab8", "centered_home"))
+        self.assertEqual(run_cli("--yaml", str(self.path), "--check")[0], 0)
+        self.assertEqual(
+            home_joint_hash({**home.joint_pos_deg, "left_knee": -0.0}, -0.0), "bbef07cab8"
+        )
+        # A value whose repr has no dot (1e-05) is written as a YAML float.
+        code, _, err = run_cli(
+            "--yaml", str(self.path), "--trunk-pitch-deg", "0.00001", "--write", "--force"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("trunk_pitch_deg: 1.0e-05\n", self.path.read_text())
+        self.assertEqual(load_home_pose(self.path).trunk_pitch_deg, 1.0e-05)
+        import yaml
+
+        for value in (1e-12, 2e-07, -6.5598e-08, 1e16, 5e-324, -0.0, 1.198384259489):
+            text = yaml_float_text(value)
+            self.assertIsInstance(yaml.safe_load(text), float, text)
+            self.assertEqual(yaml.safe_load(text), value + 0.0)
+        self.assertEqual(yaml_float_text(-0.0), "0.0")
+
+    def test_training_line_refusal_blocks_the_write(self):
+        rewrite_home_pose_yaml(
+            self.path, joint_pos_deg={"left_knee": 15.0, "right_knee": 15.0}
+        )
+        before = self.path.read_bytes()
+        refuse = lambda *_, **__: TrainingLineCheck(False, "ValueError: fake receiver box")  # noqa: E731
+        code, out, err = run_cli("--yaml", str(self.path), training=refuse)
+        self.assertEqual(code, 0)
+        self.assertIn("training line: REFUSED: ValueError: fake receiver box", out)
+        code, out, err = run_cli("--yaml", str(self.path), "--write", training=refuse)
+        self.assertEqual((code, err.count("\n")), (1, 1), err)
+        self.assertIn("cannot retrain at the balanced HOME", err)
+        self.assertEqual(self.path.read_bytes(), before)
+        # --no-training-check never runs it; --check does not either.
+        never = mock.Mock(side_effect=AssertionError("must not run"))
+        self.assertEqual(run_cli("--yaml", str(self.path), "--check", training=never)[0], 1)
+        code, out, _ = run_cli(
+            "--yaml", str(self.path), "--write", "--no-training-check", training=never
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("name and label are unchanged", out)
+        self.assertIn("label: 'centered_home' (tag is now centered_home_", out)
 
     def test_bad_files_give_one_line_errors(self):
         good = self.path.read_text()
@@ -494,6 +569,69 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not mirror-consistent", err)
         self.assertEqual(self.path.read_text(), before)
+
+
+class TrainingLineTest(unittest.TestCase):
+    """The real check: import the training tasks at a candidate HOME (subprocess)."""
+
+    def balanced(self, trunk_pitch_deg: float = 0.0, **pairs: float) -> dict[str, float]:
+        joints = with_pairs(yaml_joints(), **pairs)
+        return dict(balance.balance_joint_pos(joints, trunk_pitch_deg).after_deg)
+
+    def test_current_home_and_a_knee_edit_are_trainable(self):
+        self.assertTrue(check_training_line(yaml_joints(), 0.0).ok)
+        # The upright full-body task used to pin the knee to 0.
+        result = check_training_line(self.balanced(knee=15.0), 0.0)
+        self.assertTrue(result.ok, result.error)
+
+    def test_refused_homes_say_why(self):
+        cases = (
+            (self.balanced(elbow=-25.0), 0.0, "receiver box"),
+            (self.balanced(trunk_pitch_deg=10.0), 10.0, "vertical trunk"),
+        )
+        for joints, trunk, message in cases:
+            with self.subTest(message=message):
+                result = check_training_line(joints, trunk)
+                self.assertFalse(result.ok)
+                self.assertIn(message, result.error)
+                self.assertEqual(result.error.count("\n"), 0)
+
+
+class HomePoseToolTest(unittest.TestCase):
+    def run_tool(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "config" / "home_pose_tool.py"), *argv],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+        )
+
+    def test_failures_are_one_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "home_pose.yaml"
+            shutil.copyfile(home_pose.HOME_POSE_YAML, path)
+            rewrite_home_pose_yaml(path, joint_pos_deg={"left_knee": 20.0, "right_knee": 20.0})
+            cases = (
+                (("show", "--yaml", str(path), "--no-training-check"), "soles are not flat"),
+                (("show", "--yaml", str(Path(directory) / "nope.yaml")), "no such file"),
+                (("write-robot", "--microban-repo", directory), "not a microban robot checkout"),
+            )
+            for argv, message in cases:
+                with self.subTest(argv=argv[0]):
+                    completed = self.run_tool(*argv)
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertTrue(completed.stderr.startswith("error: "), completed.stderr)
+                    self.assertEqual(completed.stderr.count("\n"), 1, completed.stderr)
+                    self.assertIn(message, completed.stderr)
+
+    def test_show_reports_the_training_line(self):
+        import json
+
+        completed = self.run_tool("show")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        summary = json.loads(completed.stdout)
+        self.assertEqual(summary["training_line"], {"ok": True, "error": None})
+        self.assertEqual(summary["tag"], "centered_home")
 
 
 class LazyHomeTest(unittest.TestCase):

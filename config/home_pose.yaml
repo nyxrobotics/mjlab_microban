@@ -9,7 +9,8 @@
 # src/mjlab_microban/robot/microban/robot.xml).
 #
 # Changing HOME (see config/README.md):
-#   1. edit the values below,
+#   1. edit the values below (config/README.md lists the ones this training
+#      line can retrain at),
 #   2. optionally re-centre the COM by moving only hip/ankle pitch:
 #      uv run python config/balance_home_pose.py [--write] [--trunk-pitch-deg X]
 #   3. uv run python config/home_pose_tool.py show      # check derived values

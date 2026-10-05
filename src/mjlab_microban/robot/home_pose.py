@@ -77,6 +77,9 @@ HOME_JOINT_NAMES = (
 # symmetry augmentation).
 MIRROR_EQUAL_JOINTS = ("shoulder_pitch", "elbow", "hip_pitch", "knee", "ankle_pitch")
 MIRROR_OPPOSITE_JOINTS = ("shoulder_roll", "hip_roll", "hip_yaw", "ankle_roll")
+# Single (midline) joints whose mirror image is their negative: head yaw and
+# neck roll must be 0 for a mirror-symmetric HOME (neck pitch is free).
+MIRROR_ZERO_JOINTS = ("head", "neck_roll")
 
 TRUNK_BODY = "trunk"
 # Virtual head point used by the get-up rewards (mdp._TRUNK_TO_HEAD_OFFSET).
@@ -359,12 +362,42 @@ def joint_limits_rad(xml_path: Path | str = MICROBAN_XML) -> dict[str, tuple[flo
 # HOME identity
 
 
-def canonical_home_string(joint_pos_deg: Mapping[str, float], trunk_pitch_deg: float) -> str:
-    """Canonical text of the HOME inputs (what the identity hash covers)."""
+def normalized_float(value: float) -> float:
+    """``float(value)`` with -0.0 mapped to 0.0 (one pose, one identity)."""
 
-    parts = [f"{name}={float(joint_pos_deg[name])!r}" for name in sorted(HOME_JOINT_NAMES)]
-    parts.append(f"trunk_pitch_deg={float(trunk_pitch_deg)!r}")
+    return float(value) + 0.0
+
+
+def canonical_home_string(joint_pos_deg: Mapping[str, float], trunk_pitch_deg: float) -> str:
+    """Canonical text of the HOME inputs (what the identity hash covers).
+
+    -0.0 and 0.0 are the same angle and give the same text.
+    """
+
+    parts = [
+        f"{name}={normalized_float(joint_pos_deg[name])!r}" for name in sorted(HOME_JOINT_NAMES)
+    ]
+    parts.append(f"trunk_pitch_deg={normalized_float(trunk_pitch_deg)!r}")
     return ";".join(parts)
+
+
+def yaml_float_text(value: float) -> str:
+    """Text for a finite float that YAML 1.1 (PyYAML) reads back as that float.
+
+    ``repr`` round-trips, but PyYAML only takes ``1e-05`` as a float with a
+    dot in the mantissa (``1.0e-05``); -0.0 is written as 0.0.
+    """
+
+    value = normalized_float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"HOME values must be finite, got {value!r}")
+    mantissa, marker, exponent = repr(value).partition("e")
+    if "." not in mantissa:
+        mantissa += ".0"
+    text = mantissa + marker + exponent
+    if yaml.safe_load(text) != value:  # pragma: no cover - guards the rule above
+        raise AssertionError(f"{text!r} does not read back as {value!r}")
+    return text
 
 
 def home_joint_hash(joint_pos_deg: Mapping[str, float], trunk_pitch_deg: float) -> str:
@@ -507,6 +540,12 @@ def validate_home_inputs(joint_pos_deg: Mapping[str, float], trunk_pitch_deg: fl
             raise ValueError(
                 f"HOME is not mirror symmetric: left_{joint} {left} != -right_{joint} {right}"
             )
+    for joint in MIRROR_ZERO_JOINTS:
+        if float(joint_pos_deg[joint]) != 0.0:
+            raise ValueError(
+                f"HOME is not mirror symmetric: {joint} = {joint_pos_deg[joint]} deg turns or "
+                "tilts the head to one side (it must be 0)"
+            )
     for name, (lower, upper) in joint_limits_rad().items():
         value = float(np.deg2rad(float(joint_pos_deg[name])))
         if not lower <= value <= upper:
@@ -530,9 +569,9 @@ def home_pose_from_values(
     if not isinstance(label, str) or not _LABEL_RE.match(label):
         raise ValueError(f"HOME label must match {_LABEL_RE.pattern}, got {label!r}")
     validate_home_inputs(joint_pos_deg, trunk_pitch_deg)
-    degrees = {name_: float(joint_pos_deg[name_]) for name_ in HOME_JOINT_NAMES}
+    degrees = {name_: normalized_float(joint_pos_deg[name_]) for name_ in HOME_JOINT_NAMES}
     radians = {name_: float(np.deg2rad(value)) for name_, value in degrees.items()}
-    pitch_deg = float(trunk_pitch_deg)
+    pitch_deg = normalized_float(trunk_pitch_deg)
     pitch_rad = float(np.deg2rad(pitch_deg))
     analysis = analyze_pose(radians, pitch_rad)
     if require_flat_soles:
@@ -577,6 +616,26 @@ def read_home_pose_yaml(path: Path | str = HOME_POSE_YAML) -> dict[str, object]:
     return document
 
 
+def describe_home_yaml_error(error: BaseException, path: Path | str) -> str:
+    """One-line reason for a HOME YAML that cannot be read or loaded."""
+
+    path = Path(path)
+    if isinstance(error, FileNotFoundError):
+        return "no such file"
+    if isinstance(error, IsADirectoryError):
+        return "is a directory, not a YAML file"
+    if isinstance(error, UnicodeDecodeError):
+        return f"not UTF-8 text ({error.reason})"
+    if isinstance(error, OSError):
+        return f"cannot read: {error.strerror or error}"
+    if isinstance(error, yaml.YAMLError):
+        mark = getattr(error, "problem_mark", None)
+        problem = getattr(error, "problem", None) or " ".join(str(error).split())
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        return f"invalid YAML{where}: {problem}"
+    return " ".join(str(error).split()).removeprefix(f"{path}: ")
+
+
 def load_home_pose(path: Path | str = HOME_POSE_YAML) -> HomePose:
     """Load the HOME YAML and compute every derived value."""
 
@@ -604,13 +663,17 @@ def rewrite_home_pose_yaml(
 ) -> str:
     """Rewrite HOME values in place, keeping every comment and line.
 
-    Only the value text of the named keys changes (``repr`` of the float, so
-    it round-trips exactly); quoted keys and line endings are kept.  Returns the new file text.  The result is
-    re-parsed and must contain exactly the requested values.
+    Only the value text of the named keys changes (``yaml_float_text``: the
+    shortest repr with a guaranteed dot, so every finite value round-trips;
+    -0.0 is written as 0.0); quoted keys and line endings are kept.  Returns
+    the new file text.  The result is re-parsed and must contain exactly the
+    requested values.
     """
 
     path = Path(path)
-    updates = {name: float(value) for name, value in (joint_pos_deg or {}).items()}
+    updates = {name: normalized_float(value) for name, value in (joint_pos_deg or {}).items()}
+    if trunk_pitch_deg is not None:
+        trunk_pitch_deg = normalized_float(trunk_pitch_deg)
     unknown = set(updates) - set(HOME_JOINT_NAMES)
     if unknown:
         raise KeyError(f"Unknown HOME joints {sorted(unknown)}")
@@ -630,10 +693,11 @@ def rewrite_home_pose_yaml(
             indented = bool(match["indent"])
             quoted = f"{match['quote']}{key}{match['quote']}"
             if in_joints and indented and key in updates:
-                body = f"{match['indent']}{quoted}:{match['gap']}{updates[key]!r}{match['tail']}"
+                value_text = yaml_float_text(updates[key])
+                body = f"{match['indent']}{quoted}:{match['gap']}{value_text}{match['tail']}"
                 seen.add(key)
             elif not indented and key == "trunk_pitch_deg" and trunk_pitch_deg is not None:
-                body = f"{quoted}:{match['gap']}{float(trunk_pitch_deg)!r}{match['tail']}"
+                body = f"{quoted}:{match['gap']}{yaml_float_text(trunk_pitch_deg)}{match['tail']}"
                 seen.add(key)
         out.append(body + newline)
     wanted = set(updates) | ({"trunk_pitch_deg"} if trunk_pitch_deg is not None else set())
@@ -641,10 +705,13 @@ def rewrite_home_pose_yaml(
         raise ValueError(f"{path}: could not find HOME lines for {sorted(wanted - seen)}")
     text = "".join(out)
     document = yaml.safe_load(text)
+    def read_back(value: object) -> float | None:
+        return float(value) if isinstance(value, float) else None
+
     for name, value in updates.items():
-        if float(document["joint_pos_deg"][name]) != value:
+        if read_back(document["joint_pos_deg"][name]) != value:
             raise AssertionError(f"rewrite of {name} did not round-trip")
-    if trunk_pitch_deg is not None and float(document["trunk_pitch_deg"]) != float(trunk_pitch_deg):
+    if trunk_pitch_deg is not None and read_back(document["trunk_pitch_deg"]) != trunk_pitch_deg:
         raise AssertionError("rewrite of trunk_pitch_deg did not round-trip")
     path.write_bytes(text.encode("utf-8"))
     return text

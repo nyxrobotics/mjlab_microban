@@ -119,8 +119,15 @@ def make_microban_teleop_upright_fullbody_env_cfg(
             abs_tol=1.0e-9,
         ):
             raise ValueError(f"Upright full-body HOME drifted: {name}")
+    # The knee is whatever config/home_pose.yaml says (it used to be pinned to
+    # 0 here); like hip/ankle pitch above it must only match the shared HOME.
     for name in ("left_knee", "right_knee"):
-        if float(joint_pos[name]) != 0.0:
+        if not isclose(
+            float(joint_pos[name]),
+            float(HOME_FRAME.joint_pos[name]),
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
             raise ValueError(f"Upright full-body HOME drifted: {name}")
     # The disabled v12 prior still loads its old-HOME walk004 motion during
     # command construction. A new policy must not read or learn from it.

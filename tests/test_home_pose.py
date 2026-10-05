@@ -220,8 +220,12 @@ class AnalyzePoseTest(unittest.TestCase):
         asymmetric_roll = dict(CENTERED_DEG, left_hip_roll=6.0)
         out_of_range = dict(CENTERED_DEG, left_knee=400.0, right_knee=400.0)
         tilted = dict(CENTERED_DEG, left_hip_pitch=3.0, right_hip_pitch=3.0)
+        head_turned = dict(CENTERED_DEG, head=30.0)
+        neck_tilted = dict(CENTERED_DEG, neck_roll=5.0)
         for case, joints in (
             ("missing", missing),
+            ("head_turned", head_turned),
+            ("neck_tilted", neck_tilted),
             ("asymmetric", asymmetric),
             ("asymmetric_roll", asymmetric_roll),
             ("out_of_range", out_of_range),
