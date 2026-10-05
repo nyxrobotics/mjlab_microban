@@ -250,12 +250,27 @@ class MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner(
                 None if corner is None else canonical_json_sha256(corner)
             ),
             sampler_mix=self._live_mix(),
+            training_seed=self._live_training_seed(),
+            num_envs=int(self.env.unwrapped.num_envs),
         )
         self._assert_final_rescue_environment()
         self._assert_live_optimizer_step(
             MICROBAN_TELEOP_V12_FINAL_RESCUE_PARENT_OPTIMIZER_STEP
         )
         return loaded
+
+    def _live_training_seed(self) -> int:
+        """The process seed (the train CLI sets env seed = agent seed)."""
+
+        agent_seed = self.cfg.get("seed")
+        env_seed = getattr(self.env.unwrapped.cfg, "seed", None)
+        if (
+            isinstance(agent_seed, bool)
+            or not isinstance(agent_seed, int)
+            or env_seed != agent_seed
+        ):
+            raise RuntimeError("Final rescue environment and agent seeds disagree")
+        return agent_seed
 
     def _contract_infos(self, infos: dict | None = None) -> dict:
         self._assert_final_rescue_environment()

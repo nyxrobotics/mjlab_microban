@@ -19,7 +19,7 @@ usage() {
 Usage:
   scripts/train_microban_teleop_v12_hand_pose_release_final_rescue.sh \
     MODEL_14900 FAILED_FINAL_GATE_TRACKING_REPORT --mix pr_vN \
-    [--agent.run-name NAME]
+    [--seed N] [--agent.run-name NAME]
 
 MODEL_14900 must be the unmarked pose-release model_14900.pt (fresh chain,
 optionally through the pose-release model9900 corner rescue; all 20 adapter
@@ -39,7 +39,9 @@ The launcher validates both on CPU, stages the immutable parent, the report
 and the parent run's resume record (params/agent.yaml, so the packager's
 resume-ancestry walk reaches the gated 10100/10000 boundaries) under
 pr_final_rescue_seed_<sha16>/ and runs exactly 99 updates to model_14999.
-Gate the result with scripts/evaluate_microban_teleop_v12_stage.sh RUN 14999.
+--seed N (default 42) is the training process seed (env = agent seed); the
+marker records it.  Gate the result with
+scripts/evaluate_microban_teleop_v12_stage.sh RUN 14999.
 EOF_USAGE
 }
 
@@ -54,6 +56,7 @@ source_checkpoint="$1"
 failed_report="$2"
 shift 2
 mix=""
+train_seed=42
 output_run_name=""
 while (( $# > 0 )); do
     case "$1" in
@@ -61,6 +64,10 @@ while (( $# > 0 )); do
             (( $# >= 2 )) || fail "--mix requires NAME"
             [[ "$2" =~ ^pr_v[0-9]+$ ]] || fail "Unsafe mix name."
             mix="$2"; shift 2 ;;
+        --seed)
+            (( $# >= 2 )) && [[ "$2" =~ ^(0|[1-9][0-9]{0,8})$ ]] \
+                || fail "--seed requires a non-negative integer"
+            train_seed="$2"; shift 2 ;;
         --agent.run-name)
             (( $# >= 2 )) || fail "--agent.run-name requires NAME"
             [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fail "Unsafe output run name."
@@ -69,7 +76,11 @@ while (( $# > 0 )); do
     esac
 done
 [[ -n "${mix}" ]] || fail "--mix pr_vN is required."
-[[ -n "${output_run_name}" ]] || output_run_name="v12_pr_final_rescue_${mix}_14901_to15000"
+if [[ -z "${output_run_name}" ]]; then
+    suffix=""
+    (( train_seed == 42 )) || suffix="_seed${train_seed}"
+    output_run_name="v12_pr_final_rescue_${mix}${suffix}_14901_to15000"
+fi
 [[ "${output_run_name}" != "${SEED_PREFIX}"* && "${output_run_name}" != final_rescue_seed_* ]] \
     || fail "Output run name is reserved for the immutable seed."
 
@@ -97,7 +108,8 @@ cd -- "${PROJECT_ROOT}"
     || fail "Final rescue training requires a clean committed source tree."
 # Same run as the failed gate, rescuable failures, mix covers them.
 uv run --locked python -m mjlab_microban.scripts.teleop_v12_hand_pose_release_final_rescue \
-    validate-parent "${source_checkpoint}" "${failed_report}" --mix "${mix}" >/dev/null
+    validate-parent "${source_checkpoint}" "${failed_report}" --mix "${mix}" \
+    --seed "${train_seed}" >/dev/null
 
 seed_run="${SEED_PREFIX}${source_sha:0:16}"
 seed_dir="${LOG_ROOT}/${seed_run}"
@@ -126,12 +138,12 @@ else
     mv -- "${seed_dir}/.parent_run.tmp" "${seed_dir}/parent_run.txt"
 fi
 
-echo "[INFO] authenticated ${TASK} mix=${mix} parent=${source_sha} (${parent_run_dir##*/})"
+echo "[INFO] authenticated ${TASK} mix=${mix} seed=${train_seed} parent=${source_sha} (${parent_run_dir##*/})"
 echo "[INFO] failed_gate_report=${failed_report_sha}"
 echo "[INFO] completed=14901 target=15000 process_updates=${PROCESS_UPDATES}"
 export MICROBAN_V12_PR_FINAL_RESCUE_MIX="${mix}"
 exec uv run --locked train "${TASK}" \
-    --env.scene.num-envs 2048 --env.seed 42 --agent.seed 42 \
+    --env.scene.num-envs 2048 --env.seed "${train_seed}" --agent.seed "${train_seed}" \
     --agent.num-steps-per-env 24 --agent.max-iterations "${PROCESS_UPDATES}" \
     --agent.save-interval "${PROCESS_UPDATES}" --agent.logger tensorboard \
     --agent.upload-model False --enable-nan-guard True \
