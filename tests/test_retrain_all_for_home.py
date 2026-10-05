@@ -8,6 +8,7 @@ import math
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -346,3 +347,284 @@ class DryRunSmokeCorpusTest(unittest.TestCase):
         self.assertEqual(dry_run_tools.SMOKE_ROWS, 16)
         source = (REPO / "scripts" / "home_pipeline" / "dry_run_tools.py").read_text()
         self.assertIn("rows[i % len(rows)] for i in range(SMOKE_ROWS)", source)
+
+
+class ArgumentsTest(unittest.TestCase):
+    def test_rescue_mixes_and_dry_run_options(self):
+        args = make_pipeline().args
+        self.assertEqual(args.pr_corner_rescue_mixes, ["lf60", "lf90", "lf72", "lf72"])
+        self.assertEqual(args.v12_9999_attempts, 2)
+        args = make_pipeline(None, "--pr-corner-rescue-mixes", "lf72, lf90").args
+        self.assertEqual(args.pr_corner_rescue_mixes, ["lf72", "lf90"])
+        for bad in (["--pr-corner-rescue-mixes", "lf61"], ["--v12-9999-attempts", "0"], ["--dry-run-plumbing"],
+                    ["--dry-run-simulate-failures"]):
+            with self.assertRaises(SystemExit):
+                with unittest.mock.patch("sys.stderr"):
+                    make_pipeline(None, *bad)
+        p = make_pipeline(None, "--dry-run", "--dry-run-plumbing")
+        self.assertTrue(p.plumbing)
+        self.assertFalse(make_pipeline(None, "--dry-run").plumbing)
+
+    def test_a_dry_run_needs_a_walker_of_this_home_or_plumbing_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            robot = PreflightTest().robot(Path(d), reads_yaml=True)
+            p = make_pipeline(None, "--dry-run")
+            p.robot = robot
+            with self.assertRaisesRegex(pipeline.PipelineError, "--dry-run-plumbing") as raised:
+                p.preflight()
+            self.assertEqual(raised.exception.code, pipeline.EXIT_INPUT)
+            p = make_pipeline(None, "--dry-run", "--dry-run-walk-init", str(Path(d) / "model_7.pt"))
+            p.robot = robot
+            with self.assertRaisesRegex(pipeline.PipelineError, "model_<N>.pt"):
+                p.preflight()
+            (Path(d) / "model_7.pt").write_bytes(b"x")
+            p.preflight()
+            p = make_pipeline(None, "--dry-run", "--dry-run-plumbing")
+            p.robot = robot
+            p.preflight()
+
+
+class SimulatedFailureTest(unittest.TestCase):
+    def schedule(self, mode: str) -> dict[str, bool]:
+        with tempfile.TemporaryDirectory() as d:
+            p = make_pipeline(Path(d), "--dry-run", "--dry-run-plumbing", "--dry-run-simulate-failures",
+                              "--dry-run-simulate-9999", mode)
+            keys = ["canary:3000_to3100", "canary:3000_to3100", "9999:a1", "rescue:a1r1_lf60",
+                    "rescue:a1r2_lf90", "9999:a2", "rescue:a2r1_lf60", "stage:3100_to7000"]
+            return [p.simulated_failure(k) for k in keys]
+
+    def test_routes(self):
+        self.assertEqual(self.schedule("retrain"), [True, False, True, True, True, False, True, False])
+        self.assertEqual(self.schedule("rescue"), [True, False, True, True, False, False, True, False])
+        self.assertEqual(self.schedule("stop"), [True, False, True, True, True, True, True, False])
+
+    def test_real_runs_never_simulate(self):
+        p = make_pipeline()
+        self.assertFalse(p.simulated_failure("9999:a1"))
+
+
+class Boundary9999Test(unittest.TestCase):
+    """The automatic 10000-boundary escalation: gate -> corner rescues -> retrain -> stop."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.v12 = root / "v12"
+        self.v12.mkdir()
+        self.original_v12 = pipeline.V12_EXP
+        pipeline.V12_EXP = self.v12
+        self.p = make_pipeline(root / "state")
+        (root / "state").mkdir()
+        self.p.prefix = "home_x"
+        self.p.check_recipe = lambda run, end: None
+        self.calls: list = []
+
+    def tearDown(self):
+        pipeline.V12_EXP = self.original_v12
+        self.tmp.cleanup()
+
+    def make_run(self, name: str, end: int = 9999) -> str:
+        (self.v12 / name).mkdir(exist_ok=True)
+        (self.v12 / name / f"model_{end}.pt").write_bytes(name.encode())
+        return name
+
+    def wire(self, gates: dict[str, bool], rescues: dict[int, str | None]):
+        def judged_gate(run, end, key):
+            self.calls.append(("gate", run, key))
+            return gates[key], ([] if gates[key] else ["hand_tracking_rms"]), []
+
+        def corner_rescues(run, attempt):
+            self.calls.append(("rescues", run, attempt))
+            return rescues.get(attempt)
+
+        def attempt_9999(parent, attempt):
+            self.calls.append(("retrain", parent, attempt))
+            return self.make_run(f"r_a{attempt}")
+
+        self.p.judged_gate, self.p.corner_rescues, self.p.attempt_9999 = judged_gate, corner_rescues, attempt_9999
+
+    def test_passing_gate(self):
+        self.wire({"9999:a1": True}, {})
+        first = self.make_run("first")
+        self.assertEqual(self.p.boundary_9999("p7099", first), "first")
+        self.assertEqual(self.p.get("pico", "b9999", "passed", "kind"), "segment")
+
+    def test_rescue_then_resume_skips_everything(self):
+        self.wire({"9999:a1": False}, {1: self.make_run("rescue_lf90")})
+        self.assertEqual(self.p.boundary_9999("p7099", self.make_run("first")), "rescue_lf90")
+        self.assertEqual(self.p.get("pico", "b9999", "passed", "kind"), "corner_rescue")
+        self.calls.clear()
+        self.assertEqual(self.p.boundary_9999("p7099", "first"), "rescue_lf90")
+        self.assertEqual(self.calls, [])
+
+    def test_retrain_from_the_gated_7099_after_every_rescue_failed(self):
+        self.wire({"9999:a1": False, "9999:a2": True}, {})
+        self.assertEqual(self.p.boundary_9999("p7099", self.make_run("first")), "r_a2")
+        self.assertEqual(self.calls, [("gate", "first", "9999:a1"), ("rescues", "first", 1),
+                                      ("retrain", "p7099", 2), ("gate", "r_a2", "9999:a2")])
+        self.assertEqual(self.p.get("pico", "b9999", "passed", "attempt"), 2)
+
+    def test_stops_after_the_last_attempt(self):
+        self.wire({"9999:a1": False, "9999:a2": False}, {})
+        with self.assertRaisesRegex(pipeline.PipelineError, "9999 boundary failed after 2 attempt"):
+            self.p.boundary_9999("p7099", self.make_run("first"))
+        self.assertEqual([c[0] for c in self.calls], ["gate", "rescues", "retrain", "gate", "rescues"])
+        self.assertIsNone(self.p.get("pico", "b9999", "passed"))
+
+
+class CornerRescueMixesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.v12 = root / "v12"
+        self.v12.mkdir()
+        self.original_v12 = pipeline.V12_EXP
+        pipeline.V12_EXP = self.v12
+        (root / "state").mkdir()
+        self.p = make_pipeline(root / "state")
+        self.p.prefix = "home_x"
+        (self.v12 / "first").mkdir()
+        (self.v12 / "first" / "model_9900.pt").write_bytes(b"parent")
+        (self.v12 / "first" / "model_9999.pt").write_bytes(b"first")
+        (root / "state" / "pico").mkdir()
+        (root / "state" / "pico" / "first_model_9900_strict_tracking.json").write_text("{}")
+        self.p.check_recipe = lambda run, end: None
+        self.p.ensure_committed_tree = lambda: self.trained.append("commit")
+        self.trained: list = []
+        self.validated: list = []
+
+        def gpu_job(need, name, cmd, kind, **kwargs):
+            seg = cmd[cmd.index("--agent.run-name") + 1]
+            self.trained.append(cmd[cmd.index("--mix") + 1])
+            (self.v12 / f"2026-01-01_00-00-0{len(self.trained)}_{seg}").mkdir()
+            (self.v12 / f"2026-01-01_00-00-0{len(self.trained)}_{seg}" / "model_9999.pt").write_bytes(seg.encode())
+
+        self.p.gpu_job = gpu_job
+
+    def tearDown(self):
+        pipeline.V12_EXP = self.original_v12
+        self.tmp.cleanup()
+
+    def validator(self, rc: int):
+        def capture(cmd, **kwargs):
+            self.validated.append(kwargs["env"]["MICROBAN_V12_PR_CORNER_RESCUE_MIX"])
+            return unittest.mock.Mock(returncode=rc, stdout="", stderr="ValueError: refused")
+        self.p.capture = capture
+
+    def test_mixes_in_order_until_one_passes_and_resume(self):
+        self.validator(0)
+        self.p.judged_gate = lambda run, end, key: (key == "rescue:a1r2_lf90", [], [])
+        rescue = self.p.corner_rescues("first", 1)
+        self.assertTrue(rescue.endswith("_home_x_v12_pr_rescue_a1r2_lf90_9901_to10000"))
+        self.assertEqual(self.trained, ["commit", "lf60", "commit", "lf90"])
+        self.assertEqual(self.validated, ["lf60", "lf90"])
+        self.assertFalse(self.p.get("pico", "b9999", "rescues", "a1r1_lf60", "passed"))
+        # A rerun skips the failed lf60 and reuses the trained lf90 run.
+        self.trained.clear()
+        self.validated.clear()
+        self.assertEqual(self.p.corner_rescues("first", 1), rescue)
+        self.assertEqual(self.trained, [])
+        self.assertEqual(self.validated, ["lf90"])
+
+    def test_every_mix_is_tried_and_repeats_are_new_runs(self):
+        self.validator(0)
+        self.p.judged_gate = lambda run, end, key: (False, ["hand_tracking_rms"], [])
+        self.assertIsNone(self.p.corner_rescues("first", 1))
+        self.assertEqual([m for m in self.trained if m != "commit"], ["lf60", "lf90", "lf72", "lf72"])
+        runs = {v["run"] for v in self.p.get("pico", "b9999", "rescues").values()}
+        self.assertEqual(len(runs), 4)
+
+    def test_a_refused_parent_skips_the_rescues(self):
+        self.validator(1)
+        self.p.judged_gate = lambda run, end, key: self.fail("no gate without a rescue")
+        self.assertIsNone(self.p.corner_rescues("first", 1))
+        self.assertEqual(self.trained, [])
+        self.assertIn("refused", self.p.get("pico", "b9999", "attempts", "1", "rescue_parent", "refused"))
+
+    def test_no_model_9900(self):
+        (self.v12 / "first" / "model_9900.pt").unlink()
+        self.assertIsNone(self.p.corner_rescues("first", 1))
+
+
+class CommittedTreeTest(unittest.TestCase):
+    def test_only_the_home_yaml_is_committed_for_the_rescue(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True)  # noqa: E731
+            git("init", "-q")
+            git("config", "user.email", "t@example.com")
+            git("config", "user.name", "t")
+            (repo / "config").mkdir()
+            yaml_path = repo / "config" / "home_pose.yaml"
+            yaml_path.write_text("a: 1\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            originals = pipeline.REPO, pipeline.HOME_YAML
+            pipeline.REPO, pipeline.HOME_YAML = repo, yaml_path
+            try:
+                p = make_pipeline(repo / "state")
+                p.home = {"tag": "knee15", "joint_hash": "abc", "trunk_pitch_deg": 0.0}
+                yaml_path.write_text("a: 2\n")
+                p.yaml_sha256 = pipeline.sha256(yaml_path)
+                (repo / "state").mkdir()
+                (repo / ".gitignore").write_text("state/\n")
+                git("add", ".gitignore")
+                git("commit", "-qm", "ignore")
+                p.ensure_committed_tree()
+                log = subprocess.run(["git", "-C", d, "log", "-1", "--format=%s"], capture_output=True,
+                                     text=True).stdout
+                self.assertIn("Set HOME knee15", log)
+                p.ensure_committed_tree()  # clean: nothing to do
+                (repo / "other.py").write_text("x\n")
+                with self.assertRaisesRegex(pipeline.PipelineError, "other.py"):
+                    p.ensure_committed_tree()
+            finally:
+                pipeline.REPO, pipeline.HOME_YAML = originals
+
+
+class DryRunToolsTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(REPO / "scripts" / "home_pipeline"))
+        import dry_run_tools
+
+        self.tools = dry_run_tools
+
+    def test_forced_probe_keeps_the_measured_values(self):
+        receipt = {"summary": {"scenario_count": 9, "completed_scenario_count": 4, "fall_scenario_count": 5,
+                               "directionally_correct_scenario_count": 1},
+                   "results": [{"completed": False, "fell": True, "executed_steps": 120,
+                                "maximum_actual_soft_limit_violation_rad": 0.5}] * 9}
+        forced = self.tools.forced_probe_report(receipt, 0.0873)
+        for key, value in self.tools.PROBE_PASS_SUMMARY.items():
+            self.assertIs(type(forced["summary"][key]), type(value))
+            self.assertEqual(forced["summary"][key], value)
+        self.assertTrue(all(r["completed"] and not r["fell"] and r["executed_steps"] == 300
+                            and r["maximum_actual_soft_limit_violation_rad"] == 0.0 for r in forced["results"]))
+        self.assertEqual(forced["dry_run_original_summary"]["fall_scenario_count"], 5)
+        self.assertEqual(forced["dry_run_original_results"][0]["executed_steps"], 120)
+        self.assertTrue(forced["dry_run_forced_pass_not_deployable"])
+        self.assertEqual(receipt["summary"]["fall_scenario_count"], 5)  # input untouched
+        with self.assertRaises(ValueError):
+            self.tools.forced_probe_report({"summary": {}, "results": []}, 0.0873)
+
+    def test_stamped_rescue_carries_the_pose_release_corner_lineage(self):
+        from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION as PR,
+        )
+        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
+            HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE,
+            hand_pose_release_lineage,
+        )
+
+        for mix in ("lf60", "lf72", "lf90"):
+            infos = self.tools.corner_rescue_infos({"microban_teleop_recipe_revision": PR},
+                                                   parent_sha256="a" * 64, report_sha256="b" * 64, mix=mix,
+                                                   provenance={})
+            self.assertEqual(hand_pose_release_lineage(infos, iteration=10099),
+                             HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE)
+            self.assertTrue(infos["dry_run_synthetic_corner_rescue"]["not_deployable"])
+            with self.assertRaises(ValueError):  # a rescue of a rescue
+                self.tools.corner_rescue_infos(infos, parent_sha256="a" * 64, report_sha256="b" * 64, mix=mix,
+                                               provenance={})

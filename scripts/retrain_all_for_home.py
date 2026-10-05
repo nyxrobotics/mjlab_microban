@@ -35,14 +35,22 @@ same command resumes after a crash, a stall or a fixed failure):
    (scripts/train_microban_teleop_v12.sh start --hand-pose-release), stage
    route 0 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000 with
    scripts/evaluate_microban_teleop_v12_stage.sh at every boundary.  Automatic
-   rescues: an accuracy-only canary failure is retrained once; a failed 9999
-   gate tries the pose-release model_9900 corner rescue (scripts/
-   train_microban_teleop_v12_corner_rescue.sh --hand-pose-release --mix
-   <--pr-corner-rescue-mix>, which accepts only a fresh pose-release parent
-   failing hand accuracy only, as its validator authenticates; its model_9999
-   is gated by the stage evaluator and resumed as an ordinary pose-release
-   checkpoint); the 15000 gate of the pose-release recipe is
-   judged under its completion-allowance profile by the stage evaluator.
+   rescues: an accuracy-only canary failure is retrained once.  The 10000
+   boundary escalates on its own (the route the 2026-10 forward-lean chain
+   took by hand): a failed 9999 gate tries the pose-release model_9900 corner
+   rescues, one run per mix of --pr-corner-rescue-mixes (default lf60, lf90,
+   lf72, lf72; scripts/train_microban_teleop_v12_corner_rescue.sh
+   --hand-pose-release --mix M, whose validator accepts only a fresh
+   pose-release parent failing hand accuracy only), each gated at 9999; if
+   they all fail, 7100->10000 is retrained from the gated model_7099 as a new
+   attempt (run <prefix>_v12_7100_to10000_a2, gated, then its own rescues), up
+   to --v12-9999-attempts (default 2); then the run stops.  The first rescue
+   commits config/home_pose.yaml on the training branch (the rescue launcher
+   trains only from a clean committed tree).  A passing rescue's model_9999
+   (lineage fresh_chain_model9900_corner_rescue) or attempt is resumed as an
+   ordinary pose-release checkpoint; the 15000 gate of the pose-release
+   recipe is judged under its completion-allowance profile by the stage
+   evaluator.
 5. Export walk.onnx / getup.onnx, install them, the robot HOME yaml and the
    run pins (walking source / probe / walk.onnx SHA-256s, HOME literals of the
    robot tests) into --robot-repo, package PICO against that robot tree
@@ -64,13 +72,34 @@ the job needs; a job whose log is not written for the stall limit is killed
 and the command exits 2 (rerun to resume).  Ctrl-C / SIGTERM stops its own
 children and exits.
 
---dry-run exercises the whole plumbing in minutes: 2-3 iterations per stage
-at 64 envs, a warm walking start (--dry-run-walk-init, so the v12 source probe
-can pass), PICO stage boundaries reached by clock lifts, gates in plumbing mode
-(evaluated and reported, not enforced; the final package uses
-scripts/home_pipeline/dry_run_tools.py, artifacts labelled DRYRUN), the robot
-repo must be a scratch clone (origin push URL a local path), the robot commit
-stays local and nothing is pushed or committed in the training repo.
+--dry-run exercises the whole plumbing in minutes at any HOME: 2-3 iterations
+per stage at 64 envs, PICO stage boundaries reached by clock lifts, every gate
+evaluated and recorded but not enforced (plumbing mode; only
+--dry-run-simulate-failures decides the rescue route), the final package
+built by scripts/home_pipeline/dry_run_tools.py (artifacts labelled DRYRUN),
+the robot repo a scratch clone (origin push URL a local path), the robot
+commit local, and nothing pushed or committed in the training repo.  It needs
+one of:
+
+  --dry-run-walk-init WALKER  walking continues from a checkpoint stamped with
+                              this HOME (e.g. the forward-lean cont2
+                              model_29000 for the forward-lean yaml), so the
+                              v12 source probe can pass and the robot
+                              validator and tests are enforced;
+  --dry-run-plumbing          from scratch at any edited HOME: the v12 source
+                              probe, the robot validator and the robot tests
+                              run and are recorded but do not stop the run (a
+                              failed source probe is copied to
+                              DRYRUN_FORCED_PASS_<receipt> and the chain
+                              bootstraps from it).
+
+--dry-run-simulate-failures fails the first gate of each canary and the 9999
+gate; --dry-run-simulate-9999 retrain|rescue|stop picks the 9999 route (all
+rescues fail and attempt 2 passes / the second rescue mix passes / everything
+fails).  A dry corner rescue records the real rescue validator's verdict on
+the dry model_9900 and stands in for the 2048-env rescue run with
+dry_run_tools.py stamp-corner-rescue (the dry model_9999 with the exact
+pose-release corner-rescue marker), so the downstream lineage validators run.
 
 Exit codes: 0 done, 1 a check/gate failed, 2 a job stalled, 3 bad input or
 preflight refusal, 4 another instance holds the state dir, 130 interrupted.
@@ -262,6 +291,7 @@ class Pipeline:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.dry = args.dry_run
+        self.plumbing = bool(args.dry_run and args.dry_run_plumbing)
         self.lock = threading.RLock()
         self.gpu_lock = threading.Lock()
         self.gpu_reservations: dict[int, tuple[int, float]] = {}
@@ -510,6 +540,15 @@ class Pipeline:
             raise PipelineError(f"{REPO} is not a home-config training checkout", EXIT_INPUT)
         if not a.robot_branch:
             raise PipelineError("--robot-branch is required", EXIT_INPUT)
+        if self.dry and a.dry_run_walk_init:
+            seed = Path(a.dry_run_walk_init)
+            if not seed.is_file() or model_index(seed.name) is None:
+                raise PipelineError(f"--dry-run-walk-init must be a walking model_<N>.pt file: {seed}", EXIT_INPUT)
+        elif self.dry and not self.plumbing:
+            raise PipelineError(
+                "a dry run needs --dry-run-walk-init WALKER (a walking checkpoint trained at this HOME, so the "
+                "v12 source probe can pass) or --dry-run-plumbing (from scratch at any HOME: the source probe and "
+                "the robot checks are run and recorded, not enforced)", EXIT_INPUT)
         if self.dry:
             push_url = self.git(self.robot, "remote", "get-url", "--push", "origin", check=False)
             if re.match(r"^(git@|ssh://|https?://)", push_url):
@@ -645,6 +684,19 @@ class Pipeline:
             "loader_contact", "ground_contact", "head_standing_height_m", "feet_lateral_m")}
             | {"balance_tool_canonical": canonical, "training_line": training_line,
                "yaml_sha256": self.yaml_sha256})
+
+    def check_walk_init(self) -> None:
+        """--dry-run-walk-init must be a walking checkpoint trained at this HOME (its stamp)."""
+
+        seed = Path(self.args.dry_run_walk_init).resolve()
+        out = self.capture([*UV, "python", "-m", "mjlab_microban.tasks.microban_velocity_runner", str(seed)],
+                           timeout=900)
+        if out.returncode != 0:
+            raise PipelineError(
+                f"--dry-run-walk-init {seed} was not trained at the HOME of config/home_pose.yaml (its "
+                "microban_walk_home_pose stamp differs): use a walker of this HOME, or run from scratch with "
+                "--dry-run-plumbing\n" + (out.stderr or out.stdout).strip()[-600:], EXIT_INPUT)
+        self.log(f"dry run: warm-start walker {seed} was trained at this HOME")
 
     # -------------------------------------------------- generic segments
     def train_segment(self, exp: Path, label: str, task: str, iterations: int,
@@ -985,6 +1037,13 @@ class Pipeline:
             if self.dry:
                 cmd += ["--max-updates", "2"]
             probe = PROBE_ROOT / f"velocity_{source['sha256'][:16]}_teleop83_raw_9x300.json"
+            forced = self.get("pico", "forced_probe")
+            if forced and forced.get("source_sha256") == source["sha256"] and Path(forced["path"]).is_file():
+                # Plumbing mode: the walker's measured probe failed (kept in
+                # forced["from"]); the chain bootstraps from the forced copy.
+                cmd += ["--dry-run-probe-receipt", forced["path"]]
+                self.gpu_job(a.pico_gpu_mib, seg, cmd, "train")
+                return
             started = time.time()
             seen = {"done": False}
 
@@ -1018,6 +1077,9 @@ class Pipeline:
                     if not bad or raised.secondary:
                         raise
                     error = SourceProbeFailed(f"v12 start refused the fresh source probe {probe.name}")
+                if self.plumbing:
+                    self.force_source_probe(source, probe, str(error))
+                    return self.v12_train(seg, None)
                 # Repeat probes vary by about +-0.01; the next-best candidate
                 # (already probed during selection) gets its own fresh probe.
                 if not self.reselect_walker(str(error)):
@@ -1040,6 +1102,48 @@ class Pipeline:
         if self.dry:
             cmd += ["--dry-run-skip-gate", "--max-updates", "3"]
         self.gpu_job(a.pico_gpu_mib, seg, cmd, "train")
+
+    def force_source_probe(self, source: dict, probe: Path, reason: str) -> None:
+        """Plumbing mode: bootstrap the chain from a forced-pass copy of the failed probe."""
+
+        if not probe.is_file():
+            raise PipelineError(f"plumbing mode: {reason}, and no probe receipt {probe} to force")
+        forced = PROBE_ROOT / f"DRYRUN_FORCED_PASS_{probe.name}"
+        self.run("force_probe_DRYRUN", [*UV, "python", "scripts/home_pipeline/dry_run_tools.py", "force-probe",
+                                        str(probe), str(forced)], "cpu")
+        self.put("pico", "forced_probe", {"path": str(forced), "from": str(probe), "reason": reason,
+                                          "source_sha256": source["sha256"], "measured": probe_verdict(probe)})
+        self.log(f"plumbing mode: the v12 source probe failed ({reason}); NOT ENFORCED, the chain "
+                 f"bootstraps from the forced-pass receipt {forced.name} (not deployable)")
+
+    def simulated_failure(self, key: str) -> bool:
+        """--dry-run-simulate-failures: does this gate count as failed?
+
+        Keys: ``canary:<segment>`` (its first gate), ``9999:a<attempt>`` and
+        ``rescue:a<attempt>r<index>_<mix>``.  --dry-run-simulate-9999 picks the
+        9999 route: ``retrain`` fails the 9999 gate and every corner rescue of
+        attempt 1 and passes the retrained attempt 2 (the route of the 2026-10
+        forward-lean chain); ``rescue`` passes the second rescue mix; ``stop``
+        fails everything so the boundary stops.
+        """
+
+        if not (self.dry and self.args.dry_run_simulate_failures):
+            return False
+        mode = self.args.dry_run_simulate_9999
+        if key.startswith("canary:"):
+            done = set(self.get("pico", "simulated_failures") or [])
+            if key in done:
+                return False
+            self.put("pico", "simulated_failures", sorted(done | {key}))
+            return True
+        if key == "9999:a1":
+            return True
+        if key.startswith("9999:a"):
+            return mode == "stop"
+        if key.startswith("rescue:"):
+            index = int(re.match(r"rescue:a\d+r(\d+)_", key).group(1))
+            return mode != "rescue" or index == 1
+        return False
 
     def v12_gate(self, run: str, end: int) -> tuple[int, list[str], list[str]]:
         prefix = GATE_ROOT / f"{run}_model_{end}"
@@ -1079,49 +1183,207 @@ class Pipeline:
                                                          "other_failed": other, "profile": profile})
         return rc, trk, other
 
-    def corner_rescue(self, run: str) -> str:
-        """Try the pose-release model_9900 corner rescue of a failed 9999 gate; return its run.
+    def judged_gate(self, run: str, end: int, key: str) -> tuple[bool, list[str], list[str]]:
+        """Gate ``run``/model_<end>; return (passed, tracking failed, other failed).
 
-        The chain is a fresh pose-release chain, so the rescue is the
-        pose-release variant (Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-
-        Microban, sampler mix --pr-corner-rescue-mix); its model_9999 keeps the
-        pose-release recipe and is gated like any stage checkpoint.
+        A real run is judged by the gate itself (an existing validating gate
+        is reused; a recorded failure of the same checkpoint bytes is not
+        re-evaluated).  A dry run evaluates and records every gate it can, but
+        only --dry-run-simulate-failures decides the route (plumbing mode).
         """
 
+        ckpt = V12_EXP / run / f"model_{end}.pt"
+        digest = sha256(ckpt)
+        record = self.get("pico", "gates", f"{run}_model_{end}")
+        if not self.dry and self.gate_ok(run, end):
+            self.log(f"gate {end}: the existing gate validates for {run}")
+            rc, trk, other = 0, [], []
+        elif record and record.get("checkpoint_sha256") == digest:
+            rc, trk, other = record["rc"], record["tracking_failed"], record["other_failed"]
+            self.log(f"gate {end} {run}: recorded rc={rc} tracking failed={trk} other failed={other}")
+        elif self.dry and self.args.dry_run_gates == "final" and end != 14999:
+            rc, trk, other = 0, [], []
+        else:
+            rc, trk, other = self.v12_gate(run, end)
+            self.put("pico", "gates", f"{run}_model_{end}", "checkpoint_sha256", digest)
+        if self.simulated_failure(key):
+            self.log(f"dry run: simulating an accuracy-only failure of gate {end} ({key}, {run})")
+            return False, ["hand_tracking_rms"], []
+        if self.dry:
+            return True, trk, other
+        return rc == 0, trk, other
+
+    def check_recipe(self, run: str, end: int) -> None:
+        ckpt = V12_EXP / run / f"model_{end}.pt"
+        kind = self.last_line(self.stage_tool("checkpoint-recipe", str(ckpt), "--shell"))
+        if kind != "hand_pose_release":
+            raise PipelineError(f"{ckpt} recipe kind {kind} != hand_pose_release")
+
+    def ensure_committed_tree(self) -> None:
+        """The corner-rescue launcher trains only from a clean, committed tree.
+
+        The HOME edit is the only change a run allows, so commit it now (the
+        release commit of step 6 follows on the same branch); anything else
+        stops the run.
+        """
+
+        status = self.git(REPO, "status", "--porcelain", "--untracked-files=all")
+        dirty = sorted({line[3:] for line in status.splitlines() if line.strip()})
+        if not dirty:
+            return
+        if dirty != ["config/home_pose.yaml"] or sha256(HOME_YAML) != self.yaml_sha256:
+            raise PipelineError("9999 gate failed; the corner rescue needs a clean, committed training tree "
+                                f"but these files are modified or untracked: {dirty}")
+        h = self.home
+        commit = self.commit(REPO, ["config/home_pose.yaml"], (
+            f"Set HOME {h['tag']} for retraining every policy\n\n"
+            f"HOME {h['tag']} (hash {h['joint_hash']}, trunk {h.get('trunk_pitch_deg')} deg).  Committed by "
+            "scripts/retrain_all_for_home.py before the pose-release corner rescue of the v12\n"
+            "9999 boundary, whose launcher trains only from a clean committed tree.  The release\n"
+            "commit with the retrained policies follows on this branch."))
+        self.log(f"committed config/home_pose.yaml ({(commit or '')[:12]}) for the corner rescue")
+        self.put("training", "home_yaml_commit", commit)
+
+    def rescue_parent(self, run: str, attempt: int) -> Path | None:
+        """model_9900 of a 7100->10000 attempt (a dry run lifts its model_9999 to 9900)."""
+
         parent = V12_EXP / run / "model_9900.pt"
-        if not parent.is_file():
-            raise PipelineError(f"9999 gate failed and {parent} does not exist (no corner rescue parent)")
-        report = self.state_dir / "pico" / f"{run}_model_9900_strict_tracking.json"
+        if parent.is_file() or not self.dry:
+            return parent if parent.is_file() else None
+        lifted = V12_EXP / f"{self.prefix}_v12_dry_parent9900_a{attempt}"
+        if not (lifted / "model_9900.pt").is_file():
+            shutil.rmtree(lifted, ignore_errors=True)
+            self.run(f"lift_parent9900_a{attempt}", [*UV, "python", "scripts/home_pipeline/dry_run_tools.py",
+                                                     "lift-clock", str(V12_EXP / run / "model_9999.pt"),
+                                                     str(lifted), "9900"], "cpu")
+        return lifted / "model_9900.pt"
+
+    def corner_rescues(self, run: str, attempt: int) -> str | None:
+        """Pose-release model_9900 corner rescues of a failed 9999 gate; return the passing run.
+
+        The mixes of --pr-corner-rescue-mixes are tried in order (a repeated
+        mix is a new run: GPU nondeterminism), each gated at 9999 like any
+        stage checkpoint.  A parent the rescue validator refuses (the 9999
+        gate did not fail on hand accuracy only) skips the rescues.  A dry run
+        records the validator's verdict and stands in for the 2048-env rescue
+        with dry_run_tools.py stamp-corner-rescue.
+        """
+
+        parent = self.rescue_parent(run, attempt)
+        if parent is None:
+            self.log(f"corner rescue: {run} has no model_9900; no rescue for attempt {attempt}")
+            self.put("pico", "b9999", "attempts", str(attempt), "rescue_parent", None)
+            return None
+        report = self.state_dir / "pico" / f"{parent.parent.name}_model_9900_strict_tracking.json"
         report.parent.mkdir(exist_ok=True)
         if not report.exists():
-            self.gpu_job(self.args.probe_gpu_mib, "rescue_parent_report", [
+            self.gpu_job(self.args.probe_gpu_mib, f"rescue_parent_report_a{attempt}", [
                 *UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking", str(parent),
                 "--expected-sha256", sha256(parent), "--output", str(report), "--force"], "gate",
                 allow_fail=True)
-        mix_env = {"MICROBAN_V12_PR_CORNER_RESCUE_MIX": self.args.pr_corner_rescue_mix}
-        check = self.capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_corner_rescue",
-                              "validate-parent", str(parent), str(report), "--hand-pose-release"],
-                             timeout=1800, env=mix_env)
-        if check.returncode != 0:
-            raise PipelineError("9999 gate failed and the corner rescue refuses model_9900: "
-                                + (check.stderr or check.stdout).strip()[-600:])
-        if self.git(REPO, "status", "--porcelain", "--untracked-files=all"):
-            raise PipelineError("9999 gate failed; the corner rescue is applicable but needs a clean, committed "
-                                "training tree (commit config/home_pose.yaml, then rerun)")
-        seg = f"{self.prefix}_v12_pr_rescue_9901_to10000"
-        rescue = self.latest_v12(seg)
-        if not (rescue and (V12_EXP / rescue / "model_9999.pt").exists()):
-            self.gpu_job(self.args.pico_gpu_mib, seg, ["scripts/train_microban_teleop_v12_corner_rescue.sh",
-                                                       str(parent), str(report), "--hand-pose-release",
-                                                       "--mix", self.args.pr_corner_rescue_mix,
-                                                       "--agent.run-name", seg],
-                         "train")
+        for index, mix in enumerate(self.args.pr_corner_rescue_mixes, 1):
+            key = f"a{attempt}r{index}_{mix}"
+            done = self.get("pico", "b9999", "rescues", key)
+            if done and done.get("passed") is False:
+                self.log(f"corner rescue {key}: failed earlier ({done.get('run')}), next")
+                continue
+            check = self.capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_corner_rescue",
+                                  "validate-parent", str(parent), str(report), "--hand-pose-release"],
+                                 timeout=1800, env={"MICROBAN_V12_PR_CORNER_RESCUE_MIX": mix})
+            verdict = "accepted" if check.returncode == 0 else (
+                (check.stderr or check.stdout).strip().splitlines() or ["refused"])[-1][-400:]
+            if check.returncode != 0:
+                if not self.dry:
+                    self.log(f"corner rescue: the validator refuses {parent.parent.name}/model_9900: {verdict}")
+                    self.put("pico", "b9999", "attempts", str(attempt), "rescue_parent",
+                             {"path": str(parent), "refused": verdict})
+                    return None
+                self.log(f"dry run: the rescue validator refuses the dry parent ({verdict}); plumbing mode, "
+                         "not enforced")
+            seg = f"{self.prefix}_v12_pr_rescue_{key}_9901_to10000"
             rescue = self.latest_v12(seg)
-        if not self.gate_ok(rescue, 9999):
-            self.gpu_job(self.args.probe_gpu_mib, "gate_rescue_9999",
-                         ["scripts/evaluate_microban_teleop_v12_stage.sh", rescue, "9999"], "gate")
-        self.log(f"corner rescue {rescue} passed the 9999 gate")
-        return rescue
+            if not (rescue and (V12_EXP / rescue / "model_9999.pt").is_file()):
+                self.log(f"corner rescue {key}: mix {mix} from {parent.parent.name}/model_9900")
+                if self.dry:
+                    rescue = f"{datetime.now():%Y-%m-%d_%H-%M-%S}_{seg}"
+                    self.run(f"rescue_{key}_DRYRUN", [
+                        *UV, "python", "scripts/home_pipeline/dry_run_tools.py", "stamp-corner-rescue",
+                        str(parent), str(report), str(V12_EXP / run / "model_9999.pt"), str(V12_EXP / rescue),
+                        mix], "cpu")
+                else:
+                    self.ensure_committed_tree()
+                    self.gpu_job(self.args.pico_gpu_mib, f"rescue_{key}", [
+                        "scripts/train_microban_teleop_v12_corner_rescue.sh", str(parent), str(report),
+                        "--hand-pose-release", "--mix", mix, "--agent.run-name", seg], "train")
+                rescue = self.latest_v12(seg)
+                if not (rescue and (V12_EXP / rescue / "model_9999.pt").is_file()):
+                    raise PipelineError(f"corner rescue {key} wrote no model_9999.pt")
+            self.check_recipe(rescue, 9999)
+            passed, trk, other = self.judged_gate(rescue, 9999, f"rescue:{key}")
+            self.put("pico", "b9999", "rescues", key, {"run": rescue, "mix": mix, "attempt": attempt,
+                                                       "parent": str(parent), "validator": verdict,
+                                                       "passed": passed, "tracking_failed": trk,
+                                                       "other_failed": other})
+            self.log(f"corner rescue {key} {rescue}: gate 9999 {'PASS' if passed else 'FAIL'} "
+                     f"(tracking {trk}, other {other})")
+            if passed:
+                return rescue
+        return None
+
+    def attempt_9999(self, parent_7099: str, attempt: int) -> str:
+        """Retrain 7100->10000 from the gated model_7099 as a new attempt; return its run."""
+
+        seg = f"{self.prefix}_v12_7100_to10000_a{attempt}"
+        current = self.latest_v12(seg)
+        if current and (V12_EXP / current / "model_9999.pt").is_file():
+            self.log(f"skip training {seg}: {current}/model_9999.pt exists")
+            return current
+        self.log(f"9999 boundary: retrain 7100->10000 from the gated {parent_7099}/model_7099 "
+                 f"(attempt {attempt}, GPU nondeterminism)")
+        self.v12_train(seg, parent_7099, lift_to=9996 if self.dry else None)
+        current = self.latest_v12(seg)
+        if not (current and (V12_EXP / current / "model_9999.pt").is_file()):
+            raise PipelineError(f"{seg}: model_9999.pt missing after training")
+        return current
+
+    def boundary_9999(self, parent_7099: str, first: str) -> str:
+        """Pass the 10000 boundary automatically; return the run the chain continues from.
+
+        The escalation of the 2026-10 forward-lean chain: the 9999 gate of
+        the 7100->10000 segment; if it fails, the pose-release model_9900
+        corner rescues (every mix of --pr-corner-rescue-mixes); if they all
+        fail, retrain 7100->10000 from the gated model_7099 as a new attempt
+        (gate, then rescues again), up to --v12-9999-attempts; then stop.
+        """
+
+        passed = self.get("pico", "b9999", "passed")
+        if passed and (V12_EXP / passed["run"] / "model_9999.pt").is_file() and \
+                sha256(V12_EXP / passed["run"] / "model_9999.pt") == passed["sha256"]:
+            self.log(f"skip the 9999 boundary: {passed['run']} ({passed['kind']}, attempt {passed['attempt']})")
+            return passed["run"]
+        failures = []
+        for attempt in range(1, self.args.v12_9999_attempts + 1):
+            run = first if attempt == 1 else self.attempt_9999(parent_7099, attempt)
+            self.put("pico", "b9999", "attempts", str(attempt), "run", run)
+            self.check_recipe(run, 9999)
+            ok, trk, other = self.judged_gate(run, 9999, f"9999:a{attempt}")
+            kind, chosen = "segment", run
+            if not ok:
+                self.log(f"gate 9999 failed for attempt {attempt} {run} (tracking {trk}, other {other}); "
+                         "trying the pose-release corner rescues")
+                failures.append(f"attempt {attempt} {run}: tracking {trk}, other {other}")
+                chosen = self.corner_rescues(run, attempt)
+                kind = "corner_rescue"
+            if chosen:
+                record = {"run": chosen, "sha256": sha256(V12_EXP / chosen / "model_9999.pt"),
+                          "attempt": attempt, "kind": kind}
+                self.put("pico", "b9999", "passed", record)
+                self.log(f"9999 boundary passed: {chosen} ({kind}, attempt {attempt})")
+                return chosen
+            self.log(f"9999 boundary: attempt {attempt} and its corner rescues failed")
+        raise PipelineError(f"v12 9999 boundary failed after {self.args.v12_9999_attempts} attempt(s), each with "
+                            f"the corner rescues {','.join(self.args.pr_corner_rescue_mixes)}: "
+                            + "; ".join(failures) + f" (see {self.state_dir / 'STATUS.log'})")
 
     def step_pico(self) -> None:
         self.log("[4/6] PICO v12 pose-release chain")
@@ -1129,18 +1391,11 @@ class Pipeline:
         if final and Path(final["checkpoint"]).is_file() and sha256(Path(final["checkpoint"])) == final["sha256"]:
             self.log(f"skip PICO: final {final['checkpoint']}")
             return
-        a = self.args
         prev: str | None = None
-        simulated = set(self.get("pico", "simulated_failures") or [])
         for index, (suffix, real_end, canary) in enumerate(V12_SEGMENTS):
             seg = f"{self.prefix}_v12_{suffix}"
-            if self.dry:
-                if index == 0:
-                    end = real_end
-                elif canary:
-                    end = V12_SEGMENTS[index - 1][1] + 3
-                else:
-                    end = real_end
+            if self.dry and canary:
+                end = V12_SEGMENTS[index - 1][1] + 3
             else:
                 end = real_end
             current = self.latest_v12(seg)
@@ -1160,42 +1415,22 @@ class Pipeline:
             ckpt = V12_EXP / current / f"model_{end}.pt"
             if not ckpt.is_file():
                 raise PipelineError(f"{ckpt} missing after training")
-            kind = self.last_line(self.stage_tool("checkpoint-recipe", str(ckpt), "--shell"))
-            if kind != "hand_pose_release":
-                raise PipelineError(f"{ckpt} recipe kind {kind} != hand_pose_release")
-            run_gate = not self.dry or a.dry_run_gates == "all" or end == 14999
-            if not self.dry and self.gate_ok(current, end):
-                self.log(f"skip gate {end}: the existing gate validates for {current}")
-            elif self.dry and self.get("pico", "gates", f"{current}_model_{end}"):
-                self.log(f"skip plumbing gate {end}: already evaluated for {current}")
-            elif run_gate:
-                rc, trk, other = self.v12_gate(current, end)
-                key = f"{suffix}"
-                if self.dry and a.dry_run_simulate_failures and key not in simulated and (
-                        canary or real_end == 9999):
-                    simulated.add(key)
-                    self.put("pico", "simulated_failures", sorted(simulated))
-                    rc, trk, other = 1, ["hand_tracking_rms"], []
-                    self.log(f"dry run: simulating an accuracy-only failure of gate {end}")
-                if rc != 0 and canary and trk and set(trk) <= V12_ACCURACY_CHECKS and not other \
-                        and not self.get("pico", "canary_retry", suffix):
-                    self.put("pico", "canary_retry", suffix, current)
-                    self.log(f"canary {end} failed on accuracy only {trk}; retraining it once "
-                             f"(failed run {current} kept)")
-                    self.v12_train(seg, prev)
-                    current = self.latest_v12(seg)
-                    rc, trk, other = self.v12_gate(current, end)
-                elif rc != 0 and real_end == 9999:
-                    self.log(f"gate 9999 failed (tracking {trk}, other {other}); trying the corner rescue")
-                    try:
-                        current = self.corner_rescue(current)
-                        rc = 0
-                    except PipelineError as error:
-                        if not self.dry:
-                            raise
-                        self.log(f"dry run: corner rescue path: {error}")
-                if rc != 0 and not self.dry:
-                    raise PipelineError(f"v12 gate {end} failed for {current}: tracking {trk}, other {other}")
+            self.check_recipe(current, end)
+            if real_end == 9999:
+                prev = self.boundary_9999(prev, current)
+                continue
+            ok, trk, other = self.judged_gate(current, end, f"canary:{suffix}" if canary else f"stage:{suffix}")
+            if not ok and canary and trk and set(trk) <= V12_ACCURACY_CHECKS and not other \
+                    and not self.get("pico", "canary_retry", suffix):
+                self.put("pico", "canary_retry", suffix, current)
+                self.log(f"canary {end} failed on accuracy only {trk}; retraining it once "
+                         f"(failed run {current} kept)")
+                self.v12_train(seg, prev)
+                current = self.latest_v12(seg)
+                self.check_recipe(current, end)
+                ok, trk, other = self.judged_gate(current, end, f"canary:{suffix}")
+            if not ok:
+                raise PipelineError(f"v12 gate {end} failed for {current}: tracking {trk}, other {other}")
             prev = current
         ckpt = V12_EXP / prev / "model_14999.pt"
         gate = GATE_ROOT / f"{prev}_model_14999_gate.json"
@@ -1281,6 +1516,7 @@ class Pipeline:
         # Run pins: frozen walking source + probe of PICO v12, and the walk fallback.
         prov = self.provenance(pico_ckpt)
         src, probe = prov["source"], prov["probe"]
+        self.put("export", "probe_receipt", probe["path"])
         if src["sha256"] != self.get("walk", "selected", "sha256"):
             raise PipelineError("the PICO checkpoint's walking source is not the selected walker")
         changed = self.edit_robot(robot_pins.PICO_HYBRID, lambda t: robot_pins.set_hex_pin(
@@ -1369,7 +1605,12 @@ class Pipeline:
         except ValueError:
             report = {}
         (out / "validate_pico_policy.json").write_text(valid.stdout or valid.stderr)
-        if valid.returncode != 0 or report.get("status") != "pass":
+        self.put("export", "robot_validator", {"rc": valid.returncode, "status": report.get("status")})
+        if (valid.returncode != 0 or report.get("status") != "pass") and self.plumbing:
+            self.log("plumbing mode: tools/validate_pico_policy.py rejected the installed pico_teleop.onnx "
+                     f"(recorded in {out / 'validate_pico_policy.json'}, NOT ENFORCED): "
+                     + ((valid.stderr or valid.stdout).strip().splitlines() or [""])[-1][-300:])
+        elif valid.returncode != 0 or report.get("status") != "pass":
             raise PipelineError("tools/validate_pico_policy.py rejected the installed pico_teleop.onnx: "
                                 + (valid.stderr or valid.stdout).strip()[-1200:])
         expected = {"v12_legacy_source_checkpoint_sha256": src["sha256"],
@@ -1377,13 +1618,20 @@ class Pipeline:
         for key, value in expected.items():
             if report.get(key) not in (None, value):
                 raise PipelineError(f"validator report {key}={report.get(key)} != {value}")
-        self.log(f"robot validator: pass (walk fallback {report.get('walk_fallback', {}).get('status')})")
+        if report.get("status") == "pass":
+            self.log(f"robot validator: pass (walk fallback {report.get('walk_fallback', {}).get('status')})")
         tests = self.capture(["uv", "run", "--project", str(self.robot), "--locked", "--with", "pytest", "python",
                               "-m", "pytest", "-q", "tests"], cwd=self.robot,
                              env={"PYTHONPATH": str(self.robot / "src"), "CUDA_VISIBLE_DEVICES": ""},
                              timeout=3600)
         (out / "robot_tests.log").write_text(tests.stdout + tests.stderr)
         summary = (tests.stdout.strip().splitlines() or ["(no output)"])[-1]
+        if tests.returncode != 0 and self.plumbing:
+            failed = [l for l in tests.stdout.splitlines() if l.startswith(("FAILED", "ERROR"))][:30]
+            self.log(f"plumbing mode: robot test suite failed ({summary}; NOT ENFORCED, log "
+                     f"{out / 'robot_tests.log'}): " + "; ".join(failed[:8]))
+            self.put("export", "robot_tests", f"NOT ENFORCED (plumbing): {summary}")
+            return
         if tests.returncode != 0:
             failed = [l for l in tests.stdout.splitlines() if l.startswith(("FAILED", "ERROR"))][:30]
             raise PipelineError("robot test suite failed: " + summary + "\n" + "\n".join(failed)
@@ -1467,7 +1715,8 @@ class Pipeline:
         record = {
             "home": self.get("home"), "prefix": self.prefix, "walk": sel,
             "walk_runs": self.get("walk", "runs"), "getup": self.get("getup"), "pico": pf,
-            "pico_gates": self.get("pico", "gates"), "exports": exp,
+            "pico_gates": self.get("pico", "gates"), "pico_9999_boundary": self.get("pico", "b9999"),
+            "pico_forced_probe": self.get("pico", "forced_probe"), "exports": exp,
             "robot": {"repo": str(self.robot), "branch": self.args.robot_branch, "commit": robot_commit},
             "training": self.get("training"), "finished": f"{datetime.now():%F %T}",
         }
@@ -1529,7 +1778,9 @@ class Pipeline:
         files.append(walker)
         if (walker.parent / "params").is_dir():
             files += sorted(p for p in (walker.parent / "params").iterdir() if p.is_file())
-        files.append(PROBE_ROOT / f"velocity_{sel['sha256'][:16]}_teleop83_raw_9x300.json")
+        probe = self.get("export", "probe_receipt")  # repo:// path of the PICO chain's provenance
+        files.append(REPO / probe[len("repo://"):] if probe and probe.startswith("repo://") else
+                     PROBE_ROOT / f"velocity_{sel['sha256'][:16]}_teleop83_raw_9x300.json")
         getup_ckpt = Path(gf["checkpoint"])
         files.append(getup_ckpt)
         if (getup_ckpt.parent / "params").is_dir():
@@ -1557,6 +1808,8 @@ class Pipeline:
         self.open_state()
         self.prepare_branches()
         self.step_home()
+        if self.dry and self.args.dry_run_walk_init:
+            self.check_walk_init()
         errors: list = []
         walk = self.threaded("walk", self.step_walk, errors)
         getup = None
@@ -1641,20 +1894,39 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="free GPU memory before a v12 training job (2048 envs use about 16.1 GB)")
     p.add_argument("--probe-gpu-mib", type=int, default=3000, help="free GPU memory before a probe/eval/gate")
     p.add_argument("--dry-run", action="store_true", help="plumbing run with 2-3 iterations per stage")
-    p.add_argument("--dry-run-walk-init", help="dry run: walking continues from this checkpoint (so the v12 "
-                   "source probe can pass)")
+    p.add_argument("--dry-run-walk-init", help="dry run: walking continues from this checkpoint, which must "
+                   "be stamped with this HOME (so the v12 source probe can pass)")
+    p.add_argument("--dry-run-plumbing", action="store_true",
+                   help="dry run from scratch at any HOME: the v12 source probe, the robot validator and the "
+                   "robot tests are run and recorded but do not stop the run (a failed source probe is forced "
+                   "to pass in a DRYRUN_FORCED_PASS_ copy)")
     p.add_argument("--dry-run-gates", choices=("all", "final"), default="all")
     p.add_argument("--dry-run-simulate-failures", action="store_true",
-                   help="dry run: treat the first canary/9999 gates as failed to exercise the rescues")
+                   help="dry run: treat the first gate of each canary and the 9999 gate as failed to exercise "
+                   "the canary retry and the 9999 escalation")
+    p.add_argument("--dry-run-simulate-9999", choices=("retrain", "rescue", "stop"), default="retrain",
+                   help="with --dry-run-simulate-failures: retrain = every corner rescue of attempt 1 fails, the "
+                   "retrained attempt 2 passes; rescue = the second rescue mix passes; stop = everything fails")
     p.add_argument("--dry-envs", type=int, default=64)
-    p.add_argument("--pr-corner-rescue-mix", choices=("lf60", "lf72", "lf90"), default="lf60",
-                   help="sampler mix of the pose-release corner rescue of a failed 9999 gate")
+    p.add_argument("--pr-corner-rescue-mixes", default="lf60,lf90,lf72,lf72",
+                   help="sampler mixes of the pose-release corner rescues tried, in order, after a failed 9999 "
+                   "gate (a repeated mix is a new run); the order of the 2026-10 forward-lean chain")
+    p.add_argument("--v12-9999-attempts", type=int, default=2,
+                   help="7100->10000 attempts (the first plus retrains from the gated model_7099), each with "
+                   "its corner rescues, before the 9999 boundary stops the run")
     args = p.parse_args(argv)
+    mixes = [m.strip() for m in args.pr_corner_rescue_mixes.split(",") if m.strip()]
+    bad = [m for m in mixes if m not in ("lf60", "lf72", "lf90")]
+    if bad:
+        p.error(f"--pr-corner-rescue-mixes: unknown mix(es) {bad} (lf60, lf72, lf90)")
+    args.pr_corner_rescue_mixes = mixes
+    if args.v12_9999_attempts < 1:
+        p.error("--v12-9999-attempts must be at least 1")
     if args.dry_run:
         args.probe_every, args.probe_min = 1, 0
         args.select_top, args.select_repeats = min(args.select_top, 2), min(args.select_repeats, 2)
         args.train_gpu_mib = args.pico_gpu_mib = args.probe_gpu_mib = 2500
-    elif args.dry_run_walk_init or args.dry_run_simulate_failures:
+    elif args.dry_run_walk_init or args.dry_run_simulate_failures or args.dry_run_plumbing:
         p.error("--dry-run-* options need --dry-run")
     return args
 

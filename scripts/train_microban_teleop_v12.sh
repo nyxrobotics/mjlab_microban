@@ -18,7 +18,7 @@ usage() {
 Usage:
   scripts/train_microban_teleop_v12.sh start --source VELOCITY_MODEL.pt [--source-sha256 SHA]
       [--canary] [--agent.run-name NAME] [--num-envs N] [--max-updates N]
-      [--hand-pose-release]
+      [--hand-pose-release] [--dry-run-probe-receipt DRYRUN_FORCED_PASS_RECEIPT]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
 
@@ -30,7 +30,10 @@ its SHA-256 and the probe receipt are recorded in every checkpoint and
 re-hashed on every save/resume, so keep the source file in place.
 --num-envs (default 2048) and --max-updates (cap on this process's updates)
 exist for plumbing dry runs; --dry-run-skip-gate resumes without a stage gate
-and must never be used for a release chain. Resume requires a schema-v2 hash-bound locomotion + tracking
+and --dry-run-probe-receipt starts from a DRYRUN_FORCED_PASS_* probe receipt
+(scripts/home_pipeline/dry_run_tools.py force-probe, the from-scratch plumbing
+dry run of scripts/retrain_all_for_home.py) instead of probing the source;
+both must never be used for a release chain. Resume requires a schema-v2 hash-bound locomotion + tracking
 + ONNX gate produced by scripts/evaluate_microban_teleop_v12_stage.sh. Normal
 runs stop at 3000/7000/10000/15000. A boundary that activates push, HMD/hand,
 or feet is followed by a mandatory 100-update canary and a second gate before
@@ -70,6 +73,7 @@ source_sha=""
 num_envs=2048
 max_updates=0
 skip_gate=0
+dry_probe=""
 hand_pose_release=0
 while (( $# > 0 )); do
     case "$1" in
@@ -98,6 +102,13 @@ while (( $# > 0 )); do
             max_updates="$2"; shift 2
             ;;
         --dry-run-skip-gate) skip_gate=1; shift ;;
+        --dry-run-probe-receipt)
+            (( $# >= 2 )) || fail "--dry-run-probe-receipt requires a receipt path"
+            dry_probe="$(realpath -e -- "$2")" || fail "Probe receipt not found: $2"
+            [[ "${dry_probe##*/}" == DRYRUN_FORCED_PASS_* ]] \
+                || fail "--dry-run-probe-receipt accepts only a DRYRUN_FORCED_PASS_* receipt"
+            shift 2
+            ;;
         --agent.run-name)
             (( $# >= 2 )) || fail "--agent.run-name requires NAME"
             [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] \
@@ -130,9 +141,14 @@ if [[ "${mode}" == "start" ]]; then
         || fail "Velocity source was not trained at the current HOME: ${source_path}"
     probe="${PROBE_ROOT}/velocity_${source_sha:0:16}_teleop83_raw_9x300.json"
     mkdir -p -- "${PROBE_ROOT}" "${BOOTSTRAP_ROOT}"
-    uv run --locked python -m mjlab_microban.scripts.probe_legacy_actor_in_teleop_env \
-        --checkpoint "${source_path}" --expected-sha256 "${source_sha}" \
-        --output "${probe}" --force
+    if [[ -n "${dry_probe}" ]]; then
+        echo "[WARN] --dry-run-probe-receipt: NOT DEPLOYABLE, source probe forced to pass: ${dry_probe}" >&2
+        probe="${dry_probe}"
+    else
+        uv run --locked python -m mjlab_microban.scripts.probe_legacy_actor_in_teleop_env \
+            --checkpoint "${source_path}" --expected-sha256 "${source_sha}" \
+            --output "${probe}" --force
+    fi
     probe_sha="$(sha256sum -- "${probe}" | awk '{print $1}')"
     # Fails unless the probe passed (9/9 completed, no fall, 8/8 directional).
     uv run --locked --with onnxruntime --with 'protobuf<7' python -m \
@@ -149,6 +165,7 @@ if [[ "${mode}" == "start" ]]; then
         --agent.save-pristine-checkpoint True
     )
 else
+    [[ -z "${dry_probe}" ]] || fail "--dry-run-probe-receipt is start-only"
     [[ -z "${source_path}${source_sha}" ]] \
         || fail "resume reads its velocity source from the checkpoint"
     run_dir="${LOG_ROOT}/${run_name}"
