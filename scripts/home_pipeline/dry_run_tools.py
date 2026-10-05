@@ -7,7 +7,8 @@ usage:
       SOURCE_MODEL.pt DEST_RUN_DIR ITERATION
   uv run --locked --with onnxruntime --with 'protobuf<7' python \
       scripts/home_pipeline/dry_run_tools.py package \
-      CHECKPOINT REPORT_PREFIX GATE_OUT ONNX_OUT MICROBAN_REPO
+      CHECKPOINT REPORT_PREFIX GATE_OUT ONNX_OUT MICROBAN_REPO \
+      [BOUNDARY_CHECKPOINT BOUNDARY_REPORT_PREFIX]...
   uv run --locked python scripts/home_pipeline/dry_run_tools.py force-probe \
       PROBE_RECEIPT.json OUTPUT_DIR/DRYRUN_FORCED_PASS_<name>.json
   uv run --locked python scripts/home_pipeline/dry_run_tools.py \
@@ -25,7 +26,18 @@ locomotion/tracking reports are copied next to GATE_OUT with status forced
 to "pass" (marked ``dry_run_original_status``), their status/threshold
 validation is skipped, a short runtime smoke corpus (a DRYRUN checkpoint
 that fell records fewer than 16 rows) is cycled to 16 rows, and the gate
-carries ``dry_run_status_forced_not_deployable``.  Prints the packager receipt (JSON).
+carries ``dry_run_status_forced_not_deployable``.  The locomotion summary
+and per-scenario pass fields the robot validator re-checks in the package
+metadata (falls, completion, directional count, soft-limit overshoot) are
+forced like force-probe (measured values kept in ``dry_run_original_*``), so
+a from-scratch ``--dry-run-plumbing`` policy that falls still reaches the
+robot validator.  Each BOUNDARY_CHECKPOINT/BOUNDARY_REPORT_PREFIX pair (the
+model_9999 the chain passed the 10000 boundary with, e.g. a stamped corner
+rescue) gets the same forced gate (DRYRUN_boundary_gate_model_<N>.json next
+to GATE_OUT) and is passed to the packager as --boundary-gate, so its real
+boundary lineage check (shared and inherited lineage markers, e.g. the
+pose-release corner-rescue marker the final checkpoint must carry) runs.
+Prints the packager receipt (JSON).
 
 force-probe (``--dry-run-plumbing`` only): copy a failing 9x300 v12 source
 probe receipt of a from-scratch dry-run walker with its pass/fail fields
@@ -81,17 +93,15 @@ def lift_clock(source: str, destination_dir: str, iteration: str) -> int:
     return 0
 
 
-def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, repo: str) -> int:
-    from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
-    from mjlab_microban.scripts import teleop_v12_stage as stage
+def forced_stage_reports(report_prefix: str, out_dir: Path, max_overshoot_rad: float) -> tuple[Path, Path]:
+    """DRYRUN_FORCED_PASS_ copies of a stage gate's locomotion and tracking reports."""
 
-    checkpoint_path = Path(checkpoint)
-    gate_path = Path(gate_out)
-    onnx_path = Path(onnx_out)
     forced = []
     for suffix in ("_9x300.json", "_tracking.json"):
         source = Path(report_prefix + suffix)
         report = json.loads(source.read_text(encoding="utf-8"))
+        if suffix == "_9x300.json":
+            report = forced_probe_report(report, max_overshoot_rad)
         report["dry_run_original_status"] = report.get("status")
         report["status"] = "pass"
         rows = report.get("runtime_smoke_observations")
@@ -101,30 +111,61 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, r
             # DRYRUN checkpoint can fall early and record fewer, so cycle them.
             report["dry_run_smoke_rows_original_count"] = len(rows)
             report["runtime_smoke_observations"] = [rows[i % len(rows)] for i in range(SMOKE_ROWS)]
-        copy = gate_path.parent / f"DRYRUN_FORCED_PASS_{source.name}"
+        copy = out_dir / f"DRYRUN_FORCED_PASS_{source.name}"
         copy.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
         forced.append(copy)
-    locomotion, tracking = forced
-    onnx_report = Path(report_prefix + "_onnx.json")
+    return forced[0], forced[1]
+
+
+def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, repo: str,
+            *boundaries: str) -> int:
+    from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
+    from mjlab_microban.scripts import teleop_v12_stage as stage
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+        ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
+    )
+
+    if len(boundaries) % 2:
+        raise SystemExit("package: boundary arguments come in CHECKPOINT REPORT_PREFIX pairs")
+    gate_path = Path(gate_out)
+    onnx_path = Path(onnx_out)
     stage._validate_locomotion_report = lambda report, identity: None
     # The real validator returns the profile the report was judged under.
     stage._validate_tracking_report = lambda report, identity, **_kwargs: report.get("profile")
 
-    def build() -> dict:
-        gate = stage.create_gate(
-            checkpoint=checkpoint_path,
-            locomotion_report=locomotion,
-            tracking_report=tracking,
-            onnx_report=onnx_report,
-        )
-        gate["dry_run_status_forced_not_deployable"] = True
-        return json.loads(json.dumps(gate))
+    def builder(ckpt: Path, prefix: str):
+        locomotion, tracking = forced_stage_reports(prefix, gate_path.parent,
+                                                    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD)
 
-    gate_path.write_text(json.dumps(build(), indent=2, sort_keys=True), encoding="utf-8")
+        def build() -> dict:
+            gate = stage.create_gate(
+                checkpoint=ckpt,
+                locomotion_report=locomotion,
+                tracking_report=tracking,
+                onnx_report=Path(prefix + "_onnx.json"),
+            )
+            gate["dry_run_status_forced_not_deployable"] = True
+            return json.loads(json.dumps(gate))
+
+        return build
+
+    # gate path -> (checkpoint, builder); the packager's validate_gate accepts exactly these.
+    gates: dict[Path, tuple[Path, object]] = {}
+    checkpoint_path = Path(checkpoint)
+    gates[gate_path.resolve()] = (checkpoint_path, builder(checkpoint_path, report_prefix))
+    boundary_paths = []
+    for ckpt, prefix in zip(boundaries[0::2], boundaries[1::2]):
+        ckpt_path = Path(ckpt)
+        out = gate_path.parent / f"DRYRUN_boundary_gate_{ckpt_path.parent.name}_{ckpt_path.stem}.json"
+        gates[out.resolve()] = (ckpt_path, builder(ckpt_path, prefix))
+        boundary_paths.append(out)
+    for path, (_ckpt, build) in gates.items():
+        path.write_text(json.dumps(build(), indent=2, sort_keys=True), encoding="utf-8")
 
     def validate_gate(path: Path, ckpt: Path) -> dict:
+        entry = gates.get(Path(path).resolve())
         loaded = json.loads(Path(path).read_text(encoding="utf-8"))
-        if Path(ckpt).resolve() != checkpoint_path.resolve() or loaded != build():
+        if entry is None or Path(ckpt).resolve() != entry[0].resolve() or loaded != entry[1]():
             raise ValueError("dry-run gate drifted")
         return loaded
 
@@ -135,8 +176,10 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str, r
         output=onnx_path,
         microban_repo=Path(repo),
         force=True,
+        boundary_gates=tuple(boundary_paths),
     )
     receipt["dry_run_status_forced_not_deployable"] = True
+    receipt["dry_run_boundary_gates"] = [str(p) for p in boundary_paths]
     print(json.dumps(receipt, sort_keys=True, default=str))
     return 0
 
@@ -262,7 +305,7 @@ def stamp_corner_rescue(parent: str, report: str, source: str, destination_dir: 
 def main(argv: list[str]) -> int:
     if len(argv) >= 1 and argv[0] == "lift-clock" and len(argv) == 4:
         return lift_clock(*argv[1:])
-    if len(argv) >= 1 and argv[0] == "package" and len(argv) == 6:
+    if len(argv) >= 1 and argv[0] == "package" and len(argv) >= 6 and len(argv) % 2 == 0:
         return package(*argv[1:])
     if len(argv) >= 1 and argv[0] == "force-probe" and len(argv) == 3:
         return force_probe(*argv[1:])

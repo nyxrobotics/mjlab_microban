@@ -1574,8 +1574,8 @@ class Pipeline:
                 self.run("package_pico_DRYRUN", [*UV_ONNX, "python", "scripts/home_pipeline/dry_run_tools.py",
                                                  "package", str(pico_ckpt), str(prefix),
                                                  str(out / "DRYRUN_gate_model_14999.json"), str(pico_out),
-                                                 str(self.robot)], "cpu", env={"CUDA_VISIBLE_DEVICES": ""},
-                         stdout_path=receipt)
+                                                 str(self.robot), *self.dry_boundary_args()], "cpu",
+                         env={"CUDA_VISIBLE_DEVICES": ""}, stdout_path=receipt)
             else:
                 self.run("package_pico", [*UV_ONNX, "python", "-m",
                                           "mjlab_microban.scripts.export_teleop_v12_deployment",
@@ -1659,6 +1659,26 @@ class Pipeline:
                 args += ["--boundary-gate", str(gate)]
         return args
 
+    def dry_boundary_args(self) -> list[str]:
+        """Dry run: the model_9999 that passed the 10000 boundary, for the dry packager.
+
+        dry_run_tools.py package builds it a forced gate and passes it as
+        --boundary-gate, so the packager's real boundary lineage check sees the
+        escalation's result (a stamped corner rescue's marker must be carried
+        by the final checkpoint; a retrained attempt shares every marker).  The
+        dry 10100 canary ends at 10002, not a canary iteration, so it is left out.
+        """
+
+        run = self.get("pico", "b9999", "passed", "run")
+        prefix = GATE_ROOT / f"{run}_model_9999"
+        if not run or not all(Path(f"{prefix}{s}").is_file() for s in ("_9x300.json", "_tracking.json",
+                                                                       "_onnx.json")):
+            self.log("dry run: no evaluated 9999 boundary gate to pass to the packager")
+            return []
+        self.log(f"dry run: packaging with the 10000 boundary {run}/model_9999 "
+                 f"({self.get('pico', 'b9999', 'passed', 'kind')})")
+        return [str(V12_EXP / run / "model_9999.pt"), str(prefix)]
+
     def check_receipt(self, receipt: Path, ckpt: Path, onnx: Path) -> None:
         """The binding finalize_microban_teleop_v12.sh applies to the packager report."""
 
@@ -1680,6 +1700,9 @@ class Pipeline:
         if not all(checks.values()):
             raise PipelineError(f"PICO deployment receipt incomplete: {checks}")
         self.log(f"PICO packaged {onnx.name} sha256 {sha256(onnx)[:12]} (runtime validator pass)")
+        for entry in report.get("boundary_stage_gates") or []:
+            self.log(f"  boundary gate {entry.get('iteration')} ({entry.get('checkpoint_kind')}, "
+                     f"{str(entry.get('checkpoint_sha256'))[:12]}): {entry.get('tracking_profile')}")
 
     # ----------------------------------------------------------- step 6
     def commit(self, repo: Path, paths: list[str], message: str, *, force_add: list[str] = ()) -> str | None:
@@ -1950,7 +1973,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.serial_gpu = True
     if args.serial_gpu:
         args.sequential = True
-    elif args.dry_run_walk_init or args.dry_run_simulate_failures or args.dry_run_plumbing:
+    if not args.dry_run and (args.dry_run_walk_init or args.dry_run_simulate_failures or args.dry_run_plumbing):
         p.error("--dry-run-* options need --dry-run")
     return args
 

@@ -311,7 +311,7 @@ class ArgumentsTest(unittest.TestCase):
         args = make_pipeline(None, "--pr-corner-rescue-mixes", "lf72, lf90").args
         self.assertEqual(args.pr_corner_rescue_mixes, ["lf72", "lf90"])
         for bad in (["--pr-corner-rescue-mixes", "lf61"], ["--v12-9999-attempts", "0"], ["--dry-run-plumbing"],
-                    ["--dry-run-simulate-failures"]):
+                    ["--dry-run-simulate-failures"], ["--serial-gpu", "--dry-run-plumbing"]):
             with self.assertRaises(SystemExit):
                 with unittest.mock.patch("sys.stderr"):
                     make_pipeline(None, *bad)
@@ -563,6 +563,34 @@ class DryRunToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tools.forced_probe_report({"summary": {}, "results": []}, 0.0873)
 
+    def test_package_forces_the_locomotion_pass_fields_the_robot_rechecks(self):
+        # A from-scratch plumbing policy falls in every scenario; the robot
+        # validator re-checks these fields in the package metadata.
+        with tempfile.TemporaryDirectory() as d:
+            prefix = str(Path(d) / "run_model_14999")
+            Path(prefix + "_9x300.json").write_text(json.dumps({
+                "status": "fail",
+                "summary": {"scenario_count": 9, "completed_scenario_count": 0, "fall_scenario_count": 9,
+                            "nonfinite_scenario_count": 0, "directionally_correct_scenario_count": 3,
+                            "directional_scenario_count": 8},
+                "results": [{"completed": False, "fell": True, "executed_steps": 40,
+                             "maximum_actual_soft_limit_violation_rad": 0.105}] * 9}))
+            Path(prefix + "_tracking.json").write_text(json.dumps({
+                "status": "fail", "runtime_smoke_observations": [[0.0], [1.0], [2.0]]}))
+            loco, tracking = self.tools.forced_stage_reports(prefix, Path(d), 0.0873)
+            loco = json.loads(loco.read_text())
+            self.assertEqual(loco["status"], "pass")
+            self.assertEqual(loco["dry_run_original_status"], "fail")
+            self.assertEqual((loco["summary"]["fall_scenario_count"],
+                              loco["summary"]["directionally_correct_scenario_count"]), (0, 8))
+            self.assertEqual(loco["dry_run_original_summary"]["fall_scenario_count"], 9)
+            self.assertTrue(all(r["maximum_actual_soft_limit_violation_rad"] == 0.0 for r in loco["results"]))
+            tracking = json.loads(tracking.read_text())
+            self.assertEqual(len(tracking["runtime_smoke_observations"]), 16)
+            self.assertEqual(tracking["dry_run_smoke_rows_original_count"], 3)
+        with unittest.mock.patch("sys.stderr"):  # boundary arguments come in pairs
+            self.assertEqual(self.tools.main(["package", "c", "p", "g", "o", "r", "b"]), 2)
+
     def test_stamped_rescue_carries_the_pose_release_corner_lineage(self):
         from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
             MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION as PR,
@@ -633,5 +661,11 @@ class BoundaryGateArgsTest(unittest.TestCase):
                 p.gate_ok = lambda run, end: run == "rescue"
                 self.assertEqual(p.boundary_gate_args(),
                                  ["--boundary-gate", str(root / "rescue_model_9999_gate.json")])
+                # A dry run packages with the evaluated (forced) 9999 boundary of the passed run.
+                self.assertEqual(p.dry_boundary_args(), [])
+                for suffix in ("_9x300.json", "_tracking.json", "_onnx.json"):
+                    (root / f"rescue_model_9999{suffix}").write_text("{}")
+                self.assertEqual(p.dry_boundary_args(), [str(pipeline.V12_EXP / "rescue" / "model_9999.pt"),
+                                                         str(root / "rescue_model_9999")])
             finally:
                 pipeline.GATE_ROOT = original
