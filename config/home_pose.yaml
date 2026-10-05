@@ -14,7 +14,8 @@
 #   2. optionally re-centre the COM by moving only hip/ankle pitch:
 #      uv run python config/balance_home_pose.py [--write] [--trunk-pitch-deg X]
 #   3. uv run python config/home_pose_tool.py show      # check derived values
-#   4. uv run python config/home_pose_tool.py write-robot --microban-repo ../microban
+#   4. uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_home-<label>
+#      (a robot worktree made from origin/home-config; the deploy checkout is refused),
 #   5. retrain walking, get-up and PICO v12 from scratch (old checkpoints and
 #      ONNX are refused: their HOME tag/stamp no longer matches), install the
 #      new policies in the robot repo,

@@ -60,7 +60,8 @@ Root height, gravity at HOME, get-up targets, hand FK bounds and the HOME
 identity strings are derived from it by MuJoCo FK
 (`src/mjlab_microban/robot/home_pose.py`). Changing it means retraining every
 policy and regenerating the robot copy with
-`uv run python config/home_pose_tool.py write-robot --microban-repo ../microban`.
+`uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_home-<label>`
+(a robot worktree made from `origin/home-config`; see `config/README.md`).
 
 ## Training your own agent
 
