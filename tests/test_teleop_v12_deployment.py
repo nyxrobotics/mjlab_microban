@@ -48,6 +48,7 @@ from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -284,6 +285,55 @@ def test_final_gate_rejects_every_nonfinal_identity(
             gate,
             checkpoint=checkpoint,
             checkpoint_sha256="1" * 64,
+        )
+
+
+def test_pose_release_final_gate_profile_is_the_completion_allowance(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "model_14999.pt"
+    gate, *_ = _evidence(tmp_path)
+    expected = deployment._expected_final_tracking_profile(
+        {
+            "microban_teleop_recipe_revision": (
+                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            )
+        }
+    )
+    assert expected == deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert expected in deployment.SUPPORTED_FINAL_TRACKING_PROFILES
+    for accepted in (
+        deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE,
+        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
+        deployment.FINAL_PROFILE,
+    ):
+        gate["tracking_profile"] = accepted
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=expected,
+        )
+    gate["tracking_profile"] = deployment.DEADLINE_FINAL_FALLBACK_PROFILE
+    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=expected,
+        )
+    # The canonical v11 lineage keeps the deployed-accuracy final profile.
+    canonical = deployment._expected_final_tracking_profile(
+        {"microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION}
+    )
+    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
+    gate["tracking_profile"] = deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
+        deployment._require_final_gate(
+            gate,
+            checkpoint=checkpoint,
+            checkpoint_sha256="1" * 64,
+            expected_tracking_profile=canonical,
         )
 
 

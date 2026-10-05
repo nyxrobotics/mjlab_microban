@@ -36,9 +36,12 @@ from mjlab_microban.robot.microban_hand_fk import (
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DEADLINE_FINAL_FALLBACK_PROFILE,
+    FINAL_COMPLETION_ALLOWANCE_PROFILE,
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_PROFILE,
     STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE,
+    STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE,
+    required_tracking_profile,
 )
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
@@ -104,9 +107,15 @@ from mjlab_microban.teleop_v12_safety import (
 FINAL_ITERATION = 14_999
 FINAL_COMPLETED_UPDATES = 15_000
 # FINAL_PROFILE is the stricter legacy final profile; a gate made under it
-# also satisfies the canonical deployed-accuracy profile.
+# also satisfies the canonical deployed-accuracy profile.  The completion
+# allowance is the pose-release lineage's final profile (lineage-bound below).
 SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
-    (FINAL_DEPLOYED_ACCURACY_PROFILE, FINAL_PROFILE, DEADLINE_FINAL_FALLBACK_PROFILE)
+    (
+        FINAL_DEPLOYED_ACCURACY_PROFILE,
+        FINAL_PROFILE,
+        DEADLINE_FINAL_FALLBACK_PROFILE,
+        FINAL_COMPLETION_ALLOWANCE_PROFILE,
+    )
 )
 PACKAGER_REVISION = (
     "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
@@ -448,7 +457,10 @@ def _expected_final_tracking_profile(infos: Mapping[str, Any]) -> str:
             raise ValueError(
                 "Final deadline-fallback checkpoint is missing post-canary lineage"
             )
-        return FINAL_DEPLOYED_ACCURACY_PROFILE
+        return required_tracking_profile(
+            FINAL_COMPLETED_UPDATES,
+            recipe_revision=infos.get("microban_teleop_recipe_revision"),
+        )
     validate_deadline_fallback_marker(deadline)
     validate_deadline_post_canary_marker(post_canary)
     return DEADLINE_FINAL_FALLBACK_PROFILE
@@ -480,6 +492,9 @@ def _require_final_gate(
         expected_tracking_profile,
         STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE.get(
             expected_tracking_profile, expected_tracking_profile
+        ),
+        *STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE.get(
+            expected_tracking_profile, ()
         ),
     }:
         mismatches.append("tracking_profile")
