@@ -55,6 +55,19 @@ hand-active flags exactly; the rest keep the ordinary samplers.
 | `pr_v2` | 70 % | 20 % | 10 % | - |
 | `pr_v3` | 30 % | 45 % | 25 % | - |
 | `pr_v4` | 50 % | 25 % | 15 % | 10 % |
+| `pr_v5` | 50 % | 30 % | 20 % | - |
+| `pr_v6` | 70 % | 20 % | 10 % | - |
+
+`pr_v5` and `pr_v6` repeat the `pr_v1` and `pr_v2` shares and also replay the
+final profile's perturbation: in replayed episodes the ordinary random
+`push_robot` kick is replaced by the evaluator's fixed one (world-frame
+x 0.35 m/s, y -0.20 m/s every 1.0 s, the `_tracking_cfg(perturbation=True)`
+term), while ordinary episodes keep the staged curriculum's random push. Their
+marker adds a `scenario_push` record; `pr_v1`-`pr_v4` markers are unchanged.
+On 2026-10-06 the `pr_v1`/`pr_v2` rescues of the lean chain moved the
+mixed_forward_left lateral response positive without that push (diagnostic
++0.155 / +0.026 m/s) but fell early on that scenario under it in their
+gates, so the push is part of what the replay must cover.
 
 `bounded_both_feet` lifts both feet (0.016 m, above the ordinary two-foot
 range of 0.012 m) with both hands inactive; its replay uses the ordinary

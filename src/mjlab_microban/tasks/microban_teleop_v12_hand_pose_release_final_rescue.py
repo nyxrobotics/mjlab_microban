@@ -75,6 +75,7 @@ from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
     FinalRescueTwistCommandCfg,
     _rebased_cfg,
     evaluator_scenario_commands,
+    final_rescue_pattern_state,
 )
 
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID = (
@@ -133,7 +134,39 @@ MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIXES: dict[
         "bounded_both_feet": 0.15,
         "mixed_backward_right": 0.10,
     },
+    # pr_v5/pr_v6: the pr_v1/pr_v2 shares, and every replayed episode also
+    # gets the evaluator's perturbation instead of the ordinary random push
+    # (see MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH).
+    # On 2026-10-06 pr_v1/pr_v2 rescues turned the lateral response positive
+    # without that push (+0.155 / +0.026 m/s) but fell on mixed_forward_left
+    # under it.
+    "pr_v5": {
+        "ordinary": 0.50,
+        "mixed_forward_left": 0.30,
+        "bounded_both_feet": 0.20,
+    },
+    "pr_v6": {
+        "ordinary": 0.70,
+        "mixed_forward_left": 0.20,
+        "bounded_both_feet": 0.10,
+    },
 }
+# Mixes whose replayed episodes take the evaluator's fixed push (ordinary
+# episodes keep the ordinary random push of the staged curriculum).
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_MIXES = frozenset(
+    ("pr_v5", "pr_v6")
+)
+# The final profile's perturbation exactly as the tracking evaluator builds it
+# (``evaluate_teleop_v12_tracking._tracking_cfg(perturbation=True)``: the
+# training push_robot term with a 1.0 s interval and a fixed world-frame
+# velocity kick); a test pins it to the evaluator.
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH: dict[str, Any] = {
+    "interval_range_s": (1.0, 1.0),
+    "velocity_range": {"x": (0.35, 0.35), "y": (-0.20, -0.20)},
+}
+MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_EVENT = (
+    "final_rescue_scenario_push"
+)
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MIN_ORDINARY_PROBABILITY = 0.30
 # The failed final gate may fail only these checks (accuracy or the two
 # per-scenario safety/response checks the 2026-10-05 lean gates failed); every
@@ -189,6 +222,68 @@ def hand_pose_release_final_rescue_mix_probabilities(name: str) -> dict[str, flo
             validate_hand_pose_release_final_rescue_mix(name)
         ]
     )
+
+
+def hand_pose_release_final_rescue_uses_scenario_push(name: str) -> bool:
+    return (
+        validate_hand_pose_release_final_rescue_mix(name)
+        in MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_MIXES
+    )
+
+
+def _scenario_push_record() -> dict[str, Any]:
+    push = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH
+    return {
+        "source": "final_profile_tracking_evaluator_perturbation",
+        "scope": "replayed_episodes_only",
+        "interval_range_s": list(push["interval_range_s"]),
+        "velocity_range": {
+            axis: list(bounds) for axis, bounds in push["velocity_range"].items()
+        },
+        "ordinary_push": "staged_curriculum_random_push_on_ordinary_episodes_only",
+    }
+
+
+def push_ordinary_episodes(
+    env: Any,
+    env_ids: Any,
+    velocity_range: dict[str, tuple[float, float]],
+    final_rescue_mix: str,
+) -> None:
+    """The ordinary push_robot term, skipping replayed episodes."""
+
+    from mjlab.envs.mdp import push_by_setting_velocity
+
+    state = final_rescue_pattern_state(env, final_rescue_mix)
+    ids = _as_env_ids(env, env_ids)
+    ids = ids[state.pattern[ids] == 0]
+    if len(ids) > 0:
+        push_by_setting_velocity(env, ids, velocity_range)
+
+
+def push_replayed_episodes(
+    env: Any,
+    env_ids: Any,
+    velocity_range: dict[str, tuple[float, float]],
+    final_rescue_mix: str,
+) -> None:
+    """The evaluator's fixed push, applied only to replayed episodes."""
+
+    from mjlab.envs.mdp import push_by_setting_velocity
+
+    state = final_rescue_pattern_state(env, final_rescue_mix)
+    ids = _as_env_ids(env, env_ids)
+    ids = ids[state.pattern[ids] != 0]
+    if len(ids) > 0:
+        push_by_setting_velocity(env, ids, velocity_range)
+
+
+def _as_env_ids(env: Any, env_ids: Any) -> Any:
+    import torch
+
+    if env_ids is None or isinstance(env_ids, slice):
+        return torch.arange(int(env.num_envs), device=env.device)
+    return env_ids
 
 
 def hand_pose_release_final_rescue_sampler_spec(
@@ -420,6 +515,11 @@ def hand_pose_release_final_rescue_marker(
         "sampler_probabilities": hand_pose_release_final_rescue_mix_probabilities(mix),
         "sampler_scope": "per_episode_shared_by_twist_foot_hand_commands",
         "scenario_commands": deepcopy(evaluator_scenario_commands(scenarios)),
+        **(
+            {"scenario_push": _scenario_push_record()}
+            if hand_pose_release_final_rescue_uses_scenario_push(mix)
+            else {}
+        ),
         "adapter_gradient_schedule_revision": (
             TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
         ),
@@ -509,6 +609,8 @@ def make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(
         ("hand_target", FinalRescueHandTargetCommandCfg),
     ):
         cfg.commands[name] = _rebased_cfg(cfg.commands[name], cls, mix)
+    if hand_pose_release_final_rescue_uses_scenario_push(mix):
+        _install_scenario_push(cfg, mix)
     curriculum = cfg.curriculum.get("staged_curriculum")
     stages = None if curriculum is None else curriculum.params.get("stages")
     if not isinstance(stages, list):
@@ -521,6 +623,36 @@ def make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(
         < MICROBAN_TELEOP_V12_FINAL_RESCUE_TARGET_COMMON_STEP
     ]
     return cfg
+
+
+def _install_scenario_push(cfg: Any, mix: str) -> None:
+    """Ordinary push on ordinary episodes; the evaluator push on replayed ones.
+
+    The ordinary term keeps its name, mode, interval and ``velocity_range``
+    parameter, so the staged curriculum still sets its range.
+    """
+
+    ordinary = cfg.events.get("push_robot")
+    if ordinary is None or ordinary.mode != "interval":
+        raise TypeError("Pose-release final rescue requires the interval push_robot term")
+    if set(ordinary.params) != {"velocity_range"}:
+        raise TypeError("Pose-release final rescue push_robot params drifted")
+    gated = deepcopy(ordinary)
+    gated.func = push_ordinary_episodes
+    gated.params["final_rescue_mix"] = mix
+    cfg.events["push_robot"] = gated
+    push = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH
+    replay = deepcopy(ordinary)
+    replay.func = push_replayed_episodes
+    replay.interval_range_s = tuple(push["interval_range_s"])
+    replay.params = {
+        "velocity_range": deepcopy(push["velocity_range"]),
+        "final_rescue_mix": mix,
+    }
+    name = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SCENARIO_PUSH_EVENT
+    if name in cfg.events:
+        raise ValueError(f"Event {name} already exists")
+    cfg.events[name] = replay
 
 
 def validate_hand_pose_release_final_rescue_infos(
