@@ -875,3 +875,195 @@ def test_onnx_parity_rule_metadata_rejects_drift(name: str, value: object) -> No
     evidence[name] = value
     with pytest.raises(ValueError):
         deployment._onnx_parity_rule_metadata(evidence)
+
+
+def _boundary_gate_fixture(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    infos: dict,
+    completed: int = 10_000,
+    kind: str = "canonical_boundary",
+    profile: str = deployment.HMD_HAND_HAND_RMS_40MM_PROFILE,
+) -> Path:
+    import torch
+
+    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+        tracking_profile_completion_allowance,
+    )
+
+    checkpoint = root / name / f"model_{completed - 1}.pt"
+    checkpoint.parent.mkdir(parents=True)
+    torch.save({"iter": completed - 1, "infos": infos}, checkpoint)
+    gate = {
+        "schema_version": 2,
+        "gate": "microban_teleop_v12_stage",
+        "status": "pass",
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": _sha(checkpoint),
+        "iteration": completed - 1,
+        "completed_updates": completed,
+        "canonical_boundary": kind == "canonical_boundary",
+        "checkpoint_kind": kind,
+        "tracking_profile": profile,
+    }
+    allowance = tracking_profile_completion_allowance(profile)
+    if allowance is not None:
+        gate["tracking_profile_completion_allowance"] = allowance
+    gate_path = root / name / "gate.json"
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+    return gate_path
+
+
+def test_boundary_gates_record_the_10000_hand_rms_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        corner_rescue_marker,
+    )
+
+    validated: list[Path] = []
+
+    def fake_validate_gate(gate_path: Path, checkpoint: Path) -> dict:
+        gate = json.loads(gate_path.read_text(encoding="utf-8"))
+        assert Path(gate["checkpoint"]) == checkpoint
+        validated.append(gate_path)
+        return gate
+
+    monkeypatch.setattr(deployment, "validate_gate", fake_validate_gate)
+    monkeypatch.setattr(deployment, "resolve_bootstrap_artifact_path", Path)
+    *_, final_infos = _evidence(tmp_path)
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    marker = corner_rescue_marker(
+        parent_checkpoint_sha256="a" * 64,
+        parent_strict_tracking_report_sha256="b" * 64,
+        hand_pose_release=True,
+        parent_strict_failed_checks=("hand_tracking_rms",),
+    )
+    final_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = marker
+    boundary_infos = deepcopy(final_infos)
+    gate_path = _boundary_gate_fixture(
+        tmp_path, monkeypatch, name="rescue", infos=boundary_infos
+    )
+    entries = deployment._boundary_stage_gate_lineage(
+        (gate_path,), final_infos=final_infos
+    )
+    assert validated == [gate_path.resolve()]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["completed_updates"] == 10_000
+    assert entry["iteration"] == 9_999
+    assert entry["stage_gate_sha256"] == _sha(gate_path)
+    assert entry["tracking_profile"] == deployment.HMD_HAND_HAND_RMS_40MM_PROFILE
+    allowance = entry["tracking_profile_completion_allowance"]
+    assert allowance["hand_rms_m_max"] == 0.040
+    assert allowance["hand_p95_m_max"] == 0.05
+    assert allowance["relaxes_profile"] == (
+        "hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1"
+    )
+
+    # The package carries the per-boundary profile record.
+    checkpoint = tmp_path / "model_14999.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    final_gate_path = tmp_path / "gate.json"
+    final_gate_path.write_text("{}", encoding="utf-8")
+    gate, locomotion, tracking, onnx_report, _ = _evidence(tmp_path)
+    gate["checkpoint_sha256"] = _sha(checkpoint)
+    gate["tracking_profile"] = deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    common = {
+        "checkpoint": checkpoint,
+        "checkpoint_sha256": _sha(checkpoint),
+        "gate_path": final_gate_path,
+        "gate": gate,
+        "infos": final_infos,
+        "bootstrap": _bootstrap(),
+        "locomotion": locomotion,
+        "tracking": tracking,
+        "onnx_report": onnx_report,
+        "packager_parity": {
+            "reference_maximum_absolute_error": 1.0e-6,
+            "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
+        },
+        "microban_source_identity": _microban_identity(),
+    }
+    metadata = deployment.build_v12_deployment_metadata(
+        **common, boundary_stage_gates=entries
+    )
+    assert metadata["v12_tracking_profile"] == (
+        deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
+    )
+    assert metadata["v12_boundary_stage_gates_semantics"] == (
+        deployment.BOUNDARY_STAGE_GATES_SEMANTICS
+    )
+    assert json.loads(metadata["v12_boundary_stage_gates_json"]) == entries
+    plain = deployment.build_v12_deployment_metadata(**common)
+    assert "v12_boundary_stage_gates_json" not in plain
+    assert "v12_boundary_stage_gates_semantics" not in plain
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "other_recipe",
+        "marker_not_carried",
+        "final_clock",
+        "activation_canary",
+        "duplicate_clock",
+    ],
+)
+def test_boundary_gates_reject_foreign_or_nonboundary_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
+        corner_rescue_marker,
+    )
+
+    monkeypatch.setattr(
+        deployment,
+        "validate_gate",
+        lambda gate_path, _checkpoint: json.loads(gate_path.read_text("utf-8")),
+    )
+    monkeypatch.setattr(deployment, "resolve_bootstrap_artifact_path", Path)
+    *_, final_infos = _evidence(tmp_path)
+    final_infos["microban_teleop_recipe_revision"] = (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    )
+    boundary_infos = deepcopy(final_infos)
+    fixture: dict = {}
+    if case == "other_recipe":
+        boundary_infos["microban_teleop_recipe_revision"] = (
+            MICROBAN_TELEOP_V12_RECIPE_REVISION
+        )
+    elif case == "marker_not_carried":
+        boundary_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = (
+            corner_rescue_marker(
+                parent_checkpoint_sha256="a" * 64,
+                parent_strict_tracking_report_sha256="b" * 64,
+                hand_pose_release=True,
+                parent_strict_failed_checks=("hand_tracking_rms",),
+            )
+        )
+    elif case == "final_clock":
+        fixture = {"completed": 15_000}
+    elif case == "activation_canary":
+        fixture = {
+            "completed": 10_100,
+            "kind": "activation_canary",
+            "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
+        }
+    gates = [
+        _boundary_gate_fixture(
+            tmp_path, monkeypatch, name="a", infos=boundary_infos, **fixture
+        )
+    ]
+    if case == "duplicate_clock":
+        gates.append(
+            _boundary_gate_fixture(tmp_path, monkeypatch, name="b", infos=boundary_infos)
+        )
+    with pytest.raises(ValueError):
+        deployment._boundary_stage_gate_lineage(tuple(gates), final_infos=final_infos)

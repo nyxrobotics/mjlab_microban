@@ -229,9 +229,49 @@ reward change, same final scenarios); its release route is a fresh
 pose-release chain (`scripts/train_microban_teleop_v12.sh start --source
 LEAN_WALK.pt --hand-pose-release`), because no lean model_7099 is pinned as a
 recipe-switch parent. Every other boundary and every other lineage keeps its
-profile. A gate judged
+profile (except the 10000 hand-RMS allowance below). A gate judged
 under the allowance records the limits and this reason in
 `tracking_profile_completion_allowance`.
+
+## 10000-boundary hand-RMS allowance (pose-release lineage)
+
+Profile
+`hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1_hand_rms_40mm_v1`
+is the 10000-update profile (model_9999 of a fresh pose-release segment or of a
+pose-release model_9900 corner rescue, both of which keep the pose-release
+recipe revision) of the active-hand arm pose-release recipe only. It is the
+HMD/hand deployed-accuracy profile with exactly one change:
+
+| limit | deployed-accuracy HMD/hand | hand-RMS allowance |
+| --- | --- | --- |
+| hand RMS | 0.035 m | 0.040 m |
+| hand P95 | 0.05 m | 0.05 m |
+| foot RMS | 0.05 m | 0.05 m |
+| foot P95 | 0.08 m | 0.08 m |
+
+Scenarios, checks (falls, finiteness, soft limits, raw-action recurrence,
+forced HMD motion, coverage, hand ablation, twist), locomotion and ONNX gates
+are unchanged; the deployed-accuracy and strict HMD/hand profiles are also
+accepted at that boundary. Interrupted 7101..9999 clocks, the 10100 canary,
+the 15000 final and every other lineage keep their profiles.
+
+Reason (2026-10-05): the forward-lean pose-release model_9999 checkpoints (two
+fresh 7100->10000 segments and eleven model_9900 corner rescues) passed every
+non-accuracy check and missed only the 0.035 m hand RMS by a few millimetres in
+one bilateral corner (best max(L, R) about 0.0365 m). User decision: "手は
+0.04mまで許容でいいんじゃない？". The gate records the limits and reason in
+`tracking_profile_completion_allowance` (revision `hand_rms_40mm_v1`,
+`boundary_completed_updates` 10000).
+
+The packager does not see earlier gates through the final checkpoint, so it
+takes them explicitly: `--boundary-gate GATE.json` (repeatable) fully
+revalidates each earlier canonical-boundary gate, requires its checkpoint to
+share the final checkpoint's contract, recipe, bootstrap, HOME and site-order
+markers (and the final to carry its corner-rescue / recipe-switch /
+LR-migration markers unchanged), and records `v12_boundary_stage_gates_json`
+(clock, checkpoint and gate SHA-256, tracking profile, allowance record) with
+`v12_boundary_stage_gates_semantics` in the package. The robot runtime only
+checks the final `v12_tracking_profile`; the boundary record is informational.
 
 The command intentionally has no diagnostic/nonaccepted mode. If the final gate
 or its evidence is absent, stale, changed, non-final, or rejected by the current

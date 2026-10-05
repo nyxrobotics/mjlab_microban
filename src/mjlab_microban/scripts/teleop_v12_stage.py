@@ -390,8 +390,9 @@ def _validate_tracking_report(
     """Validate one tracking report; return the profile it was judged under.
 
     Without an override the canonical profile for this clock and training
-    recipe (deployed-accuracy, or the pose-release final completion allowance)
-    and its accepted stricter profiles are accepted.
+    recipe (deployed-accuracy, or for the pose-release lineage the 10000
+    hand-RMS allowance / the final completion allowance) and its accepted
+    stricter profiles are accepted.
     """
 
     completed = int(expected_identity["completed_updates"])
@@ -1119,7 +1120,8 @@ def create_gate(
     }
     allowance = tracking_profile_completion_allowance(tracking_profile)
     if allowance is not None:
-        # The gate records why its accuracy limits are wider than canonical.
+        # The gate records why its accuracy limits are wider than canonical
+        # (15000 completion allowance or 10000 hand-RMS allowance).
         result["tracking_profile_completion_allowance"] = allowance
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
