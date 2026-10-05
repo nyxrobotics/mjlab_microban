@@ -1550,27 +1550,14 @@ class Pipeline:
         if changed:
             self.log(f"robot pins: source {src['sha256'][:12]} iter {src['iteration']}, probe "
                      f"{probe['sha256'][:12]}, walk.onnx {sha256(self.robot / 'src/agents/walk.onnx')[:12]}")
-        # HOME literals of the robot tests (once per state; later hand edits are kept).
-        if not self.get("robot", "home_test_pins_applied") or self.args.redo_robot_pins:
-            before = (self.state_dir / "robot_home_pose.before.yaml").read_text()
-            old = robot_pins.parse_robot_home_yaml(before) if before.strip() else {}
-            new = robot_pins.parse_robot_home_yaml((self.robot / "config/home_pose.yaml").read_text())
-            mapping, ambiguous = robot_pins.build_home_token_map(old, new) if old else ({}, [])
-            total = 0
-            for rel in robot_pins.HOME_TEST_FILES:
-                path = self.robot / rel
-                if not path.exists():
-                    continue
-                text = path.read_text()
-                text, count = robot_pins.substitute_home_tokens(text, mapping)
-                if rel.endswith("test_shared_home.py"):
-                    text, _ = robot_pins.set_training_home_deg(text, new["joint_pos_deg"])
-                if text != path.read_text():
-                    path.write_text(text)
-                total += count
-            self.log(f"robot test HOME literals: {total} token replacements"
-                     + (f", ambiguous tokens left alone: {ambiguous}" if ambiguous else ""))
-            self.put("robot", "home_test_pins_applied", True)
+        # The robot tests derive every HOME-bound value from config/home_pose.yaml
+        # (robot home-config); only the reviewed degree table TRAINING_HOME_DEG of
+        # tests/test_shared_home.py pins the HOME, so rewrite it (the run pins and
+        # PACKAGER_V12_HOME_POSE_JSON of tests/test_pico_hybrid.py follow below).
+        new = robot_pins.parse_robot_home_yaml((self.robot / "config/home_pose.yaml").read_text())
+        if self.edit_robot("tests/test_shared_home.py",
+                           lambda t: robot_pins.set_training_home_deg(t, new["joint_pos_deg"])):
+            self.log("updated TRAINING_HOME_DEG in tests/test_shared_home.py")
         # Package PICO against this robot tree, unless the installed package still validates.
         pico_out = out / ("DRYRUN_pico_teleop.onnx" if self.dry else "pico_teleop.onnx")
         receipt = out / "pico_receipt.json"
@@ -1896,8 +1883,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--serial-gpu", action="store_true",
                    help="run at most one GPU job of this command at a time (implies --sequential; walking "
                    "probes then wait for the end of each training segment); default for --dry-run")
-    p.add_argument("--redo-robot-pins", action="store_true",
-                   help="re-apply the HOME literal substitution to the robot tests")
     p.add_argument("--commit-trailer", default=TRAILER_DEFAULT, help="text appended to commit messages")
     p.add_argument("--walk-iterations", type=int, default=15000)
     p.add_argument("--walk-cont-iterations", type=int, default=15000)

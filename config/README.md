@@ -121,6 +121,12 @@ python3 scripts/retrain_all_for_home.py --robot-repo ../microban_home-<label> --
 `--robot-repo` が `config/home_pose.yaml` を読まないロボットのチェックアウト（`src/home_pose.py` がない、
 たとえば `feature/neck-roll-pitch-camera`）なら、パイプラインも `write-robot` も最初に拒否する。
 
+人手の介入なしで最後まで進むように、PICO v12 の 10000 境界は自動で段階的に救済する（9999 ゲート不合格 →
+model_9900 の pose-release コーナー救済を mix lf60, lf90, lf72, lf72 の順に → それも全部落ちたらゲート済みの
+model_7099 から 7100→10000 を学習し直す → 尽きたら止まる）。学習を回す前の配線確認は、どのHOMEでも
+`--dry-run` で数十分（そのHOMEの歩行があれば `--dry-run-walk-init`、編集したばかりのHOMEなら
+`--dry-run-plumbing`）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md) の「ドライラン」。
+
 以下はそのコマンドが行う内容（手で行う場合の手順）。
 
 1. `home_pose.yaml` を編集する（膝など。変えられる値は上の表）。

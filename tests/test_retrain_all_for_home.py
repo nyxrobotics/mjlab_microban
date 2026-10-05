@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import sys
 import tempfile
 import unittest
@@ -69,52 +68,7 @@ class ProbeSelectionTest(unittest.TestCase):
         self.assertTrue(fallback)
 
 
-CENTERED = {
-    "tag": "centered_home",
-    "root_pos_m": [0.0, 0.0, 0.170554885633559],
-    "joint_pos_deg": {"left_hip_pitch": 1.198384259489, "left_ankle_pitch": -1.198384259489,
-                      "left_knee": 0.0, "left_elbow": -20.0},
-    "joint_pos_rad": {"left_hip_pitch": math.radians(1.198384259489),
-                      "left_ankle_pitch": -math.radians(1.198384259489), "left_knee": 0.0},
-}
-KNEE15 = {
-    "tag": "centered_home_e7afd03eb9",
-    "root_pos_m": [0.0, 0.0, 0.167836754864191],
-    "joint_pos_deg": {"left_hip_pitch": -6.513901179137, "left_ankle_pitch": -8.486098820863,
-                      "left_knee": 15.0, "left_elbow": -20.0},
-    "joint_pos_rad": {"left_hip_pitch": math.radians(-6.513901179137),
-                      "left_ankle_pitch": math.radians(-8.486098820863), "left_knee": math.radians(15.0)},
-}
-
-
 class RobotPinsTest(unittest.TestCase):
-    def test_home_tokens_follow_the_new_home(self):
-        mapping, ambiguous = robot_pins.build_home_token_map(CENTERED, KNEE15)
-        self.assertEqual(ambiguous, [])
-        text = (
-            '    "left_hip_pitch": 1.198384259489,\n'
-            "        self.assertEqual(HOME_ROOT_POS_Z_M, 0.170554885633559)\n"
-            '    "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5"\n'
-            '        "v3_centered_home_servo_range"\n'
-            "    def test_centered_home_values(self):\n"
-            "        x = -math.radians(1.198384259489)\n"
-            "        y = math.radians(1.198384259489)\n"
-            "        elbow = -20.0\n"
-        )
-        new, count = robot_pins.substitute_home_tokens(text, mapping)
-        self.assertIn('"left_hip_pitch": -6.513901179137,', new)
-        self.assertIn("0.167836754864191", new)
-        self.assertIn("centered_home_e7afd03eb9_hip_minus6p513901179137_ankle_minus8p486098820863", new)
-        self.assertIn('"v3_centered_home_e7afd03eb9_servo_range"', new)
-        self.assertIn("def test_centered_home_values", new)  # test names keep their wording
-        self.assertIn("x = math.radians(-8.486098820863)", new)
-        self.assertIn("y = math.radians(-6.513901179137)", new)
-        self.assertIn("elbow = -20.0", new)
-        self.assertGreater(count, 5)
-        same, none = robot_pins.build_home_token_map(CENTERED, CENTERED)
-        self.assertEqual((same, none), ({}, []))
-        self.assertEqual(robot_pins.substitute_home_tokens(text, same), (text, 0))
-
     def test_training_home_table_and_packager_json(self):
         text = 'X = 1\nTRAINING_HOME_DEG = {\n    "left_knee": 0.0,\n    "left_hip_pitch": 1.0,\n}\n'
         new, changed = robot_pins.set_training_home_deg(text, {"left_knee": 15.0, "left_hip_pitch": -6.5})
