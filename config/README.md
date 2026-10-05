@@ -56,6 +56,16 @@ PICO v12 と救済段階の全タスクの環境設定が組み立てられる�
 home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.py show / write-robot → 全ポリシー再学習 → 両リポジトリでコミット
 ```
 
+手順3〜7は1つのコマンドでまとめて実行できる（中断しても同じコマンドで再開、詳細は
+[`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md)）:
+
+```bash
+python3 scripts/retrain_all_for_home.py --robot-repo ../microban --robot-branch home-<label> \
+    --training-branch home-<label>
+```
+
+以下はそのコマンドが行う内容（手で行う場合の手順）。
+
 1. `home_pose.yaml` を編集する（膝など。変えられる値は上の表）。
 2. （任意）`uv run python config/balance_home_pose.py` で重心を合わせる。既定は確認だけ（dry run）で、
    `--write` を付けると股・足首ピッチの4つの値だけを書き換える（後述）。学習タスクが受け付けないHOMEは
