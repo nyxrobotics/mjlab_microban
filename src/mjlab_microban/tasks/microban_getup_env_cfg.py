@@ -42,15 +42,27 @@ redesign/ reports):
   (upright_standing's target gravity, the head height, the near-HOME reset's
   yaw axis); at a vertical-trunk HOME they are the original terms.
 
-Reward sets sharing this contract:
+One training run (GETUP_SCHEDULE; stage C, 2026-10-07).  The HOME-stance
+reward set ("redesign" core plus the posture terms, every standing term gated
+on standing height) is active from the first update; the step-scheduled
+curriculum (tasks/curriculum.py) then switches on, in one process:
 
-* "posture" (default): "redesign" plus HOME-stance terms (see
-  _add_posture_rewards). Stands from fallen starts with feet together and
-  straight legs; fine-tuned under simulated IMU delay for the robot.
-* "redesign": the 2026-09-25 from-scratch core, minus the terms measured to
-  hurt, plus HoST's post-standing terms -- every standing term gated above
-  kneeling/squatting height (see _add_redesign_rewards). Stands, but in a
-  wide braced stance.
+* update 2500: the walking task's 0-3 tick simulated IMU latency (the actor's
+  gyro/gravity delay buffers are allocated for 3 ticks from the start and
+  held at 0 until here);
+* update 4000 ("refine"): the calm terms (measured joint velocity while
+  standing, roll joints near HOME, wider-stance penalty x3, a light
+  raw-target clip barrier); the runner resets the action std to 0.5, the
+  Adam moments, the learning rate and sets entropy 0.001 at the same update;
+* update 10000 ("effort_push"): shoulder roll joins the roll pose term, the
+  target-vs-measured effort penalty, a 10x clip barrier and +-0.3 m/s pushes
+  every 3-6 s.
+
+The reward-based pose curriculum (standing_bonus >= 2 raises the pose
+weights to 240/120, standing_pose >= 15 enables the HOME stillness term) is
+unchanged.  The play/evaluation config keeps the full IMU latency and no
+schedule.  These switches are the five fine-tuning stages of the 2026-10
+chain (docs/getup_training_export.md), without the restarts.
 """
 
 import numpy as np
@@ -59,7 +71,6 @@ from copy import deepcopy
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.envs.mdp.rewards import joint_torques_l2
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
@@ -120,13 +131,13 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Servo goal range on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = SERVO_TARGET_RANGE_RAD
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
-# Fine-tuning stages after stage 2 (see docs/getup_training_export.md). Each
-# adds to the one before; see _add_calm_rewards for what each stage adds.
-_CALM_STAGE = {"calm_roll": 3, "calm_effort_strong": 4, "calm_push": 5}
-# Final (post-curriculum) standing_pose / hip_pose weights; 240/120 for the
-# HOME-stance sets (posture and every calm stage).
-_POSE_FINAL_WEIGHTS = {"redesign": (30.0, 15.0)}
+# Update at which each scheduled switch happens (see the module docstring),
+# and the length of the run.  The runner reads "refine" too.
+GETUP_SCHEDULE = {"imu_delay": 2500, "refine": 4000, "effort_push": 10000}
+GETUP_MAX_ITERATIONS = 16500
+GETUP_IMU_DELAY_MAX_LAG = 3
+GETUP_REFINE_ACTION_STD = 0.5
+GETUP_REFINE_ENTROPY_COEF = 0.001
 # Lateral distance between the two foot bodies at HOME, by forward kinematics
 # of config/home_pose.yaml (robot/home_pose.py; 0.1 mm rounding).  The
 # centered HOME keeps its historical 0.094 m target (FK 0.0935 m).
@@ -142,20 +153,10 @@ HOME_FEET_LATERAL_M = HOME.feet_lateral_m
 # reward.
 HEAD_STANDING_HEIGHT = HOME.head_standing_height_m
 STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
-# (fraction of resets near HOME, max roll/pitch noise in rad). 957ab42 widened
-# this to (0.2, 0.6) -- +-34 deg, "tipping, not yet fallen" -- so the policy
-# would practise catching itself. Measured at the centered HOME on 2026-10-03:
-# with it, stage 1 learned to catch tips by moving a foot and kept that stance
-# (17.6 cm wide under the +-1.57 clip; 8.6 cm staggered fore-aft under the
-# servo range, feet_fore_aft reward 3.1 vs 13.9 and standing_pose 124 vs 176 at
-# iteration 2000), while (0.1, 0.09) reproduced the HOME-stance lineage. The centered
-# HOME's tasks keep the wide default they were registered with
-# (LEGACY_HOME_OVERRIDES "getup_near_home_reset"); every other HOME, the
-# forward-lean one included, defaults to NEAR_HOME_RESET.
+# (fraction of resets near HOME, max roll/pitch noise in rad): 10 % of resets
+# within +-5 deg of HOME.  957ab42's wide (0.2, 0.6) "tipping" reset trained a
+# braced, staggered stance at the centered HOME (2026-10-03).
 NEAR_HOME_RESET = (0.1, 0.09)
-_DEFAULT_NEAR_HOME_RESET: tuple[float, float] = tuple(  # type: ignore[assignment]
-    HOME.override("getup_near_home_reset", NEAR_HOME_RESET)
-)
 # Despite the name, _head_height only uses .name to resolve the robot entity.
 HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))
 DOFS_FILTER = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
@@ -197,15 +198,48 @@ SIM_CFG = SimulationCfg(
 )
 
 
-def make_microban_getup_env_cfg(
-    play: bool = False,
-    reward_set: str = "posture",
-    imu_delay_max_lag: int = 0,
-    near_home_reset: tuple[float, float] = _DEFAULT_NEAR_HOME_RESET,
-) -> ManagerBasedRlEnvCfg:
-    """near_home_reset: (fraction of resets near HOME, max roll/pitch noise in rad)."""
-    if reward_set not in GETUP_REWARD_SETS:
-        raise ValueError(f"Unknown get-up reward set {reward_set!r}; expected one of {GETUP_REWARD_SETS}")
+_IMU_TERMS = ("actor/base_ang_vel", "actor/projected_gravity")
+
+# The step-scheduled switches of the one training run (module docstring).
+GETUP_STAGES = (
+    Stage(
+        "start without IMU latency",
+        0,
+        tuple(Setting("observation", term, "delay_max_lag", 0) for term in _IMU_TERMS),
+    ),
+    Stage(
+        "imu_delay",
+        scaled(GETUP_SCHEDULE["imu_delay"]),
+        tuple(
+            Setting("observation", term, "delay_max_lag", GETUP_IMU_DELAY_MAX_LAG)
+            for term in _IMU_TERMS
+        ),
+    ),
+    Stage(
+        "refine",
+        scaled(GETUP_SCHEDULE["refine"]),
+        (
+            Setting("reward", "standing_joint_vel", "weight", -4.0),
+            Setting("reward", "raw_target_clip_excess", "weight", -0.2),
+            Setting("reward", "feet_lateral", "weight", 30.0),
+            Setting("reward", "roll_pose", "weight", 60.0),
+        ),
+    ),
+    Stage(
+        "effort_push",
+        scaled(GETUP_SCHEDULE["effort_push"]),
+        (
+            Setting("reward", "roll_pose", "weight", 0.0),
+            Setting("reward", "roll_pose_shoulder", "weight", 60.0),
+            Setting("reward", "standing_target_error", "weight", -2.0),
+            Setting("reward", "raw_target_clip_excess", "weight", -2.0),
+            Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),
+        ),
+    ),
+)
+
+
+def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
     cfg.episode_length_s = GETUP_EPISODE_LENGTH_S
 
@@ -282,18 +316,18 @@ def make_microban_getup_env_cfg(
     del cfg.observations["critic"].terms["foot_air_time"]
     del cfg.observations["critic"].terms["foot_contact"]
     del cfg.observations["critic"].terms["foot_contact_forces"]
-    # IMU terms keep the base config's noise (gyro +-0.2, gravity +-0.05).
-    # imu_delay_max_lag > 0 adds the walking task's simulated IMU latency
-    # (0..N policy ticks, resampled every 64 steps). The first standing v4
-    # policy, trained without it, dropped from 53/54 to 34/62 fallen-start
-    # stands under 0-3 ticks, so the robot-bound policy is fine-tuned with it.
-    if imu_delay_max_lag:
-        for name in ("base_ang_vel", "projected_gravity"):
-            term = deepcopy(cfg.observations["actor"].terms[name])
-            term.delay_min_lag = 0
-            term.delay_max_lag = imu_delay_max_lag
-            term.delay_update_period = 64
-            cfg.observations["actor"].terms[name] = term
+    # IMU terms keep the base config's noise (gyro +-0.2, gravity +-0.05) and
+    # carry the walking task's simulated IMU latency (0..3 policy ticks,
+    # resampled every 64 steps).  Training holds it at 0 until the imu_delay
+    # switch (a policy trained without it dropped from 53/54 to 34/62
+    # fallen-start stands under 0-3 ticks; one that learned with it from the
+    # first update stood far later); evaluation and the robot always have it.
+    for name in ("base_ang_vel", "projected_gravity"):
+        term = deepcopy(cfg.observations["actor"].terms[name])
+        term.delay_min_lag = 0
+        term.delay_max_lag = GETUP_IMU_DELAY_MAX_LAG
+        term.delay_update_period = 64
+        cfg.observations["actor"].terms[name] = term
     cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
         func=velocity_mdp.joint_pos_rel,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
@@ -333,12 +367,9 @@ def make_microban_getup_env_cfg(
         "self_collision": self_collision_sensor_cfg.name,
     }
     _add_redesign_rewards(cfg, sensors)
-    calm_stage = _CALM_STAGE.get(reward_set, 0)
-    if reward_set == "posture" or calm_stage:
-        _add_posture_rewards(cfg)
-    if calm_stage:
-        _add_calm_rewards(cfg, calm_stage)
-    standing_pose_final, hip_pose_final = _POSE_FINAL_WEIGHTS.get(reward_set, (240.0, 120.0))
+    _add_posture_rewards(cfg)
+    _add_calm_rewards(cfg)
+    standing_pose_final, hip_pose_final = 240.0, 120.0
 
     #---------------------------- Terminations ----------------------
     # No "fell over" exit: starting fallen is the whole point.
@@ -373,25 +404,22 @@ def make_microban_getup_env_cfg(
         mode="reset",
         func=reset_near_home_fraction,
         params={
-            "rel_near_home_envs": near_home_reset[0],
+            "rel_near_home_envs": NEAR_HOME_RESET[0],
             "joint_noise_range": (-0.05, 0.05),
-            "orientation_noise_range": (-near_home_reset[1], near_home_reset[1]),
+            "orientation_noise_range": (-NEAR_HOME_RESET[1], NEAR_HOME_RESET[1]),
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
-    # No pushes. Ankle-only balance absorbs about 0.2 m/s; the walking
-    # task's +-0.5 m/s pushes (tried in 0e33eb3) knocked every stand over
-    # into a worse-scoring posture, so standing attempts stopped paying.
-    del cfg.events["push_robot"]
-    if _CALM_STAGE.get(reward_set, 0) >= 5:
-        # Fine-tuning only: modest horizontal kicks every 3-6 s (ankle balance
-        # absorbs ~0.2 m/s; walking's +-0.5 broke learning from scratch).
-        cfg.events["push_robot"] = EventTermCfg(
-            mode="interval",
-            func=envs_mdp.push_by_setting_velocity,
-            interval_range_s=(3.0, 6.0),
-            params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}},
-        )
+    # Modest horizontal kicks every 3-6 s, off (zero range) until the
+    # effort_push switch.  Ankle-only balance absorbs about 0.2 m/s; the
+    # walking task's +-0.5 m/s pushes (tried in 0e33eb3) knocked every stand
+    # over and broke learning from scratch.
+    cfg.events["push_robot"] = EventTermCfg(
+        mode="interval",
+        func=envs_mdp.push_by_setting_velocity,
+        interval_range_s=(3.0, 6.0),
+        params={"velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0)}},
+    )
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = (
         r".*left_foot_collision.*",
@@ -423,20 +451,11 @@ def make_microban_getup_env_cfg(
     )
 
     #---------------------------- Curriculum ------------------------
-    cfg.curriculum = {}
-    # Stage 1 finds any way up; then keep effort within what the XC330s deliver.
-    cfg.curriculum["staged_curriculum"] = CurriculumTermCfg(
-        func=StagedCurriculum,
-        params={
-            "stages": (
-                Stage(
-                    "add torque regularization",
-                    scaled(5000),
-                    (Setting("reward", "joint_torques_l2", "weight", -1e-3),),
-                ),
-            )
-        },
-    )
+    cfg.curriculum = {
+        "staged_curriculum": CurriculumTermCfg(
+            func=StagedCurriculum, params={"stages": GETUP_STAGES}
+        )
+    }
     # Pose shaping starts low and ramps only once standing is reliable
     # (standing_bonus mean episode reward >= 2.0 at weight 5.0, i.e. raw
     # >= 0.4). A from-scratch run with every pose weight at its final value
@@ -596,8 +615,6 @@ def _add_shared_rewards(
             "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll.*", r".*hip_pitch.*")),
         },
     )
-    # Off until staged_curriculum turns it on at step 120000.
-    cfg.rewards["joint_torques_l2"] = RewardTermCfg(func=joint_torques_l2, weight=0.0)
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=velocity_mdp.self_collision_cost,
         weight=-1.0,
@@ -695,73 +712,62 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         )
 
 
-def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, stage: int) -> None:
-    """Fine-tuning stages 3-5: a calm, low-effort, push-tolerant HOME stance.
+def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
+    """The calm (refine) and effort terms, registered at weight 0.
 
-    Resume each stage from the previous one; stage 3 starts from a stage-2
-    checkpoint with its action std reset to 0.5 and entropy 0.001
-    (scripts/reset_getup_action_std.py, docs/getup_training_export.md).
+    GETUP_STAGES sets their weights: refine at update 4000, effort_push at
+    10000 (mjlab skips a zero-weight term, so they cost nothing before).
 
-    Stage 3 (calm_roll). The stage-2 policy holds its stance with bang-bang
-    targets (~80 % on the clip) under action std ~10 and trembles at ~0.8
-    rad/s, although a linear ankle PD holds the same stance under the same
-    IMU delay. A commanded-target-rate penalty changed nothing, so penalize
-    the MEASURED joint velocity while standing. On its own that calmed the
-    stance by splaying it (feet 12-13 cm, hip/ankle roll 15-28 deg), so also
-    triple feet_lateral and hold the roll joints near HOME with a tight
-    (8.6 deg) roll_pose. Plus a light barrier on raw output beyond the flat
-    clip. Measured: tremble 0.77 -> 0.07 rad/s.
-    Stage 4 (calm_effort_strong). The stage-3 policy presses its right arm
-    into the 0-deg shoulder_roll stop at 0.44 Nm while standing. Its target
-    sits on the clip and its measured angle cannot move, so a pose term has
-    no gradient. So: add shoulder_roll to roll_pose, penalize the
-    target-vs-measured error (the P-term effort), and raise the clip-excess
-    barrier 10x so the raw output comes back to where the target responds.
+    refine (the 2026-10 chain's stage 3, calm_roll). The standing policy
+    holds its stance with bang-bang targets (~80 % on the clip) under action
+    std ~10 and trembles at ~0.8 rad/s, although a linear ankle PD holds the
+    same stance under the same IMU delay. A commanded-target-rate penalty
+    changed nothing, so penalize the MEASURED joint velocity while standing.
+    On its own that calmed the stance by splaying it (feet 12-13 cm,
+    hip/ankle roll 15-28 deg), so also triple feet_lateral and hold the roll
+    joints near HOME with a tight (8.6 deg) roll_pose. Plus a light barrier
+    on raw output beyond the flat clip. Measured: tremble 0.77 -> 0.07 rad/s.
+
+    effort_push (stages 4 and 5, calm_effort_strong and calm_push). The calm
+    policy presses its right arm into the 0-deg shoulder_roll stop at
+    0.44 Nm while standing. Its target sits on the clip and its measured
+    angle cannot move, so a pose term has no gradient. So: shoulder_roll
+    joins the roll pose (roll_pose_shoulder replaces roll_pose: one exp-mean
+    term over the larger joint set, as trained), the target-vs-measured
+    error (the P-term effort) is penalized, and the clip barrier is raised
+    10x so the raw output comes back to where the target responds.
     Measured: shoulder 0.44 -> 0.10 Nm; total standing effort 0.9 -> 0.5 Nm.
-    Stage 5 (calm_push). The effort penalty also cost push tolerance, so
-    kick the robot with +-0.3 m/s every 3-6 s (the push event in the env
-    cfg). Measured: 0.3 m/s fore-aft kicks fell 1/62 (stage 4: 3-7).
+    The effort penalty also cost push tolerance, hence the pushes from the
+    same update (0.3 m/s fore-aft kicks: 1/62 fell).
     """
+    gated = {"height_threshold": STANDING_GATE_HEIGHT, "head_asset_cfg": HEAD_ASSET_CFG}
     cfg.rewards["standing_joint_vel"] = RewardTermCfg(
         func=standing_joint_vel_l2,
-        weight=-4.0,
-        params={
-            "height_threshold": STANDING_GATE_HEIGHT,
-            "head_asset_cfg": HEAD_ASSET_CFG,
-            "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
-        },
+        weight=0.0,
+        params={**gated, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
     )
     # Brings raw output back to the clip edge, where a small change moves
     # the target (it may still sit at the edge for full torque).
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=-0.2 if stage < 4 else -2.0,
+        weight=0.0,
         params={"action_name": "joint_pos"},
     )
-    cfg.rewards["feet_lateral"].weight = 30.0
     roll_joints = (r".*hip_roll.*", r".*ankle_roll.*")
-    if stage >= 4:
-        roll_joints += (r".*shoulder_roll.*",)
-    cfg.rewards["roll_pose"] = RewardTermCfg(
-        func=home_pose_reward,
-        weight=60.0,
-        params={
-            "height_threshold": STANDING_GATE_HEIGHT,
-            "std": {r".*": 0.15},
-            "head_asset_cfg": HEAD_ASSET_CFG,
-            "asset_cfg": SceneEntityCfg("robot", joint_names=roll_joints),
-        },
-    )
-    if stage >= 4:
-        cfg.rewards["standing_target_error"] = RewardTermCfg(
-            func=standing_target_error_l1,
-            weight=-2.0,
-            params={
-                "height_threshold": STANDING_GATE_HEIGHT,
-                "head_asset_cfg": HEAD_ASSET_CFG,
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,)),
-            },
+    for name, joints in (
+        ("roll_pose", roll_joints),
+        ("roll_pose_shoulder", roll_joints + (r".*shoulder_roll.*",)),
+    ):
+        cfg.rewards[name] = RewardTermCfg(
+            func=home_pose_reward,
+            weight=0.0,
+            params={**gated, "std": {r".*": 0.15}, "asset_cfg": SceneEntityCfg("robot", joint_names=joints)},
         )
+    cfg.rewards["standing_target_error"] = RewardTermCfg(
+        func=standing_target_error_l1,
+        weight=0.0,
+        params={**gated, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
+    )
 
 
 MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(
@@ -803,5 +809,5 @@ MicrobanGetupRlCfg = RslRlOnPolicyRunnerCfg(
     experiment_name="mjlab_microban_getup",
     save_interval=500,
     num_steps_per_env=24,
-    max_iterations=15_000,
+    max_iterations=GETUP_MAX_ITERATIONS,
 )

@@ -105,6 +105,12 @@ UNREGISTERED_TASKS = frozenset({
     "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
     "Mjlab-Teleop-V12-Final-Rescue-Microban",
     "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban",
+    # Stage C: get-up is one run with scheduled switches.
+    "Mjlab-Getup-Microban-ImuDelay",
+    "Mjlab-Getup-Microban-CalmRoll-ImuDelay",
+    "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay",
+    "Mjlab-Getup-Microban-CalmPush-ImuDelay",
+    "Mjlab-Getup-Microban-Redesign",
 })
 
 
@@ -176,15 +182,14 @@ INTENDED_CHANGES = {
         for task in (
             "Mjlab-Velocity-Microban",
             "Mjlab-Getup-Microban",
-            "Mjlab-Getup-Microban-ImuDelay",
-            "Mjlab-Getup-Microban-CalmRoll-ImuDelay",
-            "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay",
-            "Mjlab-Getup-Microban-CalmPush-ImuDelay",
-            "Mjlab-Getup-Microban-Redesign",
             "Mjlab-Teleop-V12-HandPoseRelease-Microban",
         )
         for part in ("env", "play")
     },
+    "task:Mjlab-Getup-Microban:rl": "stage C: one 16500-update get-up run",
+    "const:mjlab_microban.tasks.microban_getup_env_cfg.NEAR_HOME_RESET": (
+        "stage C: one near-HOME reset at every HOME"
+    ),
     "const:mjlab_microban.tasks.microban_getup_env_cfg.SCENE_CFG": (
         "stage C: get-up uses the shared robot config (P125 on every servo, no neck P400)"
     ),

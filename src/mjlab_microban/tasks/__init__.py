@@ -36,47 +36,13 @@ register_mjlab_task(
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
-# Get-up (v5 action contract at the centered HOME, v6 at the forward-lean
-# HOME, "v6_<tag>" at any other; see microban_getup_runner.py). The robot
-# policy is trained in two stages:
-#   1. Mjlab-Getup-Microban from scratch: HOME-stance reward set ("posture");
-#      stands from fallen starts with a HOME stance by ~2000 iterations.
-#   2. Mjlab-Getup-Microban-ImuDelay, resumed from stage 1: the same rewards
-#      under the walking task's 0-3 tick simulated IMU latency (~500 iters).
+# Get-up: one training run with step-scheduled switches (IMU latency at 2500,
+# calm refinement at 4000, low effort and pushes at 10000; see
+# microban_getup_env_cfg.GETUP_SCHEDULE and docs/getup_training_export.md).
 register_mjlab_task(
     task_id="Mjlab-Getup-Microban",
-    env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-ImuDelay",
-    env_cfg=make_microban_getup_env_cfg(reward_set="posture", imu_delay_max_lag=3),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", imu_delay_max_lag=3),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-# Stages 3-5: calm, low-effort, push-tolerant fine-tunes, each resumed from
-# the previous stage (see microban_getup_env_cfg._add_calm_rewards).
-for _reward_set, _task_id in (
-    ("calm_roll", "Mjlab-Getup-Microban-CalmRoll-ImuDelay"),
-    ("calm_effort_strong", "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay"),
-    ("calm_push", "Mjlab-Getup-Microban-CalmPush-ImuDelay"),
-):
-    register_mjlab_task(
-        task_id=_task_id,
-        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set, imu_delay_max_lag=3),
-        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set, imu_delay_max_lag=3),
-        rl_cfg=MicrobanGetupRlCfg,
-        runner_cls=MicrobanGetupOnPolicyRunner,
-    )
-# The first v4 set that stood, with a wide braced stance ("redesign"): the
-# scene scripts/home_pipeline/getup_eval.py evaluates every get-up stage in.
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Redesign",
-    env_cfg=make_microban_getup_env_cfg(reward_set="redesign"),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign"),
+    env_cfg=make_microban_getup_env_cfg(),
+    play_env_cfg=make_microban_getup_env_cfg(play=True),
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )

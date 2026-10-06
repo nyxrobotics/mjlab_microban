@@ -29,7 +29,6 @@ from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_ACTION_CLIP,
     GETUP_ACTION_CLIP_RAD,
-    GETUP_REWARD_SETS,
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_policy_export import (
@@ -39,39 +38,20 @@ from mjlab_microban.tasks.microban_policy_export import (
 
 class GetupActionObservationContractTest(unittest.TestCase):
     def test_actor_and_critic_observe_raw_previous_action(self) -> None:
-        for reward_set in GETUP_REWARD_SETS:
-            cfg = make_microban_getup_env_cfg(reward_set=reward_set)
+        for play in (False, True):
+            cfg = make_microban_getup_env_cfg(play=play)
             for group_name in ("actor", "critic"):
                 term = cfg.observations[group_name].terms["actions"]
                 self.assertIs(term.func, raw_getup_action)
                 self.assertEqual(term.params, {"action_name": "joint_pos"})
                 self.assertEqual(term.delay_max_lag, 0)
 
-    def test_no_clip_excess_penalty_pushes_or_imu_delay(self) -> None:
-        # Every standing policy was trained without these (see the env
-        # module docstring); the v5 runner rejects the penalty outright.
-        # From-scratch sets only; fine-tuning sets may add a clip-excess
-        # barrier (see microban_getup_env_cfg.py).
-        for reward_set in ("posture", "redesign"):
-            cfg = make_microban_getup_env_cfg(reward_set=reward_set)
-            self.assertNotIn("raw_target_clip_excess", cfg.rewards)
-            self.assertNotIn("push_robot", cfg.events)
-            for name in ("base_ang_vel", "projected_gravity"):
-                self.assertEqual(cfg.observations["actor"].terms[name].delay_max_lag, 0)
-
-    def test_imu_delay_is_opt_in_and_actor_only(self) -> None:
-        cfg = make_microban_getup_env_cfg(reward_set="redesign", imu_delay_max_lag=3)
+    def test_imu_delay_is_allocated_and_actor_only(self) -> None:
+        # Training holds it at 0 until the scheduled switch (test_getup_schedule).
+        cfg = make_microban_getup_env_cfg()
         for name in ("base_ang_vel", "projected_gravity"):
             self.assertEqual(cfg.observations["actor"].terms[name].delay_max_lag, 3)
             self.assertEqual(cfg.observations["critic"].terms[name].delay_max_lag, 0)
-        # The shared default term config must not be mutated for other tasks.
-        self.assertEqual(
-            make_microban_getup_env_cfg().observations["actor"].terms["base_ang_vel"].delay_max_lag, 0
-        )
-
-    def test_unknown_reward_set_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            make_microban_getup_env_cfg(reward_set="nope")
 
     def test_current_clip_and_default_offset_are_runtime_reconstructible(self) -> None:
         cfg = make_microban_getup_env_cfg()

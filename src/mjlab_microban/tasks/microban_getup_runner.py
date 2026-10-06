@@ -22,7 +22,12 @@ from mjlab_microban.robot.microban_constants import (
     SERVO_KP_POLICY,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab_microban.tasks.curriculum import bind_update_clock
+from mjlab_microban.tasks.curriculum import (
+    STEPS_PER_UPDATE_ATTR,
+    bind_update_clock,
+    scaled,
+    stage_log_line,
+)
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
     raw_getup_action,
@@ -30,7 +35,13 @@ from mjlab_microban.tasks.microban_getup_action import (
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_ACTION_CLIP,
     GETUP_EPISODE_LENGTH_S,
+    GETUP_REFINE_ACTION_STD,
+    GETUP_REFINE_ENTROPY_COEF,
+    GETUP_SCHEDULE,
 )
+
+# Checkpoint marker: the refine switch's exploration reset has been applied.
+GETUP_EXPLORATION_REFINED_INFO_KEY = "microban_getup_exploration_refined"
 
 
 # The contract string is HOME-bound (robot/home_contracts.py):
@@ -227,7 +238,17 @@ def require_getup_checkpoint_contract(
 
 
 class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
-    """Stamp compatible checkpoints and reject old get-up resumes."""
+    """Stamp compatible checkpoints, reject old get-up resumes, and run the refine switch.
+
+    At the update GETUP_SCHEDULE["refine"] (right after that update, so the
+    next rollout already explores with it) the runner resets the action std to
+    GETUP_REFINE_ACTION_STD, clears the Adam moments, puts the adaptive
+    learning rate back to its configured start and lowers the entropy
+    coefficient to GETUP_REFINE_ENTROPY_COEF -- once: the checkpoint records
+    it, and a resumed run past the switch keeps its std and optimizer state
+    and only gets the entropy coefficient back.  The switch prints a
+    curriculum-format line for the pipeline monitor.
+    """
 
     def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
         unwrapped = env.unwrapped
@@ -264,6 +285,39 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             )
         bind_update_clock(unwrapped, int(train_cfg["num_steps_per_env"]))
         super().__init__(env, train_cfg, log_dir, device)
+        self.exploration_refined = False
+        self.initial_learning_rate = float(self.alg.learning_rate)
+        update = self.alg.update
+
+        def update_then_refine(*args, **kwargs):
+            result = update(*args, **kwargs)
+            self.maybe_refine_exploration()
+            return result
+
+        self.alg.update = update_then_refine
+
+    def maybe_refine_exploration(self) -> bool:
+        """Apply the refine switch once its update is reached (see class doc)."""
+
+        if self.exploration_refined:
+            return False
+        env = self.env.unwrapped
+        steps = getattr(env, STEPS_PER_UPDATE_ATTR)
+        counter = int(env.common_step_counter)
+        if counter < scaled(GETUP_SCHEDULE["refine"]) * steps:
+            return False
+        policy = self.alg.get_policy()
+        with torch.no_grad():
+            policy.distribution.std_param.fill_(GETUP_REFINE_ACTION_STD)
+        self.alg.optimizer.state.clear()
+        self.alg.learning_rate = self.initial_learning_rate
+        for group in self.alg.optimizer.param_groups:
+            group["lr"] = self.initial_learning_rate
+        self.alg.entropy_coef = GETUP_REFINE_ENTROPY_COEF
+        self.exploration_refined = True
+        print(stage_log_line(0, "refine exploration (std, Adam, learning rate, entropy)", counter, steps),
+              flush=True)
+        return True
 
     def save(self, path: str, infos=None) -> None:
         infos = {
@@ -271,6 +325,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             "microban_getup_contract": GETUP_CONTRACT_VERSION,
             "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
             "microban_getup_home_pose": getup_home_pose(),
+            GETUP_EXPLORATION_REFINED_INFO_KEY: self.exploration_refined,
         }
         super().save(path, infos)
 
@@ -280,4 +335,11 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         require_getup_checkpoint_contract(
             Path(path), checkpoint.get("infos"), require_recorded_env=False
         )
-        return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        infos = super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        if load_cfg is None or load_cfg.get("iteration", False):
+            # Continue after the saved update (rsl_rl would repeat it).
+            self.current_learning_iteration += 1
+        if (infos or {}).get(GETUP_EXPLORATION_REFINED_INFO_KEY):
+            self.exploration_refined = True
+            self.alg.entropy_coef = GETUP_REFINE_ENTROPY_COEF
+        return infos

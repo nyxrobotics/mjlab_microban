@@ -67,7 +67,11 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
         map_location: str | None = None,
     ) -> dict:
         require_current_home_walk_checkpoint(path)
-        return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        infos = super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        if load_cfg is None or load_cfg.get("iteration", False):
+            # Continue after the saved update (rsl_rl would repeat it).
+            self.current_learning_iteration += 1
+        return infos
 
 
 if __name__ == "__main__":

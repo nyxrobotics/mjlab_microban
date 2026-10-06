@@ -9,10 +9,8 @@
 > `HEAD_STANDING_HEIGHT` / `HOME_FEET_LATERAL_M` are the FK values (0.2953 m /
 > 0.0941 m at +10°), the near-HOME reset turns its yaw about world z, and
 > `Mjlab-Getup-Microban` defaults to the 10 %, ±5° near-HOME reset (the
-> centered HOME keeps its registered 20 %, ±34° default; both stay available as
-> `-NearHome5deg` / `-Tipping`). Only the current contract's stamp (plus, at the
-> centered HOME, a `v4` stamp whose recorded env proves v5) is resumed or
-> exported. The stage commands below are unchanged.
+> HOME). Only the current contract's stamp (plus, at the centered HOME, a
+> `v4` stamp whose recorded env proves v5) is resumed or exported.
 
 > **2026-10-03 unification (contract v5).** Every Microban policy (walking,
 > PICO full-body tracking, get-up) now uses the centered HOME
@@ -22,22 +20,18 @@
 > (`SERVO_TARGET_RANGE_RAD`); the old ±1.57 rad clip capped XC330 torque at
 > ~70 %. Everything else is unchanged from v4: the policy observes its own
 > **raw** previous output and the neck is held at its measured angles. The
-> stage commands below are unchanged. The reference numbers, run names and
+> reference numbers, run names and
 > the robot policy cited below are **v4 / old-HOME history** (hip-pitch HOME,
 > ±1.57 clip); no v5 policy has been measured against them yet.
 >
 > Runs started on 2026-10-03 just before the version bump (e.g.
 > `2026-10-03_13-40-39_chome_servo_s1`, `..._chome_servo_s1_nh5`) trained
 > under v5 but their checkpoints are stamped `microban_getup_contract=v4`.
-> The exporter, resume and `reset_getup_action_std` accept a `v4` stamp only
+> The exporter and resume accept a `v4` stamp only
 > when the run's recorded `params/env.yaml` shows the ±π clip at the centered
 > HOME with raw previous-action feedback, and treat it as v5. Centered-HOME
 > runs with the ±1.57 clip (e.g. `..._chome_s1b`) and every old-HOME
 > checkpoint are refused.
-
-Run these commands on the training PC from this repository. Start stage 1
-as a **new** training run; stage 2 resumes only from that stage-1 run, never
-from a checkpoint of an earlier contract.
 
 v5 keeps the action rule every get-up policy that ever stood up was trained
 under (v4; see `microban_getup_env_cfg.py`'s module docstring for the
@@ -47,8 +41,8 @@ evidence), with only the clip widened to the servo range:
   all 18 body joints (the servo goal range; v4 used ±1.57; never each joint's
   soft limit);
 * the policy observes its own previous **raw** output (not the clipped target);
-* no penalty on raw output beyond the clip (the IMU delay comes in only in
-  the stage-2 fine-tune below).
+* no penalty on raw output beyond the clip until the policy stands (the IMU
+  delay and the calm/effort terms are switched on later in the same run).
 
 At the robot's RL servo gain (P=125) standing is active balance that needs
 targets far past the joint angle to produce useful torque, so a trained
@@ -62,97 +56,34 @@ policy's own target. Their checkpoints and ONNX files are rejected.
 The actor reads angular velocity in the IMU sensor's own axes, matching the
 unrotated BMI088 gyroscope values sent to the robot's get-up actor.
 
-Train in two stages (a fresh stage-1 run, then resume it for stage 2):
+## Training: one run with scheduled switches (stage C, 2026-10-07)
+
+All servos, head and neck included, run at the policy gain P125
+(`SERVO_KP_POLICY`), as on the robot.  `scripts/retrain_all_for_home.py`
+trains get-up as one process:
 
 ```bash
-uv sync --locked
-# Stage 1: HOME-stance rewards, from scratch. Stands with feet together and
-# straight legs by ~2000 iterations.
-uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --agent.logger tensorboard \
-  --agent.max-iterations 2000
-# Stage 2: same rewards under the walking task's 0-3 tick simulated IMU
-# latency, resumed from stage 1 (~500 iterations suffice).
-uv run --locked train Mjlab-Getup-Microban-ImuDelay --env.scene.num-envs 4096 --agent.logger tensorboard \
-  --agent.max-iterations 1000 --agent.resume True \
-  --agent.load-run <stage-1-run> --agent.load-checkpoint model_2000.pt
+uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --env.seed 42 \
+  --agent.seed 42 --agent.logger tensorboard --agent.max-iterations 16500
 ```
 
-Reference numbers (v4 / old-HOME history, 2026-09-30, 64 envs, fallen starts, 0-3 tick IMU delay
-plus sensor noise): stage 1 at 2000 stood 26/62 under delay (52/53 without);
-stage 2 at 2500 stood 61/62 (median 2.7 s to stand), feet 10.0 cm apart
-(HOME 9.4 cm) with 0.3 cm stagger, every leg joint within 3.3 deg of HOME,
-and no falls after 0.2 m/s fore-aft kicks while standing.
-Stage 1 reproduced with `--agent.seed 7`: 53/53 fallen starts standing at
-1500 (no delay), feet 9.8 cm apart with 0.2 cm stagger. The robot candidate
-is stage 2 at 3500 (61/62 and 54/54 under 0-3 tick delay plus noise, 61/62
-even under 0-5 ticks).
-Training the delay from scratch was much slower (standing_bonus ~0.2 at
-iteration 1400), hence the two stages.
+The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
+`microban_getup_env_cfg.py`, applied by `tasks/curriculum.py`; each prints a
+`Curriculum stage ... at step S (update U)` line):
 
-### Stage 3: stop the standing tremble (calm fine-tune)
+| Updates | What is active | Why (2026-10 chain, v4 / old-HOME measurements) |
+|---|---|---|
+| 0-2499 | HOME-stance rewards, pose curriculum (reward-driven), no IMU latency, entropy 0.01 | stands by ~1750 at the latest; the delay from scratch kept standing_bonus at ~0.2 for 1400 iterations |
+| 2500-3999 | + 0-3 tick IMU latency (the actor's delay buffers are allocated for 3 ticks and held at 0 before) | stage 2: 47/62 -> 61/62 fallen starts standing under delay |
+| 4000-9999 | refine: action std 0.5, fresh Adam moments, learning rate back to 1e-3, entropy 0.001 (runner); calm terms: standing joint velocity -4, roll pose (hip/ankle roll, 8.6 deg std) 60, feet width x3, clip barrier -0.2 | stage 3: tremble 0.77 -> 0.08 rad/s; bang-bang targets under std ~10 otherwise |
+| 10000-16499 | effort_push: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0, +-0.3 m/s kicks every 3-6 s | stages 4-5: shoulder 0.44 -> 0.10 Nm, 0.3 m/s kick falls 1/62; clip excess and target error level off ~4000-5000 after the switch |
 
-The stage-2 policy stands, but holds the stance with bang-bang targets
-(~80 % on the clip) and trembles at ~0.77 rad/s. Its action std has grown to
-~10, and under that much noise bang-bang is the robust way to stand. Reset
-the std to 0.5 and fine-tune with the calm reward set (standing-gated joint
-velocity penalty, tight roll-joint pose, feet width, a clip-excess barrier):
-
-```bash
-uv run --locked python -m mjlab_microban.scripts.reset_getup_action_std \
-  --checkpoint logs/rsl_rl/mjlab_microban_getup/<stage-2-run>/model_<N>.pt \
-  --out-run <stage-2-run>_std05
-uv run --locked train Mjlab-Getup-Microban-CalmRoll-ImuDelay --env.scene.num-envs 4096 \
-  --agent.logger tensorboard --agent.max-iterations 8000 --agent.algorithm.entropy-coef 0.001 \
-  --agent.resume True --agent.load-run <stage-2-run>_std05 --agent.load-checkpoint model_<N>.pt
-```
-
-Reproduced (v4 / old-HOME history) on 2026-10-01/02 from stage 2 at 3500 (seed 42): tremble 0.77 ->
-0.55 -> 0.29 -> 0.08 rad/s after 2500 / 4500 / 5500 iterations; at 11499,
-0.06-0.07 rad/s, fallen starts stood 60/62, 53/54, 57/60, 54/55 (four seeds)
-and 59/62 under 0-5 tick delay, feet 9.4 cm apart, tilt ~4 deg, falls after a
-0.3 m/s fore-aft kick 2/62. Standing effort drops ~7x (0.9 Nm over 18 joints).
-
-
-### Stages 4 and 5: release the shoulder, then train push recovery
-
-The stage-3 policy presses its right arm into the 0-deg shoulder_roll stop
-at ~0.44 Nm while standing. Its raw output keeps the target on the clip, so
-neither a pose term nor an effort term can move it. Stage 4
-(`Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay`) adds shoulder_roll to the
-roll pose term, penalizes |target - measured| while standing, and raises the
-clip-excess barrier 10x. That effort penalty also cost push tolerance, so
-stage 5 (`Mjlab-Getup-Microban-CalmPush-ImuDelay`) adds +-0.3 m/s kicks every
-3-6 s. Resume each stage from the previous one (keep `--agent.algorithm.entropy-coef
-0.001`; no further std reset):
-
-```bash
-uv run --locked train Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay ... \
-  --agent.max-iterations 6500 --agent.resume True --agent.load-run <stage-3-run> ...
-uv run --locked train Mjlab-Getup-Microban-CalmPush-ImuDelay ... \
-  --agent.max-iterations 3000 --agent.resume True --agent.load-run <stage-4-run> ...
-```
-
-v4 / old-HOME history: the robot's v4 policy (`src/agents/getup.onnx`,
-2026-10-02) came from exactly this chain: stage 1 `2026-09-30_11-03-25_v4_S1_posture_scratch`
-(2000) -> stage 2 `2026-09-30_12-20-47_v4_S1D_posture_delay_ft` (3500, std
-reset) -> stage 3 `2026-10-01_18-46-39_v4_stage3_calmroll_repro_s42` (11499)
--> stage 4 `..._v4_stage4_effort_from_repro` / `_cont` / `_cont2` (18000)
--> stage 5 `2026-10-02_05-56-18_v4_calm_push` (model_20999,
-`artifacts/getup_v4_calm_push_20999.onnx`). Measured (64 envs, 0-3 tick IMU
-delay plus noise): fallen starts stood 60/62, 52/54, 57/60, 52/55 (four
-seeds) and 59/62 under 0-5 ticks; standing tremble 0.05-0.06 rad/s, effort
-0.55 Nm over 18 joints (right shoulder 0.10 Nm); falls after a 0.3 m/s
-fore-aft kick 1/62, after 0.4 m/s fore-aft / lateral kicks 19/59 / 19/57.
-Stages 4-5 were reproduced with `--agent.seed 7` from the same stage-3
-checkpoint, in one uninterrupted run each (6500 + 3000 iterations): fallen
-starts 61/62, 53/54, 56/60, 54/55 and 60/62 under 0-5 ticks; tremble 0.06
-rad/s; effort 0.46 Nm (no joint above 0.08 Nm, the shoulder stop no longer
-pressed); falls after a 0.3 m/s fore-aft kick 1/62, after 0.4 m/s fore-aft /
-lateral kicks 23/62 / 17/59.
-
-`Mjlab-Getup-Microban-Redesign` (the first set that stood, in a wide braced
-stance) stays registered as the scene the pipeline evaluates every stage in
-(scripts/home_pipeline/getup_eval.py).
+The evaluation / play config keeps the 0-3 tick latency and no schedule.
+Each switch was a separate resumed run before (std reset by a checkpoint
+copy, the pose curriculum re-fired at every restart); a run that crashes is
+resumed from its last checkpoint with the same table (the curriculum and the
+runner's refine flag are restored from the update counter and the
+checkpoint).
 
 The training episode lasts 20 seconds. The robot's automatic get-up attempt
 also allows up to 20 seconds. Once the upright gravity condition holds for 20

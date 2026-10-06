@@ -25,9 +25,8 @@ same command resumes after a crash, a stall or a fixed failure):
    margin over all repeats is selected (if none passes every repeat, the best
    one is used and reported as a fallback).  It is copied to
    checkpoints/<prefix>_walk/ (the v12 provenance re-hashes it there).
-3. Get-up stages 1-5 (Mjlab-Getup-Microban 2500 -> ImuDelay +1500 -> action
-   std reset 0.5 -> CalmRoll-ImuDelay +8000 -> CalmEffortStrong-ImuDelay +6500
-   -> CalmPush-ImuDelay +3000, entropy 0.001 from stage 3), each stage
+3. Get-up: one Mjlab-Getup-Microban run of 16500 updates (IMU latency,
+   calm refinement and effort/push switches scheduled inside it), then
    evaluated (scripts/home_pipeline/getup_eval.py); the final stage must pass
    the get-up acceptance gate.  Runs in parallel with step 2 (GPU memory
    permitting).
@@ -137,21 +136,18 @@ PROBE_THRESHOLDS = {
 }
 PROBE_MAX_SOFT_LIMIT_OVERSHOOT_RAD = 0.0873  # 5 deg, as the bootstrap gate
 
-# (label suffix, task, iterations, entropy coef, reset std before)
+# (label suffix, task, iterations, entropy coef, reset std before): one run,
+# the switches are scheduled inside it (microban_getup_env_cfg.GETUP_SCHEDULE).
 GETUP_STAGES = [
-    ("getup_s1", "Mjlab-Getup-Microban", 2500, None, False),
-    ("getup_s2_delay", "Mjlab-Getup-Microban-ImuDelay", 1500, None, False),
-    ("getup_s3_calmroll", "Mjlab-Getup-Microban-CalmRoll-ImuDelay", 8000, "0.001", True),
-    ("getup_s4_effort", "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay", 6500, "0.001", False),
-    ("getup_s5_push", "Mjlab-Getup-Microban-CalmPush-ImuDelay", 3000, "0.001", False),
+    ("getup", "Mjlab-Getup-Microban", 16500, None, False),
 ]
 # (name, extra args) of the evaluations run after every get-up stage.
 GETUP_EVALS = [
-    ("stand_s11", ["stand", "Mjlab-Getup-Microban-Redesign", "--seed", "11", "--imu-delay", "3", "--noise"]),
-    ("stand_s5", ["stand", "Mjlab-Getup-Microban-Redesign", "--seed", "5", "--imu-delay", "3", "--noise"]),
-    ("push_s11", ["stand", "Mjlab-Getup-Microban-Redesign", "--seed", "11", "--imu-delay", "3", "--noise",
+    ("stand_s11", ["stand", "Mjlab-Getup-Microban", "--seed", "11", "--imu-delay", "3", "--noise"]),
+    ("stand_s5", ["stand", "Mjlab-Getup-Microban", "--seed", "5", "--imu-delay", "3", "--noise"]),
+    ("push_s11", ["stand", "Mjlab-Getup-Microban", "--seed", "11", "--imu-delay", "3", "--noise",
                   "--push", "x:0.3"]),
-    ("posture_s11", ["posture", "Mjlab-Getup-Microban-ImuDelay", "--seed", "11"]),
+    ("posture_s11", ["posture", "Mjlab-Getup-Microban", "--seed", "11"]),
 ]
 # Get-up acceptance of the final stage (2026-10 lean/centered finals: 0.98
 # fallen-start standing, 0/63 push falls, 0.07 rad/s, 60/64 posture).

@@ -141,9 +141,6 @@ FEET_LATERAL_DECIMALS = 4
 #   the YAML's canonical 12-decimal ones in the last digits (the forward-lean
 #   branch wrote the solver's unrounded hip/ankle pitch); checked against the
 #   YAML to JOINT_PIN_TOLERANCE_DEG;
-# * ``getup_near_home_reset``: the default near-HOME reset of the get-up tasks
-#   on that branch (the centered line kept the wide (0.2, 0.6) default; the
-#   forward-lean line, and any new HOME, use NEAR_HOME_RESET (0.1, 0.09));
 # * ``accepts_unstamped_walk_checkpoints``: walking checkpoints saved before
 #   the HOME stamp existed (centered line only).
 #
@@ -215,7 +212,6 @@ LEGACY_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
                 "feet_lateral_m": 0.094,
                 "root_z_m": 0.170554885633559,
                 "contracts": MappingProxyType(_CENTERED_HOME_CONTRACTS),
-                "getup_near_home_reset": (0.2, 0.6),
                 "accepts_unstamped_walk_checkpoints": True,
             }
         ),
