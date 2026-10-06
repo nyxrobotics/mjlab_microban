@@ -11,7 +11,6 @@ import torch
 
 from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     TWIST_RATIO_AXIS_SCALE,
-    TWIST_RATIO_BASE,
     TWIST_RATIO_DIRECTION_PENALTY,
     TWIST_RATIO_MIN_COMMAND_NORM,
     twist_ratio,
@@ -35,7 +34,6 @@ def reward(commands, twists):
     return twist_ratio_reward(
         torch.tensor(commands, dtype=torch.float32),
         torch.tensor(twists, dtype=torch.float32),
-        base=0.0,
     )
 
 
@@ -140,7 +138,7 @@ class DecompositionTest(unittest.TestCase):
             ]
             values = reward([command] * len(candidates), candidates)
             self.assertEqual(int(torch.argmax(values)), 0, command)
-            self.assertAlmostEqual(float(values[0]), 1.0, places=5)
+            self.assertAlmostEqual(float(values[0]), 1.0, places=5)  # the best value
 
     def test_standing_and_small_commands(self) -> None:
         # Standing still earns the same speed 1 as exact tracking of a moving
@@ -169,7 +167,7 @@ class DecompositionTest(unittest.TestCase):
     def test_every_command_has_the_same_best_value(self) -> None:
         commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
         values = twist_ratio_reward(torch.tensor(commands), torch.tensor(commands))
-        self.assertTrue(torch.allclose(values, torch.full((len(commands),), 2.0), atol=1e-5))
+        self.assertTrue(torch.allclose(values, torch.ones(len(commands)), atol=1e-5))
 
     def test_the_speed_branches_meet_on_the_ray(self) -> None:
         # n exactly at min_command_norm: both branches give s on the ray.
@@ -229,14 +227,14 @@ class DecompositionTest(unittest.TestCase):
         # Falling forward (v_z -0.8 m/s, pitching 3 rad/s), walking with a
         # small bob and sway, standing still.
         uncommanded = torch.tensor([[-0.8, 0.0, 3.0], [0.05, 0.2, 0.2], [0.0, 0.0, 0.0]])
-        values = twist_ratio_reward(command, twist, uncommanded=uncommanded, base=0.0)
+        values = twist_ratio_reward(command, twist, uncommanded=uncommanded)
         self.assertLess(float(values[0]), float(values[2]))
-        self.assertAlmostEqual(float(values[2]), 0.0, places=6)
-        self.assertGreater(float(values[1]), 0.75)
+        self.assertAlmostEqual(float(values[2]), 0.5, places=6)  # still on a moving command
         bob = math.sqrt((0.05 / 0.7) ** 2 + 2 * (0.2 / 1.5) ** 2)
-        self.assertAlmostEqual(float(values[1]), 1.0 - bob, places=5)
+        self.assertAlmostEqual(float(values[1]), math.exp(-bob), places=5)
+        self.assertGreater(float(values[1]), 0.75)
         # Without the uncommanded motion the fall would earn the full reward.
-        planar = twist_ratio_reward(command, twist, base=0.0)
+        planar = twist_ratio_reward(command, twist)
         self.assertAlmostEqual(float(planar[0]), 1.0, places=5)
 
     def test_uncommanded_motion_is_off_direction_motion(self) -> None:
@@ -252,16 +250,24 @@ class DecompositionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             twist_ratio(command, twist, uncommanded=torch.zeros(1, 3), uncommanded_scale=(0.7, 1.5))
 
-    def test_base_keeps_a_positive_reward_for_staying_upright(self) -> None:
-        command = torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], [0.3, 0.1, 0.6], list(G)])
-        twist = torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], [0.0, 0.0, 0.0], scaled(G, 0.3)])
-        values = twist_ratio_reward(command, twist)
-        self.assertEqual(TWIST_RATIO_BASE, 1.0)
-        expected = [2.0, 2.0, 1.0, 1.3]
-        for value, want in zip(values.tolist(), expected, strict=True):
-            self.assertAlmostEqual(value, want, places=5)
-        shifted = twist_ratio_reward(command, twist, base=0.0)
-        self.assertTrue(torch.allclose(values - shifted, torch.ones(4)))
+    def test_reward_is_bounded_and_never_negative(self) -> None:
+        # Falling can never pay: every value is in [0, 1].  Standing still
+        # is worth 1 on a standing command and 1/2 on a moving one.
+        torch.manual_seed(0)
+        commands = torch.randn(4096, 3) * torch.tensor([0.5, 0.25, 1.2])
+        commands[:256] = 0.0
+        twists = torch.randn(4096, 3) * torch.tensor([1.0, 1.0, 3.0])
+        uncommanded = torch.randn(4096, 3) * torch.tensor([1.0, 3.0, 3.0])
+        values = twist_ratio_reward(commands, twists, uncommanded=uncommanded)
+        self.assertGreaterEqual(float(values.min()), 0.0)
+        self.assertLessEqual(float(values.max()), 1.0)
+        still = twist_ratio_reward(
+            torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], list(G)]), torch.zeros(3, 3)
+        )
+        for value, want in zip(still.tolist(), [1.0, 0.5, 0.5], strict=True):
+            self.assertAlmostEqual(value, want, places=6)
+        half = twist_ratio_reward(torch.tensor([list(G)]), torch.tensor([scaled(G, 0.3)]))
+        self.assertAlmostEqual(float(half[0]), 0.65, places=5)
 
     def test_bad_inputs(self) -> None:
         with self.assertRaises(ValueError):
@@ -312,9 +318,9 @@ class RewardTermTest(unittest.TestCase):
         # roll/pitch rates (0.05 m/s, 0.3 and -0.2 rad/s) are uncommanded.
         value = twist_ratio_velocity_reward(env)
         uncommanded = math.sqrt((0.05 / 0.7) ** 2 + (0.3 / 1.5) ** 2 + (0.2 / 1.5) ** 2)
-        self.assertAlmostEqual(float(value[0]), 1.5 - uncommanded, places=5)
+        self.assertAlmostEqual(float(value[0]), 0.75 * math.exp(-uncommanded), places=5)
         planar = twist_ratio_velocity_reward(env, uncommanded_scale=None)
-        self.assertAlmostEqual(float(planar[0]), 1.5, places=5)
+        self.assertAlmostEqual(float(planar[0]), 0.75, places=5)
 
     def test_matches_the_task_home_levelled_velocity(self) -> None:
         # Same frame as mjlab_microban.tasks.mdp.home_levelled_root_*_vel_b

@@ -35,23 +35,37 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     perpendicular motion costs k and opposite motion 2k; the error grows
     monotonically with the angle to the command.
 
-The reward is ``base + speed - direction_penalty * error`` (``base`` 1 by
-default): 2 at exact tracking of any command (standing still on a standing
-command included), less for anything off the command.  ``base`` keeps a
-positive reward for staying upright, as the exp tracking kernels this term
-replaces did; without it (``base = 0``) a walker trained from scratch barely
-learned to stay up (mean episode length 45 steps at update 200 against about
-190 for the old reward; with ``base = 1`` 183 at update 400).  The equal best
-value matters because falling ends an episode and draws a new command: when a
-standing command could earn at most 1 against 2 for a moving one, a walker
-trained from scratch learned to fall at once when told to stand (all 30
-standing rollouts at update 4000).  For a zero command ``error =
-sqrt(|v^|^2 + |w^|^2)``.  The maximum over the twists a robot can reach lies on
-the commanded ray: ``s * c`` with the largest feasible ``s`` (exact tracking
-when the command is feasible).  The uncommanded motion keeps a robot that
-topples in the commanded direction from collecting speed reward on the way
-down (the tracking kernels this term replaces penalised vertical velocity and
-roll/pitch rates the same way); ``uncommanded_scale=None`` leaves it out.
+The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
+[0, 1]: 1 at exact tracking of any command (standing still on a standing
+command included), 1/2 for standing still on a moving command, less for
+anything off the command, and never negative.  Its maximum over the twists a
+robot can reach lies on the commanded ray: ``s * c`` with the largest feasible
+``s`` (exact tracking when the command is feasible).  For a zero command
+``error = sqrt(|v^|^2 + |w^|^2)``.
+
+Why this form (walker trained from scratch at the forward-lean HOME,
+2026-10-06, held-out probes on seeds 101-105):
+
+* ``speed - error`` (no constant part): no positive reward for staying upright
+  where the exp tracking kernels it replaces gave about half of the early
+  positive reward; episodes stayed near 45 steps at update 200 (old reward
+  190).
+* ``1 + speed - error`` with ``speed = a / max(n, min_command_norm)``: a
+  standing command could earn at most 1 against 2 for a moving one, and
+  falling ends an episode without a penalty and draws a new command; at update
+  4000 the walker fell within one second in every standing rollout.  The
+  small-command branch of ``speed`` gives every command the same best value.
+* ``1 + speed - error`` with that ``speed``: the reward goes negative after a
+  push, so falling can pay; 36-43 of 90 pushed diagonal rollouts fell from
+  update 5000 to 8000 (old reward 2 of 90 at 5000), and single-axis commands
+  were overshot about twice.
+* This bounded form: 4 of 90 at update 3000 with single-axis commands
+  tracked.
+
+The uncommanded motion keeps a robot that topples in the commanded direction
+from collecting speed reward on the way down (the tracking kernels this term
+replaces penalised vertical velocity and roll/pitch rates the same way);
+``uncommanded_scale=None`` leaves it out.
 
 ``twist_ratio_velocity_reward`` is meant to replace the separate velocity
 tracking terms (exp kernels, L1 errors and the xy projection progress) of the
@@ -77,7 +91,6 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_MIN_COMMAND_NORM = 0.2
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
-TWIST_RATIO_BASE = 1.0
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -156,16 +169,19 @@ def twist_ratio_reward(
     direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
-    base: float = TWIST_RATIO_BASE,
 ) -> torch.Tensor:
-    """``base + speed - direction_penalty * error`` per env (pure tensor form)."""
+    """``(1 + speed) / 2 * exp(-direction_penalty * error)`` per env."""
 
     if not direction_penalty > 0.0:
         raise ValueError("direction_penalty must be positive")
     parts = twist_ratio(
         command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
     )
-    return base + parts.speed - direction_penalty * parts.error
+    return _bounded(parts, direction_penalty)
+
+
+def _bounded(parts: TwistRatio, direction_penalty: float) -> torch.Tensor:
+    return 0.5 * (1.0 + parts.speed) * torch.exp(-direction_penalty * parts.error)
 
 
 def home_levelled_velocities(
@@ -216,7 +232,6 @@ def twist_ratio_velocity_reward(
     min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
     direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
-    base: float = TWIST_RATIO_BASE,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward term: the ratio-keeping velocity reward of the module doc."""
@@ -237,4 +252,4 @@ def twist_ratio_velocity_reward(
         log = extras.setdefault("log", {})
         log["Metrics/twist_ratio_speed"] = parts.speed.mean()
         log["Metrics/twist_ratio_error"] = parts.error.mean()
-    return base + parts.speed - direction_penalty * parts.error
+    return _bounded(parts, direction_penalty)

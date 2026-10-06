@@ -96,26 +96,18 @@ register_mjlab_task(
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
-# VALIDATION EXPERIMENT ONLY: walking with the twist-ratio velocity reward.
+# VALIDATION EXPERIMENT ONLY: walking with the twist-ratio velocity reward
+# (bounded form B2; trw5B2_* train it).  Earlier forms are in this branch's
+# history.
 from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
     make_microban_velocity_twist_ratio_env_cfg,
 )
 
-register_mjlab_task(
-    task_id="Mjlab-Velocity-TwistRatio-Microban",
-    env_cfg=make_microban_velocity_twist_ratio_env_cfg(),
-    play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True),
-    rl_cfg=MicrobanVelocityRlCfg,
-    runner_cls=MicrobanVelocityOnPolicyRunner,
-)
-# A (trw3A_*) trained the module at commit 5a8bbf8; A2 is the module from the
-# next commit on (same best value 2 for every command, standing included).
-# B2 is the kernel form with the A2 speed (module from 68ab716 on).
-for _variant, _suffix in (("offset", "A"), ("kernel", "B"), ("offset", "A2"), ("kernel", "B2")):
+for _task_id in ("Mjlab-Velocity-TwistRatio-Microban", "Mjlab-Velocity-TwistRatioB2-Microban"):
     register_mjlab_task(
-        task_id=f"Mjlab-Velocity-TwistRatio{_suffix}-Microban",
-        env_cfg=make_microban_velocity_twist_ratio_env_cfg(variant=_variant),
-        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True, variant=_variant),
+        task_id=_task_id,
+        env_cfg=make_microban_velocity_twist_ratio_env_cfg(),
+        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True),
         rl_cfg=MicrobanVelocityRlCfg,
         runner_cls=MicrobanVelocityOnPolicyRunner,
     )

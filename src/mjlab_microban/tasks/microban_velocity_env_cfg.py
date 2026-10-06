@@ -488,55 +488,27 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 
 # VALIDATION EXPERIMENT ONLY (branch exp/twist-ratio-validation, never
-# merged): the walking task with the ratio-keeping twist reward in place of
-# its two exp velocity tracking terms (weight 2 each), everything else equal.
-MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
+# merged): the walking task with the ratio-keeping twist reward
+# (microban_twist_ratio_mdp, bounded form B2) in place of its two exp velocity
+# tracking terms (weight 2 each), everything else equal.  The reward is in
+# [0, 1], so weight 8 gives the same best value as the two exp terms (4) plus
+# the same again for speed.  Earlier forms (A, A2, kernel B with the old small-
+# command speed) are in the history of this branch (5a8bbf8, 68ab716, d587882).
+MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 8.0
 
 
-def twist_ratio_kernel_reward(env, command_name: str = "twist", trunk_pitch: float = 0.0):
-    """Variant B: (1 + speed) / 2 * exp(-error), bounded in [0, 1]."""
-
-    import torch
-
-    from mjlab_microban.tasks.microban_twist_ratio_mdp import (
-        TWIST_RATIO_UNCOMMANDED_SCALE,
-        home_levelled_velocities,
-        twist_ratio,
-    )
-
-    command = env.command_manager.get_command(command_name)[:, :3]
-    linear, angular = home_levelled_velocities(env, trunk_pitch)
-    twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
-    uncommanded = torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
-    parts = twist_ratio(command, twist, uncommanded=uncommanded,
-                        uncommanded_scale=TWIST_RATIO_UNCOMMANDED_SCALE)
-    log = env.extras.setdefault("log", {})
-    log["Metrics/twist_ratio_speed"] = parts.speed.mean()
-    log["Metrics/twist_ratio_error"] = parts.error.mean()
-    return 0.5 * (1.0 + parts.speed) * torch.exp(-parts.error)
-
-
-def make_microban_velocity_twist_ratio_env_cfg(
-    play: bool = False, variant: str = "linear"
-) -> ManagerBasedRlEnvCfg:
+def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microban.tasks.microban_twist_ratio_mdp import (
         twist_ratio_velocity_reward,
     )
 
-    # "offset" (variant A, adopted) is the module's reward (base 1);
-    # "linear" is the first form (base 0); "kernel" is variant B.
-    func, weight, extra = {
-        "linear": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {"base": 0.0}),
-        "offset": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {}),
-        "kernel": (twist_ratio_kernel_reward, 2.0 * MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {}),
-    }[variant]
     cfg = make_microban_velocity_env_cfg(play=play)
     del cfg.rewards["track_linear_velocity"]
     del cfg.rewards["track_angular_velocity"]
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=func,
-        weight=weight,
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, **extra},
+        func=twist_ratio_velocity_reward,
+        weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
     return cfg
 

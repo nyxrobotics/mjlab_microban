@@ -677,11 +677,14 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "yaw_velocity_error_l1",
     ):
         del cfg.rewards[name]
+    # Bounded form (in [0, 1]); weight 32 makes standing still -> exact
+    # tracking worth 16 like the L1 term's typical push.  UNVALIDATED for the
+    # PICO: the 7099 validation run trained the first form at weight 16 and
+    # was stopped before its first probe.
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
         func=twist_ratio_velocity_reward,
-        weight=16.0,
-        # The stopped 7099 validation run trained the first form (base 0).
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, "base": 0.0},
+        weight=32.0,
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
 
     # V2 converged to a wide static stance because the inherited term penalized
