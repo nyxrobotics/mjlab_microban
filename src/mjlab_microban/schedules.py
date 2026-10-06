@@ -7,10 +7,11 @@ configs, the PICO adapter, the evaluators, the exporters and the pipeline
 (``scaled``).  This module imports nothing, so the pipeline and the HOME
 contracts can read it without loading mjlab.
 
-Early stop (pipeline monitor): a run whose last stage has lasted at least
-half its planned length may stop once two checks 1000 updates apart pass;
-the ``*_MIN_FINAL_UPDATES`` values are the earliest update such a run can end
-at.
+Early stop (pipeline monitor): a run may stop once two checks 1000 updates
+apart pass, at the earliest at its ``*_MIN_FINAL_UPDATES``: get-up and PICO
+once their last stage has lasted half its planned length; walking (no planned
+end, ``WALK_MAX_UPDATES`` is a cap) once both checks saw at least 1000 updates
+of its only stage.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ def scaled(iteration: int) -> int:
 # Walking: one stage (wider forward/yaw commands, no-stepping penalty).
 WALK_WIDEN_UPDATE = scaled(3000)
 WALK_MAX_UPDATES = scaled(20000)
+WALK_MIN_FINAL_UPDATES = WALK_WIDEN_UPDATE + scaled(2000)
 
 # Get-up: IMU latency, calm refinement, low effort with pushes.
 GETUP_SCHEDULE = {

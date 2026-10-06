@@ -24,7 +24,9 @@ walk:
   # Checks every 1000 updates while training (in parallel, one at a time):
   # the held-out probe W1-W5 (pipeline/walk_probe.py, seeds 101-105) and the
   # 9x300 probe above with seed 101.  Two consecutive passes (N, N+1000) end
-  # the run with model_<N+1000>; no stop by WALK_MAX_UPDATES fails the step.
+  # the run with model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000: both
+  # checks saw 1000+ updates of the only stage); no stop by WALK_MAX_UPDATES
+  # fails the step.
   check:
     stage_tolerance: 1
     seeds: "101,102,103,104,105"

@@ -117,7 +117,7 @@ class Pipeline:
         code = ("import json; from mjlab_microban import schedules as s, policy_contract as p; "
                 "from mjlab_microban.pipeline.steps import stage_tables; print(json.dumps({"
                 "'contract': p.POLICY_CONTRACT, 'recipes': dict(p.RECIPES), "
-                "'walk_max': s.WALK_MAX_UPDATES, "
+                "'walk_max': s.WALK_MAX_UPDATES, 'walk_min_final': s.WALK_MIN_FINAL_UPDATES, "
                 "'check_every': s.scaled(1000), 'getup_total': s.GETUP_TOTAL_UPDATES, "
                 "'getup_min_final': s.GETUP_MIN_FINAL_UPDATES, 'pico_total': s.PICO_TOTAL_UPDATES, "
                 "'pico_min_final': s.PICO_MIN_FINAL_UPDATES, 'pico': s.pico_schedule_record(), "
@@ -309,7 +309,7 @@ class Pipeline:
         monitor = self.monitor(
             "walk", WALK_EXP, label,
             stages=self.sched["stages"]["walk"],
-            check_updates=list(range(every, total, every)), min_final=0,
+            check_updates=list(range(every, total, every)), min_final=self.sched["walk_min_final"],
             start_check=self.walk_check, abort_rules=walk_abort_rules(c["check"]),
             check_abort=walk_check_abort(c["check"]))
         final = self.train("walk", WALK_EXP, label, c["task"], total, c["envs"],
