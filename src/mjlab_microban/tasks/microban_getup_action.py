@@ -22,7 +22,8 @@ import torch
 
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 
-from mjlab_microban.tasks.microban_getup_actuator import GETUP_NECK_JOINT_NAMES
+# Head and neck: not policy actions; held at their measured angles.
+GETUP_NECK_JOINT_NAMES = ("head", "neck_roll", "neck_pitch")
 
 
 class GetupJointPositionActionCfg(JointPositionActionCfg):

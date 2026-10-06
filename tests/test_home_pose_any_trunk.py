@@ -185,6 +185,9 @@ INTENDED_CHANGES = {
         )
         for part in ("env", "play")
     },
+    "const:mjlab_microban.tasks.microban_getup_env_cfg.SCENE_CFG": (
+        "stage C: get-up uses the shared robot config (P125 on every servo, no neck P400)"
+    ),
     "const:mjlab_microban.tasks.microban_teleop_v12_runner.TELEOP_V12_OBSERVATION_TERM_LAYOUTS": (
         "stage C: the disabled locomotion-prior critic term removed (critic 137 -> 98)"
     ),

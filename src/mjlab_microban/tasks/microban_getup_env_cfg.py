@@ -86,6 +86,7 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import (
+    MICROBAN_ROBOT_CFG,
     HOME_FRAME,
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
@@ -111,9 +112,6 @@ from mjlab_microban.tasks.mdp import (
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionActionCfg,
     raw_getup_action,
-)
-from mjlab_microban.tasks.microban_getup_actuator import (
-    make_getup_robot_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
 
@@ -170,7 +168,7 @@ SCENE_CFG = SceneCfg(
     ),
     num_envs=1,
     extent=2.0,
-    entities={"robot": make_getup_robot_cfg()},
+    entities={"robot": MICROBAN_ROBOT_CFG},
 )
 
 VIEWER_CONFIG = ViewerConfig(
@@ -251,8 +249,8 @@ def make_microban_getup_env_cfg(
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    # 18 body joints; the robot holds head/neck at their measured angles with
-    # P gain 400 during get-up, which the get-up action/actuator reproduce.
+    # 18 body joints; head/neck are held at their measured angles (the
+    # get-up action), every servo at the shared policy gain.
     # Absolute target = default pose + raw action, saturated at the servo's
     # +-pi goal range. That bound also removes early exploration's
     # multi-radian tail (which blew up the solver when unbounded); it is

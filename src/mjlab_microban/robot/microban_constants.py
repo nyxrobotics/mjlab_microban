@@ -88,10 +88,17 @@ bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
 # vin_drop_gain_range is UNCHANGED (still XL330-tuned): it's an empirical pack-level
 # V/Nm coefficient (battery + wiring resistance across all 21 servos), not derivable
 # from a single motor's R/kt, so it needs its own re-tuning/measurement pass.
+# Firmware position P gain of all 21 servos while a learned policy (walking,
+# get-up, PICO) runs, in training and on the robot (the robot's KP_RL; the
+# exported policies record it as ``servo_kp`` and the robot refuses a policy
+# trained at another gain).  The robot holds static poses without a policy at
+# its own, stiffer gain.
+SERVO_KP_POLICY = 125
+
 actuators = BamActuatorCfg(
     json_path=str(Path(os.path.dirname(__file__)) / "xc330_params.json"),
     target_names_expr=(r".*",),
-    kp_fw=125,
+    kp_fw=SERVO_KP_POLICY,
     vin_range=(9.0, 12.6),
     vin_drop_gain_range=(0.0, 0.2),
     vin_min=9.0,

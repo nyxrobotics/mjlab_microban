@@ -15,15 +15,17 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from bam.mjlab import BamActuatorCfg
+
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    SERVO_KP_POLICY,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.tasks.curriculum import bind_update_clock
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
     raw_getup_action,
-)
-from mjlab_microban.tasks.microban_getup_actuator import (
-    GETUP_BODY_KP_FW,
-    GetupBamActuatorCfg,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_ACTION_CLIP,
@@ -253,10 +255,13 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
                 raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires undelayed {group} action feedback")
         robot_cfg = unwrapped.cfg.scene.entities["robot"]
         actuator_cfgs = robot_cfg.articulation.actuators if robot_cfg.articulation else ()
-        if len(actuator_cfgs) != 1 or not isinstance(actuator_cfgs[0], GetupBamActuatorCfg):
-            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires its body/neck XC330 actuator model")
-        if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
-            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires body P125 and XC330 0.91 A current limit")
+        if len(actuator_cfgs) != 1 or type(actuator_cfgs[0]) is not BamActuatorCfg:
+            raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires the shared XC330 actuator model")
+        if actuator_cfgs[0].kp_fw != SERVO_KP_POLICY or actuator_cfgs[0].max_current != 0.91:
+            raise ValueError(
+                f"Get-up {GETUP_CONTRACT_VERSION} requires P{SERVO_KP_POLICY} on every servo and the "
+                "XC330 0.91 A current limit"
+            )
         bind_update_clock(unwrapped, int(train_cfg["num_steps_per_env"]))
         super().__init__(env, train_cfg, log_dir, device)
 
