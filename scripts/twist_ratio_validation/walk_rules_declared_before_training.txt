@@ -92,3 +92,19 @@
 #   対策候補 B2 = (1 + speed)/2 * exp(-error)（重み 8, speed は A2 の定義）。常に 0 以上で、どの指令も最大 1（×8）。
 #   同じシードで比べるため、trw4_s43（A2）を止めて trw5B2_s42（B2, シード 42）を始める。trw4_s42（A2）は 20000 回まで続ける。
 #   B2 にも同じ基準 W1-W5 を当て、5000 回の時点で押し p30 の転倒を A2 と比べる。
+2026-10-06 18:15:32 trw4_s43 stopped after model_5000; start trw5B2_s42 (B2, commit 2cddf0c)
+2026-10-06 18:40:34 trw4_s42 model_6000: it 6000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 22/p30 25 deg; speed none 0.69/p30 0.67; falls none 0/90 p30 36/90 single 0; F +0.405 BK +0.205 LL +0.121 LR +0.139 YL +0.98 YR +0.98
+2026-10-06 18:44:41 trw4_s42 model_6000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.151 forward2=0.370 backward1=0.121 backward2=0.190 lateral_left1=0.119 lateral_right1=0.138 yaw_left5=0.987 yaw_right5=0.964 below=[]
+2026-10-06 18:58:35 trw5B2_s42 model_1000: it 1000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=NG] angle none 40/p30 47 deg; speed none 0.49/p30 0.41; falls none 0/90 p30 16/90 single 0; F +0.138 BK +0.038 LL +0.059 LR +0.060 YL +0.54 YR +0.53
+2026-10-06 19:02:37 trw5B2_s42 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.078 forward2=0.117 backward1=0.002 backward2=0.038 lateral_left1=0.053 lateral_right1=0.068 yaw_left5=0.559 yaw_right5=0.522 below=['backward_0p1', 'backward_0p2']
+2026-10-06 19:23:06 trw4_s42 model_7000: it 7000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 20/p30 22 deg; speed none 0.69/p30 0.68; falls none 0/90 p30 43/90 single 0; F +0.339 BK +0.226 LL +0.136 LR +0.126 YL +0.85 YR +0.97
+2026-10-06 19:27:13 trw4_s42 model_7000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.194 forward2=0.309 backward1=0.110 backward2=0.210 lateral_left1=0.141 lateral_right1=0.126 yaw_left5=0.863 yaw_right5=0.973 below=[]
+2026-10-06 19:40:55 trw5B2_s42 model_2000: it 2000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 28/p30 34 deg; speed none 0.57/p30 0.51; falls none 0/90 p30 13/90 single 0; F +0.186 BK +0.088 LL +0.066 LR +0.084 YL +0.54 YR +0.72
+2026-10-06 19:44:56 trw5B2_s42 model_2000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.076 forward2=0.164 backward1=0.052 backward2=0.088 lateral_left1=0.066 lateral_right1=0.082 yaw_left5=0.543 yaw_right5=0.707 below=[]
+2026-10-06 20:05:35 trw4_s42 model_8000: it 8000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 22/p30 23 deg; speed none 0.69/p30 0.67; falls none 0/90 p30 40/90 single 0; F +0.413 BK +0.191 LL +0.130 LR +0.158 YL +0.87 YR +1.04
+2026-10-06 20:09:30 trw4_s42 model_8000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.217 forward2=0.376 backward1=0.102 backward2=0.182 lateral_left1=0.132 lateral_right1=0.160 yaw_left5=0.895 yaw_right5=1.033 below=[]
+2026-10-06 20:23:18 trw5B2_s42 model_3000: it 3000: FAIL [W1=NG W2=ok W3=ok W4=ok W5=ok] angle none 27/p30 31 deg; speed none 0.57/p30 0.51; falls none 0/90 p30 4/90 single 0; F +0.227 BK +0.118 LL +0.084 LR +0.083 YL +0.69 YR +0.67
+# 修正5（2026-10-06 20:25）: 同じシード 42 で比べると、B2 は 3000 回で押し p30 の転倒 4/90・単軸も指令どおり（W2-W5 合格、W1 のみ 27/31 度）。
+#   A2 は 8000 回でも押し p30 の転倒 40/90、単軸で指令の約 2 倍の速さ（F 0.2 指令に 0.41 m/s）。A2 の押しへの弱さは解消していない。
+#   B2 の 2 本目のシードを得るため、trw4_s42（A2）を 8000 回の途中確認後に止め、trw5B2_s43（B2, シード 43）を始める。基準は同じ。
+2026-10-06 20:23:58 trw4_s42 stopped after model_8000; start trw5B2_s43 (B2, commit 2cddf0c)
