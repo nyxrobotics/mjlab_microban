@@ -125,43 +125,6 @@ def normalized_target_clip_excess_l1_sum(
     return torch.abs(normalized_excess).sum(dim=-1)
 
 
-def target_soft_limit_excess_l1(
-    target: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor
-) -> torch.Tensor:
-    """Sum over joints of how far each target lies outside [lower, upper], in half-ranges."""
-
-    excess = torch.clamp(lower - target, min=0.0) + torch.clamp(target - upper, min=0.0)
-    return (excess / (0.5 * (upper - lower))).sum(dim=-1)
-
-
-def normalized_target_soft_limit_excess_l1_sum(
-    env: ManagerBasedRlEnv,
-    action_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Penalize position targets beyond each joint's soft limit (unclipped, L1).
-
-    A target past the joint's hard stop, or past the servo's +-pi goal range,
-    leaves the joint at the same place: every position-based term (pose,
-    dof_pos_limits) is flat in the action there, so a policy whose mean output
-    drifts into that region gets no gradient back and stays.  Measured on a
-    walker trained with the twist-ratio reward (2026-10-07): from update 5000
-    the standing policy held both elbows and shoulder pitches at their stops
-    with raw outputs near 20 rad, losing the whole pose reward and paying
-    dof_pos_limits every step.  This term is linear in the unclipped target's
-    excess, so the pull back toward the soft range never vanishes; it is zero
-    for every target inside the soft range.
-    """
-
-    action = env.action_manager.get_term(action_name)
-    if not isinstance(action, JointPositionAction):
-        raise TypeError(f"{action_name!r} must be a JointPositionAction")
-    raw = action.raw_action
-    scale = torch.as_tensor(action.scale, dtype=raw.dtype, device=raw.device)
-    offset = torch.as_tensor(action.offset, dtype=raw.dtype, device=raw.device)
-    limits = action._entity.data.soft_joint_pos_limits[:, action.target_ids]
-    return target_soft_limit_excess_l1(raw * scale + offset, limits[..., 0], limits[..., 1])
-
-
 def normalized_joint_soft_limit_guard_l1_sum(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
