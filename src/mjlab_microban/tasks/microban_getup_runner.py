@@ -189,10 +189,6 @@ def require_recorded_getup_env(env_yaml: Path) -> None:
             raise ValueError(f"Run did not observe the undelayed raw previous action ({group})")
 
 
-# Historical name (contract v5 at the centered HOME).
-require_recorded_getup_v5_env = require_recorded_getup_env
-
-
 def require_getup_checkpoint_contract(
     checkpoint: Path, infos: object, *, require_recorded_env: bool
 ) -> str:

@@ -29,11 +29,6 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from rsl_rl.algorithms import PPO
-from rsl_rl.modules.distribution import Distribution, GaussianDistribution
-from tensordict import TensorDict
-from torch import nn
-from torch.distributions import Normal
 
 from mjlab_microban.tasks.mdp import (
     FootTargetCommand,
@@ -43,22 +38,7 @@ from mjlab_microban.tasks.mdp import (
     home_levelled_root_ang_vel_b,
     home_levelled_root_lin_vel_b,
 )
-from mjlab_microban.tasks.microban_locomotion_prior import (
-    MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
-)
-from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_HMD_JOINT_NAMES,
-    MICROBAN_TELEOP_ACTION_WIDTH,
-    MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
-    MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
-    MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER,
-    MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
-    MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR,
-    MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
-    MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR,
-    MICROBAN_TELEOP_OBSERVATION_WIDTH,
-    validate_microban_teleop_observation_contract,
-)
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
 
 # Runtime command limits from microban/src/moves/hmd_head.py.  The event further
 # intersects these with Entity.data.soft_joint_pos_limits, so the effective
@@ -85,939 +65,6 @@ MICROBAN_HMD_RETARGET_INTERVAL_S = (0.35, 1.50)
 MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M = 0.0025
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
-
-
-class PerJointGaussianDistribution(GaussianDistribution):
-    """RSL-RL Gaussian initialized with one exact standard deviation per joint.
-
-    Microban's action coordinates are joint-position deltas in radians.  Their
-    usable ranges differ by more than an order of magnitude, and the shoulder
-    roll home positions are only one degree inside an absolute soft limit.  A
-    scalar one-radian exploration standard deviation therefore starts training
-    with pervasive target clipping.  This distribution keeps RSL-RL's ordinary
-    state-independent Gaussian behavior while making the initial vector an
-    explicit, ordered part of the task contract.
-    """
-
-    def __init__(
-        self,
-        output_dim: int,
-        init_std: Sequence[float],
-        std_type: str = "log",
-    ) -> None:
-        if isinstance(init_std, (str, bytes)):
-            raise TypeError("init_std must be a numeric sequence")
-        values = torch.as_tensor(tuple(init_std), dtype=torch.float32)
-        if values.shape != (output_dim,):
-            raise ValueError(
-                f"init_std must contain {output_dim} values, got {values.numel()}"
-            )
-        if not bool(torch.isfinite(values).all().item()) or not bool(
-            torch.all(values > 0.0).item()
-        ):
-            raise ValueError("every init_std value must be finite and positive")
-
-        # Let the upstream implementation create the correctly registered
-        # parameter, then replace it without changing its state-dict key.
-        super().__init__(output_dim, init_std=1.0, std_type=std_type)
-        with torch.no_grad():
-            if std_type == "scalar":
-                self.std_param.copy_(values)
-            elif std_type == "log":
-                self.log_std_param.copy_(torch.log(values))
-
-
-class _AsymmetricArctanDeterministicOutput(nn.Module):
-    """Exportable zero-anchored map from MLP outputs to safe deltas."""
-
-    def __init__(
-        self,
-        lower_bound: torch.Tensor,
-        upper_bound: torch.Tensor,
-        mean_lower_bound: torch.Tensor,
-        mean_upper_bound: torch.Tensor,
-    ) -> None:
-        super().__init__()
-        self.register_buffer("lower_bound", lower_bound.detach().clone())
-        self.register_buffer("upper_bound", upper_bound.detach().clone())
-        self.register_buffer("mean_lower_bound", mean_lower_bound.detach().clone())
-        self.register_buffer("mean_upper_bound", mean_upper_bound.detach().clone())
-        zero = torch.zeros((), dtype=lower_bound.dtype, device=lower_bound.device)
-        self.register_buffer(
-            "inward_lower_bound", torch.nextafter(lower_bound, zero).detach().clone()
-        )
-        self.register_buffer(
-            "inward_upper_bound", torch.nextafter(upper_bound, zero).detach().clone()
-        )
-
-    def forward(self, mlp_output: torch.Tensor) -> torch.Tensor:
-        if not torch.onnx.is_in_onnx_export() and not bool(
-            torch.isfinite(mlp_output).all().item()
-        ):
-            raise FloatingPointError(
-                "Exportable bounded actor MLP output became non-finite"
-            )
-        mean_scale = torch.where(
-            mlp_output >= 0.0, self.mean_upper_bound, -self.mean_lower_bound
-        )
-        latent = (2.0 * mean_scale / math.pi) * torch.atan(
-            math.pi * mlp_output / (2.0 * mean_scale)
-        )
-        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
-        action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
-        bounded = torch.maximum(
-            torch.minimum(action, self.inward_upper_bound),
-            self.inward_lower_bound,
-        )
-        # atan(inf) is finite.  Preserve non-finite network failures through
-        # ONNX rather than hiding them behind a saturated-looking action.
-        output = bounded + 0.0 * mlp_output
-        if not torch.onnx.is_in_onnx_export() and not bool(
-            torch.isfinite(output).all().item()
-        ):
-            raise FloatingPointError(
-                "Exportable bounded actor output became non-finite"
-            )
-        return output
-
-
-class AsymmetricBoundedGaussianDistribution(Distribution):
-    """Numerically guarded diagonal Gaussian with bounded physical actions.
-
-    The MLP emits an unconstrained latent action ``z``.  For a joint with raw
-    action bounds ``lower < 0 < upper``, the action sent to the environment is::
-
-        2 * upper / pi * atan(pi * z / (2 * upper))       if z >= 0
-        2 * (-lower) / pi * atan(pi * z / (2 * -lower))   if z < 0
-
-    This asymmetric arctangent is strictly monotonic, maps real numbers onto the
-    open action interval, satisfies ``T(0) == 0`` and has unit derivative at
-    zero on both sides.  Float32 storage cannot reliably invert it arbitrarily
-    close to its asymptote, however.  The bounded-action contract therefore derives a finite
-    operational latent envelope from each side's action width, smoothly bounds
-    the MLP-provided Gaussian mean inside that envelope, and clamps the
-    learned standard deviation to leave a wide stochastic margin.  Sampling
-    outside the outer envelope fails training instead of silently clipping a
-    non-invertible action.
-
-    PPO stores and scores the exact sampled latent, never a float32 physical
-    action reconstructed through the ill-conditioned inverse.  The custom PPO
-    adapter maps that latent through :meth:`to_environment_action` only for the
-    environment step.  Deterministic evaluation and ONNX export apply the same
-    map.  Previous-action observations remain the bounded, target-clipped raw
-    delta received by the environment.
-    """
-
-    def __init__(
-        self,
-        output_dim: int,
-        init_std: Sequence[float],
-        lower_bound: Sequence[float],
-        upper_bound: Sequence[float],
-        std_type: str = "log",
-        latent_scale_multiplier: float = (
-            MICROBAN_TELEOP_ACTOR_LATENT_SCALE_MULTIPLIER
-        ),
-        latent_abs_max: float = MICROBAN_TELEOP_ACTOR_LATENT_ABS_MAX,
-        latent_mean_fraction: float = MICROBAN_TELEOP_ACTOR_LATENT_MEAN_FRACTION,
-        std_min_abs_max: float = MICROBAN_TELEOP_ACTOR_STD_MIN_ABS_MAX,
-        std_min_envelope_divisor: float = (
-            MICROBAN_TELEOP_ACTOR_STD_MIN_ENVELOPE_DIVISOR
-        ),
-        std_abs_max: float = MICROBAN_TELEOP_ACTOR_STD_ABS_MAX,
-        std_envelope_divisor: float = (MICROBAN_TELEOP_ACTOR_STD_ENVELOPE_DIVISOR),
-    ) -> None:
-        super().__init__(output_dim)
-        if isinstance(init_std, (str, bytes)):
-            raise TypeError("init_std must be a numeric sequence")
-        std_values = torch.as_tensor(tuple(init_std), dtype=torch.float32)
-        lower_values = torch.as_tensor(tuple(lower_bound), dtype=torch.float32)
-        upper_values = torch.as_tensor(tuple(upper_bound), dtype=torch.float32)
-        for name, values in (
-            ("init_std", std_values),
-            ("lower_bound", lower_values),
-            ("upper_bound", upper_values),
-        ):
-            if values.shape != (output_dim,):
-                raise ValueError(
-                    f"{name} must contain {output_dim} values, got {values.numel()}"
-                )
-            if not bool(torch.isfinite(values).all().item()):
-                raise ValueError(f"every {name} value must be finite")
-        if not bool(torch.all(std_values > 0.0).item()):
-            raise ValueError("every init_std value must be positive")
-        if not bool(torch.all(lower_values < 0.0).item()):
-            raise ValueError("every lower_bound must be strictly negative")
-        if not bool(torch.all(upper_values > 0.0).item()):
-            raise ValueError("every upper_bound must be strictly positive")
-        scalar_contract = {
-            "latent_scale_multiplier": latent_scale_multiplier,
-            "latent_abs_max": latent_abs_max,
-            "std_min_abs_max": std_min_abs_max,
-            "std_min_envelope_divisor": std_min_envelope_divisor,
-            "std_abs_max": std_abs_max,
-            "std_envelope_divisor": std_envelope_divisor,
-        }
-        for name, value in scalar_contract.items():
-            if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"{name} must be finite and positive")
-        if (
-            not math.isfinite(latent_mean_fraction)
-            or not 0.0 < latent_mean_fraction < 1.0
-        ):
-            raise ValueError("latent_mean_fraction must be finite and in (0, 1)")
-
-        absolute_cap = torch.full_like(lower_values, latent_abs_max)
-        operational_lower = -torch.minimum(
-            -lower_values * latent_scale_multiplier, absolute_cap
-        )
-        operational_upper = torch.minimum(
-            upper_values * latent_scale_multiplier, absolute_cap
-        )
-        mean_lower = operational_lower * latent_mean_fraction
-        mean_upper = operational_upper * latent_mean_fraction
-        closest_operational_side = torch.minimum(-operational_lower, operational_upper)
-        min_std = torch.minimum(
-            torch.full_like(std_values, std_min_abs_max),
-            closest_operational_side / std_min_envelope_divisor,
-        )
-        max_std = torch.minimum(
-            torch.full_like(std_values, std_abs_max),
-            closest_operational_side / std_envelope_divisor,
-        )
-        if not bool(torch.all(min_std < max_std).item()):
-            raise ValueError("derived max_std must be greater than std_min")
-        if not bool(
-            torch.all((std_values >= min_std) & (std_values <= max_std)).item()
-        ):
-            raise ValueError("every init_std must be inside the operational std bounds")
-
-        self.std_type = std_type
-        if std_type == "scalar":
-            self.std_param = nn.Parameter(std_values.clone())
-        elif std_type == "log":
-            self.log_std_param = nn.Parameter(torch.log(std_values))
-        else:
-            raise ValueError(
-                f"Unknown standard deviation type: {std_type}. "
-                "Should be 'scalar' or 'log'."
-            )
-        self.register_buffer("lower_bound", lower_values)
-        self.register_buffer("upper_bound", upper_values)
-        zero = torch.zeros((), dtype=lower_values.dtype)
-        self.register_buffer("inward_lower_bound", torch.nextafter(lower_values, zero))
-        self.register_buffer("inward_upper_bound", torch.nextafter(upper_values, zero))
-        self.register_buffer("operational_lower_bound", operational_lower)
-        self.register_buffer("operational_upper_bound", operational_upper)
-        self.register_buffer("mean_lower_bound", mean_lower)
-        self.register_buffer("mean_upper_bound", mean_upper)
-        self.register_buffer("min_std", min_std)
-        self.register_buffer("max_std", max_std)
-        operational_scale = torch.where(
-            operational_lower >= 0.0, upper_values, -lower_values
-        )
-        operational_action_lower = (
-            2.0
-            * operational_scale
-            / math.pi
-            * torch.atan(math.pi * operational_lower / (2.0 * operational_scale))
-        )
-        operational_scale = torch.where(
-            operational_upper >= 0.0, upper_values, -lower_values
-        )
-        operational_action_upper = (
-            2.0
-            * operational_scale
-            / math.pi
-            * torch.atan(math.pi * operational_upper / (2.0 * operational_scale))
-        )
-        self.register_buffer("operational_action_lower", operational_action_lower)
-        self.register_buffer("operational_action_upper", operational_action_upper)
-        self._distribution: Normal | None = None
-        self._latent_sample: torch.Tensor | None = None
-        Normal.set_default_validate_args(False)
-
-    def init_mlp_weights(self, mlp: nn.Module) -> None:
-        """Deterministically seed the two narrow shoulder-roll output rows.
-
-        RSL-RL invokes this hook immediately after it creates the actor MLP and
-        before constructing PPO's optimizer.  This is the earliest and most
-        reliable place to prevent a random final row from pinning either
-        asymmetric shoulder-roll action at its neutral-side endpoint.
-        """
-
-        from mjlab_microban.tasks.microban_teleop_bootstrap import (
-            initialize_teleop_shoulder_roll_mlp_head,
-        )
-
-        if self.output_dim == MICROBAN_TELEOP_ACTION_WIDTH:
-            initialize_teleop_shoulder_roll_mlp_head(mlp)
-
-    @torch.no_grad()
-    def project_std_parameters_(self) -> None:
-        """Project the learned exploration width into its numerical contract.
-
-        Applying ``torch.clamp`` only while building the distribution creates a
-        dead zone: once the optimizer moves the underlying parameter beyond a
-        bound, the clamp derivative is zero and a later PPO gradient cannot
-        bring it back.  In-place parameter projection keeps the optimizer state
-        and checkpoint schema unchanged while leaving the in-range forward path
-        differentiable, including exactly at either boundary.
-        """
-
-        if self.std_type == "scalar":
-            parameter = self.std_param
-            lower = self.min_std
-            upper = self.max_std
-        else:
-            parameter = self.log_std_param
-            lower = torch.log(self.min_std)
-            upper = torch.log(self.max_std)
-        if not bool(torch.isfinite(parameter).all().item()):
-            parameter_name = "std" if self.std_type == "scalar" else "log_std"
-            raise FloatingPointError(
-                f"Bounded Gaussian {parameter_name} parameter became non-finite "
-                "before clamp"
-            )
-        parameter.copy_(torch.maximum(torch.minimum(parameter, upper), lower))
-
-    def _transform(self, latent: torch.Tensor) -> torch.Tensor:
-        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
-        action = (2.0 * scale / math.pi) * torch.atan(math.pi * latent / (2.0 * scale))
-
-        # A real-valued arctangent never reaches its asymptote.  At very large but
-        # finite float32 inputs, however, the result can round to the
-        # exact physical bound.  Move only that numerical endpoint one ULP
-        # inward.  Ordinary samples are unchanged, while every finite output is
-        # strictly inside the action/target soft limits.
-        return torch.maximum(
-            torch.minimum(action, self.inward_upper_bound),
-            self.inward_lower_bound,
-        )
-
-    def _limit_mean(self, mlp_output: torch.Tensor) -> torch.Tensor:
-        """Smoothly keep the Gaussian centre inside its operational envelope."""
-
-        scale = torch.where(
-            mlp_output >= 0.0, self.mean_upper_bound, -self.mean_lower_bound
-        )
-        return (2.0 * scale / math.pi) * torch.atan(
-            math.pi * mlp_output / (2.0 * scale)
-        )
-
-    def _inverse(self, action: torch.Tensor) -> torch.Tensor:
-        if action.shape[-1] != self.output_dim:
-            raise ValueError(
-                f"Bounded action must end in width {self.output_dim}, "
-                f"got {action.shape[-1]}"
-            )
-        valid = (
-            torch.isfinite(action)
-            & (action > self.lower_bound)
-            & (action < self.upper_bound)
-            & (action >= self.operational_action_lower)
-            & (action <= self.operational_action_upper)
-        )
-        if not bool(valid.all().item()):
-            raise ValueError(
-                "Bounded action log_prob requires finite values inside every "
-                "joint's operational action envelope"
-            )
-        scale = torch.where(action >= 0.0, self.upper_bound, -self.lower_bound)
-        latent = (2.0 * scale / math.pi) * torch.tan(math.pi * action / (2.0 * scale))
-        if not bool(torch.isfinite(latent).all().item()):
-            raise FloatingPointError("Operational action inverse became non-finite")
-        return latent
-
-    def _log_abs_det_jacobian(self, latent: torch.Tensor) -> torch.Tensor:
-        scale = torch.where(latent >= 0.0, self.upper_bound, -self.lower_bound)
-        absolute_scaled = torch.abs(math.pi * latent / (2.0 * scale))
-        # log(1 + x^2) in two finite branches.  Direct square overflows for a
-        # large but finite float32 latent, while logaddexp(0, 2*log(abs(x))) has
-        # an awkward log(0) gradient at the zero anchor.  Clamping each branch's
-        # unused magnitude keeps both forward and backward intermediates finite.
-        one = torch.ones((), dtype=latent.dtype, device=latent.device)
-        small = torch.minimum(absolute_scaled, one)
-        large = torch.maximum(absolute_scaled, one)
-        log_one_plus_square = torch.where(
-            absolute_scaled <= 1.0,
-            torch.log1p(torch.square(small)),
-            2.0 * torch.log(large) + torch.log1p(torch.square(1.0 / large)),
-        )
-        return -log_one_plus_square
-
-    def update(self, mlp_output: torch.Tensor) -> None:
-        if not bool(torch.isfinite(mlp_output).all().item()):
-            raise FloatingPointError("Bounded Gaussian MLP output became non-finite")
-        mean = self._limit_mean(mlp_output)
-        self.project_std_parameters_()
-        if self.std_type == "scalar":
-            std_values = self.std_param
-        else:
-            std_values = torch.exp(self.log_std_param)
-        if not bool(torch.isfinite(std_values).all().item()):
-            raise FloatingPointError("Bounded Gaussian std became non-finite")
-        self._distribution = Normal(mean, std_values.expand_as(mean))
-        self._latent_sample = None
-
-    def sample(self) -> torch.Tensor:
-        if self._distribution is None:
-            raise RuntimeError("update() must be called before sample()")
-        # rsample supplies the pathwise derivative needed by the entropy
-        # estimator during PPO updates.  Rollout collection already runs under
-        # inference_mode and detaches stored actions.
-        self._latent_sample = self._distribution.rsample()
-        valid = (
-            torch.isfinite(self._latent_sample)
-            & (self._latent_sample >= self.operational_lower_bound)
-            & (self._latent_sample <= self.operational_upper_bound)
-        )
-        if not bool(valid.all().item()):
-            raise FloatingPointError(
-                "Bounded Gaussian sample escaped its operational latent envelope"
-            )
-        return self._latent_sample
-
-    def to_environment_action(self, latent: torch.Tensor) -> torch.Tensor:
-        """Map a stored/scored PPO latent to the bounded environment action."""
-
-        if latent.shape[-1] != self.output_dim:
-            raise ValueError(
-                f"PPO latent must end in width {self.output_dim}, "
-                f"got {latent.shape[-1]}"
-            )
-        valid = (
-            torch.isfinite(latent)
-            & (latent >= self.operational_lower_bound)
-            & (latent <= self.operational_upper_bound)
-        )
-        if not bool(valid.all().item()):
-            raise FloatingPointError(
-                "PPO latent escaped its operational envelope before env transform"
-            )
-        action = self._transform(latent)
-        if not bool(torch.isfinite(action).all().item()):
-            raise FloatingPointError("Bounded environment action became non-finite")
-        endpoint = (action == self.inward_lower_bound) | (
-            action == self.inward_upper_bound
-        )
-        if bool(endpoint.any().item()):
-            raise FloatingPointError(
-                "Operational latent produced a non-bijective action endpoint"
-            )
-        return action
-
-    def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
-        if not bool(torch.isfinite(mlp_output).all().item()):
-            raise FloatingPointError(
-                "Deterministic bounded Gaussian MLP output became non-finite"
-            )
-        output = self._transform(self._limit_mean(mlp_output))
-        if not bool(torch.isfinite(output).all().item()):
-            raise FloatingPointError(
-                "Deterministic bounded Gaussian output became non-finite"
-            )
-        return output
-
-    def as_deterministic_output_module(self) -> nn.Module:
-        return _AsymmetricArctanDeterministicOutput(
-            self.lower_bound,
-            self.upper_bound,
-            self.mean_lower_bound,
-            self.mean_upper_bound,
-        )
-
-    @property
-    def input_dim(self) -> int:
-        return self.output_dim
-
-    @property
-    def mean(self) -> torch.Tensor:
-        if self._distribution is None:
-            raise RuntimeError("update() must be called before reading mean")
-        # PPO stores and scores latent actions.  Deterministic policy/export
-        # output is intentionally exposed only through deterministic_output().
-        return self._distribution.mean
-
-    @property
-    def std(self) -> torch.Tensor:
-        if self._distribution is None:
-            raise RuntimeError("update() must be called before reading std")
-        # RSL-RL uses this property only for its exploration-width log.  Return
-        # the learned latent standard deviation, whose local action scale is
-        # identical at the zero anchor because T'(0) == 1.
-        return self._distribution.stddev
-
-    @property
-    def entropy(self) -> torch.Tensor:
-        if self._distribution is None or self._latent_sample is None:
-            raise RuntimeError("sample() must be called before reading entropy")
-        return self._distribution.entropy().sum(dim=-1)
-
-    @property
-    def params(self) -> tuple[torch.Tensor, ...]:
-        if self._distribution is None:
-            raise RuntimeError("update() must be called before reading params")
-        # Storing latent parameters is both sufficient and preferable: the
-        # bounds are immutable buffers and fixed-bijection KL is latent KL.
-        return (self._distribution.mean, self._distribution.stddev)
-
-    def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
-        if self._distribution is None:
-            raise RuntimeError("update() must be called before log_prob()")
-        if outputs.shape[-1] != self.output_dim:
-            raise ValueError(
-                f"PPO latent must end in width {self.output_dim}, "
-                f"got {outputs.shape[-1]}"
-            )
-        valid = (
-            torch.isfinite(outputs)
-            & (outputs >= self.operational_lower_bound)
-            & (outputs <= self.operational_upper_bound)
-        )
-        if not bool(valid.all().item()):
-            raise FloatingPointError(
-                "PPO log_prob latent is outside its operational envelope"
-            )
-        result = self._distribution.log_prob(outputs).sum(dim=-1)
-        if not bool(torch.isfinite(result).all().item()):
-            raise FloatingPointError(
-                "Latent Gaussian log_prob became non-finite: "
-                f"latent_abs_max={float(outputs.abs().max().item()):.9g}, "
-                f"mean_abs_max={float(self._distribution.mean.abs().max().item()):.9g}, "
-                f"std_min={float(self._distribution.stddev.min().item()):.9g}, "
-                f"std_max={float(self._distribution.stddev.max().item()):.9g}"
-            )
-        return result
-
-    def kl_divergence(
-        self,
-        old_params: tuple[torch.Tensor, ...],
-        new_params: tuple[torch.Tensor, ...],
-    ) -> torch.Tensor:
-        old_mean, old_std = old_params
-        new_mean, new_std = new_params
-        old_dist = Normal(old_mean, old_std)
-        new_dist = Normal(new_mean, new_std)
-        return torch.distributions.kl_divergence(old_dist, new_dist).sum(dim=-1)
-
-
-class LatentActionPPO(PPO):
-    """Bounded-action PPO with contract-v9 locomotion-prior BC disabled."""
-
-    def __init__(
-        self,
-        *args: Any,
-        locomotion_prior_bc_cfg: Mapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        if not isinstance(
-            self.actor.distribution, AsymmetricBoundedGaussianDistribution
-        ):
-            raise TypeError(
-                "LatentActionPPO requires AsymmetricBoundedGaussianDistribution"
-            )
-        if self.symmetry is not None:
-            raise ValueError(
-                "LatentActionPPO does not support action-space symmetry augmentation"
-            )
-        if self.rnd is not None:
-            raise ValueError("LatentActionPPO does not support RND")
-        if self.actor.distribution.output_dim != MICROBAN_TELEOP_ACTION_WIDTH:
-            raise ValueError(
-                "LatentActionPPO requires the exact 18-wide Microban action contract"
-            )
-        self.actor.distribution.project_std_parameters_()
-        self._std_projection_hook_handle = self.optimizer.register_step_post_hook(
-            self._project_std_after_optimizer_step
-        )
-        self._locomotion_prior_bc_cfg = self._validate_locomotion_prior_bc_cfg(
-            locomotion_prior_bc_cfg
-        )
-
-    def _validate_locomotion_prior_bc_cfg(
-        self, cfg: Mapping[str, Any] | None
-    ) -> dict[str, Any] | None:
-        if cfg is None:
-            return None
-        raise ValueError(
-            "Contract v9 forbids walk004 locomotion-prior BC; cfg must be None"
-        )
-
-    def _project_std_after_optimizer_step(
-        self,
-        _optimizer: torch.optim.Optimizer,
-        _args: tuple[Any, ...],
-        _kwargs: dict[str, Any],
-    ) -> None:
-        """Keep std parameters trainable at the boundary after every update."""
-
-        distribution = self.actor.distribution
-        if not isinstance(distribution, AsymmetricBoundedGaussianDistribution):
-            raise TypeError(
-                "LatentActionPPO lost its AsymmetricBoundedGaussianDistribution"
-            )
-        distribution.project_std_parameters_()
-
-    @staticmethod
-    def construct_algorithm(
-        obs: TensorDict, env: Any, cfg: dict[str, Any], device: str
-    ) -> PPO:
-        if getattr(env, "clip_actions", object()) is not None:
-            raise ValueError("LatentActionPPO requires wrapper clip_actions=None")
-        if getattr(env, "num_actions", None) != MICROBAN_TELEOP_ACTION_WIDTH:
-            raise ValueError(
-                "LatentActionPPO requires the exact 18-wide Microban action contract"
-            )
-        algorithm_cfg = cfg.get("algorithm", {})
-        if not isinstance(algorithm_cfg, dict):
-            raise TypeError("LatentActionPPO algorithm config must be a dictionary")
-        if algorithm_cfg.get("rnd_cfg") is not None:
-            raise ValueError("LatentActionPPO does not support RND")
-        if algorithm_cfg.get("symmetry_cfg") is not None:
-            raise ValueError("LatentActionPPO does not support symmetry augmentation")
-        semantic_names = (
-            "locomotion_prior_bc_forward_coefficient",
-            "locomotion_prior_bc_neutral_leg_coefficient",
-            "locomotion_prior_bc_arm_home_coefficient",
-            "locomotion_prior_bc_error_scale_rad",
-            "locomotion_prior_bc_chunks",
-            "locomotion_prior_bc_max_target_projection_rad",
-        )
-        missing = [name for name in semantic_names if name not in algorithm_cfg]
-        if missing:
-            raise ValueError(
-                "LatentActionPPO canonical locomotion-prior BC fields are missing: "
-                f"{missing}"
-            )
-        semantic = {name: algorithm_cfg.pop(name) for name in semantic_names}
-
-        raw_env = getattr(env, "unwrapped", None)
-        if raw_env is None or not hasattr(raw_env, "observation_manager"):
-            raise TypeError("LatentActionPPO requires an unwrapped manager-based env")
-        validate_microban_teleop_observation_contract(raw_env)
-        manager = raw_env.observation_manager
-        actor_group = "actor"
-        actor_names = tuple(manager.active_terms.get(actor_group, ()))
-        actor_dims = tuple(manager.group_obs_term_dim[actor_group])
-        actor_widths = tuple(math.prod(dim) for dim in actor_dims)
-        if actor_names.count("command") != 1:
-            raise ValueError("Microban actor must contain command exactly once")
-        command_index = actor_names.index("command")
-        if actor_widths[command_index] != 3:
-            raise ValueError("Microban actor command must be 3-wide")
-        critic_group = "critic"
-        if not manager.group_obs_concatenate.get(critic_group, False):
-            raise ValueError("Microban critic observations must be concatenated")
-        names = tuple(manager.active_terms.get(critic_group, ()))
-        if names.count("locomotion_prior") != 1:
-            raise ValueError(
-                "Microban critic must contain locomotion_prior exactly once"
-            )
-        dims = tuple(manager.group_obs_term_dim[critic_group])
-        prior_index = names.index("locomotion_prior")
-        widths = tuple(math.prod(dim) for dim in dims)
-        if widths[prior_index] != MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH:
-            raise ValueError("Microban critic locomotion prior must be 39-wide")
-        if critic_group not in obs or obs[critic_group].shape[-1] != sum(widths):
-            raise ValueError("Resolved critic observation shape is inconsistent")
-        if "actor" not in obs or obs["actor"].shape[-1] != (
-            MICROBAN_TELEOP_OBSERVATION_WIDTH
-        ):
-            raise ValueError("Resolved actor observation must be exactly 83-wide")
-
-        if any(
-            float(semantic[name]) != 0.0
-            for name in (
-                "locomotion_prior_bc_forward_coefficient",
-                "locomotion_prior_bc_neutral_leg_coefficient",
-                "locomotion_prior_bc_arm_home_coefficient",
-            )
-        ):
-            raise ValueError(
-                "Contract v9 requires every walk004 BC coefficient to be exact zero"
-            )
-        # The 39-wide critic term remains for topology stability, but no BC
-        # config reaches the optimizer and no post-PPO teacher step can run.
-        algorithm_cfg["locomotion_prior_bc_cfg"] = None
-        return PPO.construct_algorithm(obs, env, cfg, device)
-
-    def _prepare_locomotion_prior_bc(
-        self, observations: TensorDict
-    ) -> tuple[dict[str, torch.Tensor], dict[str, float]] | None:
-        cfg = self._locomotion_prior_bc_cfg
-        if cfg is None:
-            return None
-        critic_group = cfg["critic_group"]
-        if critic_group not in observations:
-            raise ValueError("Rollout is missing the configured critic observation")
-        critic = observations[critic_group]
-        prior = critic[:, cfg["prior_start"] : cfg["prior_stop"]]
-        if prior.shape[-1] != MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH:
-            raise ValueError("Stored locomotion-prior payload width drifted")
-        if not bool(torch.isfinite(prior).all().item()):
-            raise FloatingPointError("Stored locomotion-prior payload is non-finite")
-        forward_weight = prior[:, 0].detach().clone()
-        if not bool(
-            ((forward_weight >= 0.0) & (forward_weight <= 1.0)).all().item()
-        ):
-            raise ValueError("Stored locomotion-prior BC weights must be in [0, 1]")
-        active = forward_weight > 0.0
-        inactive = ~active
-        if bool(inactive.any().item()) and not bool(
-            torch.all(prior[inactive] == 0.0).item()
-        ):
-            raise ValueError("Inactive locomotion-prior payload must be exact zero")
-        if bool(active.any().item()):
-            phase_norm = torch.square(prior[active, 1]) + torch.square(prior[active, 2])
-            if not bool(
-                torch.allclose(
-                    phase_norm,
-                    torch.ones_like(phase_norm),
-                    atol=2.0e-5,
-                    rtol=0.0,
-                )
-            ):
-                raise ValueError("Active locomotion-prior phase is not unit length")
-
-        actor_group = cfg["actor_group"]
-        if actor_group not in observations:
-            raise ValueError("Rollout is missing the configured actor observation")
-        command = observations[actor_group][
-            :, cfg["command_start"] : cfg["command_stop"]
-        ]
-        if command.shape[-1] != 3 or not bool(torch.isfinite(command).all().item()):
-            raise ValueError("Stored actor velocity command is malformed")
-        standing = torch.all(torch.abs(command) <= 1.0e-6, dim=-1) & inactive
-
-        sagittal_prior_ids = cfg["sagittal_prior_ids"]
-        sagittal_action_ids = cfg["sagittal_action_ids"]
-        scale = cfg["action_scale"][sagittal_action_ids]
-        offset = cfg["action_offset"][sagittal_action_ids]
-        q_lead = prior[:, 27:39][:, sagittal_prior_ids]
-        forward_target = (q_lead - offset) / scale
-        distribution = self.actor.distribution
-        if not isinstance(distribution, AsymmetricBoundedGaussianDistribution):
-            raise TypeError("Locomotion-prior BC lost its bounded distribution")
-        reachable_lower = distribution._transform(distribution.mean_lower_bound)[
-            sagittal_action_ids
-        ]
-        reachable_upper = distribution._transform(distribution.mean_upper_bound)[
-            sagittal_action_ids
-        ]
-        projected = torch.clamp(
-            forward_target, min=reachable_lower, max=reachable_upper
-        )
-        projection = torch.abs(projected - forward_target) * scale
-        if bool(active.any().item()):
-            maximum_projection = float(projection[active].max().item())
-            if maximum_projection > cfg["max_target_projection_rad"]:
-                raise ValueError(
-                    "Locomotion-prior BC target is outside the deterministic actor "
-                    f"closure by {maximum_projection:.9g} rad"
-                )
-            projected_count = torch.count_nonzero(projection[active] > 0.0)
-            projection_fraction = float(
-                projected_count.item() / projection[active].numel()
-            )
-        else:
-            projection_fraction = 0.0
-        forward_target = torch.where(
-            active.unsqueeze(-1), projected, torch.zeros_like(projected)
-        ).detach()
-        global_teacher_weight = forward_weight.max()
-        neutral_weight = (
-            standing.to(dtype=forward_weight.dtype) * global_teacher_weight
-        )
-        arm_weight = forward_weight + neutral_weight
-        stats = {
-            "locomotion_prior_bc_active_fraction": float(
-                active.to(dtype=torch.float32).mean().item()
-            ),
-            "locomotion_prior_bc_neutral_anchor_fraction": float(
-                standing.to(dtype=torch.float32).mean().item()
-            ),
-            "locomotion_prior_bc_arm_anchor_fraction": float(
-                (arm_weight > 0.0).to(dtype=torch.float32).mean().item()
-            ),
-            "locomotion_prior_bc_target_projection_fraction": projection_fraction,
-        }
-        return (
-            {
-                "forward_weight": forward_weight.detach(),
-                "forward_target": forward_target,
-                "neutral_weight": neutral_weight.detach(),
-                "arm_weight": arm_weight.detach(),
-            },
-            stats,
-        )
-
-    def _run_locomotion_prior_bc(
-        self,
-        observations: TensorDict,
-        prepared: dict[str, torch.Tensor],
-        stats: dict[str, float],
-    ) -> dict[str, float]:
-        cfg = self._locomotion_prior_bc_cfg
-        assert cfg is not None
-        forward_weight = prepared["forward_weight"]
-        forward_target = prepared["forward_target"]
-        neutral_weight = prepared["neutral_weight"]
-        arm_weight = prepared["arm_weight"]
-        forward_active = forward_weight > 0.0
-        neutral_active = neutral_weight > 0.0
-        arm_active = arm_weight > 0.0
-        if not bool((forward_active | neutral_active | arm_active).any().item()):
-            return {
-                "locomotion_prior_bc": 0.0,
-                "locomotion_prior_bc_action_mae_rad": 0.0,
-                "locomotion_prior_bc_forward": 0.0,
-                "locomotion_prior_bc_neutral_leg": 0.0,
-                "locomotion_prior_bc_arm_home": 0.0,
-                "locomotion_prior_bc_forward_action_mae_rad": 0.0,
-                "locomotion_prior_bc_neutral_leg_action_mae_rad": 0.0,
-                "locomotion_prior_bc_arm_home_action_mae_rad": 0.0,
-                **stats,
-            }
-        batch_size = int(forward_weight.numel())
-        if observations.batch_size != torch.Size((batch_size,)):
-            raise ValueError("Locomotion-prior BC rollout shape mismatch")
-        all_leg_ids = cfg["all_leg_action_ids"]
-        sagittal_ids = cfg["sagittal_action_ids"]
-        arm_ids = cfg["arm_action_ids"]
-        chunks = min(cfg["chunks"], batch_size)
-        chunk_size = math.ceil(batch_size / chunks)
-        error_scale = cfg["error_scale_rad"]
-        forward_coefficient = cfg["forward_coefficient"]
-        neutral_leg_coefficient = cfg["neutral_leg_coefficient"]
-        arm_home_coefficient = cfg["arm_home_coefficient"]
-        forward_square_sum = torch.zeros((), device=self.device)
-        neutral_square_sum = torch.zeros((), device=self.device)
-        arm_square_sum = torch.zeros((), device=self.device)
-        forward_absolute_sum = torch.zeros((), device=self.device)
-        neutral_absolute_sum = torch.zeros((), device=self.device)
-        arm_absolute_sum = torch.zeros((), device=self.device)
-
-        self.optimizer.zero_grad(set_to_none=True)
-        for start in range(0, batch_size, chunk_size):
-            stop = min(start + chunk_size, batch_size)
-            prediction = self.actor(observations[start:stop])
-            if not bool(torch.isfinite(prediction).all().item()):
-                raise FloatingPointError(
-                    "Locomotion-prior BC actor prediction became non-finite"
-                )
-            forward_error = (
-                prediction[:, sagittal_ids] - forward_target[start:stop]
-            ) * cfg["action_scale"][sagittal_ids]
-            neutral_error = (
-                prediction[:, all_leg_ids] * cfg["action_scale"][all_leg_ids]
-            )
-            arm_error = prediction[:, arm_ids] * cfg["action_scale"][arm_ids]
-            chunk_forward_weight = forward_weight[start:stop]
-            chunk_neutral_weight = neutral_weight[start:stop]
-            chunk_arm_weight = arm_weight[start:stop]
-            forward_square = chunk_forward_weight * torch.square(
-                forward_error
-            ).mean(dim=-1)
-            neutral_square = chunk_neutral_weight * torch.square(
-                neutral_error
-            ).mean(dim=-1)
-            arm_square = chunk_arm_weight * torch.square(arm_error).mean(dim=-1)
-            loss = (
-                forward_coefficient * forward_square.sum()
-                + neutral_leg_coefficient * neutral_square.sum()
-                + arm_home_coefficient * arm_square.sum()
-            ) / (batch_size * error_scale**2)
-            loss.backward()
-            forward_square_sum += forward_square.detach().sum()
-            neutral_square_sum += neutral_square.detach().sum()
-            arm_square_sum += arm_square.detach().sum()
-            chunk_forward_active = forward_active[start:stop]
-            chunk_neutral_active = neutral_active[start:stop]
-            chunk_arm_active = arm_active[start:stop]
-            if bool(chunk_forward_active.any().item()):
-                forward_absolute_sum += (
-                    torch.abs(forward_error[chunk_forward_active]).detach().sum()
-                )
-            if bool(chunk_neutral_active.any().item()):
-                neutral_absolute_sum += (
-                    torch.abs(neutral_error[chunk_neutral_active]).detach().sum()
-                )
-            if bool(chunk_arm_active.any().item()):
-                arm_absolute_sum += (
-                    torch.abs(arm_error[chunk_arm_active]).detach().sum()
-                )
-
-        for parameter in self.actor.parameters():
-            if parameter.grad is not None and not bool(
-                torch.isfinite(parameter.grad).all().item()
-            ):
-                raise FloatingPointError(
-                    "Locomotion-prior BC produced a non-finite actor gradient"
-                )
-        gradient_norm = nn.utils.clip_grad_norm_(
-            self.actor.parameters(), self.max_grad_norm
-        )
-        if not bool(torch.isfinite(gradient_norm).item()):
-            raise FloatingPointError(
-                "Locomotion-prior BC actor gradient norm became non-finite"
-            )
-        self.optimizer.step()
-        forward_loss = (
-            forward_coefficient * forward_square_sum / (batch_size * error_scale**2)
-        )
-        neutral_loss = (
-            neutral_leg_coefficient
-            * neutral_square_sum
-            / (batch_size * error_scale**2)
-        )
-        arm_loss = (
-            arm_home_coefficient * arm_square_sum / (batch_size * error_scale**2)
-        )
-        forward_elements = int(forward_active.sum().item()) * len(sagittal_ids)
-        neutral_elements = int(neutral_active.sum().item()) * len(all_leg_ids)
-        arm_elements = int(arm_active.sum().item()) * len(arm_ids)
-        total_elements = forward_elements + neutral_elements + arm_elements
-
-        def _mean_or_zero(total: torch.Tensor, count: int) -> float:
-            return 0.0 if count == 0 else float((total / count).item())
-
-        return {
-            "locomotion_prior_bc": float(
-                (forward_loss + neutral_loss + arm_loss).item()
-            ),
-            "locomotion_prior_bc_action_mae_rad": _mean_or_zero(
-                forward_absolute_sum + neutral_absolute_sum + arm_absolute_sum,
-                total_elements,
-            ),
-            "locomotion_prior_bc_forward": float(forward_loss.item()),
-            "locomotion_prior_bc_neutral_leg": float(neutral_loss.item()),
-            "locomotion_prior_bc_arm_home": float(arm_loss.item()),
-            "locomotion_prior_bc_forward_action_mae_rad": _mean_or_zero(
-                forward_absolute_sum, forward_elements
-            ),
-            "locomotion_prior_bc_neutral_leg_action_mae_rad": _mean_or_zero(
-                neutral_absolute_sum, neutral_elements
-            ),
-            "locomotion_prior_bc_arm_home_action_mae_rad": _mean_or_zero(
-                arm_absolute_sum, arm_elements
-            ),
-            **stats,
-        }
-
-    def update(self) -> dict[str, float]:
-        """Run base PPO only; contract v9 has no auxiliary teacher update."""
-
-        if self._locomotion_prior_bc_cfg is not None:
-            raise RuntimeError("Contract v9 locomotion-prior BC state must stay None")
-        return super().update()
-
-    def act(self, obs: TensorDict) -> torch.Tensor:
-        latent = super().act(obs)
-        distribution = self.actor.distribution
-        assert isinstance(distribution, AsymmetricBoundedGaussianDistribution)
-        return distribution.to_environment_action(latent)
 
 
 def _joint_position_action_tensors(
@@ -1060,23 +107,6 @@ def _joint_position_action_tensors(
     return raw, effective_raw, target, lower, upper
 
 
-def effective_action_after_target_clip(
-    env: ManagerBasedRlEnv,
-    action_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Previous action actually sent to the target pipeline, in raw coordinates.
-
-    The returned value has the actor's 18-wide delta/radian coordinates, but an
-    out-of-range policy output is first converted to an absolute target, clipped
-    to the configured soft joint bounds, and converted back.  Deployment stores
-    exactly the same value, preventing an unbounded raw output from feeding back
-    through the next observation while the physical target remains saturated.
-    """
-
-    _, effective_raw, _, _, _ = _joint_position_action_tensors(env, action_name)
-    return effective_raw
-
-
 def normalized_target_clip_excess_l1_sum(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
@@ -1098,46 +128,6 @@ def normalized_target_clip_excess_l1_sum(
     return torch.abs(normalized_excess).sum(dim=-1)
 
 
-def normalized_target_near_limit_l1_sum(
-    env: ManagerBasedRlEnv,
-    action_name: str = "joint_pos",
-    margin_ratio: float = 0.05,
-) -> torch.Tensor:
-    """Keep action targets inside an asymmetric, default-safe limit margin.
-
-    A symmetric inward margin is unsafe for Microban's shoulder-roll joints:
-    their default pose is only one degree inside the articulation soft limit.
-    The lower/upper preferred bounds therefore move inward by ``margin_ratio``
-    only as far as the configured default action offset.  Raw action zero is
-    always penalty-free, while targets closer to a limit than that preferred
-    interval receive a normalized L1 cost summed across joints.  The sum keeps
-    a sparse single-joint approach to a limit visible to PPO, and the L1 hinge
-    retains a linear reward/return signal throughout the preferred-margin
-    violation.
-    """
-
-    if not math.isfinite(margin_ratio) or not 0.0 < margin_ratio < 0.5:
-        raise ValueError("margin_ratio must be finite and in (0, 0.5)")
-    _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
-    action = env.action_manager.get_term(action_name)
-    assert isinstance(action, JointPositionAction)
-    default_target = torch.as_tensor(
-        action.offset, dtype=target.dtype, device=target.device
-    )
-    default_target = torch.broadcast_to(default_target, target.shape)
-    if not bool(
-        torch.all((default_target >= lower) & (default_target <= upper)).item()
-    ):
-        raise ValueError("joint-position default target must be inside action clips")
-
-    span = upper - lower
-    preferred_lower = torch.minimum(default_target, lower + margin_ratio * span)
-    preferred_upper = torch.maximum(default_target, upper - margin_ratio * span)
-    preferred_target = torch.clamp(target, min=preferred_lower, max=preferred_upper)
-    normalized_excess = (target - preferred_target) / (0.5 * span)
-    return torch.abs(normalized_excess).sum(dim=-1)
-
-
 def normalized_joint_soft_limit_guard_l1_sum(
     env: ManagerBasedRlEnv,
     action_name: str = "joint_pos",
@@ -1154,10 +144,9 @@ def normalized_joint_soft_limit_guard_l1_sum(
     side is compared with an inward ``margin_ratio`` and normalized by half of
     that joint's soft range before summing.
 
-    As with :func:`normalized_target_near_limit_l1_sum`, an inward margin is
-    clamped at the configured default pose.  The guard therefore never asks the
-    measured joint to move away from neutral.  Unlike the target guard, however,
-    it penalizes gravity sag or projected motion past that neutral boundary.
+    An inward margin is clamped at the configured default pose, so the guard
+    never asks the measured joint to move away from neutral; it does penalize
+    gravity sag or projected motion past that neutral boundary.
     Microban's shoulder-roll defaults are only one degree inside their soft
     limits, so the policy can learn the inward *target* needed to hold the
     measured shoulder at neutral without changing that neutral pose.  This is a
@@ -1208,16 +197,6 @@ def normalized_joint_soft_limit_guard_l1_sum(
     return ((lower_excess + upper_excess) / (0.5 * span)).sum(dim=-1)
 
 
-def raw_action_l2(
-    env: ManagerBasedRlEnv,
-    action_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Small magnitude anchor that removes the target-clip policy nullspace."""
-
-    raw, _, _, _, _ = _joint_position_action_tensors(env, action_name)
-    return torch.square(raw).mean(dim=-1)
-
-
 def linear_velocity_tracking_error_l1(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
@@ -1246,6 +225,81 @@ def yaw_velocity_tracking_error_l1(
     command = env.command_manager.get_command(command_name)
     actual = home_levelled_root_ang_vel_b(env, trunk_pitch, asset_cfg)
     return torch.abs(command[:, 2] - actual[:, 2])
+
+
+def planar_velocity_tracking_exp(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
+) -> torch.Tensor:
+    """Track body-frame XY velocity without penalizing gait vertical motion.
+
+    Mjlab's generic linear-velocity reward adds squared base vertical velocity
+    inside the same exponential.  At Microban's low command speeds and the
+    sharpened 0.10 m/s scale, that suppresses the vertical motion needed to
+    unload and lift a foot.  Vertical stability remains covered by the upright,
+    pose, body-angular-velocity, contact, and fall terms.
+
+    ``trunk_pitch`` (the HOME trunk's forward lean) reads the velocity in the
+    HOME-levelled trunk frame (mdp.track_linear_velocity_home_frame); 0 is
+    the body frame.
+    """
+
+    if not math.isfinite(std) or std <= 0.0:
+        raise ValueError("planar velocity tracking std must be finite and positive")
+    command = env.command_manager.get_command(command_name)
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    error = torch.square(command[:, :2] - actual[:, :2]).sum(
+        dim=-1
+    )
+    return torch.exp(-error / std**2)
+
+
+def commanded_planar_velocity_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    trunk_pitch: float = 0.0,
+) -> torch.Tensor:
+    """Reward commanded body-frame XY progress, bounded to ``[0, 1]``.
+
+    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame.
+    """
+
+    if not math.isfinite(command_threshold) or command_threshold <= 0.0:
+        raise ValueError("command_threshold must be finite and positive")
+    command = env.command_manager.get_command(command_name)
+    if command is None or command.ndim != 2 or command.shape != (env.num_envs, 3):
+        raise ValueError("planar velocity progress requires an (num_envs, 3) command")
+    if not bool(torch.isfinite(command).all()):
+        raise ValueError("planar velocity progress command must be finite")
+
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    if actual.ndim != 2 or actual.shape != (env.num_envs, 3):
+        raise ValueError(
+            "planar velocity progress requires an (num_envs, 3) body velocity"
+        )
+    if not bool(torch.isfinite(actual).all()):
+        raise ValueError("planar velocity progress body velocity must be finite")
+
+    command_xy = command[:, :2]
+    actual_xy = actual[:, :2]
+    command_norm_sq = torch.square(command_xy).sum(dim=-1)
+    aligned_progress = (actual_xy * command_xy).sum(dim=-1)
+    if not bool(torch.isfinite(command_norm_sq).all()) or not bool(
+        torch.isfinite(aligned_progress).all()
+    ):
+        raise ValueError("planar velocity progress arithmetic must remain finite")
+    active_command = command_norm_sq > command_threshold**2
+    aligned_fraction = aligned_progress / torch.clamp(
+        command_norm_sq, min=command_threshold**2
+    )
+    reward = torch.clamp(aligned_fraction, min=0.0, max=1.0) * active_command
+    env.extras["log"]["Metrics/commanded_planar_velocity_progress"] = reward.mean()
+    return reward
 
 
 class ResumeSafeStepBasedStagedCurriculum:

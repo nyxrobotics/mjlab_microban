@@ -10,49 +10,19 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
-import onnx
-from onnx import TensorProto, helper
+import numpy as np
 
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
     MICROBAN_TELEOP_OBSERVATION_WIDTH,
-    validate_action_only_onnx,
+    TELEOP_ONNX_PARITY_SAMPLE_COUNT,
+    TELEOP_ONNX_PARITY_SEED,
+    deterministic_teleop_parity_inputs,
     validate_microban_teleop_observation_contract,
 )
-
-
-def _write_policy(
-    path: Path,
-    *,
-    input_shape: list[int | str | None] | None = None,
-    output_shape: list[int | str | None] | None = None,
-) -> None:
-    """Write a minimal, checker-valid linear policy with requested I/O shapes."""
-
-    input_shape = input_shape or [1, 83]
-    output_shape = output_shape or [1, 18]
-    obs = helper.make_tensor_value_info("obs", TensorProto.FLOAT, input_shape)
-    actions = helper.make_tensor_value_info("actions", TensorProto.FLOAT, output_shape)
-    weight = helper.make_tensor(
-        "weight",
-        TensorProto.FLOAT,
-        [83, 18],
-        [0.0] * (83 * 18),
-    )
-    graph = helper.make_graph(
-        [helper.make_node("MatMul", ("obs", "weight"), ("actions",))],
-        "microban_policy_contract_test",
-        [obs],
-        [actions],
-        [weight],
-    )
-    model = helper.make_model(graph)
-    onnx.save(model, path)
 
 
 def _fake_env(
@@ -92,32 +62,31 @@ class ObservationContractTest(unittest.TestCase):
             )
 
 
-class OnnxContractTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.path = Path(self.temporary_directory.name) / "policy.onnx"
+class DeterministicCorpusTest(unittest.TestCase):
+    def test_corpus_is_repeatable_finite_and_seed_sensitive(self) -> None:
+        first = deterministic_teleop_parity_inputs()
+        second = deterministic_teleop_parity_inputs()
+        different_seed = deterministic_teleop_parity_inputs(
+            seed=TELEOP_ONNX_PARITY_SEED + 1
+        )
 
-    def tearDown(self) -> None:
-        self.temporary_directory.cleanup()
+        self.assertEqual(
+            first.shape,
+            (
+                TELEOP_ONNX_PARITY_SAMPLE_COUNT,
+                1,
+                MICROBAN_TELEOP_OBSERVATION_WIDTH,
+            ),
+        )
+        self.assertEqual(first.dtype, np.float32)
+        self.assertTrue(np.isfinite(first).all())
+        np.testing.assert_array_equal(first, second)
+        self.assertFalse(np.array_equal(first[4:], different_seed[4:]))
+        self.assertTrue(np.isin(first[4:, 0, -2:], (0.0, 1.0)).all())
 
-    def test_accepts_exact_fixed_shapes(self) -> None:
-        _write_policy(self.path)
-        validate_action_only_onnx(self.path)
-
-    def test_rejects_dynamic_batch(self) -> None:
-        _write_policy(self.path, input_shape=["batch", 83])
-        with self.assertRaisesRegex(ValueError, "input shape"):
-            validate_action_only_onnx(self.path)
-
-    def test_rejects_wrong_input_width(self) -> None:
-        _write_policy(self.path, input_shape=[1, 82])
-        with self.assertRaisesRegex(ValueError, "input shape"):
-            validate_action_only_onnx(self.path)
-
-    def test_rejects_wrong_output_width(self) -> None:
-        _write_policy(self.path, output_shape=[1, 17])
-        with self.assertRaisesRegex(ValueError, "output shape"):
-            validate_action_only_onnx(self.path)
+    def test_rejects_too_few_samples(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least four"):
+            deterministic_teleop_parity_inputs(sample_count=3)
 
 
 if __name__ == "__main__":

@@ -157,7 +157,6 @@ STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # (LEGACY_HOME_OVERRIDES "getup_near_home_reset"); every other HOME, the
 # forward-lean one included, defaults to NEAR_HOME_RESET.
 NEAR_HOME_RESET = (0.1, 0.09)
-NEAR_HOME_RESET_TIPPING = (0.2, 0.6)
 _DEFAULT_NEAR_HOME_RESET: tuple[float, float] = tuple(  # type: ignore[assignment]
     HOME.override("getup_near_home_reset", NEAR_HOME_RESET)
 )

@@ -12,67 +12,41 @@ import numpy as np
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
+from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.envs.mdp.terminations import root_height_below_minimum
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
+from mjlab.rl import (
+    RslRlModelCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoAlgorithmCfg,
+)
+from mjlab.scene import SceneCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg, ObjRef, TerrainHeightSensorCfg, RingPatternCfg
+from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.tasks.velocity import mdp
+from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.terrains import TerrainEntityCfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
+from mjlab.viewer import ViewerConfig
 
 from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
     MICROBAN_ROBOT_CFG,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab.rl import (
-    RslRlModelCfg,
-    RslRlOnPolicyRunnerCfg,
-    RslRlPpoAlgorithmCfg,
-)
-from mjlab.utils.noise import UniformNoiseCfg as Unoise
-
-from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.reward_manager import RewardTermCfg
-from mjlab.managers.observation_manager import ObservationTermCfg
-from mjlab.managers.curriculum_manager import CurriculumTermCfg
-from mjlab.envs.mdp import dr
-
-from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
-
-from mjlab.tasks.velocity import mdp
-from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
-
-from mjlab.managers.reward_manager import RewardTermCfg
-from mjlab.managers.observation_manager import ObservationTermCfg
-from mjlab.managers.curriculum_manager import CurriculumTermCfg
-from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.termination_manager import TerminationTermCfg
-
-from mjlab.envs.mdp import dr
-from mjlab.envs.mdp.terminations import root_height_below_minimum
-
-from mjlab.utils.noise import UniformNoiseCfg as Unoise
-from mjlab.scene import SceneCfg
-from mjlab.terrains import TerrainEntityCfg
-from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.viewer import ViewerConfig
-from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.rl import (
-    RslRlModelCfg,
-    RslRlOnPolicyRunnerCfg,
-    RslRlPpoAlgorithmCfg,
-)
-from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg, ObjRef, TerrainHeightSensorCfg, RingPatternCfg
-
 from mjlab_microban.tasks.mdp import (
-    reward_based_staged_curriculum,
-    reward_based_curriculum,
     step_based_staged_curriculum,
     set_command_velocity,
     set_stepping_parameters,
-    set_push_parameters,
     no_stepping_penalty,
     feet_distance_penalty,
-    penalize_stepping_while_standing,
-    stepping_curriculum,
     UniformVelocityCommandWithRotation,
     reset_root_state_uniform_world_yaw,
     track_angular_velocity_home_frame,

@@ -26,9 +26,7 @@ from typing import Any
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlVecEnvWrapper
-from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from mjlab.utils.nan_guard import NanGuard
 from mjlab.utils.torch import configure_torch_backends
@@ -194,18 +192,9 @@ def _teleop_cfg(*, seed: int, steps: int) -> Any:
     cfg.auto_reset = False
     cfg.episode_length_s = (steps + 2) * cfg.decimation * cfg.sim.mujoco.timestep
     _configure_fixed_twist(cfg.commands["twist"])
+    # The teleop env already observes the raw previous action; the target is
+    # saturated only at the servo goal range, as in the v12 task.
     cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
-    raw_action_term = ObservationTermCfg(
-        func=velocity_mdp.last_action,
-        params={"action_name": "joint_pos"},
-    )
-    cfg.observations["actor"].terms["actions"] = raw_action_term
-    cfg.observations["critic"].terms["actions"] = raw_action_term
-    # These three diagnostics intentionally require the bounded teleop action
-    # clip.  Rewards cannot affect a fixed inference rollout, and removing them
-    # is necessary to exercise the requested raw legacy action semantics.
-    for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):
-        cfg.rewards.pop(reward_name, None)
     return cfg
 
 

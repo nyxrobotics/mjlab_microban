@@ -24,7 +24,6 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
-    TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
     transplant_legacy_actor_state_to_teleop83,
@@ -422,22 +421,6 @@ def validate_bootstrap_provenance(
         value,
         verify_files=verify_files,
         expected_mapping_version=TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
-    )
-
-
-def validate_identity_normalizer_v1_bootstrap_provenance(
-    value: object,
-    *,
-    verify_files: bool = True,
-) -> TeleopV12BootstrapProvenance:
-    """Authenticate the superseded identity-normalizer mapping for migration."""
-
-    return _validate_bootstrap_provenance(
-        value,
-        verify_files=verify_files,
-        expected_mapping_version=(
-            TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION
-        ),
     )
 
 

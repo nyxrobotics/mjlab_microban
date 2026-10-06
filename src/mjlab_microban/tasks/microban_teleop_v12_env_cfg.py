@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
-from mjlab.tasks.velocity import mdp as velocity_mdp
 
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import (
@@ -89,19 +87,6 @@ def make_microban_teleop_v12_env_cfg(
 
     cfg = make_microban_teleop_env_cfg(play=play)
     cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
-    raw_previous_action = ObservationTermCfg(
-        func=velocity_mdp.last_action,
-        params={"action_name": "joint_pos"},
-    )
-    cfg.observations["actor"].terms["actions"] = raw_previous_action
-    cfg.observations["critic"].terms["actions"] = raw_previous_action
-
-    # These terms call the soft-limit target-clip helper of the bounded-action
-    # contracts.  They do not describe the +-pi servo goal range used here.  The
-    # measured joint-state soft-limit guard remains enabled as a reward only; it
-    # does not filter or stop an action.
-    for reward_name in ("target_clip_excess", "target_near_limit", "raw_action_l2"):
-        cfg.rewards.pop(reward_name, None)
 
     hmd_event = cfg.events.get("hmd_neck_target_motion")
     if hmd_event is not None and HOME_TRUNK_PITCH_RAD != 0.0:

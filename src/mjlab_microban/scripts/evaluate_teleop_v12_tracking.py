@@ -31,7 +31,7 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
     microban_reachable_hand_evaluation_offsets,
 )
-from mjlab_microban.scripts.evaluate_teleop_checkpoint import (
+from mjlab_microban.scripts.teleop_v12_scenarios import (
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     EvaluationScenario,

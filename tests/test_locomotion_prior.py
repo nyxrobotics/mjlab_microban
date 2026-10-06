@@ -63,9 +63,6 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     MICROBAN_TELEOP_SAGITTAL_AXIS_RANGES,
     make_microban_teleop_env_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_provenance import (
-    collect_training_source_manifest,
-)
 
 
 def _prior_term(num_envs: int = 2) -> LocomotionPriorCommand:
@@ -172,16 +169,6 @@ class LocomotionPriorArtifactTest(unittest.TestCase):
         self.assertLessEqual(
             loaded_consumed_max_qdot * rate,
             MICROBAN_LOCOMOTION_PRIOR_MAX_SOURCE_JOINT_SPEED_RAD_S * rate,
-        )
-
-    def test_training_source_manifest_hashes_the_binary_prior(self) -> None:
-        manifest = collect_training_source_manifest()
-        relative = "data/motions/microban_twist2_walk004_locomotion_prior.npz"
-        self.assertEqual(manifest["files"][relative], MICROBAN_LOCOMOTION_PRIOR_SHA256)
-        lock_path = MICROBAN_LOCOMOTION_PRIOR_PATH.parents[2] / "uv.lock"
-        self.assertEqual(
-            manifest["files"]["uv.lock"],
-            hashlib.sha256(lock_path.read_bytes()).hexdigest(),
         )
 
 

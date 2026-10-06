@@ -1202,67 +1202,6 @@ def standing_target_error_l1(
     return _standing_gate(_head_height(env, head_asset_cfg), height_threshold) * torch.sum(error, dim=-1)
 
 
-def standing_pose_reward(
-    env: ManagerBasedRlEnv,
-    gate_center: float,
-    gate_sharpness: float,
-    std: float,
-    head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward joint angles close to default pose, weighted by a steep sigmoid gate on
-    head height instead of a hard on/off threshold — near-zero below gate_center,
-    rapidly ramping to full strength just above it (gate_sharpness controls how
-    quickly; small values = steeper). A linear height-based scale was avoided because
-    it would keep this reward weak most of the way to the target instead of ever
-    really taking over there; this gives a clearer regime change once actually near
-    standing. Kept as a secondary nudge, not a dominant term — not falling over
-    matters more than exactly matching the default pose, so its configured weight
-    stays modest relative to height/standing_bonus/standing_torque.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    height = _head_height(env, head_asset_cfg)
-    joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-    default_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
-    error = torch.sum(torch.square(joint_pos - default_pos), dim=-1)
-    pose_reward = torch.exp(-error / std**2)
-    gate = torch.sigmoid((height - gate_center) / gate_sharpness)
-    return gate * pose_reward
-
-
-def foot_flat_reward(
-    env: ManagerBasedRlEnv,
-    std: float,
-    height_threshold: float,
-    head_asset_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Reward both feet flat/level (sole parallel to the ground) once standing.
-
-    on_feet_reward only checks that the feet are touching, not what angle they're
-    touching at — a foot resting on its edge or toe still counts. Same
-    projected-gravity-error shape as standing_bonus's orientation check, applied per
-    foot (asset_cfg should resolve to both foot bodies) and averaged. Gated on head
-    height, not trunk (see head_height_reward) — during recovery a tilted foot is
-    often unavoidable/necessary, so this only applies once actually up.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    height = _head_height(env, head_asset_cfg)
-    body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
-    gravity_w = asset.data.gravity_vec_w.unsqueeze(1).expand(
-        -1, len(asset_cfg.body_ids), -1
-    )
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    gravity_norm = projected_gravity_b.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    projected_gravity_b_unit = projected_gravity_b / gravity_norm
-    flat_error = torch.square(projected_gravity_b_unit[..., 0]) + torch.square(
-        projected_gravity_b_unit[..., 1]
-    )
-    flat_reward = torch.exp(-flat_error / std**2).mean(dim=-1)
-    is_standing = height > height_threshold
-    return torch.where(is_standing, flat_reward, torch.zeros_like(flat_reward))
-
-
 def on_feet_reward(
     env: ManagerBasedRlEnv,
     sensor_name: str,
@@ -1352,122 +1291,6 @@ def _feet_airborne(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
     """True where neither foot has ground contact (bool, shape [B])."""
     found = env.scene[sensor_name].data.found
     return (found <= 0).all(dim=-1)
-
-
-class hold_airborne:
-    """Suspend the robot by applying a gravity-compensating external force to the
-    trunk for a sampled duration, with a cooldown between holds — simulates a human
-    picking the robot up and holding it. Mirrors mjlab's own
-    ``mjlab.envs.mdp.events.apply_body_impulse`` state-machine (cooldown -> trigger ->
-    sustain -> expire, one independent timer per env), but the force is biased upward
-    (toward weight support) instead of zero-centered.
-
-    Unlike a kinematic teleport of the root pose, this keeps the trunk dynamically
-    simulated — internal joint torques can still swing/tilt the body against the
-    supporting force, so a flailing policy visibly fights the hold instead of being
-    rigidly pinned, and a compliant one hangs still. write_external_wrench_to_sim
-    persists until overwritten (same assumption apply_body_impulse makes), so the
-    force only needs to be (re)written at trigger and expire, not every step.
-
-    Use with mode="step".
-    """
-
-    def __init__(self, cfg, env: ManagerBasedRlEnv):
-        self._asset: Entity = env.scene[cfg.params["asset_cfg"].name]
-        self._body_ids = cfg.params["asset_cfg"].body_ids
-        self._device = env.device
-        self._step_dt = env.step_dt
-        self._num_bodies = (
-            len(self._body_ids)
-            if isinstance(self._body_ids, list)
-            else self._asset.num_bodies
-        )
-        self._cooldown_s = cfg.params["cooldown_s"]
-
-        self._time_remaining = torch.zeros(env.num_envs, device=self._device)
-        # Staggered, not zero: an all-zero init makes every env's first hold trigger
-        # in lockstep on step 1 — reproduced as a real MuJoCo solver blowup (NaN
-        # qpos/qvel within ~65 steps at 4096 envs) from applying a near-mg force to
-        # every single env simultaneously, on top of the already-extreme randomized
-        # fallen pose reset. Sampling from cooldown_s here (and in reset()) spreads
-        # first triggers out like the ones after every subsequent expiry already are.
-        lo, hi = self._cooldown_s
-        self._interval_time_left = (
-            torch.rand(env.num_envs, device=self._device) * (hi - lo) + lo
-        )
-        self._active = torch.zeros(env.num_envs, device=self._device, dtype=torch.bool)
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor | None,
-        force_z_range: tuple[float, float],
-        force_lateral_range: tuple[float, float],
-        torque_range: tuple[float, float],
-        duration_s: tuple[float, float],
-        cooldown_s: tuple[float, float],
-        asset_cfg: SceneEntityCfg,
-    ) -> None:
-        del env, env_ids, asset_cfg  # Unused; step events always operate on all envs.
-        dt = self._step_dt
-
-        self._time_remaining[self._active] -= dt
-
-        expired = self._active & (self._time_remaining <= 0)
-        if expired.any():
-            expired_ids = expired.nonzero(as_tuple=False).squeeze(-1)
-            zeros = torch.zeros(
-                (len(expired_ids), self._num_bodies, 3), device=self._device
-            )
-            self._asset.write_external_wrench_to_sim(
-                zeros, zeros, env_ids=expired_ids, body_ids=self._body_ids
-            )
-            self._active[expired_ids] = False
-            self._time_remaining[expired_ids] = 0.0
-            lo, hi = cooldown_s
-            self._interval_time_left[expired_ids] = (
-                torch.rand(len(expired_ids), device=self._device) * (hi - lo) + lo
-            )
-
-        self._interval_time_left -= dt
-
-        eligible = (~self._active) & (self._interval_time_left <= 0)
-        if eligible.any():
-            trigger_ids = eligible.nonzero(as_tuple=False).squeeze(-1)
-            n = len(trigger_ids)
-            forces = sample_uniform(
-                *force_lateral_range, (n, self._num_bodies, 3), self._device
-            )
-            forces[..., 2] = sample_uniform(
-                *force_z_range, (n, self._num_bodies), self._device
-            )
-            torques = sample_uniform(
-                *torque_range, (n, self._num_bodies, 3), self._device
-            )
-            self._asset.write_external_wrench_to_sim(
-                forces, torques, env_ids=trigger_ids, body_ids=self._body_ids
-            )
-
-            lo, hi = duration_s
-            self._time_remaining[trigger_ids] = (
-                torch.rand(n, device=self._device) * (hi - lo) + lo
-            )
-            self._active[trigger_ids] = True
-
-    def reset(self, env_ids: torch.Tensor) -> None:
-        # An env can reset mid-hold (episode end while _active); the external wrench
-        # written by __call__ otherwise persists onto the freshly-reset state.
-        zeros = torch.zeros((len(env_ids), self._num_bodies, 3), device=self._device)
-        self._asset.write_external_wrench_to_sim(
-            zeros, zeros, env_ids=env_ids, body_ids=self._body_ids
-        )
-
-        self._time_remaining[env_ids] = 0.0
-        lo, hi = self._cooldown_s
-        self._interval_time_left[env_ids] = (
-            torch.rand(len(env_ids), device=self._device) * (hi - lo) + lo
-        )
-        self._active[env_ids] = False
 
 
 def feet_distance_penalty(
@@ -1734,46 +1557,6 @@ class reward_based_staged_curriculum:
         return {"stage": self.current_stage}
 
 
-class reward_based_curriculum:
-    """
-    Curriculum based on the mean episode reward of a specific term accross all environments.
-    Once the mean reward across envs exceeds a threshold, a new curriculum stage is applied.
-    """
-
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.rewards = torch.zeros(env.num_envs, device=env.device)
-        self.current_stage = 0
-        self.stage_first_step = 0
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor,
-        reward_term_name: str,
-        stages: list[dict],
-    ) -> dict[str, torch.Tensor]:
-        self.rewards[env_ids] = (
-            env.reward_manager._episode_sums[reward_term_name][env_ids]
-            / env.max_episode_length_s
-        )
-        mean_reward = self.rewards.mean().item()
-
-        if (
-            self.current_stage < len(stages)
-            and mean_reward >= stages[self.current_stage]["threshold"]
-            and env.common_step_counter >= self.stage_first_step + 100 * 24
-        ):
-            stage = stages[self.current_stage]
-            print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {mean_reward:.4f})"
-            )
-            stage["apply"](env)
-            self.current_stage += 1
-            self.stage_first_step = env.common_step_counter
-
-        return {"stage": self.current_stage}
-
-
 def set_command_velocity(
     env,
     lin_vel_x=None,
@@ -1817,86 +1600,6 @@ def set_stepping_parameters(
         env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
 
 
-def hold_at_default_pose(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg,
-) -> None:
-    """Set the given joints' position TARGET (not raw ctrl) to default_joint_pos at
-    reset.
-
-    BAM actuators (bam.mjlab.BamActuator, used for all 21 joints here) compute force
-    from ``data.joint_pos_target``, not from MuJoCo's raw ``ctrl`` — writing ctrl
-    directly (e.g. via Entity.write_ctrl_to_sim) gets overwritten the next physics
-    step regardless. EntityData resets joint_pos_target to 0.0 for every joint on
-    every episode reset, and the action pipeline (JointPositionAction) only ever
-    updates it for the actuators it owns — so any actuator OUTSIDE the RL action term
-    (measured 2026-09-22) has its target silently left at 0 rather than
-    default_joint_pos, driving joints like the elbows/shoulders (whose default is far
-    from 0: -20/±10 deg) to visibly drift there every episode. That's an unintended
-    disturbance injected into every training run that excluded them from actions —
-    likely the real cause behind repeated failed attempts at a legs-only policy, more
-    than any of the reward/curriculum/observation changes tried first.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    default_pos = asset.data.default_joint_pos[env_ids][:, asset_cfg.joint_ids]
-    asset.set_joint_position_target(
-        default_pos, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1)
-    )
-
-
-def randomize_upper_body_pose_reset(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg,
-) -> None:
-    """Teleport the given joints (arms/neck/head) to a random position within their
-    own soft limits at reset, and set their position actuators to match (so there's no
-    snap at episode start — see randomize_upper_body_pose_interval for the ongoing,
-    mid-episode counterpart that keeps them actually moving).
-
-    These joints aren't RL-controlled — they're driven mathematically (IK for the
-    arms, the closed-form stabilization law for the neck) once deployed.
-
-    asset_cfg must resolve both joint_names and actuator_names to the SAME set of
-    joints (in corresponding order — each actuator drives its own like-named joint).
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-
-    pose = _sample_upper_body_pose(env, env_ids, asset_cfg)
-    zero_vel = torch.zeros_like(pose)
-
-    asset.write_joint_state_to_sim(
-        pose, zero_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids
-    )
-    asset.set_joint_position_target(
-        pose, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1)
-    )
-
-
-def randomize_upper_body_pose_interval(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg,
-) -> None:
-    """Retarget the arm/neck/head position actuators to a new random pose, WITHOUT
-    teleporting the joint state — the position servo drives them there smoothly over
-    the next few control steps, same as a real IK-driven arm or the neck stabilization
-    law continuously retargeting while the operator moves.
-
-    Fired on an interval (see the "interval_range_s" on this event's EventTermCfg) so
-    the upper body keeps moving throughout each episode instead of holding one fixed
-    pose — a static per-episode pose (randomize_upper_body_pose_reset alone) never
-    exposes the legs to the ongoing, changing momentum a moving upper body imparts
-    while actually walking.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    pose = _sample_upper_body_pose(env, env_ids, asset_cfg)
-    asset.set_joint_position_target(
-        pose, joint_ids=asset_cfg.joint_ids, env_ids=env_ids.unsqueeze(-1)
-    )
-
-
 def _sample_upper_body_pose(
     env: ManagerBasedRlEnv, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg
 ) -> torch.Tensor:
@@ -1906,115 +1609,8 @@ def _sample_upper_body_pose(
     return limits[..., 0] + r * (limits[..., 1] - limits[..., 0])
 
 
-def set_push_parameters(
-    env,
-    velocity_range: dict[str, tuple[float, float]] | None = None,
-    interval_range: tuple[float, float] | None = None,
-) -> None:
-    """
-    Helper function to set push event parameters.
-    Returns a dict of the current (post-update) values for wandb logging.
-    """
-    push_event_cfg = env.event_manager.get_term_cfg("push_robot")
-    if velocity_range is not None:
-        push_event_cfg.params["velocity_range"] = velocity_range
-    if interval_range is not None:
-        push_event_cfg.params["interval_range"] = interval_range
-
-
-def penalize_stepping_while_standing(
-    env: ManagerBasedRlEnv,
-    air_time_weight: float,
-    no_stepping_penalty_weight: float,
-) -> torch.Tensor:
-    """
-    Updating the air_time and no_stepping reward weights to penalize stepping while standing.
-    """
-    env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-    env.reward_manager.get_term_cfg("no_stepping").weight = no_stepping_penalty_weight
-
-
-def stepping_curriculum(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    air_time_weight: float,
-    no_stepping_penalty_weight: float,
-    rel_standing_envs: float = 0.0,
-    rel_rotation_envs: float = 0.0,
-    step: int = 10000 * 24,
-) -> dict[str, torch.Tensor]:
-    """
-    Updating the air_time and no_stepping reward weights to penalize stepping while standing
-    after a certain number of iterations.
-    """
-    del env_ids  # Unused.
-
-    if env.common_step_counter >= step:
-        env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-        env.reward_manager.get_term_cfg(
-            "no_stepping"
-        ).weight = no_stepping_penalty_weight
-        env.command_manager.get_term_cfg("twist").rel_standing_envs = rel_standing_envs
-        env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
-
-    return {
-        "air_time_weight": torch.tensor(
-            env.reward_manager.get_term_cfg("air_time").weight
-        ),
-        "no_stepping_penalty_weight": torch.tensor(
-            env.reward_manager.get_term_cfg("no_stepping").weight
-        ),
-        "rel_standing_envs": torch.tensor(
-            env.command_manager.get_term_cfg("twist").rel_standing_envs
-        ),
-        "rel_rotation_envs": torch.tensor(
-            env.command_manager.get_term_cfg("twist").rel_rotation_envs
-        ),
-    }
-
-
-class target_rate_l2:
-    """Penalize the commanded joint TARGET (asset.data.joint_pos_target) changing
-    between steps — a drop-in replacement for mjlab's built-in action_rate_l2,
-    which penalizes env.action_manager.action/prev_action instead: those are
-    explicitly the RAW, pre-scale/offset/clip network output (per
-    ActionManager.process_action's own docstring), not what the robot actually
-    ends up commanded to do. Once that raw value saturates past this task's own
-    clip range (measured directly: RMS raw action reaching >100 over an episode,
-    while the actual clipped target stays within +-1.57), action_rate_l2 can
-    penalize a target that ISN'T physically changing at all just because the
-    raw pre-clip number is still swinging — the opposite of what a smoothness
-    penalty is supposed to measure. This reads the same joint_pos_target field
-    home_stillness_reward does, which is bounded by the real clip and reflects
-    what's actually asked of the servo.
-
-    A previous joint_pos_target isn't separately exposed anywhere, so (like
-    home_stillness_reward) this class caches its own (self._prev_target,
-    updated every call) rather than being a plain function.
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        asset: Entity = env.scene[cfg.params["asset_cfg"].name]
-        self._joint_ids = cfg.params["asset_cfg"].joint_ids
-        self._prev_target = asset.data.joint_pos_target[:, self._joint_ids].clone()
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ) -> torch.Tensor:
-        asset: Entity = env.scene[asset_cfg.name]
-        target = asset.data.joint_pos_target[:, asset_cfg.joint_ids]
-        rate_sq = torch.sum(torch.square(target - self._prev_target), dim=-1)
-        self._prev_target = target.clone()
-        return rate_sq
-
-    def reset(self, env_ids: torch.Tensor) -> None:
-        del env_ids  # Unused — a stale cross-episode rate spike for one step
         # right after a reset is a minor, brief inaccuracy, not worth the extra
         # bookkeeping (matches home_stillness_reward's own reset() reasoning).
-
-
 
 
 class home_stillness_reward:
@@ -2102,8 +1698,6 @@ class home_stillness_reward:
         del env_ids  # Unused — a stale cross-episode target_rate spike for one
         # step right after a reset is harmless, since is_standing gates the whole
         # term to 0 right at that moment anyway (a just-reset env starts fallen).
-
-
 
 
 class home_pose_reward:
@@ -2201,8 +1795,6 @@ class home_pose_reward:
         del env_ids  # Unused.
 
 
-
-
 def hands_released_reward(
     env: ManagerBasedRlEnv,
     height_threshold: float,
@@ -2232,8 +1824,6 @@ def hands_released_reward(
     height = _head_height(env, head_asset_cfg)
     is_past_threshold = height > height_threshold
     return torch.where(is_past_threshold, hands_off_ground, torch.zeros_like(hands_off_ground))
-
-
 
 
 def reset_near_home_fraction(
@@ -2298,7 +1888,5 @@ def reset_near_home_fraction(
         velocity_range=(0.0, 0.0),
         asset_cfg=asset_cfg,
     )
-
-
 
 
