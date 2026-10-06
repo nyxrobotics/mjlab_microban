@@ -138,3 +138,10 @@
 #   B4: 報酬 = 1 + s * (0.4 + 0.6 * exp(-e / 0.15)) - 1.0 * max(0, -p) / max(n, 0.2)（フィルタ 0.5 s は B3 のまま、重み 4）。
 #   止まる = 1、指令の向きに少しでも進めば 1 より上、ずれなく進めば 1 + s（最大 2）、真横 = 1、反対向き < 1。小さな指令の扱いは B3 と同じ。
 #   B3 を止め、B4 のシード 42（trw7B4_s42）を最初から学習する（GPU は 1 本）。基準 W1-W5 は変更なし。
+2026-10-07 00:10:13 trw6B3_s42 stopped at ~5790; start trw7B4_s42 (B4, commit 6d12626)
+2026-10-07 00:33:48 trw7B4_s42 model_1000: it 1000: FAIL [W1=NG W2=NG W3=ok W4=NG W5=NG] angle none 51/p30 51 deg; speed none 0.72/p30 0.60; falls none 2/90 p30 15/90 single 0; F +0.063 BK +0.014 LL +0.098 LR +0.126 YL +1.39 YR +0.95
+2026-10-07 00:36:04 trw7B4_s42 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.034 forward2=0.052 backward1=-0.015 backward2=0.012 lateral_left1=0.093 lateral_right1=0.131 yaw_left5=1.267 yaw_right5=0.851 below=['forward_0p1', 'forward_0p2', 'backward_0p1', 'backward_0p2']
+2026-10-07 00:51:37 trw7B4_s42 model_2000: it 2000: FAIL [W1=NG W2=NG W3=ok W4=NG W5=NG] angle none 47/p30 48 deg; speed none 0.63/p30 0.55; falls none 0/90 p30 13/90 single 0; F +0.081 BK +0.005 LL +0.094 LR +0.106 YL +1.04 YR +0.99
+2026-10-07 00:53:50 trw7B4_s42 model_2000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.055 forward2=0.075 backward1=-0.013 backward2=0.004 lateral_left1=0.106 lateral_right1=0.112 yaw_left5=1.104 yaw_right5=1.258 below=['forward_0p2', 'backward_0p1', 'backward_0p2']
+2026-10-07 01:08:22 trw7B4_s42 model_3000: it 3000: FAIL [W1=NG W2=NG W3=ok W4=NG W5=NG] angle none 56/p30 56 deg; speed none 0.71/p30 0.50; falls none 0/90 p30 7/90 single 0; F +0.056 BK +0.014 LL +0.090 LR +0.101 YL +1.12 YR +1.18
+2026-10-07 01:09:01 trw7B4_s42 stopped at ~3098: early rule (B4 3000 passes 1 vs B3 3000 passes 3) -> B3 recommended; GPU freed
