@@ -800,12 +800,6 @@ def validate_final_rescue_checkpoint(
         MICROBAN_TELEOP_V12_FINAL_RESCUE_ACTIVE_COLUMNS
     ):
         raise ValueError("Final rescue active actor columns drifted")
-    from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-        MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    )
-
-    if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
-        raise ValueError("Final rescue cannot carry deadline-fallback lineage")
     marker = validate_final_rescue_lineage_marker(
         infos.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY)
     )

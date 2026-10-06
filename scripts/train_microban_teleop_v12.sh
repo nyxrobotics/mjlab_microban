@@ -204,47 +204,16 @@ else
     gate="${GATE_ROOT}/${run_name}_model_${iteration}_gate.json"
     if (( skip_gate == 1 )); then
         echo "[WARN] --dry-run-skip-gate: resuming WITHOUT a stage gate" >&2
-        resume_mode=canonical
     else
         [[ -f "${gate}" ]] \
             || fail "Missing gate; run scripts/evaluate_microban_teleop_v12_stage.sh ${run_name} ${iteration}"
         uv run --locked python -m mjlab_microban.scripts.teleop_v12_stage validate \
             "${gate}" "${checkpoint}" >/dev/null
-        resume_mode="$(uv run --locked python -m \
-            mjlab_microban.scripts.teleop_v12_stage resume-mode \
-            "${gate}" "${checkpoint}" --shell)"
     fi
-    case "${resume_mode}" in
-        canonical) ;;
-        deadline_fallback)
-            gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"
-            runner_args+=(
-                --agent.deadline-fallback-resume True
-                --agent.deadline-fallback-resume-gate "${gate}"
-                --agent.deadline-fallback-resume-gate-sha256 "${gate_sha}"
-            )
-            save_interval=15000
-            ;;
-        deadline_fallback_post_canary)
-            gate_sha="$(sha256sum -- "${gate}" | awk '{print $1}')"
-            runner_args+=(
-                --agent.deadline-fallback-resume True
-                --agent.deadline-fallback-resume-gate "${gate}"
-                --agent.deadline-fallback-resume-gate-sha256 "${gate_sha}"
-            )
-            save_interval=15000
-            ;;
-        deadline_fallback_canary_complete)
-            fail "Deadline fallback canary reached 10100; explicit post-canary promotion is required."
-            ;;
-        *) fail "Unknown validated resume mode: ${resume_mode}" ;;
-    esac
     recipe_kind="$(uv run --locked python -m \
         mjlab_microban.scripts.teleop_v12_stage checkpoint-recipe \
         "${checkpoint}" --shell)"
     if (( hand_pose_release == 1 )); then
-        [[ "${resume_mode}" == canonical ]] \
-            || fail "--hand-pose-release has no deadline-fallback route"
         case "${recipe_kind}" in
             hand_pose_release) ;;
             canonical)

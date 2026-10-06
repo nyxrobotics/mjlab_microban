@@ -639,7 +639,7 @@ def _rescue_gate_fixture(root: Path, *, final: dict | None, corner: dict | None)
         TELEOP_V12_HOME_POSE_INFO_KEY,
         teleop_v12_home_pose_marker,
     )
-    from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+    from mjlab_microban.tasks.microban_teleop_v12_runner import (
         BILATERAL_SITE_ORDER_INFO_KEY,
     )
 

@@ -85,12 +85,6 @@ def validate_final_rescue_parent_payload(
         MICROBAN_TELEOP_V12_FINAL_RESCUE_ACTIVE_COLUMNS
     ):
         raise ValueError("Final rescue parent active columns drifted")
-    from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-        MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    )
-
-    if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
-        raise ValueError("Final rescue parent cannot carry deadline-fallback lineage")
     assert_final_rescue_optimizer_step(
         payload,
         expected_step=MICROBAN_TELEOP_V12_FINAL_RESCUE_PARENT_OPTIMIZER_STEP,

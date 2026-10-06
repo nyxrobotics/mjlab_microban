@@ -2,8 +2,8 @@
 
 Only the final `model_14999.pt` checkpoint (15,000 completed PPO updates) may be
 packaged for Microban. The 3,000, 7,000 and 10,000 boundaries, activation
-canaries, interrupted checkpoints, and every preview checkpoint remain
-simulation-only even when one of their diagnostic reports passes.
+canaries and interrupted checkpoints remain simulation-only even when one of
+their diagnostic reports passes.
 
 ## Packaging
 
@@ -29,19 +29,14 @@ The packager performs the following fail-closed sequence on CPU:
 1. Rebuilds and compares the supplied stage gate using its current evaluator
    code, rehashing the checkpoint, all three reports, and the gate ONNX.
 2. Requires exactly `model_14999.pt`, iteration `14999`, 15,000 completed
-   updates, canonical-boundary kind, `status=pass`, and either the canonical
-   final perturbation profile or the explicitly authorized deadline-final
-   profile. The latter is accepted only when the checkpoint contains the exact
-   pinned fallback and post-canary lineage; changing only the gate/profile name
-   is rejected. A checkpoint of the active-hand arm pose-release recipe is
+   updates, canonical-boundary kind, `status=pass`, and the canonical final
+   perturbation profile. A checkpoint of the active-hand arm pose-release recipe is
    judged at 15000 under the final completion allowance (see below); the
    deployed-accuracy and strict final profiles are also accepted for it.
 3. Captures immutable checkpoint bytes before loading the actor, then revalidates
    the pinned legacy checkpoint/probe and frozen legacy tensors. It also
-   requires the corrected bilateral-site revision and the authenticated
-   `swap` migration from the pinned raw `model_9200.pt`; an unmarked pre-fix
-   checkpoint, a fresh-but-unrelated revision marker, or the diagnostic
-   `zero_hand` migration cannot be exported.
+   requires the corrected bilateral-site revision (every chain is bootstrapped
+   with it; there is no checkpoint migration).
 4. Exports a fresh fixed-shape `obs[1,83] -> actions[1,18]` float32 graph.
 5. Copies the hash-bound locomotion, tracking and ONNX evidence into the exact
    metadata keys required by Microban. The per-joint finite-amplitude guard is
@@ -182,7 +177,7 @@ activation-canary gates explicitly. Each gate is fully revalidated. Its
 checkpoint must lie on that resume chain, so a sibling with the same markers
 is refused. It must also share the final checkpoint's contract, recipe,
 bootstrap, HOME and site-order markers, and the final must carry its
-corner-rescue / recipe-switch / LR-migration markers unchanged. The packager
+corner-rescue / recipe-switch markers unchanged. The packager
 records `v12_boundary_stage_gates_json` (clock, checkpoint kind, checkpoint
 and gate SHA-256, tracking profile, allowance record) with
 `v12_boundary_stage_gates_semantics`

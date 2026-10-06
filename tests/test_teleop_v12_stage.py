@@ -24,8 +24,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    DEADLINE_CANARY_FALLBACK_PROFILE,
-    DEADLINE_FINAL_FALLBACK_PROFILE,
     DIRECTIONAL_RESPONSE_MINIMUM,
     EXPANDED_LOCOMOTION_PROFILE,
     FINAL_COMPLETION_ALLOWANCE_PROFILE,
@@ -85,13 +83,9 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
-    TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     teleop_v12_active_adapter_columns,
-    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
@@ -115,7 +109,7 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
     BILATERAL_SITE_ORDER_INFO_KEY,
 )
 from mjlab_microban.teleop_v12_safety import (
@@ -667,7 +661,7 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(over["status"], "fail")
         with self.assertRaises(ValueError):
             _validate_tracking_report(over, identity)
-        for profile in (DEADLINE_CANARY_FALLBACK_PROFILE, WHOLE_BODY_PROFILE):
+        for profile in (WHOLE_BODY_PROFILE,):
             with self.subTest(profile=profile), self.assertRaises(ValueError):
                 _validate_tracking_report(
                     _tracking_report(identity, profile=profile), identity
@@ -1480,35 +1474,6 @@ class TeleopV12StageTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "descendant clock"):
                 checkpoint_recipe_kind(early)
 
-    def test_deadline_final_tracking_report_requires_perturbation(self) -> None:
-        identity = {
-            "sha256": "a" * 64,
-            "iteration": 14_999,
-            "completed_updates": 15_000,
-        }
-        report = _tracking_report(
-            identity, profile=DEADLINE_FINAL_FALLBACK_PROFILE
-        )
-        self.assertTrue(report["settings"]["perturbation"])
-        self.assertEqual(
-            report["thresholds"]["hand_rms_m_max"],
-            hand_tracking_rms_max_m(DEADLINE_FINAL_FALLBACK_PROFILE),
-        )
-        _validate_tracking_report(
-            report,
-            identity,
-            profile_override=DEADLINE_FINAL_FALLBACK_PROFILE,
-        )
-
-        without_perturbation = deepcopy(report)
-        without_perturbation["settings"]["perturbation"] = False
-        with self.assertRaisesRegex(ValueError, "settings are not canonical"):
-            _validate_tracking_report(
-                without_perturbation,
-                identity,
-                profile_override=DEADLINE_FINAL_FALLBACK_PROFILE,
-            )
-
     def test_activation_canaries_require_causality_before_final_quality(self) -> None:
         hand_canary_checks = required_tracking_check_names(
             HMD_HAND_ACTIVATION_CANARY_PROFILE
@@ -1751,7 +1716,7 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(tuple(error.shape), (1,))
         torch.testing.assert_close(error, torch.tensor([0.01]))
 
-    def test_schema2_gate_accepts_hash_bound_sanitized_recovery(self) -> None:
+    def test_schema2_gate_accepts_hash_bound_interrupted_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint = root / "model_600.pt"
@@ -1765,15 +1730,6 @@ class TeleopV12StageTest(unittest.TestCase):
                 ),
                 "active_actor_columns_at_save": [],
                 "env_state": {"common_step_counter": 601 * 24},
-                "adapter_sanitization": {
-                    "schema_version": (TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION),
-                    "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-                    "parent_checkpoint_sha256": "a" * 64,
-                    "parent_iteration": 600,
-                    "completed_updates": 601,
-                    "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
-                    **teleop_v12_target_normalizer_metadata(),
-                },
             }
             torch.save({"iter": 600, "infos": infos}, checkpoint)
             checkpoint_sha = sha256_file(checkpoint)
@@ -1800,14 +1756,11 @@ class TeleopV12StageTest(unittest.TestCase):
                 onnx_report=onnx_report_path,
             )
             self.assertEqual(gate["schema_version"], 2)
-            self.assertEqual(gate["checkpoint_kind"], "sanitized_recovery")
+            self.assertEqual(gate["checkpoint_kind"], "interrupted_recovery")
             gate_path = root / "gate.json"
             gate_path.write_text(json.dumps(gate))
             self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-            self.assertEqual(
-                _checkpoint_kind(602, infos["adapter_sanitization"]),
-                "interrupted_recovery",
-            )
+            self.assertEqual(_checkpoint_kind(10_100), "activation_canary")
 
             corruptions = (
                 (locomotion_path, locomotion, ("checks",), {}),

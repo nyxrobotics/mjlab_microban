@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
-from functools import partial
-from typing import Any
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
@@ -85,65 +82,6 @@ MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 1.0e-4
 MICROBAN_TELEOP_V12_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)
 
 
-@dataclass(frozen=True)
-class PreviewHandTrackingSettings:
-    """One auditable hand-acquisition stage used only by the preview task."""
-
-    reward_weight: float
-    reward_std_m: float
-    joint_soft_limit_guard_weight: float
-
-
-MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION_UPDATE = 7_001
-MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS_UPDATE = 7_050
-MICROBAN_TELEOP_V12_PREVIEW_HAND_STANDARD_UPDATE = 8_500
-MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION = PreviewHandTrackingSettings(
-    reward_weight=4.0,
-    reward_std_m=0.12,
-    joint_soft_limit_guard_weight=-10.0,
-)
-MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS = PreviewHandTrackingSettings(
-    reward_weight=4.0,
-    reward_std_m=0.08,
-    joint_soft_limit_guard_weight=-10.0,
-)
-MICROBAN_TELEOP_V12_PREVIEW_HAND_STANDARD = PreviewHandTrackingSettings(
-    reward_weight=2.0,
-    reward_std_m=0.05,
-    joint_soft_limit_guard_weight=-10.0,
-)
-
-
-def preview_hand_tracking_settings(
-    completed_updates: int,
-) -> PreviewHandTrackingSettings:
-    """Return the exact reconstructed preview hand stage for a saved clock."""
-
-    if isinstance(completed_updates, bool) or completed_updates < (
-        MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION_UPDATE
-    ):
-        raise ValueError("Preview hand tracking starts at completed update 7001")
-    if completed_updates < MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS_UPDATE:
-        return MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION
-    if completed_updates < MICROBAN_TELEOP_V12_PREVIEW_HAND_STANDARD_UPDATE:
-        return MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS
-    return MICROBAN_TELEOP_V12_PREVIEW_HAND_STANDARD
-
-
-def _apply_preview_hand_tracking_stage(
-    env: Any, *, settings: PreviewHandTrackingSettings
-) -> None:
-    """Apply a preview-only hand stage without altering the canonical task."""
-
-    reward = env.reward_manager.get_term_cfg("hand_target_tracking")
-    guard = env.reward_manager.get_term_cfg("joint_soft_limit_guard")
-    if not isinstance(reward.params, dict):
-        raise TypeError("Preview hand reward params must be a dictionary")
-    reward.weight = settings.reward_weight
-    reward.params["std"] = settings.reward_std_m
-    guard.weight = settings.joint_soft_limit_guard_weight
-
-
 def make_microban_teleop_v12_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -173,67 +111,15 @@ def make_microban_teleop_v12_env_cfg(
     return cfg
 
 
-def make_microban_teleop_v12_preview_env_cfg(
-    play: bool = False,
-) -> ManagerBasedRlEnvCfg:
-    """Build the isolated staged preview with progressive hand acquisition."""
-
-    cfg = make_microban_teleop_v12_env_cfg(play=play)
-    if not play:
-        # sanitized601 is lifted just past the 7000 stage first.  Foot columns,
-        # commands, and reward must remain inert until the later 10000 lift.
-        cfg.rewards["foot_target_tracking"].weight = 0.0
-        curriculum = cfg.curriculum.get("staged_curriculum")
-        stages = None if curriculum is None else curriculum.params.get("stages")
-        if not isinstance(stages, list):
-            raise TypeError("V12 preview requires the resume-safe stage list")
-        preview_stages = [
-            {
-                "name": "preview reachable-hand acquisition",
-                "step": (
-                    MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION_UPDATE
-                    * MICROBAN_TELEOP_NUM_STEPS_PER_ENV
-                ),
-                "apply": partial(
-                    _apply_preview_hand_tracking_stage,
-                    settings=MICROBAN_TELEOP_V12_PREVIEW_HAND_ACQUISITION,
-                ),
-            },
-            {
-                "name": "preview reachable-hand focus",
-                "step": (
-                    MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS_UPDATE
-                    * MICROBAN_TELEOP_NUM_STEPS_PER_ENV
-                ),
-                "apply": partial(
-                    _apply_preview_hand_tracking_stage,
-                    settings=MICROBAN_TELEOP_V12_PREVIEW_HAND_FOCUS,
-                ),
-            },
-        ]
-        existing_steps = {stage.get("step") for stage in stages}
-        preview_steps = {stage["step"] for stage in preview_stages}
-        if existing_steps & preview_steps:
-            raise ValueError("V12 preview hand curriculum step collides")
-        stages.extend(preview_stages)
-        stages.sort(key=lambda stage: stage["step"])
-    return cfg
-
-
 @dataclass
 class MicrobanTeleopV12RunnerCfg(RslRlOnPolicyRunnerCfg):
     """Pinned legacy-source bootstrap and strict full-state resume controls."""
 
-    checkpoint_consumer_mode: bool = False
     legacy_velocity_checkpoint: str | None = None
     legacy_velocity_checkpoint_sha256: str | None = None
     legacy_teleop_probe_receipt: str | None = None
     legacy_teleop_probe_receipt_sha256: str | None = None
     save_pristine_checkpoint: bool = False
-    simulation_preview_mode: bool = False
-    deadline_fallback_resume: bool = False
-    deadline_fallback_resume_gate: str | None = None
-    deadline_fallback_resume_gate_sha256: str | None = None
 
 
 MicrobanTeleopV12RlCfg = MicrobanTeleopV12RunnerCfg(
@@ -278,10 +164,3 @@ MicrobanTeleopV12RlCfg = MicrobanTeleopV12RunnerCfg(
     num_steps_per_env=MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     max_iterations=MICROBAN_TELEOP_V12_STAGE_BOUNDARIES[-1],
 )
-
-# A separate registry entry makes preview loading an explicit operator action;
-# canonical training and deployment never accept its permanent marker.
-MicrobanTeleopV12PreviewRlCfg = deepcopy(MicrobanTeleopV12RlCfg)
-MicrobanTeleopV12PreviewRlCfg.simulation_preview_mode = True
-MicrobanTeleopV12PreviewRlCfg.experiment_name = "mjlab_microban_teleop_v12_preview"
-MicrobanTeleopV12PreviewRlCfg.wandb_project = "mjlab_microban_teleop_v12_preview"

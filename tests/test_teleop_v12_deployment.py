@@ -15,12 +15,6 @@ from home_cases import CENTERED_HOME_TAG, FORWARD_LEAN_HOME_TAG, home_tag  # noq
 
 from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
-from mjlab_microban.scripts.teleop_v12_lr_recovery import (
-    PINNED_RAW_MODEL_9200_SHA256,
-    PINNED_SOURCE_COMMON_STEP_COUNTER,
-    PINNED_SOURCE_COMPLETED_UPDATES,
-    PINNED_SOURCE_ITERATION,
-)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -38,19 +32,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     LegacyVelocitySourceIdentity,
     TeleopV12BootstrapProvenance,
 )
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    deadline_fallback_marker,
-    deadline_post_canary_marker,
-)
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    ACTOR_PERMUTATION,
-    ACTOR_SWAP_BLOCKS,
-    BILATERAL_SITE_ORDER_INFO_KEY,
-    CRITIC_PERMUTATION,
-    CRITIC_SWAP_BLOCKS,
-    MIGRATION_INFO_KEY,
-    MIGRATION_REVISION,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
@@ -59,6 +40,10 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
+)
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    BILATERAL_SITE_ORDER_INFO_KEY,
+    require_bilateral_site_order,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
@@ -112,64 +97,6 @@ def _bootstrap() -> TeleopV12BootstrapProvenance:
             sorted(LEGACY_VELOCITY_ACTOR_STATE_KEYS - {"mlp.0.weight"})
         ),
     )
-
-
-def _lr_order_marker(*, strategy: str = "swap") -> dict:
-    partial_names = {
-        "actor_state_dict.mlp.0.weight",
-        "actor_state_dict.obs_normalizer._mean",
-        "actor_state_dict.obs_normalizer._var",
-        "actor_state_dict.obs_normalizer._std",
-        "critic_state_dict.mlp.0.weight",
-        "critic_state_dict.obs_normalizer._mean",
-        "critic_state_dict.obs_normalizer._var",
-        "critic_state_dict.obs_normalizer._std",
-        "optimizer_state_dict.state.1.exp_avg",
-        "optimizer_state_dict.state.1.exp_avg_sq",
-        "optimizer_state_dict.state.9.exp_avg",
-        "optimizer_state_dict.state.9.exp_avg_sq",
-    }
-    partial = {
-        name: {
-            "untouched_source_sha256": "1" * 64,
-            "untouched_output_sha256": "1" * 64,
-            "source_full_sha256": "2" * 64,
-            "output_full_sha256": "3" * 64,
-        }
-        for name in partial_names
-    }
-    return {
-        "schema_version": 1,
-        "revision": MIGRATION_REVISION,
-        "site_order_revision": MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-        "strategy": strategy,
-        "source_checkpoint_path": "/pinned/model_9200.pt",
-        "source_checkpoint_sha256": PINNED_RAW_MODEL_9200_SHA256,
-        "source_clock": {
-            "iteration": PINNED_SOURCE_ITERATION,
-            "completed_updates": PINNED_SOURCE_COMPLETED_UPDATES,
-            "common_step_counter": PINNED_SOURCE_COMMON_STEP_COUNTER,
-        },
-        "actor_w0_optimizer_parameter_id": 1,
-        "critic_w0_optimizer_parameter_id": 9,
-        "actor_swap_blocks": [list(block) for block in ACTOR_SWAP_BLOCKS],
-        "critic_swap_blocks": [list(block) for block in CRITIC_SWAP_BLOCKS],
-        "actor_permutation": list(ACTOR_PERMUTATION),
-        "critic_permutation": list(CRITIC_PERMUTATION),
-        "zeroed_actor_columns": [] if strategy == "swap" else list(range(75, 83)),
-        "foot_adapter_at_source": {
-            "active": False,
-            "maximum_absolute_w0": 0.0,
-            "maximum_absolute_adam_moment": 0.0,
-            "handling": "unlearned_exact_zero_left_untouched",
-        },
-        "tensor_integrity": {
-            "passed": True,
-            "unchanged_tensor_count": 0,
-            "unchanged_tensors": {},
-            "partially_transformed_tensors": partial,
-        },
-    }
 
 
 def _microban_identity() -> dict[str, str]:
@@ -271,7 +198,6 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         "active_actor_columns_at_save": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         deployment.TELEOP_V12_BOOTSTRAP_INFO_KEY: {},
         BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-        MIGRATION_INFO_KEY: _lr_order_marker(),
     }
     return gate, locomotion, tracking, onnx_report, infos
 
@@ -327,7 +253,7 @@ def test_pose_release_final_gate_profile_is_the_completion_allowance(
             checkpoint_sha256="1" * 64,
             expected_tracking_profile=expected,
         )
-    gate["tracking_profile"] = deployment.DEADLINE_FINAL_FALLBACK_PROFILE
+    gate["tracking_profile"] = "unknown_final_profile"
     with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
         deployment._require_final_gate(
             gate,
@@ -350,7 +276,7 @@ def test_pose_release_final_gate_profile_is_the_completion_allowance(
         )
 
 
-def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) -> None:
+def test_canonical_final_gate_profile_is_deployed_accuracy(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model_14999.pt"
     gate, *_ = _evidence(tmp_path)
     canonical_infos: dict[str, object] = {}
@@ -369,7 +295,7 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
             checkpoint_sha256="1" * 64,
             expected_tracking_profile=canonical,
         )
-    for rejected in (deployment.DEADLINE_FINAL_FALLBACK_PROFILE, None):
+    for rejected in ("unknown_final_profile", None):
         gate["tracking_profile"] = rejected
         with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
             deployment._require_final_gate(
@@ -378,46 +304,6 @@ def test_deadline_final_gate_profile_is_exactly_lineage_bound(tmp_path: Path) ->
                 checkpoint_sha256="1" * 64,
                 expected_tracking_profile=canonical,
             )
-
-    lineage = deadline_fallback_marker(
-        selected_checkpoint_sha256="1" * 64,
-        corner_marker_sha256="2" * 64,
-        strict_report_sha256="3" * 64,
-        strict_hand_tracking_m={"maximum_rms": 0.034, "maximum_p95": 0.04},
-    )
-    deadline_infos = {
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage,
-        deployment.MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY: (
-            deadline_post_canary_marker(
-                canary_checkpoint_sha256="4" * 64,
-                strict_report_sha256="5" * 64,
-                strict_failed_checks=["hand_tracking_rms"],
-                strict_hand_tracking_m={"maximum_rms": 0.032, "maximum_p95": 0.04},
-            )
-        ),
-    }
-    expected = deployment._expected_final_tracking_profile(deadline_infos)
-    assert expected == deployment.DEADLINE_FINAL_FALLBACK_PROFILE
-    gate["tracking_profile"] = expected
-    deployment._require_final_gate(
-        gate,
-        checkpoint=checkpoint,
-        checkpoint_sha256="1" * 64,
-        expected_tracking_profile=expected,
-    )
-
-    gate["tracking_profile"] = deployment.FINAL_PROFILE
-    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
-        deployment._require_final_gate(
-            gate,
-            checkpoint=checkpoint,
-            checkpoint_sha256="1" * 64,
-            expected_tracking_profile=expected,
-        )
-
-    missing_post = {deployment.MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY: lineage}
-    with pytest.raises(ValueError, match="missing post-canary lineage"):
-        deployment._expected_final_tracking_profile(missing_post)
 
 
 def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> None:
@@ -450,14 +336,9 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
     assert metadata["v12_bilateral_site_order_revision"] == (
         MICROBAN_BILATERAL_SITE_ORDER_REVISION
     )
-    assert metadata["v12_lr_order_migration_strategy"] == "swap"
-    assert metadata["v12_lr_order_source_checkpoint_sha256"] == (
-        PINNED_RAW_MODEL_9200_SHA256
+    assert metadata["v12_lr_order_migration_revision"] == (
+        deployment.LR_ORDER_NO_MIGRATION_REVISION
     )
-    assert metadata["v12_lr_order_source_checkpoint_iteration"] == "9200"
-    assert metadata["v12_lr_order_source_completed_updates"] == "9201"
-    assert metadata["v12_lr_order_source_common_step_counter"] == "220824"
-    assert len(metadata["v12_lr_order_migration_marker_sha256"]) == 64
     assert {
         name: metadata[name] for name in _microban_identity()
     } == _microban_identity()
@@ -514,74 +395,12 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
     )
 
 
-def test_fresh_corrected_chain_needs_no_lr_order_migration(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "model_14999.pt"
-    checkpoint.write_bytes(b"checkpoint")
-    gate_path = tmp_path / "gate.json"
-    gate_path.write_text("{}", encoding="utf-8")
-    gate, locomotion, tracking, onnx_report, infos = _evidence(tmp_path)
-    infos.pop(MIGRATION_INFO_KEY)
-    gate["checkpoint_sha256"] = _sha(checkpoint)
-    metadata = deployment.build_v12_deployment_metadata(
-        checkpoint=checkpoint,
-        checkpoint_sha256=_sha(checkpoint),
-        gate_path=gate_path,
-        gate=gate,
-        infos=infos,
-        bootstrap=_bootstrap(),
-        locomotion=locomotion,
-        tracking=tracking,
-        onnx_report=onnx_report,
-        packager_parity={
-            "reference_maximum_absolute_error": 1.0e-6,
-            "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
-        },
-        microban_source_identity=_microban_identity(),
-    )
-    assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
-    assert metadata["v12_lr_order_migration_revision"] == (
-        deployment.LR_ORDER_NO_MIGRATION_REVISION
-    )
-    assert "v12_lr_order_migration_strategy" not in metadata
-
-
-def test_deployment_requires_exact_corrected_bilateral_lineage() -> None:
-    infos = {
-        BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-        MIGRATION_INFO_KEY: _lr_order_marker(),
-    }
-    marker = deployment._require_deployable_lr_order_lineage(infos)
-    assert marker["source_checkpoint_sha256"] == PINNED_RAW_MODEL_9200_SHA256
-
-    for case, mutate in (
-        ("raw_pre_fix", lambda value: value.clear()),
-        (
-            "missing_top_level_revision",
-            lambda value: value.pop(BILATERAL_SITE_ORDER_INFO_KEY),
-        ),
-        (
-            "diagnostic_zero_hand",
-            lambda value: value.__setitem__(
-                MIGRATION_INFO_KEY, _lr_order_marker(strategy="zero_hand")
-            ),
-        ),
-        (
-            "wrong_pinned_source",
-            lambda value: value[MIGRATION_INFO_KEY].__setitem__(
-                "source_checkpoint_sha256", "0" * 64
-            ),
-        ),
-    ):
-        changed = deepcopy(infos)
-        mutate(changed)
-        with pytest.raises(
-            (TypeError, ValueError), match="bilateral|predates|migration"
-        ):
-            deployment._require_deployable_lr_order_lineage(changed)
-
-    fresh = deepcopy(infos)
-    fresh.pop(MIGRATION_INFO_KEY)
-    assert deployment._require_deployable_lr_order_lineage(fresh) is None
+def test_deployment_requires_the_corrected_bilateral_site_order() -> None:
+    infos = {BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION}
+    require_bilateral_site_order(infos)
+    for changed in ({}, {BILATERAL_SITE_ORDER_INFO_KEY: "raw_pre_fix"}):
+        with pytest.raises(ValueError, match="bilateral site order"):
+            require_bilateral_site_order(changed)
 
 
 def test_hashed_report_loader_rejects_changed_evidence(tmp_path: Path) -> None:

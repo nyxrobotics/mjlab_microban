@@ -34,10 +34,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     validate_bootstrap_provenance,
     sha256_file,
 )
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-)
 
 # The 64-sample corpus feeds randn into raw observation columns, so the
 # normalized teleop-target columns see ~20-sigma inputs and raw actions reach
@@ -66,7 +62,6 @@ def run_gate(
     checkpoint: Path,
     expected_sha256: str | None,
     onnx_path: Path,
-    allow_deadline_fallback: bool = False,
 ) -> dict[str, object]:
     try:
         import onnxruntime as ort
@@ -80,17 +75,8 @@ def run_gate(
     checkpoint_digest = sha256_file(checkpoint)
     if expected_sha256 is not None and checkpoint_digest != expected_sha256:
         raise ValueError(f"Checkpoint SHA-256 mismatch: {checkpoint_digest}")
-    target, iteration, infos = _load_actor(
-        checkpoint,
-        device="cpu",
-        allow_deadline_fallback=allow_deadline_fallback,
-    )
-    parity_tolerance = (
-        MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
-        if iteration == 14_999
-        and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
-        else ONNX_PARITY_TOLERANCE
-    )
+    target, iteration, infos = _load_actor(checkpoint, device="cpu")
+    parity_tolerance = ONNX_PARITY_TOLERANCE
     # The frozen velocity source is whatever this checkpoint was bootstrapped
     # from; its recorded SHA-256 is re-verified before the tensors are used.
     source_state = load_bootstrap_source_state(
@@ -225,11 +211,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--deadline-fallback",
-        action="store_true",
-        help="accept only a corner-rescue model9999 deadline-fallback checkpoint",
-    )
     return parser
 
 
@@ -244,7 +225,6 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint=args.checkpoint,
         expected_sha256=args.expected_sha256,
         onnx_path=args.onnx.expanduser().resolve(),
-        allow_deadline_fallback=args.deadline_fallback,
     )
     if args.output is not None:
         publish_json_atomic(args.output, report)

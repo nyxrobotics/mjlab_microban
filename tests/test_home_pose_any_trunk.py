@@ -16,8 +16,9 @@ on exactly:
 and the repr of every registered task's env / play / RL config and runner of
 the reference branch (tests/fixtures/home_equivalence/*.json, sha256 per key,
 recorded with tests/home_equivalence.py) is equal here.  The only allowed
-differences are new names this tree adds, the names of the modules and tasks
-it deleted (never trained by the HOME pipeline), and at the centered HOME the new
+differences are new names this tree adds, the names of the modules, constants
+and tasks it deleted (never trained by the HOME pipeline), the values listed in
+INTENDED_CHANGES (each with its reason), and at the centered HOME the new
 command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
 ``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
 their HOME (a subclass of mjlab's).  The 0.040 m hand-RMS profiles of the
@@ -103,11 +104,44 @@ UNREGISTERED_TASKS = frozenset({
 })
 
 
-def _deleted_here(key: str) -> bool:
-    """A reference key whose module or task this tree deleted (it is not a regression).
+# Values this tree changed on purpose, key -> reason.  Every entry was checked
+# by diffing the full dumps (tests/home_equivalence.py dump) before and after
+# the change: an RL config entry differs only by the removed runner options.
+_V12_TASKS = (
+    "Mjlab-Teleop-V12-Microban",
+    "Mjlab-Teleop-V12-HandPoseRelease-Microban",
+    "Mjlab-Teleop-V12-Corner-Rescue-Microban",
+    "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
+    "Mjlab-Teleop-V12-Final-Rescue-Microban",
+    "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban",
+)
+INTENDED_CHANGES = {
+    **{
+        f"task:{task}:rl": "runner options of the deleted consumer, preview and "
+        "deadline-fallback modes removed (checkpoint_consumer_mode, "
+        "simulation_preview_mode, deadline_fallback_resume*)"
+        for task in _V12_TASKS
+    },
+    "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES": (
+        "deadline-fallback profiles removed"
+    ),
+    "const:mjlab_microban.scripts.teleop_v12_stage.TRACKING_PROFILES": (
+        "deadline-fallback profiles removed"
+    ),
+    "const:mjlab_microban.scripts.export_teleop_v12_deployment.SUPPORTED_FINAL_TRACKING_PROFILES": (
+        "deadline-fallback final profile removed"
+    ),
+    "const:mjlab_microban.scripts.export_teleop_v12_deployment._BOUNDARY_GATE_INHERITED_INFO_KEYS": (
+        "left/right-order migration marker removed (no checkpoint migration)"
+    ),
+}
 
-    Keys of modules that still exist, and of tasks that are still registered,
-    must be present and equal; only names of deleted files may be missing.
+
+def _deleted_here(key: str) -> bool:
+    """A reference key whose module, constant or task this tree deleted (not a regression).
+
+    Keys of modules and constants that still exist, and of tasks that are still
+    registered, must be present and equal (or listed in INTENDED_CHANGES).
     """
 
     kind, _, rest = key.partition(":")
@@ -123,7 +157,11 @@ def _deleted_here(key: str) -> bool:
         return False
     relative = Path(*module.split("."))
     source = REPO_ROOT / "src"
-    return not (source / relative.with_suffix(".py")).is_file() and not (source / relative).is_dir()
+    if not (source / relative.with_suffix(".py")).is_file() and not (source / relative).is_dir():
+        return True
+    # A constant the module (which imports cleanly, see _compare) no longer
+    # defines or imports: the dump records every one it has.
+    return kind == "const"
 
 
 class HomeEquivalenceTest(unittest.TestCase):
@@ -159,13 +197,18 @@ class HomeEquivalenceTest(unittest.TestCase):
             )
         for key, value in allowed.items():
             self.assertEqual(values.get(key), value)
+        import_errors = sorted(key for key, value in values.items() if key.startswith("import:"))
+        self.assertEqual(import_errors, [], "modules that failed to import")
         current = home_equivalence.digest(values)
         expected = json.loads(reference.read_text())
         missing = sorted(key for key in set(expected) - set(current) if not _deleted_here(key))
         different = sorted(
             key
             for key in expected
-            if key in current and current[key] != expected[key] and key not in allowed
+            if key in current
+            and current[key] != expected[key]
+            and key not in allowed
+            and key not in INTENDED_CHANGES
         )
         self.assertEqual(missing, [], "names of the reference branch missing here")
         self.assertEqual(different, [], "values that differ from the reference branch")

@@ -110,10 +110,6 @@ def _rescue_info_keys() -> tuple[str, ...]:
     from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
         MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
     )
-    from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-        MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-        MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-    )
     from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
         MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
     )
@@ -121,22 +117,14 @@ def _rescue_info_keys() -> tuple[str, ...]:
     return (
         MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
         MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
-        MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-        MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
     )
 
 
 def _parent_forbidden_info_keys() -> tuple[str, ...]:
-    from mjlab_microban.tasks.microban_teleop_v12_preview import (
-        TELEOP_V12_PREVIEW_INFO_KEY,
-    )
-
     return (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
         *_rescue_info_keys(),
-        TELEOP_V12_PREVIEW_INFO_KEY,
-        "preview_non_deployable",
     )
 
 
@@ -426,8 +414,6 @@ def hand_pose_release_lineage(
             "legacy_velocity_actor_bootstrap_v12",
             "microban_teleop_v12_home_pose",
             "bilateral_site_order_revision",
-            "microban_teleop_v12_lr_order_migration",
-            "adapter_sanitization",
             "adapter_gradient_schedule_revision",
             "microban_teleop_training_contract_version",
             "previous_action_semantics",

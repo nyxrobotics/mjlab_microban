@@ -36,14 +36,9 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     validate_corner_rescue_parent_payload,
     validate_corner_rescue_parent_report,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    validate_bilateral_site_order_checkpoint,
-)
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    reject_preview_checkpoint,
-)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    require_bilateral_site_order,
 )
 
 CORNER_RESCUE_RECEIPT_SCHEMA_VERSION = 1
@@ -84,8 +79,7 @@ def validate_parent_checkpoint(
         validate_corner_rescue_parent_payload(payload, checkpoint_sha256=digest)
     infos = payload.get("infos")
     assert isinstance(infos, dict)
-    validate_bilateral_site_order_checkpoint(infos)
-    reject_preview_checkpoint(infos)
+    require_bilateral_site_order(infos)
     validate_bootstrap_provenance(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )
@@ -139,8 +133,7 @@ def validate_rescue_checkpoint(path: Path) -> tuple[dict[str, Any], dict[str, An
     if not isinstance(infos, dict):
         raise TypeError("Corner rescue checkpoint infos are missing")
     validate_corner_rescue_marker(infos, iteration=iteration)
-    validate_bilateral_site_order_checkpoint(infos)
-    reject_preview_checkpoint(infos)
+    require_bilateral_site_order(infos)
     validate_bootstrap_provenance(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )

@@ -37,7 +37,6 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     assert_actor_frozen_against_source,
-    resolve_bootstrap_artifact_path,
     sha256_file,
     validate_bootstrap_provenance,
 )
@@ -50,30 +49,12 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
 )
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
-    validate_deadline_fallback_checkpoint_payload,
-    validate_deadline_fallback_descendant_payload,
-    validate_deadline_fallback_resume_source,
-    validate_deadline_post_canary_marker,
-    validate_deadline_post_canary_resume_source,
-)
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    validate_bilateral_site_order_checkpoint,
-)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     validate_teleop_v12_home_pose,
 )
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
-    reject_preview_checkpoint,
-    validate_preview_marker,
-)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    require_bilateral_site_order,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
@@ -150,10 +131,7 @@ def _load_actor(
     checkpoint: Path,
     *,
     device: str,
-    allow_nondeployable_preview: bool = False,
-    allow_legacy_preview_v1: bool = False,
     allow_corner_rescue: bool = False,
-    allow_deadline_fallback: bool = False,
     allow_hand_pose_release_recipe: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
@@ -164,125 +142,39 @@ def _load_actor(
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
         raise ValueError("Checkpoint iteration is invalid")
     expected_step = 0 if iteration == -1 else (iteration + 1) * 24
-    if (
-        sum(
-            bool(value)
-            for value in (
-                allow_nondeployable_preview,
-                allow_corner_rescue,
-                allow_deadline_fallback,
-                allow_hand_pose_release_recipe,
-            )
-        )
-        > 1
-    ):
-        raise ValueError(
-            "Preview, corner rescue, deadline fallback and hand pose release "
-            "are exclusive"
-        )
+    if allow_corner_rescue and allow_hand_pose_release_recipe:
+        raise ValueError("Corner rescue and hand pose release are exclusive")
     if allow_hand_pose_release_recipe and infos.get(
         "microban_teleop_recipe_revision"
     ) != (MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION):
         raise ValueError(
             "--allow-hand-pose-release-recipe requires a hand pose-release checkpoint"
         )
-    if allow_nondeployable_preview:
-        preview_marker = validate_preview_marker(
-            infos,
-            iteration=iteration,
-            allow_legacy_v1=allow_legacy_preview_v1,
-        )
-        if preview_marker.get("phase") == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
-            from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
-                validate_embedded_phase1_acceptance,
-            )
-
-            validate_embedded_phase1_acceptance(infos, fullbody_marker=preview_marker)
-    else:
-        reject_preview_checkpoint(infos)
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
     validate_teleop_v12_home_pose(
         infos, allow_hand_pose_release_recipe=allow_hand_pose_release_recipe
     )
-    validate_bilateral_site_order_checkpoint(infos)
-    if allow_deadline_fallback:
-        validate_deadline_fallback_checkpoint_payload(
-            payload, checkpoint_sha256=sha256_file(checkpoint)
+    require_bilateral_site_order(infos)
+    corner_lineage = validate_corner_rescue_canonical_lineage(
+        infos,
+        iteration=iteration,
+        allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
+    )
+    is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
+        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+    )
+    if allow_corner_rescue and not is_final_corner_rescue:
+        raise ValueError(
+            "--allow-corner-rescue requires the exact final rescue checkpoint"
         )
-    elif infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
-        deadline_marker = validate_deadline_fallback_descendant_payload(
-            payload, verify_parent_files=True
+    if is_final_corner_rescue:
+        assert corner_lineage is not None
+        assert_corner_rescue_foot_adapter_zero(payload)
+        assert_corner_rescue_optimizer_step(
+            payload,
+            expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
         )
-        source = validate_deadline_fallback_resume_source(
-            infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
-        )
-        parent_checkpoint = resolve_bootstrap_artifact_path(
-            source["parent_checkpoint_path"]
-        )
-        parent_gate = resolve_bootstrap_artifact_path(source["full_stage_gate_path"])
-        from mjlab_microban.scripts.teleop_v12_stage import validate_gate
-
-        validated_parent_gate = validate_gate(parent_gate, parent_checkpoint)
-        if (
-            validated_parent_gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-            != deadline_marker
-        ):
-            raise ValueError("Deadline canary parent gate authorization drifted")
-        if (
-            sha256_file(parent_checkpoint)
-            != deadline_marker["selected_checkpoint"]["sha256"]
-            or sha256_file(parent_gate) != source["full_stage_gate_sha256"]
-        ):
-            raise ValueError("Deadline canary parent changed during actor load")
-        post_source_value = infos.get(
-            MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
-        )
-        if post_source_value is not None:
-            post_source = validate_deadline_post_canary_resume_source(post_source_value)
-            canary_checkpoint = resolve_bootstrap_artifact_path(
-                post_source["parent_checkpoint_path"]
-            )
-            canary_gate = resolve_bootstrap_artifact_path(
-                post_source["full_stage_gate_path"]
-            )
-            validated_canary_gate = validate_gate(canary_gate, canary_checkpoint)
-            authorization = validate_deadline_post_canary_marker(
-                infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-            )
-            if (
-                validated_canary_gate.get(
-                    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
-                )
-                != authorization
-            ):
-                raise ValueError("Deadline final parent gate authorization drifted")
-            if (
-                sha256_file(canary_checkpoint)
-                != authorization["parent_checkpoint"]["sha256"]
-                or sha256_file(canary_gate) != post_source["full_stage_gate_sha256"]
-            ):
-                raise ValueError("Deadline final parent changed during actor load")
-    else:
-        corner_lineage = validate_corner_rescue_canonical_lineage(
-            infos,
-            iteration=iteration,
-            allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
-        )
-        is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-        )
-        if allow_corner_rescue and not is_final_corner_rescue:
-            raise ValueError(
-                "--allow-corner-rescue requires the exact final rescue checkpoint"
-            )
-        if is_final_corner_rescue:
-            assert corner_lineage is not None
-            assert_corner_rescue_foot_adapter_zero(payload)
-            assert_corner_rescue_optimizer_step(
-                payload,
-                expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
-            )
     expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")
@@ -361,9 +253,6 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
-    allow_nondeployable_preview: bool = False,
-    allow_legacy_preview_v1: bool = False,
-    allow_deadline_fallback: bool = False,
     allow_hand_pose_release_recipe: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
@@ -377,9 +266,6 @@ def run_evaluation(
     policy, iteration, _infos = _load_actor(
         checkpoint,
         device=device,
-        allow_nondeployable_preview=allow_nondeployable_preview,
-        allow_legacy_preview_v1=allow_legacy_preview_v1,
-        allow_deadline_fallback=allow_deadline_fallback,
         allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
     )
 
@@ -527,14 +413,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
-        "--deadline-fallback",
-        action="store_true",
-        help=(
-            "accept only a corner-rescue model9999 under the explicit "
-            "deadline fallback"
-        ),
-    )
-    parser.add_argument(
         "--allow-hand-pose-release-recipe",
         action="store_true",
         help=(
@@ -555,7 +433,6 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
-        allow_deadline_fallback=args.deadline_fallback,
         allow_hand_pose_release_recipe=args.allow_hand_pose_release_recipe,
     )
     if args.output is not None:

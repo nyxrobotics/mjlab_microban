@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from copy import deepcopy
-from dataclasses import asdict, is_dataclass
-from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,23 +18,18 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_WIDTH,
-    MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
     validate_microban_teleop_observation_contract,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     LegacyAdapterPPO,
     LegacyAdapterTeleopActor,
-    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     TeleopV12BootstrapProvenance,
     assert_actor_frozen_against_source,
     bootstrap_legacy_actor,
-    portable_bootstrap_artifact_path,
     serialize_bootstrap_provenance,
     sha256_file,
     validate_bootstrap_provenance,
@@ -51,61 +43,31 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     validate_corner_rescue_canonical_lineage,
     validate_corner_rescue_lineage_marker,
 )
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP,
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_FINAL_COMMON_STEP,
-    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ITERATION,
-    MICROBAN_TELEOP_V12_DEADLINE_FINAL_OPTIMIZER_STEP,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
-    deadline_fallback_resume_source,
-    validate_deadline_fallback_canary_payload,
-    validate_deadline_fallback_final_payload,
-    validate_deadline_fallback_marker,
-    validate_deadline_fallback_resume_payload,
-    validate_deadline_fallback_resume_source,
-    validate_deadline_fallback_save_endpoint,
-    validate_deadline_fallback_training_request,
-    validate_deadline_post_canary_marker,
-    validate_deadline_post_canary_resume_source,
-)
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    deadline_post_canary_resume_source as build_deadline_post_canary_resume_source,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
-    preview_hand_tracking_settings,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
     validate_teleop_v12_home_pose,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    BILATERAL_SITE_ORDER_INFO_KEY,
-    MIGRATION_INFO_KEY,
-    validate_bilateral_site_order_checkpoint,
-    validate_lr_order_migration_marker,
-)
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    TELEOP_V12_PREVIEW_INFO_KEY,
-    TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY,
-    TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
-    TELEOP_V12_PREVIEW_PHASE_HMD_HAND,
-    reject_preview_checkpoint,
-    validate_preview_marker,
-)
 
 TELEOP_V12_BOOTSTRAP_INFO_KEY = "legacy_velocity_actor_bootstrap_v12"
-TELEOP_V12_SANITIZATION_INFO_KEY = "adapter_sanitization"
+# Every checkpoint records the corrected bilateral (left/right) site order of
+# the foot/hand target columns; the packager requires it.
+BILATERAL_SITE_ORDER_INFO_KEY = "bilateral_site_order_revision"
+
+
+def require_bilateral_site_order(infos: dict) -> None:
+    """Reject a checkpoint that predates the corrected bilateral site order."""
+
+    if infos.get(BILATERAL_SITE_ORDER_INFO_KEY) != MICROBAN_BILATERAL_SITE_ORDER_REVISION:
+        raise ValueError("Checkpoint predates the corrected bilateral site order")
+
 
 TELEOP_V12_OBSERVATION_TERM_LAYOUTS = {
     "actor": (
@@ -288,15 +250,8 @@ def _atomic_torch_save(payload: object, destination: Path) -> None:
 class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
     """Fresh legacy bootstrap, strict resume, and invariant-checked saves."""
 
-    simulation_preview_capable = False
-    allow_missing_preview_phase1_acceptance = False
-    require_immutable_checkpoint_bytes = False
-    allow_deadline_canary_consumer = False
-    consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_FULL_BODY
-    consumer_requires_live_candidate = True
     # Only the active-hand arm pose-release runner may train from or write that
-    # recipe (and accept its experimental switch); the canonical runner refuses
-    # to resume it and only consumes release-eligible checkpoints read-only.
+    # recipe; this runner refuses to resume it.
     accepts_hand_pose_release_recipe = False
 
     def __init__(
@@ -318,36 +273,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         probe_path = cfg.pop("legacy_teleop_probe_receipt", None)
         probe_sha256 = cfg.pop("legacy_teleop_probe_receipt_sha256", None)
         save_pristine = cfg.pop("save_pristine_checkpoint", False)
-        consumer_mode = cfg.pop("checkpoint_consumer_mode", False)
-        preview_mode = cfg.pop("simulation_preview_mode", False)
-        deadline_resume = cfg.pop("deadline_fallback_resume", False)
-        deadline_gate = cfg.pop("deadline_fallback_resume_gate", None)
-        deadline_gate_sha256 = cfg.pop("deadline_fallback_resume_gate_sha256", None)
-        if (
-            type(save_pristine) is not bool
-            or type(consumer_mode) is not bool
-            or type(preview_mode) is not bool
-            or type(deadline_resume) is not bool
-        ):
+        if type(save_pristine) is not bool:
             raise TypeError("Contract-v12 runner flags must be booleans")
-        if preview_mode is not self.simulation_preview_capable:
-            raise ValueError("V12 preview mode requires the dedicated preview runner")
         resume = bool(cfg.get("resume", False))
-        if deadline_resume:
-            if (
-                not resume
-                or consumer_mode
-                or preview_mode
-                or not isinstance(deadline_gate, str)
-                or not deadline_gate
-                or not isinstance(deadline_gate_sha256, str)
-                or len(deadline_gate_sha256) != 64
-            ):
-                raise ValueError(
-                    "Deadline fallback requires training resume plus a pinned gate"
-                )
-        elif deadline_gate is not None or deadline_gate_sha256 is not None:
-            raise ValueError("Deadline fallback gate options require explicit opt-in")
         source_values = (source_path, source_sha256, probe_path, probe_sha256)
         if any(value is None for value in source_values) and any(
             value is not None for value in source_values
@@ -355,17 +283,9 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError(
                 "Fresh v12 bootstrap requires checkpoint/receipt paths and hashes"
             )
-        if consumer_mode and resume:
-            raise ValueError("Consumer mode cannot resume training")
-        if consumer_mode and (log_dir is not None or save_pristine):
-            raise ValueError("Consumer mode cannot log or save pristine state")
         if resume and any(value is not None for value in source_values):
             raise ValueError("Resume reads its pinned source from the checkpoint")
-        if (
-            not resume
-            and not consumer_mode
-            and any(value is None for value in source_values)
-        ):
+        if not resume and any(value is None for value in source_values):
             raise ValueError("Fresh v12 training requires the authenticated source")
         if resume and save_pristine:
             raise ValueError("A resume cannot create a pristine checkpoint")
@@ -386,29 +306,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             algorithm.get(name) != value for name, value in expected_algorithm.items()
         ):
             raise ValueError("Contract-v12 PPO optimizer recipe drifted")
-        if deadline_resume and cfg.get("save_interval") != 15_000:
-            raise ValueError(
-                "Deadline fallback requires save_interval=15000 so only the "
-                "unconditional model10099 or model14999 endpoint is written"
-            )
 
-        self.checkpoint_consumer_mode = consumer_mode
         self.teleop_v12_training_resume = resume
-        self.simulation_preview_mode = preview_mode
-        self.deadline_fallback_resume = deadline_resume
-        self.deadline_fallback_resume_gate = deadline_gate
-        self.deadline_fallback_resume_gate_sha256 = deadline_gate_sha256
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
-        self.teleop_v12_sanitization: dict | None = None
-        self.teleop_v12_lr_order_migration: dict | None = None
         self.teleop_v12_corner_rescue: dict | None = None
-        self.teleop_v12_deadline_corner_rescue: dict | None = None
-        self.teleop_v12_deadline_fallback: dict | None = None
-        self.teleop_v12_deadline_resume_source: dict | None = None
-        self.teleop_v12_deadline_post_canary: dict | None = None
-        self.teleop_v12_deadline_post_canary_resume_source: dict | None = None
-        self.teleop_v12_preview: dict | None = None
-        self.teleop_v12_preview_phase1_acceptance: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
         if not isinstance(self.alg, LegacyAdapterPPO):
             raise TypeError("Contract-v12 runner requires LegacyAdapterPPO")
@@ -418,7 +319,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         actor.bind_common_step_provider(
             lambda: int(self.env.unwrapped.common_step_counter)
         )
-        if resume or consumer_mode:
+        if resume:
             return
 
         assert source_path is not None
@@ -488,62 +389,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 self.teleop_v12_bootstrap
             ),
         }
-        if self.teleop_v12_sanitization is not None:
-            result[TELEOP_V12_SANITIZATION_INFO_KEY] = dict(
-                self.teleop_v12_sanitization
-            )
-        if self.teleop_v12_lr_order_migration is not None:
-            result[MIGRATION_INFO_KEY] = deepcopy(
-                validate_lr_order_migration_marker(self.teleop_v12_lr_order_migration)
-            )
         if self.teleop_v12_corner_rescue is not None:
             result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
                 validate_corner_rescue_lineage_marker(self.teleop_v12_corner_rescue)
             )
-        if self.teleop_v12_deadline_fallback is not None:
-            if self.teleop_v12_deadline_corner_rescue is None:
-                raise RuntimeError("Deadline fallback v1 corner lineage is missing")
-            result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
-                self.teleop_v12_deadline_corner_rescue
-            )
-            result[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
-                validate_deadline_fallback_marker(self.teleop_v12_deadline_fallback)
-            )
-            result[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
-                validate_deadline_fallback_resume_source(
-                    self.teleop_v12_deadline_resume_source
-                )
-            )
-            if self.teleop_v12_deadline_post_canary is not None:
-                result[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY] = deepcopy(
-                    validate_deadline_post_canary_marker(
-                        self.teleop_v12_deadline_post_canary
-                    )
-                )
-                result[
-                    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
-                ] = deepcopy(
-                    validate_deadline_post_canary_resume_source(
-                        self.teleop_v12_deadline_post_canary_resume_source
-                    )
-                )
-        if self.teleop_v12_preview is not None:
-            result["preview_non_deployable"] = True
-            result[TELEOP_V12_PREVIEW_INFO_KEY] = dict(self.teleop_v12_preview)
-            if (
-                self.teleop_v12_preview.get("phase")
-                == TELEOP_V12_PREVIEW_PHASE_FULL_BODY
-            ):
-                from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
-                    validate_embedded_phase1_acceptance,
-                )
-
-                result[TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY] = deepcopy(
-                    self.teleop_v12_preview_phase1_acceptance
-                )
-                validate_embedded_phase1_acceptance(
-                    result, fullbody_marker=self.teleop_v12_preview
-                )
         return result
 
     def _save_pristine(self, path: Path) -> None:
@@ -568,144 +417,32 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         num_learning_iterations: int,
         init_at_random_ep_len: bool = False,
     ) -> None:
-        if self.checkpoint_consumer_mode:
-            raise RuntimeError("Contract-v12 consumer mode cannot train")
-        if self.deadline_fallback_resume:
-            validate_deadline_fallback_training_request(
-                current_iteration=self.current_learning_iteration,
-                common_step_counter=int(self.env.unwrapped.common_step_counter),
-                num_learning_iterations=num_learning_iterations,
-                save_interval=int(self.cfg["save_interval"]),
-            )
-            expected_source_optimizer_step = (
-                MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
-                if self.teleop_v12_deadline_post_canary is None
-                else MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP
-            )
-            assert_corner_rescue_optimizer_step(
-                {"optimizer_state_dict": self.alg.optimizer.state_dict()},
-                expected_step=expected_source_optimizer_step,
-            )
         self._validate_live_invariants()
-        result = super().learn(num_learning_iterations, init_at_random_ep_len)
-        if self.deadline_fallback_resume:
-            canary = self.teleop_v12_deadline_post_canary is None
-            expected_iteration = (
-                MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-                if canary
-                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_ITERATION
-            )
-            expected_common_step = (
-                MICROBAN_TELEOP_V12_DEADLINE_CANARY_COMMON_STEP
-                if canary
-                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_COMMON_STEP
-            )
-            expected_optimizer_step = (
-                MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP
-                if canary
-                else MICROBAN_TELEOP_V12_DEADLINE_FINAL_OPTIMIZER_STEP
-            )
-            if (
-                self.current_learning_iteration != expected_iteration
-                or int(self.env.unwrapped.common_step_counter) != expected_common_step
-            ):
-                raise RuntimeError("Deadline fallback stopped at the wrong endpoint")
-            assert_corner_rescue_optimizer_step(
-                {"optimizer_state_dict": self.alg.optimizer.state_dict()},
-                expected_step=expected_optimizer_step,
-            )
-        return result
-
-    def _validate_preview_phase1_acceptance(
-        self, infos: dict, preview: dict
-    ) -> dict | None:
-        """Validate phase-1 lineage, except for the explicit legacy trial class."""
-
-        if preview.get("phase") == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
-            if (
-                self.allow_missing_preview_phase1_acceptance
-                and TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY not in infos
-            ):
-                return None
-            from mjlab_microban.scripts.promote_teleop_v12_preview_visual import (
-                validate_embedded_phase1_acceptance,
-            )
-
-            return validate_embedded_phase1_acceptance(infos, fullbody_marker=preview)
-        if infos.get(TELEOP_V12_PREVIEW_PHASE1_ACCEPTANCE_INFO_KEY) is not None:
-            raise ValueError("Only a full-body preview may embed phase-1 acceptance")
-        return None
+        return super().learn(num_learning_iterations, init_at_random_ep_len)
 
     def load(
         self,
-        path: str | bytes,
+        path: str,
         load_cfg: dict | None = None,
         strict: bool = True,
         map_location: str | None = None,
     ) -> dict:
-        consumer = self.checkpoint_consumer_mode
-        resume = self.teleop_v12_training_resume
-        if consumer:
-            if load_cfg != {
-                "actor": True,
-                "critic": False,
-                "optimizer": False,
-                "iteration": False,
-                "rnd": False,
-            }:
-                raise ValueError("Consumer mode requires explicit actor-only load")
-        elif resume:
-            if load_cfg is not None or strict is not True:
-                raise ValueError("Training resume requires strict full-state load")
-        else:
+        if not self.teleop_v12_training_resume:
             raise ValueError("Fresh bootstrapped runner cannot load another checkpoint")
+        if load_cfg is not None or strict is not True:
+            raise ValueError("Training resume requires strict full-state load")
 
-        if self.require_immutable_checkpoint_bytes and not isinstance(path, bytes):
-            raise ValueError(
-                "Simulation preview consumer requires immutable checkpoint bytes"
-            )
-
-        verified_bytes = path if isinstance(path, bytes) else None
-        if verified_bytes is not None:
-            if not consumer:
-                raise ValueError("Verified checkpoint bytes are consumer-only")
-            before_sha256 = hashlib.sha256(verified_bytes).hexdigest()
-            payload = torch.load(
-                BytesIO(verified_bytes),
-                map_location=map_location or "cpu",
-                weights_only=False,
-            )
-            upstream_source: str | BytesIO = BytesIO(verified_bytes)
-            resolved: Path | None = None
-        else:
-            resolved = Path(path).expanduser().resolve()
-            before_sha256 = sha256_file(resolved)
-            payload = torch.load(
-                resolved, map_location=map_location or "cpu", weights_only=False
-            )
-            upstream_source = str(resolved)
+        resolved = Path(path).expanduser().resolve()
+        before_sha256 = sha256_file(resolved)
+        payload = torch.load(
+            resolved, map_location=map_location or "cpu", weights_only=False
+        )
         if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
             raise TypeError("Contract-v12 checkpoint payload is malformed")
         infos = payload["infos"]
         iteration = payload.get("iter")
         if not isinstance(iteration, int) or isinstance(iteration, bool):
             raise TypeError("Checkpoint iteration is malformed")
-        if self.simulation_preview_mode:
-            preview = validate_preview_marker(
-                infos,
-                iteration=iteration,
-                required_phase=(
-                    self.consumer_required_preview_phase if consumer else None
-                ),
-                require_live_candidate=(
-                    consumer and self.consumer_requires_live_candidate
-                ),
-            )
-            phase1_acceptance = self._validate_preview_phase1_acceptance(infos, preview)
-        else:
-            reject_preview_checkpoint(infos)
-            preview = None
-            phase1_acceptance = None
         if infos.get("microban_teleop_training_contract_version") != (
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
@@ -718,129 +455,26 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             infos.get("microban_teleop_recipe_revision")
             == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
             and not self.accepts_hand_pose_release_recipe
-            and not consumer
         ):
             # This runner would save the v11 recipe string: a silent switch back.
             raise ValueError(
                 "A hand pose-release checkpoint trains only under its own task "
                 "(Mjlab-Teleop-V12-HandPoseRelease-Microban)"
             )
-        if self.deadline_fallback_resume:
-            deadline_fallback = validate_deadline_fallback_resume_payload(
-                payload, checkpoint_sha256=before_sha256
+        corner_rescue = validate_corner_rescue_canonical_lineage(
+            infos,
+            iteration=iteration,
+            allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
+        )
+        if infos.get("microban_teleop_recipe_revision") == (
+            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
+        ):
+            assert corner_rescue is not None
+            assert_corner_rescue_foot_adapter_zero(payload)
+            assert_corner_rescue_optimizer_step(
+                payload,
+                expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
             )
-            assert self.deadline_fallback_resume_gate is not None
-            assert self.deadline_fallback_resume_gate_sha256 is not None
-            deadline_gate_path = (
-                Path(self.deadline_fallback_resume_gate).expanduser().resolve()
-            )
-            if sha256_file(deadline_gate_path) != (
-                self.deadline_fallback_resume_gate_sha256
-            ):
-                raise ValueError("Deadline fallback resume gate SHA-256 mismatch")
-            from mjlab_microban.scripts.teleop_v12_stage import validate_gate
-
-            gate = validate_gate(deadline_gate_path, resolved)  # type: ignore[arg-type]
-            gate_marker = gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-            if deadline_fallback is None:
-                # Selected rescue model_9999: its marker exists only in the gate,
-                # which must select exactly these bytes.
-                deadline_fallback = validate_deadline_fallback_marker(gate_marker)
-                if deadline_fallback["selected_checkpoint"]["sha256"] != (
-                    before_sha256
-                ):
-                    raise ValueError("Resume gate does not select this checkpoint")
-            elif gate_marker != deadline_fallback:
-                raise ValueError("Resume gate does not authorize deadline fallback")
-            deadline_post_canary_value = gate.get(
-                MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
-            )
-            if iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION:
-                deadline_post_canary = validate_deadline_post_canary_marker(
-                    deadline_post_canary_value
-                )
-                if deadline_post_canary["parent_checkpoint"]["sha256"] != (
-                    before_sha256
-                ):
-                    raise ValueError("Post-canary gate does not name this checkpoint")
-                deadline_resume_source = validate_deadline_fallback_resume_source(
-                    infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
-                )
-                deadline_post_canary_resume_source = (
-                    build_deadline_post_canary_resume_source(
-                        checkpoint_path=portable_bootstrap_artifact_path(resolved),
-                        gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
-                        gate_sha256=self.deadline_fallback_resume_gate_sha256,
-                        parent_checkpoint_sha256=before_sha256,
-                    )
-                )
-            else:
-                if deadline_post_canary_value is not None:
-                    raise ValueError("Selected-rescue gate cannot authorize post-canary")
-                deadline_post_canary = None
-                deadline_post_canary_resume_source = None
-                deadline_resume_source = deadline_fallback_resume_source(
-                    checkpoint_path=portable_bootstrap_artifact_path(resolved),
-                    gate_path=portable_bootstrap_artifact_path(deadline_gate_path),
-                    gate_sha256=self.deadline_fallback_resume_gate_sha256,
-                    parent_checkpoint_sha256=before_sha256,
-                )
-            corner_rescue = None
-        else:
-            deadline_descendant = (
-                validate_deadline_fallback_canary_payload(
-                    payload,
-                    verify_parent_files=True,
-                    checkpoint_sha256=(
-                        before_sha256 if self.allow_deadline_canary_consumer else None
-                    ),
-                )
-                if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None
-                else None
-            )
-            deadline_canary_consumer = (
-                deadline_descendant is not None
-                and self.allow_deadline_canary_consumer
-                and consumer
-                and self.require_immutable_checkpoint_bytes
-                and isinstance(path, bytes)
-                and iteration == MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-            )
-            if deadline_descendant is not None and not deadline_canary_consumer:
-                raise ValueError(
-                    "Deadline-fallback lineage requires explicit gated resume opt-in"
-                )
-            if deadline_canary_consumer:
-                deadline_fallback = deadline_descendant
-                deadline_resume_source = validate_deadline_fallback_resume_source(
-                    infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
-                )
-                deadline_post_canary = None
-                deadline_post_canary_resume_source = None
-                corner_rescue = None
-            else:
-                deadline_fallback = None
-                deadline_resume_source = None
-                deadline_post_canary = None
-                deadline_post_canary_resume_source = None
-                corner_rescue = validate_corner_rescue_canonical_lineage(
-                    infos,
-                    iteration=iteration,
-                    allow_hand_pose_release_recipe=(
-                        self.accepts_hand_pose_release_recipe
-                    ),
-                )
-                if infos.get("microban_teleop_recipe_revision") == (
-                    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-                ):
-                    assert corner_rescue is not None
-                    assert_corner_rescue_foot_adapter_zero(payload)
-                    assert_corner_rescue_optimizer_step(
-                        payload,
-                        expected_step=(
-                            MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP
-                        ),
-                    )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
             infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP
         ):
@@ -852,69 +486,20 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         provenance = validate_bootstrap_provenance(
             infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
         )
-        sanitization = infos.get(TELEOP_V12_SANITIZATION_INFO_KEY)
-        if sanitization is not None:
-            if not isinstance(sanitization, dict):
-                raise TypeError("Checkpoint adapter sanitization lineage is malformed")
-            exact_sanitization = {
-                "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
-                "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-                "parent_iteration": sanitization.get("completed_updates", 0) - 1,
-                "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
-                **teleop_v12_target_normalizer_metadata(),
-            }
-            if any(
-                sanitization.get(name) != value
-                for name, value in exact_sanitization.items()
-            ):
-                raise ValueError("Checkpoint adapter sanitization lineage drifted")
-            parent_sha = sanitization.get("parent_checkpoint_sha256")
-            if not isinstance(parent_sha, str) or len(parent_sha) != 64:
-                raise ValueError("Checkpoint sanitizer parent SHA-256 is malformed")
-        if resume and (iteration < 0 or infos.get("pristine_pre_update") is True):
+        if iteration < 0 or infos.get("pristine_pre_update") is True:
             raise ValueError("Pristine checkpoint cannot resume training")
-        lr_order_migration = validate_bilateral_site_order_checkpoint(infos)
+        require_bilateral_site_order(infos)
 
-        consumer_common_step = (
-            int(self.env.unwrapped.common_step_counter) if consumer else None
-        )
         loaded_infos = super().load(
-            upstream_source,  # type: ignore[arg-type]
+            str(resolved),
             load_cfg=load_cfg,
             strict=strict,
             map_location=map_location,
         )
-        after_sha256 = (
-            hashlib.sha256(verified_bytes).hexdigest()
-            if verified_bytes is not None
-            else sha256_file(resolved)  # type: ignore[arg-type]
-        )
-        if after_sha256 != before_sha256:
+        if sha256_file(resolved) != before_sha256:
             raise ValueError("Checkpoint changed while loading")
-        if self.deadline_fallback_resume:
-            assert deadline_gate_path is not None
-            assert self.deadline_fallback_resume_gate_sha256 is not None
-            if sha256_file(deadline_gate_path) != (
-                self.deadline_fallback_resume_gate_sha256
-            ):
-                raise ValueError("Deadline fallback gate changed while loading")
         self.teleop_v12_bootstrap = provenance
-        self.teleop_v12_sanitization = sanitization
-        self.teleop_v12_lr_order_migration = deepcopy(lr_order_migration)
         self.teleop_v12_corner_rescue = deepcopy(corner_rescue)
-        self.teleop_v12_deadline_corner_rescue = (
-            deepcopy(infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY))
-            if deadline_fallback is not None
-            else None
-        )
-        self.teleop_v12_deadline_fallback = deepcopy(deadline_fallback)
-        self.teleop_v12_deadline_resume_source = deepcopy(deadline_resume_source)
-        self.teleop_v12_deadline_post_canary = deepcopy(deadline_post_canary)
-        self.teleop_v12_deadline_post_canary_resume_source = deepcopy(
-            deadline_post_canary_resume_source
-        )
-        self.teleop_v12_preview = preview
-        self.teleop_v12_preview_phase1_acceptance = deepcopy(phase1_acceptance)
         assert_actor_frozen_against_source(self._actor, provenance)
         self._actor.bind_frozen_legacy_reference()
         expected_active = list(self._actor.active_adapter_columns())
@@ -922,12 +507,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError("Checkpoint active adapter columns drifted from its clock")
         self._actor.assert_schedule_locked_weights_zero()
         self._actor.assert_optimizer_invariant(self.alg.optimizer)
-        if consumer:
-            # Validate against the saved training clock first, then undo the
-            # upstream actor-only load's otherwise surprising env-state write.
-            assert consumer_common_step is not None
-            self.env.unwrapped.common_step_counter = consumer_common_step
-            return loaded_infos
 
         if self.current_learning_iteration != iteration:
             raise RuntimeError("Full-state load did not restore iteration")
@@ -946,75 +525,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             env.reset()
             if env.common_step_counter != restored:
                 raise RuntimeError("Reset changed restored common_step_counter")
-        if self.simulation_preview_mode:
-            self._assert_preview_curriculum_active()
         return loaded_infos
 
-    def _assert_preview_curriculum_active(self) -> None:
-        """Prove each lifted phase samples/rewards only its declared targets."""
-
-        env = self.env.unwrapped
-        marker = self.teleop_v12_preview
-        if not isinstance(marker, dict):
-            raise TypeError("V12 preview marker is not bound")
-        hand = env.command_manager.get_term_cfg("hand_target")
-        foot = env.command_manager.get_term_cfg("foot_target")
-        rewards = env.reward_manager
-        hmd = env.event_manager.get_term_cfg("hmd_neck_target_motion")
-        hmd_func = hmd.func
-        common_step_counter = int(env.common_step_counter)
-        if common_step_counter % MICROBAN_TELEOP_NUM_STEPS_PER_ENV != 0:
-            raise RuntimeError("V12 preview training clock is not update-aligned")
-        completed_updates = common_step_counter // MICROBAN_TELEOP_NUM_STEPS_PER_ENV
-        hand_settings = preview_hand_tracking_settings(completed_updates)
-        hand_reward = rewards.get_term_cfg("hand_target_tracking")
-        soft_limit_guard = rewards.get_term_cfg("joint_soft_limit_guard")
-        phase = marker.get("phase")
-        if phase == TELEOP_V12_PREVIEW_PHASE_HMD_HAND:
-            expected = (0.7, 0.0, 0.0, 0.0)
-        elif phase == TELEOP_V12_PREVIEW_PHASE_FULL_BODY:
-            expected = (0.7, 0.3, 0.05, 2.0)
-        else:
-            raise RuntimeError("V12 preview phase is invalid")
-        actual = (
-            hand.rel_active,
-            foot.rel_single_support_envs,
-            foot.rel_both_feet_envs,
-            rewards.get_term_cfg("foot_target_tracking").weight,
-        )
-        hand_actual = (
-            hand_reward.weight,
-            hand_reward.params.get("std"),
-            soft_limit_guard.weight,
-        )
-        hand_expected = (
-            hand_settings.reward_weight,
-            hand_settings.reward_std_m,
-            hand_settings.joint_soft_limit_guard_weight,
-        )
-        if (
-            actual != expected
-            or hand_actual != hand_expected
-            or getattr(hmd_func, "neutral_probability", None) != 0.2
-        ):
-            raise RuntimeError(
-                f"V12 preview {phase} curriculum drifted: "
-                f"targets={actual} != {expected}; "
-                f"hand={hand_actual} != {hand_expected}"
-            )
-
     def save(self, path: str, infos=None) -> None:
-        if self.checkpoint_consumer_mode:
-            raise RuntimeError("Contract-v12 consumer mode cannot save")
         self._validate_live_invariants()
-        if self.simulation_preview_mode:
-            self._assert_preview_curriculum_active()
-        if self.deadline_fallback_resume:
-            validate_deadline_fallback_save_endpoint(
-                iteration=self.current_learning_iteration,
-                common_step_counter=int(self.env.unwrapped.common_step_counter),
-                filename=Path(path).name,
-            )
         payload = self.alg.save()
         payload["iter"] = self.current_learning_iteration
         payload["infos"] = self._contract_infos(
@@ -1025,15 +539,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 },
             }
         )
-        if self.deadline_fallback_resume:
-            if self.teleop_v12_deadline_post_canary is None:
-                validate_deadline_fallback_canary_payload(
-                    payload, verify_parent_files=True
-                )
-            else:
-                validate_deadline_fallback_final_payload(
-                    payload, verify_parent_files=True
-                )
         destination = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, destination)
 
@@ -1043,217 +548,5 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         filename: str = "policy.onnx",
         verbose: bool = False,
     ) -> None:
-        if self.simulation_preview_mode:
-            raise RuntimeError(
-                "Simulation-only preview cannot use canonical ONNX export"
-            )
         self._validate_live_invariants()
         super().export_policy_to_onnx(path, filename, verbose)
-
-
-class MicrobanTeleopV12PreviewOnPolicyRunner(MicrobanTeleopV12OnPolicyRunner):
-    """Explicit simulation-only runner for clock-lifted full-body previews."""
-
-    simulation_preview_capable = True
-
-
-class MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner(
-    MicrobanTeleopV12PreviewOnPolicyRunner
-):
-    """Read-only loader for one explicit, unaccepted simulation observation."""
-
-    allow_missing_preview_phase1_acceptance = True
-    require_immutable_checkpoint_bytes = True
-
-    def __init__(
-        self,
-        env,
-        train_cfg: dict,
-        log_dir: str | None = None,
-        device: str = "cpu",
-    ) -> None:
-        if (
-            train_cfg.get("checkpoint_consumer_mode") is not True
-            or train_cfg.get("simulation_preview_mode") is not True
-            or train_cfg.get("resume") is not False
-            or log_dir is not None
-        ):
-            raise ValueError(
-                "Unaccepted simulation preview is immutable, read-only, and "
-                "consumer-only"
-            )
-        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
-
-    def learn(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Unaccepted simulation preview cannot train")
-
-    def save(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Unaccepted simulation preview cannot save")
-
-    def export_policy_to_onnx(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Unaccepted simulation preview cannot export")
-
-
-class MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(
-    MicrobanTeleopV12PreviewOnPolicyRunner
-):
-    """Read-only phase-1 consumer for controller hands with inactive feet."""
-
-    consumer_required_preview_phase = TELEOP_V12_PREVIEW_PHASE_HMD_HAND
-    consumer_requires_live_candidate = False
-    require_immutable_checkpoint_bytes = True
-
-    def __init__(
-        self,
-        env,
-        train_cfg: dict,
-        log_dir: str | None = None,
-        device: str = "cpu",
-    ) -> None:
-        if (
-            train_cfg.get("checkpoint_consumer_mode") is not True
-            or train_cfg.get("simulation_preview_mode") is not True
-            or train_cfg.get("resume") is not False
-            or log_dir is not None
-        ):
-            raise ValueError(
-                "Controller-only preview is immutable, read-only, and consumer-only"
-            )
-        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
-
-    def learn(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Controller-only preview cannot train")
-
-    def save(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Controller-only preview cannot save")
-
-    def export_policy_to_onnx(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Controller-only preview cannot export")
-
-
-class MicrobanTeleopV12DeadlineCanarySimulationConsumer(
-    MicrobanTeleopV12OnPolicyRunner
-):
-    """Bytes-only, read-only consumer for the exact accepted model10099 canary."""
-
-    require_immutable_checkpoint_bytes = True
-    allow_deadline_canary_consumer = True
-
-    def __init__(
-        self,
-        env,
-        train_cfg: dict,
-        log_dir: str | None = None,
-        device: str = "cpu",
-    ) -> None:
-        if (
-            train_cfg.get("checkpoint_consumer_mode") is not True
-            or train_cfg.get("simulation_preview_mode") is not False
-            or train_cfg.get("resume") is not False
-            or log_dir is not None
-        ):
-            raise ValueError(
-                "Deadline-canary live simulation is immutable, read-only, and "
-                "consumer-only"
-            )
-        super().__init__(env, train_cfg, log_dir=log_dir, device=device)
-
-    def learn(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Deadline-canary simulation consumer cannot train")
-
-    def save(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Deadline-canary simulation consumer cannot save")
-
-    def export_policy_to_onnx(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("Deadline-canary simulation consumer cannot export")
-
-
-def preview_actor_load_cfg() -> dict[str, bool]:
-    """Return the only actor-only load mask accepted by a preview consumer."""
-
-    return {
-        "actor": True,
-        "critic": False,
-        "optimizer": False,
-        "iteration": False,
-        "rnd": False,
-    }
-
-
-def make_teleop_v12_preview_consumer(
-    env, agent_cfg, device: str
-) -> MicrobanTeleopV12PreviewOnPolicyRunner:
-    """Construct the explicit simulation-only consumer used by live PICO sim."""
-
-    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
-        cfg = asdict(agent_cfg)
-    elif isinstance(agent_cfg, dict):
-        cfg = deepcopy(agent_cfg)
-    else:
-        raise TypeError("Preview agent_cfg must be a dataclass instance or dict")
-    cfg["checkpoint_consumer_mode"] = True
-    cfg["simulation_preview_mode"] = True
-    cfg["resume"] = False
-    return MicrobanTeleopV12PreviewOnPolicyRunner(env, cfg, device=device)
-
-
-def make_teleop_v12_unaccepted_simulation_preview_consumer(
-    env, agent_cfg, device: str
-) -> MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner:
-    """Construct the only consumer allowed to omit old phase-1 evidence."""
-
-    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
-        cfg = asdict(agent_cfg)
-    elif isinstance(agent_cfg, dict):
-        cfg = deepcopy(agent_cfg)
-    else:
-        raise TypeError("Preview agent_cfg must be a dataclass instance or dict")
-    cfg["checkpoint_consumer_mode"] = True
-    cfg["simulation_preview_mode"] = True
-    cfg["resume"] = False
-    return MicrobanTeleopV12UnacceptedSimulationPreviewOnPolicyRunner(
-        env, cfg, device=device
-    )
-
-
-def make_teleop_v12_controller_only_preview_consumer(
-    env, agent_cfg, device: str
-) -> MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner:
-    """Construct the phase-1 controller-hand, exact-zero-foot consumer."""
-
-    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
-        cfg = asdict(agent_cfg)
-    elif isinstance(agent_cfg, dict):
-        cfg = deepcopy(agent_cfg)
-    else:
-        raise TypeError("Preview agent_cfg must be a dataclass instance or dict")
-    cfg["checkpoint_consumer_mode"] = True
-    cfg["simulation_preview_mode"] = True
-    cfg["resume"] = False
-    return MicrobanTeleopV12ControllerOnlyPreviewOnPolicyRunner(env, cfg, device=device)
-
-
-def make_teleop_v12_deadline_canary_simulation_consumer(
-    env, agent_cfg, device: str
-) -> MicrobanTeleopV12DeadlineCanarySimulationConsumer:
-    """Construct the canonical-task actor-only consumer for exact model10099."""
-
-    if is_dataclass(agent_cfg) and not isinstance(agent_cfg, type):
-        cfg = asdict(agent_cfg)
-    elif isinstance(agent_cfg, dict):
-        cfg = deepcopy(agent_cfg)
-    else:
-        raise TypeError("Deadline-canary agent_cfg must be a dataclass or dict")
-    cfg["checkpoint_consumer_mode"] = True
-    cfg["simulation_preview_mode"] = False
-    cfg["resume"] = False
-    return MicrobanTeleopV12DeadlineCanarySimulationConsumer(env, cfg, device=device)

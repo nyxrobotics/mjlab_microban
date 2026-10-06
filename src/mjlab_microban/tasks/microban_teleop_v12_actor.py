@@ -195,10 +195,6 @@ TELEOP_V12_UNCHANGED_EXTRA_NORMALIZER_COLUMNS = tuple(
 TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION = (
     "freeze_extra_to7000_then_hmd_hand_to10000_then_all_v1"
 )
-TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION = 4
-TELEOP_V12_ADAPTER_SANITIZATION_REVISION = (
-    "zero_pre7000_extra_w0_adam_and_reachable_fk_elbow_minus10_v4"
-)
 
 
 def teleop_v12_target_normalizer_metadata() -> dict[str, object]:

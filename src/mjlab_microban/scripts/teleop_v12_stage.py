@@ -20,12 +20,8 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    DEADLINE_CANARY_FALLBACK_PROFILE,
-    DEADLINE_FINAL_FALLBACK_PROFILE,
     DIRECTIONAL_RESPONSE_MINIMUM,
-    FOOT_ACTIVATION_CANARY_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-    HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
@@ -37,7 +33,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     hand_tracking_p95_max_m,
     hand_tracking_rms_max_m,
     required_tracking_check_names,
-    required_tracking_profile,
     required_tracking_scenario_names,
     target_column_ablation_observation_columns,
     tracking_profile_completion_allowance,
@@ -59,9 +54,6 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-    TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
-    TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     teleop_v12_active_adapter_columns,
     teleop_v12_target_normalizer_metadata,
 )
@@ -76,27 +68,7 @@ from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
     assert_corner_rescue_foot_adapter_zero,
     assert_corner_rescue_optimizer_step,
-    canonical_json_sha256,
     validate_corner_rescue_canonical_lineage,
-)
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE,
-    MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
-    deadline_fallback_marker,
-    deadline_post_canary_marker,
-    validate_deadline_fallback_checkpoint_payload,
-    validate_deadline_fallback_descendant,
-    validate_deadline_fallback_descendant_payload,
-    validate_deadline_fallback_marker,
-    validate_deadline_fallback_resume_source,
-    validate_deadline_post_canary_marker,
-    validate_deadline_post_canary_resume_source,
-    strict_hand_tracking_summary,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
@@ -112,11 +84,8 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     validate_teleop_v12_home_pose,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    validate_bilateral_site_order_checkpoint,
-)
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    reject_preview_checkpoint,
+from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    require_bilateral_site_order,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
@@ -802,9 +771,7 @@ def _validate_onnx_report(
     return onnx_path, onnx_sha
 
 
-def _checkpoint_identity(
-    path: Path, *, allow_deadline_fallback: bool = False
-) -> tuple[str, int, int, dict[str, Any]]:
+def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Checkpoint payload is malformed")
@@ -812,76 +779,12 @@ def _checkpoint_identity(
         raise ValueError("Checkpoint is not contract-v12")
     infos = payload["infos"]
     validate_teleop_v12_home_pose(infos)
-    validate_bilateral_site_order_checkpoint(infos)
-    reject_preview_checkpoint(infos)
+    require_bilateral_site_order(infos)
     iteration = payload.get("iter")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
         raise ValueError("Stage checkpoint iteration is invalid")
     checkpoint_sha = sha256_file(path)
-    deadline_descendant = (
-        validate_deadline_fallback_descendant_payload(payload, verify_parent_files=True)
-        if infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None
-        else None
-    )
-    if allow_deadline_fallback:
-        if deadline_descendant is not None:
-            raise ValueError("Deadline source mode cannot load a descendant")
-        corner_rescue = validate_deadline_fallback_checkpoint_payload(
-            payload, checkpoint_sha256=checkpoint_sha
-        )
-    elif deadline_descendant is None:
-        corner_rescue = validate_corner_rescue_canonical_lineage(
-            infos, iteration=iteration
-        )
-    else:
-        corner_rescue = None
-        source = validate_deadline_fallback_resume_source(
-            infos.get(MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY)
-        )
-        parent_checkpoint = resolve_bootstrap_artifact_path(
-            source["parent_checkpoint_path"]
-        )
-        parent_gate = resolve_bootstrap_artifact_path(source["full_stage_gate_path"])
-        validated_parent_gate = validate_gate(parent_gate, parent_checkpoint)
-        if (
-            validated_parent_gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-            != deadline_descendant
-        ):
-            raise ValueError("Deadline canary parent gate authorization drifted")
-        if (
-            sha256_file(parent_checkpoint)
-            != deadline_descendant["selected_checkpoint"]["sha256"]
-            or sha256_file(parent_gate) != source["full_stage_gate_sha256"]
-        ):
-            raise ValueError("Deadline canary parent changed during gate validation")
-        post_source_value = infos.get(
-            MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
-        )
-        if post_source_value is not None:
-            post_source = validate_deadline_post_canary_resume_source(post_source_value)
-            canary_checkpoint = resolve_bootstrap_artifact_path(
-                post_source["parent_checkpoint_path"]
-            )
-            canary_gate = resolve_bootstrap_artifact_path(
-                post_source["full_stage_gate_path"]
-            )
-            validated_canary_gate = validate_gate(canary_gate, canary_checkpoint)
-            authorization = validate_deadline_post_canary_marker(
-                infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-            )
-            if (
-                validated_canary_gate.get(
-                    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY
-                )
-                != authorization
-            ):
-                raise ValueError("Deadline final parent gate authorization drifted")
-            if (
-                sha256_file(canary_checkpoint)
-                != authorization["parent_checkpoint"]["sha256"]
-                or sha256_file(canary_gate) != post_source["full_stage_gate_sha256"]
-            ):
-                raise ValueError("Deadline final parent changed during gate validation")
+    corner_rescue = validate_corner_rescue_canonical_lineage(infos, iteration=iteration)
     if infos.get("adapter_gradient_schedule_revision") != (
         TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
     ):
@@ -905,102 +808,14 @@ def _checkpoint_identity(
     expected_active = list(teleop_v12_active_adapter_columns(completed * 24))
     if infos.get("active_actor_columns_at_save") != expected_active:
         raise ValueError("Checkpoint active adapter columns drifted from its clock")
-    sanitization = infos.get("adapter_sanitization")
-    if sanitization is not None:
-        if not isinstance(sanitization, dict):
-            raise ValueError("Checkpoint sanitization lineage is malformed")
-        expected_sanitization = {
-            "schema_version": TELEOP_V12_ADAPTER_SANITIZATION_SCHEMA_VERSION,
-            "revision": TELEOP_V12_ADAPTER_SANITIZATION_REVISION,
-            "completed_updates": sanitization.get("parent_iteration", -2) + 1,
-            "zeroed_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
-            **teleop_v12_target_normalizer_metadata(),
-        }
-        if (
-            any(
-                sanitization.get(name) != value
-                for name, value in expected_sanitization.items()
-            )
-            or not isinstance(sanitization.get("parent_checkpoint_sha256"), str)
-            or len(sanitization["parent_checkpoint_sha256"]) != 64
-        ):
-            raise ValueError("Checkpoint sanitization lineage is malformed")
     return checkpoint_sha, iteration, completed, infos
 
 
-def _validate_deadline_strict_report(
-    report_path: Path, expected_identity: dict[str, int | str]
-) -> tuple[str, dict[str, float]]:
-    """Validate the selected rescue's strict report; return its SHA and metrics."""
-
-    report_sha256 = sha256_file(report_path)
-    report = _load_json(report_path)
-    _validate_tracking_report(
-        report,
-        expected_identity,
-        profile_override=HMD_HAND_PROFILE,
-        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
-    )
-    checks = report.get("checks")
-    if (
-        report.get("status") != "fail"
-        or not isinstance(checks, dict)
-        or {name for name, passed in checks.items() if passed is not True}
-        != {"hand_tracking_rms"}
-    ):
-        raise ValueError("Strict evidence must fail only hand_tracking_rms")
-    if sha256_file(report_path) != report_sha256:
-        raise ValueError("Deadline strict report changed while validating")
-    return report_sha256, strict_hand_tracking_summary(report)
-
-
-def _validate_deadline_canary_strict_report(
-    report_path: Path, expected_identity: dict[str, int | str]
-) -> tuple[str, list[str], dict[str, float]]:
-    """Validate the canary's canonical report (pass, or fail only hand RMS)."""
-
-    report_sha256 = sha256_file(report_path)
-    report = _load_json(report_path)
-    _validate_tracking_report(
-        report,
-        expected_identity,
-        profile_override=FOOT_ACTIVATION_CANARY_PROFILE,
-        allowed_failed_checks=frozenset(("hand_tracking_rms",)),
-    )
-    checks = report.get("checks")
-    if not isinstance(checks, dict):
-        raise ValueError("Canary strict evidence checks are malformed")
-    failed = sorted(name for name, passed in checks.items() if passed is not True)
-    if failed not in ([], ["hand_tracking_rms"]):
-        raise ValueError("Canary strict evidence may fail only hand_tracking_rms")
-    if sha256_file(report_path) != report_sha256:
-        raise ValueError("Deadline canary strict report changed while validating")
-    return report_sha256, failed, strict_hand_tracking_summary(report)
-
-
-def _deadline_descendant_tracking_profile(
-    *, completed: int, infos: dict[str, Any]
-) -> str:
-    if completed == 10_100:
-        return DEADLINE_CANARY_FALLBACK_PROFILE
-    if (
-        completed == 15_000
-        and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
-    ):
-        return DEADLINE_FINAL_FALLBACK_PROFILE
-    return required_tracking_profile(completed)
-
-
-def _checkpoint_kind(completed: int, sanitization: object) -> str:
+def _checkpoint_kind(completed: int) -> str:
     if completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES:
         return "canonical_boundary"
     if completed in (3_100, 7_100, 10_100):
         return "activation_canary"
-    if (
-        isinstance(sanitization, dict)
-        and sanitization.get("completed_updates") == completed
-    ):
-        return "sanitized_recovery"
     return "interrupted_recovery"
 
 
@@ -1058,20 +873,12 @@ def create_gate(
     locomotion_report: Path,
     tracking_report: Path,
     onnx_report: Path,
-    deadline_fallback_strict_report: Path | None = None,
-    deadline_canary_strict_report: Path | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     locomotion_report = locomotion_report.resolve()
     tracking_report = tracking_report.resolve()
     onnx_report = onnx_report.resolve()
-    deadline_source = deadline_fallback_strict_report is not None
-    deadline_canary = deadline_canary_strict_report is not None
-    if deadline_source and deadline_canary:
-        raise ValueError("Deadline source and canary promotions are exclusive")
-    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(
-        checkpoint, allow_deadline_fallback=deadline_source
-    )
+    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
     locomotion = _load_json(locomotion_report)
     tracking = _load_json(tracking_report)
     onnx = _load_json(onnx_report)
@@ -1081,68 +888,13 @@ def create_gate(
         "completed_updates": completed,
     }
     _validate_locomotion_report(locomotion, expected_report_identity)
-    tracking_profile = required_tracking_profile(
-        completed, recipe_revision=infos.get("microban_teleop_recipe_revision")
-    )
-    if deadline_source:
-        assert deadline_fallback_strict_report is not None
-        deadline_fallback_strict_report = deadline_fallback_strict_report.resolve()
-        source_strict = _validate_deadline_strict_report(
-            deadline_fallback_strict_report, expected_report_identity
-        )
-        tracking_profile = MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
-        _validate_tracking_report(
-            tracking,
-            expected_report_identity,
-            profile_override=tracking_profile,
-        )
-    elif deadline_canary:
-        assert deadline_canary_strict_report is not None
-        if (
-            iteration != MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION
-            or infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is None
-            or infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-            is not None
-        ):
-            raise ValueError("Only a deadline model10099 canary may be promoted")
-        deadline_canary_strict_report = deadline_canary_strict_report.resolve()
-        canary_strict = _validate_deadline_canary_strict_report(
-            deadline_canary_strict_report, expected_report_identity
-        )
-        tracking_profile = DEADLINE_CANARY_FALLBACK_PROFILE
-        _validate_tracking_report(
-            tracking,
-            expected_report_identity,
-            profile_override=tracking_profile,
-        )
-    elif infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None:
-        tracking_profile = _deadline_descendant_tracking_profile(
-            completed=completed, infos=infos
-        )
-        _validate_tracking_report(
-            tracking,
-            expected_report_identity,
-            profile_override=tracking_profile,
-        )
-    else:
-        tracking_profile = _validate_tracking_report(
-            tracking,
-            expected_report_identity,
-            recipe_revision=infos.get("microban_teleop_recipe_revision"),
-        )
-    parity_tolerance = (
-        MICROBAN_TELEOP_V12_DEADLINE_FINAL_ONNX_PARITY_TOLERANCE
-        if completed == 15_000
-        and infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY) is not None
-        else ONNX_PARITY_TOLERANCE
-    )
-    onnx_path, onnx_sha = _validate_onnx_report(
-        onnx,
+    tracking_profile = _validate_tracking_report(
+        tracking,
         expected_report_identity,
-        parity_tolerance=parity_tolerance,
+        recipe_revision=infos.get("microban_teleop_recipe_revision"),
     )
+    onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
-    sanitization = infos.get("adapter_sanitization")
     result = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
@@ -1152,10 +904,9 @@ def create_gate(
         "iteration": iteration,
         "completed_updates": completed,
         "canonical_boundary": canonical,
-        "checkpoint_kind": _checkpoint_kind(completed, sanitization),
+        "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": tracking_profile,
-        "adapter_sanitization": sanitization,
         "reports": {
             "locomotion": portable_bootstrap_artifact_path(locomotion_report),
             "tracking": portable_bootstrap_artifact_path(tracking_report),
@@ -1176,6 +927,15 @@ def create_gate(
         # The gate records why its accuracy limits are wider than canonical
         # (15000 completion allowance or 10000 / 10100 hand-RMS allowance).
         result["tracking_profile_completion_allowance"] = allowance
+    for key, value in _lineage_markers(infos).items():
+        result[key] = value
+    return result
+
+
+def _lineage_markers(infos: dict[str, Any]) -> dict[str, Any]:
+    """Rescue / recipe-switch markers a gate copies from its checkpoint."""
+
+    result: dict[str, Any] = {}
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
@@ -1188,103 +948,16 @@ def create_gate(
     pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
     if pose_release_final_rescue is not None:
         result[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
-    if deadline_source:
-        deadline_marker = deadline_fallback_marker(
-            selected_checkpoint_sha256=checkpoint_sha,
-            corner_marker_sha256=canonical_json_sha256(corner_rescue),
-            strict_report_sha256=source_strict[0],
-            strict_hand_tracking_m=source_strict[1],
-        )
-    else:
-        deadline_marker = validate_deadline_fallback_descendant(
-            infos, iteration=iteration
-        )
-    if deadline_marker is not None:
-        result[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
-            deadline_marker
-        )
-    post_canary_marker = (
-        deadline_post_canary_marker(
-            canary_checkpoint_sha256=checkpoint_sha,
-            strict_report_sha256=canary_strict[0],
-            strict_failed_checks=canary_strict[1],
-            strict_hand_tracking_m=canary_strict[2],
-        )
-        if deadline_canary
-        else infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-    )
-    if post_canary_marker is not None:
-        result[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY] = deepcopy(
-            validate_deadline_post_canary_marker(post_canary_marker)
-        )
-    deadline_resume_source = infos.get(
-        MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY
-    )
-    if deadline_resume_source is not None:
-        result[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
-            validate_deadline_fallback_resume_source(deadline_resume_source)
-        )
-    post_canary_resume_source = infos.get(
-        MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
-    )
-    if post_canary_resume_source is not None:
-        result[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY] = (
-            deepcopy(
-                validate_deadline_post_canary_resume_source(post_canary_resume_source)
-            )
-        )
-    if deadline_source:
-        assert deadline_fallback_strict_report is not None
-        result["deadline_fallback_strict_report"] = portable_bootstrap_artifact_path(
-            deadline_fallback_strict_report
-        )
-        result["deadline_fallback_strict_report_sha256"] = source_strict[0]
-    if deadline_canary:
-        assert deadline_canary_strict_report is not None
-        result["deadline_canary_strict_report"] = portable_bootstrap_artifact_path(
-            deadline_canary_strict_report
-        )
-        result["deadline_canary_strict_report_sha256"] = canary_strict[0]
     return result
-
-
-def _gate_deadline_roles(gate: dict[str, Any]) -> tuple[bool, bool]:
-    """Return (selected-rescue promotion, canary promotion) for one gate.
-
-    A gate is a deadline-source promotion when its deadline marker selects the
-    gated checkpoint itself, and a canary promotion when its post-canary
-    marker names the gated checkpoint.  Both markers are rebuilt from their
-    recorded fields; the full gate rebuild later re-derives them from files.
-    """
-
-    checkpoint_sha = gate.get("checkpoint_sha256")
-    deadline_value = gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-    post_value = gate.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-    deadline_source = False
-    deadline_canary = False
-    if deadline_value is not None:
-        marker = validate_deadline_fallback_marker(deadline_value)
-        deadline_source = marker["selected_checkpoint"]["sha256"] == checkpoint_sha
-    if post_value is not None:
-        authorization = validate_deadline_post_canary_marker(post_value)
-        deadline_canary = (
-            authorization["parent_checkpoint"]["sha256"] == checkpoint_sha
-        )
-    if deadline_source and deadline_canary:
-        raise ValueError("A gate cannot promote both the rescue and the canary")
-    return deadline_source, deadline_canary
 
 
 def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     gate_path = gate_path.resolve()
     checkpoint = checkpoint.resolve()
     gate = _load_json(gate_path)
-    deadline_source, deadline_canary = _gate_deadline_roles(gate)
-    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(
-        checkpoint, allow_deadline_fallback=deadline_source
-    )
-    canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
-    sanitization = infos.get("adapter_sanitization")
+    checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
+    recipe_revision = infos.get("microban_teleop_recipe_revision")
+    accepted = accepted_tracking_profiles(completed, recipe_revision=recipe_revision)
     exact = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
@@ -1293,89 +966,16 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "checkpoint_sha256": checkpoint_sha,
         "iteration": iteration,
         "completed_updates": completed,
-        "canonical_boundary": canonical,
-        "checkpoint_kind": _checkpoint_kind(completed, sanitization),
+        "canonical_boundary": completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
+        "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": (
-            MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_PROFILE
-            if deadline_source
-            else (
-                DEADLINE_CANARY_FALLBACK_PROFILE
-                if deadline_canary
-                else (
-                    _deadline_descendant_tracking_profile(
-                        completed=completed, infos=infos
-                    )
-                    if infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-                    is not None
-                    else (
-                        gate.get("tracking_profile")
-                        if gate.get("tracking_profile")
-                        in accepted_tracking_profiles(
-                            completed,
-                            recipe_revision=infos.get(
-                                "microban_teleop_recipe_revision"
-                            ),
-                        )
-                        else required_tracking_profile(
-                            completed,
-                            recipe_revision=infos.get(
-                                "microban_teleop_recipe_revision"
-                            ),
-                        )
-                    )
-                )
-            )
+            gate.get("tracking_profile")
+            if gate.get("tracking_profile") in accepted
+            else accepted[0]
         ),
-        "adapter_sanitization": sanitization,
+        **_lineage_markers(infos),
     }
-    corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
-    if corner_rescue is not None:
-        exact[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
-    recipe_switch = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
-    if recipe_switch is not None:
-        exact[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
-            validate_hand_pose_release_recipe_switch_marker(recipe_switch)
-        )
-    pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
-    if pose_release_final_rescue is not None:
-        exact[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
-    checkpoint_deadline = (
-        validate_deadline_fallback_marker(
-            gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-        )
-        if deadline_source
-        else validate_deadline_fallback_descendant(infos, iteration=iteration)
-    )
-    if checkpoint_deadline is not None:
-        exact[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY] = deepcopy(
-            checkpoint_deadline
-        )
-    checkpoint_post_canary = (
-        gate.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-        if deadline_canary
-        else infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-    )
-    if checkpoint_post_canary is not None:
-        exact[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY] = deepcopy(
-            validate_deadline_post_canary_marker(checkpoint_post_canary)
-        )
-    deadline_resume_source = infos.get(
-        MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY
-    )
-    if deadline_resume_source is not None:
-        exact[MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY] = deepcopy(
-            validate_deadline_fallback_resume_source(deadline_resume_source)
-        )
-    post_canary_resume_source = infos.get(
-        MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY
-    )
-    if post_canary_resume_source is not None:
-        exact[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RESUME_SOURCE_INFO_KEY] = (
-            deepcopy(
-                validate_deadline_post_canary_resume_source(post_canary_resume_source)
-            )
-        )
     if any(gate.get(name) != value for name, value in exact.items()):
         raise ValueError("V12 stage gate identity mismatch")
     reports = gate.get("reports")
@@ -1386,41 +986,11 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         report = resolve_bootstrap_artifact_path(reports.get(name, ""))
         if not report.is_file() or sha256_file(report) != report_hashes.get(name):
             raise ValueError(f"V12 stage gate {name} report changed")
-    strict_report: Path | None = None
-    canary_strict_report: Path | None = None
-    if deadline_source:
-        strict_report = resolve_bootstrap_artifact_path(
-            gate.get("deadline_fallback_strict_report", "")
-        )
-        recorded = gate[MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY][
-            "selected_strict_tracking_report_sha256"
-        ]
-        if (
-            not strict_report.is_file()
-            or gate.get("deadline_fallback_strict_report_sha256") != recorded
-            or sha256_file(strict_report) != recorded
-        ):
-            raise ValueError("Deadline fallback strict evidence changed")
-    if deadline_canary:
-        canary_strict_report = resolve_bootstrap_artifact_path(
-            gate.get("deadline_canary_strict_report", "")
-        )
-        recorded = gate[MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY][
-            "canonical_strict_tracking_report_sha256"
-        ]
-        if (
-            not canary_strict_report.is_file()
-            or gate.get("deadline_canary_strict_report_sha256") != recorded
-            or sha256_file(canary_strict_report) != recorded
-        ):
-            raise ValueError("Deadline canary strict evidence changed")
     rebuilt = create_gate(
         checkpoint=checkpoint,
         locomotion_report=resolve_bootstrap_artifact_path(reports["locomotion"]),
         tracking_report=resolve_bootstrap_artifact_path(reports["tracking"]),
         onnx_report=resolve_bootstrap_artifact_path(reports["onnx"]),
-        deadline_fallback_strict_report=strict_report,
-        deadline_canary_strict_report=canary_strict_report,
     )
     if rebuilt != gate:
         raise ValueError("V12 stage gate content is not canonical")
@@ -1428,20 +998,6 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     if not onnx_path.is_file() or sha256_file(onnx_path) != gate["onnx"]["sha256"]:
         raise ValueError("V12 stage ONNX artifact changed")
     return gate
-
-
-def gate_resume_mode(gate_path: Path, checkpoint: Path) -> str:
-    """Validate the full gate and return the only allowed runner resume mode."""
-
-    gate = validate_gate(gate_path, checkpoint)
-    if gate.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY) is not None:
-        deadline_source, deadline_canary = _gate_deadline_roles(gate)
-        if deadline_source:
-            return "deadline_fallback"
-        if deadline_canary:
-            return "deadline_fallback_post_canary"
-        return "deadline_fallback_canary_complete"
-    return "canonical"
 
 
 def checkpoint_recipe_kind(checkpoint: Path) -> str:
@@ -1471,32 +1027,12 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("onnx_report", type=Path)
     create.add_argument("output", type=Path)
     create.add_argument("--force", action="store_true")
-    create_deadline = subparsers.add_parser("create-deadline-fallback")
-    create_deadline.add_argument("checkpoint", type=Path)
-    create_deadline.add_argument("strict_tracking_report", type=Path)
-    create_deadline.add_argument("locomotion_report", type=Path)
-    create_deadline.add_argument("tracking_report", type=Path)
-    create_deadline.add_argument("onnx_report", type=Path)
-    create_deadline.add_argument("output", type=Path)
-    create_deadline.add_argument("--force", action="store_true")
-    create_canary = subparsers.add_parser("create-deadline-canary-fallback")
-    create_canary.add_argument("checkpoint", type=Path)
-    create_canary.add_argument("strict_tracking_report", type=Path)
-    create_canary.add_argument("locomotion_report", type=Path)
-    create_canary.add_argument("tracking_report", type=Path)
-    create_canary.add_argument("onnx_report", type=Path)
-    create_canary.add_argument("output", type=Path)
-    create_canary.add_argument("--force", action="store_true")
     validate = subparsers.add_parser("validate")
     validate.add_argument("gate", type=Path)
     validate.add_argument("checkpoint", type=Path)
     route = subparsers.add_parser("route")
     route.add_argument("completed_updates", type=int)
     route.add_argument("--shell", action="store_true")
-    resume_mode = subparsers.add_parser("resume-mode")
-    resume_mode.add_argument("gate", type=Path)
-    resume_mode.add_argument("checkpoint", type=Path)
-    resume_mode.add_argument("--shell", action="store_true")
     recipe = subparsers.add_parser("checkpoint-recipe")
     recipe.add_argument("checkpoint", type=Path)
     recipe.add_argument("--shell", action="store_true")
@@ -1529,18 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps({"recipe": kind}, sort_keys=True), flush=True)
         return 0
-    if args.command == "resume-mode":
-        mode = gate_resume_mode(args.gate, args.checkpoint)
-        if args.shell:
-            print(mode, flush=True)
-        else:
-            print(json.dumps({"resume_mode": mode}, sort_keys=True), flush=True)
-        return 0
-    if args.command in (
-        "create",
-        "create-deadline-fallback",
-        "create-deadline-canary-fallback",
-    ):
+    if args.command == "create":
         if args.output.exists() and not args.force:
             raise FileExistsError("Gate exists (pass --force)")
         gate = create_gate(
@@ -1548,16 +1073,6 @@ def main(argv: list[str] | None = None) -> int:
             locomotion_report=args.locomotion_report,
             tracking_report=args.tracking_report,
             onnx_report=args.onnx_report,
-            deadline_fallback_strict_report=(
-                args.strict_tracking_report
-                if args.command == "create-deadline-fallback"
-                else None
-            ),
-            deadline_canary_strict_report=(
-                args.strict_tracking_report
-                if args.command == "create-deadline-canary-fallback"
-                else None
-            ),
         )
         publish_json_atomic(args.output, gate)
     else:

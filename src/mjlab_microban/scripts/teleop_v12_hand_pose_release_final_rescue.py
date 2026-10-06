@@ -27,14 +27,9 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_run
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     validate_teleop_v12_home_pose,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    validate_bilateral_site_order_checkpoint,
-)
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    reject_preview_checkpoint,
-)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    require_bilateral_site_order,
 )
 
 
@@ -55,8 +50,7 @@ def validate_parent(
     )
     infos = payload["infos"]
     validate_teleop_v12_home_pose(infos)
-    validate_bilateral_site_order_checkpoint(infos)
-    reject_preview_checkpoint(infos)
+    require_bilateral_site_order(infos)
     validate_bootstrap_provenance(
         infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
     )

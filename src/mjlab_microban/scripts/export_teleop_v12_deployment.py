@@ -37,7 +37,6 @@ from mjlab_microban.robot.microban_hand_fk import (
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    DEADLINE_FINAL_FALLBACK_PROFILE,
     FINAL_COMPLETION_ALLOWANCE_PROFILE,
     FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_PROFILE,
@@ -49,12 +48,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     _export_onnx_atomic,
-)
-from mjlab_microban.scripts.teleop_v12_lr_recovery import (
-    PINNED_RAW_MODEL_9200_SHA256,
-    PINNED_SOURCE_COMMON_STEP_COUNTER,
-    PINNED_SOURCE_COMPLETED_UPDATES,
-    PINNED_SOURCE_ITERATION,
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
     pose_release_final_rescue_gate_marker,
@@ -80,12 +73,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
 )
-from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
-    MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY,
-    validate_deadline_fallback_marker,
-    validate_deadline_post_canary_marker,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
@@ -100,17 +87,10 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     teleop_v12_home_pose_marker,
     validate_teleop_v12_home_pose,
 )
-from mjlab_microban.tasks.microban_teleop_v12_lr_order import (
-    ACTOR_SWAP_BLOCKS,
-    BILATERAL_SITE_ORDER_INFO_KEY,
-    CRITIC_SWAP_BLOCKS,
-    MIGRATION_INFO_KEY,
-    MIGRATION_REVISION,
-    validate_bilateral_site_order_checkpoint,
-    validate_lr_order_migration_marker,
-)
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
+    BILATERAL_SITE_ORDER_INFO_KEY,
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    require_bilateral_site_order,
 )
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
@@ -127,7 +107,6 @@ SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
     (
         FINAL_DEPLOYED_ACCURACY_PROFILE,
         FINAL_PROFILE,
-        DEADLINE_FINAL_FALLBACK_PROFILE,
         FINAL_COMPLETION_ALLOWANCE_PROFILE,
     )
 )
@@ -156,8 +135,8 @@ ACTION_CLIP_SEMANTICS = (
 RUNTIME_ACTION_SEMANTICS = (
     "raw_default_plus_scale_then_servo_goal_range_saturation_v3"
 )
-# A chain bootstrapped after the bilateral site-order fix never needed the
-# historical model-9200 swap migration; it records this marker instead.
+# Every chain is bootstrapped with the corrected bilateral site order (no
+# checkpoint migration); the package records this marker.
 LR_ORDER_NO_MIGRATION_REVISION = "none_corrected_site_order_from_bootstrap_v1"
 
 _FOOT_LOWER = (-0.03, -0.03, 0.0) * 2
@@ -413,71 +392,11 @@ def _canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _require_deployable_lr_order_lineage(
-    infos: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Require corrected site order; a migrated lineage must be the pinned one.
-
-    A chain bootstrapped with the corrected site order returns ``None``.
-    """
-
-    marker = validate_bilateral_site_order_checkpoint(infos)
-    if infos.get(BILATERAL_SITE_ORDER_INFO_KEY) != (
-        MICROBAN_BILATERAL_SITE_ORDER_REVISION
-    ):
-        raise ValueError(
-            "Final checkpoint does not carry the corrected bilateral site-order revision"
-        )
-    if marker is None:
-        return None
-    marker = validate_lr_order_migration_marker(marker)
-    expected = {
-        "schema_version": 1,
-        "revision": MIGRATION_REVISION,
-        "site_order_revision": MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-        "strategy": "swap",
-        "source_checkpoint_sha256": PINNED_RAW_MODEL_9200_SHA256,
-        "actor_swap_blocks": [list(block) for block in ACTOR_SWAP_BLOCKS],
-        "critic_swap_blocks": [list(block) for block in CRITIC_SWAP_BLOCKS],
-        "zeroed_actor_columns": [],
-        "foot_adapter_at_source": {
-            "active": False,
-            "maximum_absolute_w0": 0.0,
-            "maximum_absolute_adam_moment": 0.0,
-            "handling": "unlearned_exact_zero_left_untouched",
-        },
-    }
-    mismatches = [name for name, value in expected.items() if marker.get(name) != value]
-    expected_clock = {
-        "iteration": PINNED_SOURCE_ITERATION,
-        "completed_updates": PINNED_SOURCE_COMPLETED_UPDATES,
-        "common_step_counter": PINNED_SOURCE_COMMON_STEP_COUNTER,
-    }
-    if marker.get("source_clock") != expected_clock:
-        mismatches.append("source_clock")
-    if mismatches:
-        raise ValueError(
-            "Final checkpoint bilateral migration lineage drifted: "
-            + ", ".join(mismatches)
-        )
-    return marker
-
-
 def _expected_final_tracking_profile(infos: Mapping[str, Any]) -> str:
-    deadline = infos.get(MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY)
-    post_canary = infos.get(MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_INFO_KEY)
-    if post_canary is None:
-        if deadline is not None:
-            raise ValueError(
-                "Final deadline-fallback checkpoint is missing post-canary lineage"
-            )
-        return required_tracking_profile(
-            FINAL_COMPLETED_UPDATES,
-            recipe_revision=infos.get("microban_teleop_recipe_revision"),
-        )
-    validate_deadline_fallback_marker(deadline)
-    validate_deadline_post_canary_marker(post_canary)
-    return DEADLINE_FINAL_FALLBACK_PROFILE
+    return required_tracking_profile(
+        FINAL_COMPLETED_UPDATES,
+        recipe_revision=infos.get("microban_teleop_recipe_revision"),
+    )
 
 
 def _require_final_gate(
@@ -554,7 +473,6 @@ _BOUNDARY_GATE_SHARED_INFO_KEYS = (
 )
 # Markers a boundary checkpoint may carry; a descendant carries them unchanged.
 _BOUNDARY_GATE_INHERITED_INFO_KEYS = (
-    MIGRATION_INFO_KEY,
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
 )
@@ -1014,48 +932,10 @@ def build_v12_deployment_metadata(
     smoke_corpus_json = _json(_runtime_smoke_corpus(tracking))
     source = bootstrap.source
     probe = bootstrap.probe
-    lr_order_migration = _require_deployable_lr_order_lineage(infos)
-    if lr_order_migration is None:
-        lr_order_metadata: dict[str, str] = {
-            "v12_lr_order_migration_revision": LR_ORDER_NO_MIGRATION_REVISION,
-        }
-    else:
-        if dict(lr_order_migration) != dict(
-            validate_lr_order_migration_marker(lr_order_migration)
-        ):
-            raise RuntimeError("Bilateral migration marker changed during validation")
-        lr_source_clock = lr_order_migration["source_clock"]
-        lr_order_metadata = {
-            "v12_lr_order_migration_schema_version": str(
-                lr_order_migration["schema_version"]
-            ),
-            "v12_lr_order_migration_revision": str(lr_order_migration["revision"]),
-            "v12_lr_order_migration_strategy": str(lr_order_migration["strategy"]),
-            "v12_lr_order_source_checkpoint_sha256": str(
-                lr_order_migration["source_checkpoint_sha256"]
-            ),
-            "v12_lr_order_source_checkpoint_iteration": str(
-                lr_source_clock["iteration"]
-            ),
-            "v12_lr_order_source_completed_updates": str(
-                lr_source_clock["completed_updates"]
-            ),
-            "v12_lr_order_source_common_step_counter": str(
-                lr_source_clock["common_step_counter"]
-            ),
-            "v12_lr_order_actor_swap_blocks_json": _json(
-                lr_order_migration["actor_swap_blocks"]
-            ),
-            "v12_lr_order_critic_swap_blocks_json": _json(
-                lr_order_migration["critic_swap_blocks"]
-            ),
-            "v12_lr_order_foot_adapter_at_source": (
-                "inactive_exact_zero_left_untouched"
-            ),
-            "v12_lr_order_migration_marker_sha256": _canonical_json_sha256(
-                lr_order_migration
-            ),
-        }
+    require_bilateral_site_order(infos)
+    lr_order_metadata = {
+        "v12_lr_order_migration_revision": LR_ORDER_NO_MIGRATION_REVISION,
+    }
     packager_source = Path(__file__).resolve()
 
     metadata: dict[str, list | str | float] = {
@@ -1734,7 +1614,7 @@ def package_v12_deployment(
         bootstrap = validate_bootstrap_provenance(
             infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
         )
-        _require_deployable_lr_order_lineage(infos)
+        require_bilateral_site_order(infos)
         boundary_stage_gates = _boundary_stage_gate_lineage(
             boundary_gates, final_infos=infos, final_checkpoint=checkpoint
         )

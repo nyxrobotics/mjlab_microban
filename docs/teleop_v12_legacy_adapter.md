@@ -46,58 +46,25 @@ trainingのhand targetはCartesian cubeから直接サンプルしない。左�
 
 境界 rollout の古い batch で新しい列を更新しないため、gradient hook が見る `common_step_counter == 7000*24` と `10000*24` はまだ lock する。再開後の次 rollout が最初の学習対象になる。lock 中の weight と Adam moment は、update・save・resume の各時点で exact zero を検証する。
 
-## v1 run の棄却と sanitizer
-
-旧 v1 は HMD/target が無効な期間にも追加列を学習した。model300 の forced-HMD 評価で actual soft-limit violation と forward 符号反転を確認したため、旧 run は採用しない。sanitizer v4は旧model600のbootstrap mapping v1と追加20列のidentity normalizerを先に認証し、actorの追加20列と対応するAdam momentsをzeroへ戻し、12個のtarget位置normalizerとbootstrap provenanceをelbow上限-10degのreachable-FK mapping v4へ一回で移行する。sourceは上書きしない。
-
-以下の旧sanitized v1 checkpointはidentity target normalizerの履歴資料であり、recipe v5では再開・preview sourceとして使用できない。
-
-```text
-logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_v12_sanitized601_reachable_fk_v5_grid401/model_600.pt
-SHA-256 ab0dbe0db9cadd6bb937e5eebf3d2b8f6bb3fadcc5e025aa15d28fb87e85d3a2
-iteration 600 / completed updates 601 / common_step_counter 14424
-```
-
-再現する場合は、旧 v1 checkpoint を source にして次を実行する。destination は必ず新規 path にする。
-
-```bash
-uv run --locked python -m \
-  mjlab_microban.scripts.sanitize_teleop_v12_adapter_checkpoint \
-  PATH_TO_V1_MODEL_600.pt PATH_TO_NEW_V5_MODEL_600.pt \
-  --output artifacts/teleop_v12_sanitization/model600_to_v5_reachable_fk.json
-```
-
-sanitizer revisionは`zero_pre7000_extra_w0_adam_and_reachable_fk_elbow_minus10_v4`、receipt schemaは4である。actor shared columns、trunk、critic、optimizerの他stateとparam groupsがbit-identicalであること、旧extra normalizerがmean=0/var=1/std=1であること、移行後の分母・std・var・joint box・FK revisionを検証する。advanced indexingのcopyを誤ってzeroにする回帰を防ぐため、resetは`index_fill_`に固定した。
-
-2026-09-25に上記one-pass migrationを実行した再開用checkpointは
-`logs/rsl_rl/mjlab_microban_teleop_v12/2026-09-25_v12_sanitized601_reachable_fk_v5_grid401/model_600.pt`
-（SHA-256 `ab0dbe0db9cadd6bb937e5eebf3d2b8f6bb3fadcc5e025aa15d28fb87e85d3a2`）、
-receiptは`artifacts/teleop_v12_sanitization/model600_to_v5_reachable_fk_elbow_minus10_grid401.json`
-（SHA-256 `6cd838c8fcc974323bc25d12b91f7e04b680133899fb035d10bec9e9d7a53c0a`）である。
-
 ## canonical training と必須 gate
 
 新規開始は次の wrapper だけを使う。
 
 ```bash
-scripts/train_microban_teleop_v12.sh start
+scripts/train_microban_teleop_v12.sh start --source VELOCITY_MODEL.pt
 ```
 
-新しいscaled-target sanitized601からの正式な再開例（`RUN_NAME`は生成先に置き換える）:
+再開は gate を作ってから行う（`RUN_NAME` と `ITERATION` は再開元）。
 
 ```bash
-scripts/evaluate_microban_teleop_v12_stage.sh \
-  RUN_NAME 600
-
-scripts/train_microban_teleop_v12.sh resume \
-  RUN_NAME \
-  --agent.run-name v12_stage_601_to3000
+scripts/evaluate_microban_teleop_v12_stage.sh RUN_NAME ITERATION
+scripts/train_microban_teleop_v12.sh resume RUN_NAME --agent.run-name NEW_RUN
 ```
 
 wrapper は checkpoint iteration ではなく completed updates を使い、次の状態機械を強制する。
 
 ```text
-601 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000
+0 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000
 ```
 
 3000/7000/10000 の各境界後は100 update activation canaryを省略できない。電源断した任意 checkpoint も hash-bound gate 後に再開できるが、canary 区間で中断した場合は同じ canary endpoint までしか進めない。
@@ -122,15 +89,13 @@ stage profile は「次 stage を学習する前の policy に未学習性能を
 - 10101..14999: whole-body performance
 - 15000: full-body performance + perturbation
 
-どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と見なさない。ONNX は `[1,83] -> [1,18]`、neutral 10,000 samples と full83 64 samplesの最大誤差が canonical では `2e-5` 以下、期限用 final profile では float32 実測差を含む `2.5e-5` 以下で、`CPUExecutionProvider` を実際に使うことを要求する。
+どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と見なさない。ONNX は `[1,83] -> [1,18]`、neutral 10,000 samples と full83 64 samplesの最大誤差が `2e-5` 以下で、`CPUExecutionProvider` を実際に使うことを要求する。
 
 ## 所要時間と停止条件
 
 このPCで100 updatesは約91〜95秒だった。目安は次の通り。
 
-- sanitized601 -> 3000: 約38分
 - fresh 0 -> 3000: 約48分
 - 15,000 updatesの学習部分: 約4時間（評価・再試行を除く保守値）
-- preview 100 updates: 約1.5〜2分
 
 次のどれかで直ちに停止する: non-finite、fall、actual jointの動的soft-limit overshootが5deg超、commanded targetのsoft-limit excessが`1e-7rad`超、方向反転/応答不足、locked weight/Adam mutation、normalizer/legacy tensor drift、provenance/hash不一致、ONNX parity超過、tracking observation coverage欠落。camera/tracker/learned policyの異常時にも、実行側は別系統の legacy joystick walkへ同一cycleでfallbackする。

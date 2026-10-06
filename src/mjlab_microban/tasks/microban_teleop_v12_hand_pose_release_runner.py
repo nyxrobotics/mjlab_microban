@@ -110,8 +110,6 @@ class MicrobanTeleopV12HandPoseReleaseOnPolicyRunner(
             raise ValueError("A recipe switch applies only to a resume")
         if switch and release_switch:
             raise ValueError("Experimental and release recipe switches are exclusive")
-        if cfg.get("deadline_fallback_resume") or cfg.get("simulation_preview_mode"):
-            raise ValueError("Hand pose release has no deadline or preview route")
         self.experimental_recipe_switch = switch
         self.release_recipe_switch_gate = release_gate if release_switch else None
         self.release_recipe_switch_gate_sha256 = (
