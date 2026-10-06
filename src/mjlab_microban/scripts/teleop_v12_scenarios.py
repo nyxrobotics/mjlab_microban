@@ -241,7 +241,7 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
             (False, False),
         ),
         # Likewise, hand-only corners let the broad/tight hand stages be gated
-        # before non-zero foot targets are introduced at iteration 16,000.
+        # before non-zero foot targets are introduced (PICO_SCHEDULE["foot"]).
         EvaluationScenario(
             "max_hands_left",
             zero,

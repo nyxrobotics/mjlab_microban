@@ -276,8 +276,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "retarget_interval_s": MICROBAN_HMD_RETARGET_INTERVAL_S,
                 # Learn the signed locomotion axes before adding an external
                 # disturbance that sweeps a comparatively heavy head through
-                # its full runtime range.  The 7,000-update stage switches the
-                # live stateful term to the deployment-like distribution.
+                # its full runtime range.  The first stage
+                # (PICO_SCHEDULE["hand"]) switches the live stateful term to
+                # the deployment-like distribution.
                 "neutral_probability": (
                     MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
                 ),
