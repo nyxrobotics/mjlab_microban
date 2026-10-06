@@ -10,6 +10,7 @@ from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.tasks.curriculum import bind_update_clock
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose, home_pose_stamps_match
 
 # Checkpoint marker: the full training HOME (joints, root position and root
@@ -50,6 +51,10 @@ def require_current_home_walk_checkpoint(path: str | Path) -> None:
 
 class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
     """mjlab's velocity runner plus the HOME stamp on save and check on load."""
+
+    def __init__(self, env, train_cfg: dict, *args, **kwargs) -> None:
+        bind_update_clock(env.unwrapped, int(train_cfg["num_steps_per_env"]))
+        super().__init__(env, train_cfg, *args, **kwargs)
 
     def save(self, path: str, infos=None) -> None:
         super().save(path, {**(infos or {}), WALK_HOME_POSE_INFO_KEY: getup_home_pose()})

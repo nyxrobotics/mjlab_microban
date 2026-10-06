@@ -162,6 +162,22 @@ INTENDED_CHANGES = {
         )
         for name in ("GETUP_REWARD_SETS", "_POSE_FINAL_WEIGHTS")
     },
+    # Stage C (2026-10-07) rebuilds the training recipes: one step-scheduled
+    # curriculum table per task (tasks/curriculum.py).  The HOME-derived
+    # values (module constants, calls) are still compared.
+    **{
+        f"task:{task}:{part}": "stage C recipe rebuild (curriculum table)"
+        for task in (
+            "Mjlab-Velocity-Microban",
+            "Mjlab-Getup-Microban",
+            "Mjlab-Getup-Microban-ImuDelay",
+            "Mjlab-Getup-Microban-CalmRoll-ImuDelay",
+            "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay",
+            "Mjlab-Getup-Microban-CalmPush-ImuDelay",
+            "Mjlab-Getup-Microban-Redesign",
+        )
+        for part in ("env", "play")
+    },
 }
 
 

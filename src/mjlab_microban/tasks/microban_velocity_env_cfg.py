@@ -41,10 +41,8 @@ from mjlab_microban.robot.microban_constants import (
     MICROBAN_ROBOT_CFG,
     SERVO_TARGET_RANGE_RAD,
 )
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum, scaled
 from mjlab_microban.tasks.mdp import (
-    step_based_staged_curriculum,
-    set_command_velocity,
-    set_stepping_parameters,
     no_stepping_penalty,
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
@@ -84,6 +82,24 @@ SIM_CFG = SimulationCfg(
     # nconmax=256,
     # njmax=1024,
 )
+
+# One stage at update 3000: widen the forward and yaw command ranges and
+# penalize standing still on a moving command.  (The command's rotation-env
+# extensions below are instance attributes that the train CLI's config
+# reconstruction drops, so training samples mjlab's UniformVelocityCommand and
+# the stage writes only its fields.)
+WALK_STAGES = (
+    Stage(
+        "penalize stepping + increase velocity",
+        scaled(3000),
+        (
+            Setting("command", "twist", "ranges.lin_vel_x", (-0.7, 0.7)),
+            Setting("command", "twist", "ranges.ang_vel_z", (-1.5, 1.5)),
+            Setting("reward", "no_stepping", "weight", -1.0),
+        ),
+    ),
+)
+
 
 def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
@@ -366,34 +382,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     #---------------------------- Curriculum ------------------------
-    cfg.curriculum = {}
-
-    cfg.curriculum["staged_curriculum"] = CurriculumTermCfg(
-        func=step_based_staged_curriculum,
-        params={
-            "stages": [
-                {
-                    "name": "penalize stepping + increase velocity",
-                    "step": 3000 * 24,
-                    "apply": lambda env: {
-                        set_command_velocity(
-                            env,
-                            lin_vel_x=(-0.7, 0.7),
-                            ang_vel_z=(-1.5, 1.5),
-                            rotation_env_ang_vel_z=(-3.0, 3.0),
-                        ),
-                        set_stepping_parameters(
-                            env,
-                            air_time_weight=3.0,
-                            no_stepping_penalty_weight=-1.0,
-                            rel_standing_envs=0.1,
-                            rel_rotation_envs=0.1,
-                        ),
-                    },
-                },
-            ],
-        },
-    )
+    cfg.curriculum = {
+        "staged_curriculum": CurriculumTermCfg(
+            func=StagedCurriculum, params={"stages": WALK_STAGES}
+        )
+    }
 
     #---------------------------- Terminations ----------------------
     cfg.terminations["fell_over"] = TerminationTermCfg(

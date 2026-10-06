@@ -16,6 +16,7 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+from mjlab_microban.tasks.curriculum import bind_update_clock
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionAction,
     raw_getup_action,
@@ -256,6 +257,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires its body/neck XC330 actuator model")
         if actuator_cfgs[0].kp_fw != GETUP_BODY_KP_FW or actuator_cfgs[0].max_current != 0.91:
             raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires body P125 and XC330 0.91 A current limit")
+        bind_update_clock(unwrapped, int(train_cfg["num_steps_per_env"]))
         super().__init__(env, train_cfg, log_dir, device)
 
     def save(self, path: str, infos=None) -> None:

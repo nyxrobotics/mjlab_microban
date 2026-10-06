@@ -1432,46 +1432,6 @@ def no_stepping_penalty(
 ########################## CURRICULUM #############################
 
 
-class step_based_staged_curriculum:
-    """
-    Curriculum based on step count stages. Each stage is applied once when
-    env.common_step_counter reaches the stage's step threshold.
-
-    Stage definitions example:
-    stages = [
-        {
-            "name": "stage 1",
-            "step": 10_000 * 24,
-            "apply": lambda env: env.reward_manager.get_term_cfg("term_name").weight = 1.0,
-        },
-        ...
-    ]
-    """
-
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.current_stage = 0
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor,
-        stages: list[dict],
-    ) -> dict[str, torch.Tensor]:
-        del env_ids
-        if (
-            self.current_stage < len(stages)
-            and env.common_step_counter >= stages[self.current_stage]["step"]
-        ):
-            stage = stages[self.current_stage]
-            print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter}"
-            )
-            stage["apply"](env)
-            self.current_stage += 1
-
-        return {"stage": self.current_stage}
-
-
 class reward_based_staged_curriculum:
     """
     Curriculum based on stages ending while a reward component gets its mean

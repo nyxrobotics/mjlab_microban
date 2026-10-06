@@ -90,8 +90,8 @@ from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum, scaled
 from mjlab_microban.tasks.mdp import (
-    step_based_staged_curriculum,
     reward_based_staged_curriculum,
     head_height_reward,
     home_pose_reward,
@@ -426,20 +426,17 @@ def make_microban_getup_env_cfg(
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {}
+    # Stage 1 finds any way up; then keep effort within what the XC330s deliver.
     cfg.curriculum["staged_curriculum"] = CurriculumTermCfg(
-        func=step_based_staged_curriculum,
+        func=StagedCurriculum,
         params={
-            "stages": [
-                {
-                    # Stage 1 finds any way up; then keep effort within what
-                    # the XC330s deliver.
-                    "name": "add torque regularization",
-                    "step": 5000 * 24,
-                    "apply": lambda env: env.reward_manager.get_term_cfg("joint_torques_l2").__setattr__(
-                        "weight", -1e-3
-                    ),
-                },
-            ],
+            "stages": (
+                Stage(
+                    "add torque regularization",
+                    scaled(5000),
+                    (Setting("reward", "joint_torques_l2", "weight", -1e-3),),
+                ),
+            )
         },
     )
     # Pose shaping starts low and ramps only once standing is reliable
