@@ -108,6 +108,14 @@ register_mjlab_task(
     rl_cfg=MicrobanVelocityRlCfg,
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
+for _variant, _suffix in (("offset", "A"), ("kernel", "B")):
+    register_mjlab_task(
+        task_id=f"Mjlab-Velocity-TwistRatio{_suffix}-Microban",
+        env_cfg=make_microban_velocity_twist_ratio_env_cfg(variant=_variant),
+        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True, variant=_variant),
+        rl_cfg=MicrobanVelocityRlCfg,
+        runner_cls=MicrobanVelocityOnPolicyRunner,
+    )
 
 register_mjlab_task(
     task_id=MICROBAN_SAFE_VELOCITY_TASK_ID,

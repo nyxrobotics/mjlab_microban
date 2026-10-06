@@ -493,17 +493,55 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
 
 
-def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def twist_ratio_offset_reward(env, command_name: str = "twist", trunk_pitch: float = 0.0):
+    """Variant A: 1 + speed - error (the linear form with a constant alive part)."""
+
+    from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity_reward
+
+    return 1.0 + twist_ratio_velocity_reward(env, command_name, trunk_pitch)
+
+
+def twist_ratio_kernel_reward(env, command_name: str = "twist", trunk_pitch: float = 0.0):
+    """Variant B: (1 + speed) / 2 * exp(-error), bounded in [0, 1]."""
+
+    import torch
+
+    from mjlab_microban.tasks.microban_twist_ratio_mdp import (
+        TWIST_RATIO_UNCOMMANDED_SCALE,
+        home_levelled_velocities,
+        twist_ratio,
+    )
+
+    command = env.command_manager.get_command(command_name)[:, :3]
+    linear, angular = home_levelled_velocities(env, trunk_pitch)
+    twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
+    uncommanded = torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
+    parts = twist_ratio(command, twist, uncommanded=uncommanded,
+                        uncommanded_scale=TWIST_RATIO_UNCOMMANDED_SCALE)
+    log = env.extras.setdefault("log", {})
+    log["Metrics/twist_ratio_speed"] = parts.speed.mean()
+    log["Metrics/twist_ratio_error"] = parts.error.mean()
+    return 0.5 * (1.0 + parts.speed) * torch.exp(-parts.error)
+
+
+def make_microban_velocity_twist_ratio_env_cfg(
+    play: bool = False, variant: str = "linear"
+) -> ManagerBasedRlEnvCfg:
     from mjlab_microban.tasks.microban_twist_ratio_mdp import (
         twist_ratio_velocity_reward,
     )
 
+    func, weight = {
+        "linear": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
+        "offset": (twist_ratio_offset_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
+        "kernel": (twist_ratio_kernel_reward, 2.0 * MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
+    }[variant]
     cfg = make_microban_velocity_env_cfg(play=play)
     del cfg.rewards["track_linear_velocity"]
     del cfg.rewards["track_angular_velocity"]
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=twist_ratio_velocity_reward,
-        weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
+        func=func,
+        weight=weight,
         params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
     return cfg
