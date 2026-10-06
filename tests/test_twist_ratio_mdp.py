@@ -9,10 +9,6 @@ from types import SimpleNamespace
 
 import torch
 
-from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
-from mjlab_microban.tasks.microban_teleop_env_cfg import (
-    MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE,
-)
 from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     TWIST_RATIO_AXIS_SCALE,
     TWIST_RATIO_DIRECTION_PENALTY,
@@ -23,6 +19,7 @@ from mjlab_microban.tasks.microban_twist_ratio_mdp import (
 )
 
 SCALE = torch.tensor(TWIST_RATIO_AXIS_SCALE)
+HOME_TRUNK_PITCH_RAD = math.radians(10.0)  # forward-lean HOME (any value works)
 G = (0.7, 0.3, 1.5)  # infeasible diagonal: forward, left, counter-clockwise
 
 
@@ -56,19 +53,9 @@ def unit_and_normal(command):
 
 
 class DecompositionTest(unittest.TestCase):
-    def test_axis_scale_is_the_command_envelope_maximum(self) -> None:
-        envelope = MICROBAN_TELEOP_FINAL_TRANSLATION_VELOCITY_ENVELOPE
-        self.assertEqual(
-            TWIST_RATIO_AXIS_SCALE,
-            tuple(
-                max(abs(low), abs(high))
-                for low, high in (
-                    envelope["lin_vel_x"],
-                    envelope["lin_vel_y"],
-                    envelope["ang_vel_z"],
-                )
-            ),
-        )
+    def test_default_axis_scale_is_the_moving_command_envelope(self) -> None:
+        # Robot scale_velocity while translating: 0.7 m/s, 0.3 m/s, 1.5 rad/s.
+        self.assertEqual(TWIST_RATIO_AXIS_SCALE, (0.7, 0.3, 1.5))
 
     def test_kept_ratio_costs_nothing_and_earns_its_scale(self) -> None:
         commands = [list(G), [-0.4, 0.2, -0.9], [0.3, -0.1, 0.0], [0.0, 0.25, -1.2]]
@@ -225,6 +212,8 @@ class RewardTermTest(unittest.TestCase):
             root_link_quat_w=torch.tensor([[math.cos(half), 0.0, math.sin(half), 0.0]] * 2),
             root_link_lin_vel_w=torch.stack((twist[:, 0], twist[:, 1], torch.zeros(2)), dim=-1),
             root_link_ang_vel_w=torch.stack((torch.zeros(2), torch.zeros(2), twist[:, 2]), dim=-1),
+            root_link_lin_vel_b=None,
+            root_link_ang_vel_b=None,
         )
         command = torch.tensor([list(G)] * 2)
         env = SimpleNamespace(
@@ -238,6 +227,45 @@ class RewardTermTest(unittest.TestCase):
         self.assertGreater(float(value[1]), float(value[0]))
         self.assertIn("Metrics/twist_ratio_speed", env.extras["log"])
         self.assertEqual(TWIST_RATIO_DIRECTION_PENALTY, 1.0)
+
+    def test_untilted_frame_reads_the_body_twist(self) -> None:
+        data = SimpleNamespace(
+            root_link_lin_vel_b=torch.tensor([[0.2, 0.1, 0.05]]),
+            root_link_ang_vel_b=torch.tensor([[0.3, -0.2, 0.6]]),
+        )
+        command = torch.tensor([[0.4, 0.2, 1.2]])
+        env = SimpleNamespace(
+            scene={"robot": SimpleNamespace(data=data)},
+            command_manager=SimpleNamespace(get_command=lambda name: command),
+        )
+        value = twist_ratio_velocity_reward(env)
+        self.assertAlmostEqual(float(value[0]), 0.5, places=5)
+
+    def test_matches_the_task_home_levelled_velocity(self) -> None:
+        # Same frame as mjlab_microban.tasks.mdp.home_levelled_root_*_vel_b
+        # (skipped where that helper does not exist).
+        try:
+            from mjlab_microban.tasks.mdp import (
+                home_levelled_root_ang_vel_b,
+                home_levelled_root_lin_vel_b,
+            )
+        except ImportError:
+            self.skipTest("no task home_levelled_root_*_vel_b helpers")
+        from mjlab_microban.tasks.microban_twist_ratio_mdp import home_levelled_twist
+
+        torch.manual_seed(0)
+        quat = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
+        data = SimpleNamespace(
+            root_link_quat_w=quat,
+            root_link_lin_vel_w=torch.randn(8, 3),
+            root_link_ang_vel_w=torch.randn(8, 3),
+        )
+        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
+        twist = home_levelled_twist(env, HOME_TRUNK_PITCH_RAD)
+        linear = home_levelled_root_lin_vel_b(env, HOME_TRUNK_PITCH_RAD)
+        angular = home_levelled_root_ang_vel_b(env, HOME_TRUNK_PITCH_RAD)
+        self.assertTrue(torch.equal(twist[:, :2], linear[:, :2]))
+        self.assertTrue(torch.equal(twist[:, 2], angular[:, 2]))
 
 
 if __name__ == "__main__":

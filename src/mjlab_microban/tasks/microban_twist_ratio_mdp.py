@@ -37,23 +37,21 @@ fraction of a command smaller than it is at most ``n / min_command_norm``).
 
 ``twist_ratio_velocity_reward`` is meant to replace the separate velocity
 tracking terms (exp kernels, L1 errors and the xy projection progress) of the
-walking and PICO base reward configurations; the module holds no
-task-specific state.
+walking and PICO base reward configurations.  The module depends only on
+torch and mjlab (no robot constants, no other task module): the caller passes
+the HOME trunk pitch and, if its command envelope differs, the axis scale.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import NamedTuple
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-
-from mjlab_microban.tasks.mdp import (
-    home_levelled_root_ang_vel_b,
-    home_levelled_root_lin_vel_b,
-)
+from mjlab.utils.lab_api.math import quat_apply_inverse, quat_mul
 
 # Max |.| of the command envelope per axis (v_x m/s, v_y m/s, w_z rad/s).
 TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
@@ -125,10 +123,28 @@ def home_levelled_twist(
     trunk_pitch: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """(N, 3) twist (v_x, v_y, w_z) in the HOME-levelled trunk frame."""
+    """(N, 3) twist (v_x, v_y, w_z) in the HOME-levelled trunk frame.
 
-    linear = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
-    angular = home_levelled_root_ang_vel_b(env, trunk_pitch, asset_cfg)
+    The root frame with the HOME trunk's forward lean ``trunk_pitch`` rotated
+    back out: at HOME it is level and faces the robot's heading.
+    ``trunk_pitch = 0`` is the root body frame.
+    """
+
+    data = env.scene[asset_cfg.name].data
+    if trunk_pitch == 0.0:
+        linear = data.root_link_lin_vel_b
+        angular = data.root_link_ang_vel_b
+    else:
+        quat_w = data.root_link_quat_w
+        half = -0.5 * trunk_pitch
+        unpitch = torch.tensor(
+            (math.cos(half), 0.0, math.sin(half), 0.0),
+            device=quat_w.device,
+            dtype=quat_w.dtype,
+        ).expand_as(quat_w)
+        frame = quat_mul(quat_w, unpitch)
+        linear = quat_apply_inverse(frame, data.root_link_lin_vel_w)
+        angular = quat_apply_inverse(frame, data.root_link_ang_vel_w)
     return torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
 
 
