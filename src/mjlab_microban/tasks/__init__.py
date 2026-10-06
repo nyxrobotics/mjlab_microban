@@ -108,7 +108,9 @@ register_mjlab_task(
     rl_cfg=MicrobanVelocityRlCfg,
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
-for _variant, _suffix in (("offset", "A"), ("kernel", "B")):
+# A (trw3A_*) trained the module at commit 5a8bbf8; A2 is the module from the
+# next commit on (same best value 2 for every command, standing included).
+for _variant, _suffix in (("offset", "A"), ("kernel", "B"), ("offset", "A2")):
     register_mjlab_task(
         task_id=f"Mjlab-Velocity-TwistRatio{_suffix}-Microban",
         env_cfg=make_microban_velocity_twist_ratio_env_cfg(variant=_variant),

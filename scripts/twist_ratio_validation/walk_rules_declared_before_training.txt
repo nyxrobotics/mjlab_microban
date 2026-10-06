@@ -43,3 +43,23 @@
 #   その形でシード 42/43 の 20000 回本番（trw3_*）を始める。基準 W1-W5 は変更なし。
 2026-10-06 11:09:16 start trw3A_s42 and trw3B_s42 (A/B of the reward form)
 2026-10-06 11:29:08 A/B at 400: A mean episode length 183.11, B 208.55 (old reward 221.19); both >= 166 -> A adopted (coordinator's rule). trw3B_s42 stopped; trw3A_s42 continues as the seed-42 run; started trw3A_s43
+2026-10-06 11:58:30 trw3A_s42 model_1000: it 1000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=NG] angle none 33/p30 39 deg; speed none 0.63/p30 0.56; falls none 0/90 p30 68/90 single 0; F +0.296 BK +0.000 LL +0.086 LR +0.176 YL +0.97 YR +0.76
+2026-10-06 12:02:31 trw3A_s42 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=-0.000 forward2=0.274 backward1=0.000 backward2=0.000 lateral_left1=0.106 lateral_right1=0.170 yaw_left5=0.976 yaw_right5=0.759 below=['forward_0p1', 'backward_0p1', 'backward_0p2']
+2026-10-06 12:16:58 trw3A_s43 model_1000: it 1000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 33/p30 32 deg; speed none 0.60/p30 0.63; falls none 0/90 p30 79/90 single 0; F +0.286 BK +0.094 LL +0.080 LR +0.122 YL +1.02 YR +1.07
+2026-10-06 12:21:26 trw3A_s43 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.000 forward2=0.249 backward1=-0.001 backward2=0.095 lateral_left1=0.086 lateral_right1=0.131 yaw_left5=1.022 yaw_right5=1.023 below=['forward_0p1', 'backward_0p1']
+2026-10-06 12:42:53 trw3A_s42 model_2000: it 2000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 26/p30 28 deg; speed none 0.66/p30 0.67; falls none 0/90 p30 59/90 single 0; F +0.344 BK +0.154 LL +0.170 LR +0.173 YL +1.01 YR +0.84
+2026-10-06 12:46:56 trw3A_s42 model_2000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.190 forward2=0.334 backward1=0.000 backward2=0.161 lateral_left1=0.181 lateral_right1=0.177 yaw_left5=1.026 yaw_right5=0.802 below=['backward_0p1']
+2026-10-06 13:01:37 trw3A_s43 model_2000: it 2000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 25/p30 24 deg; speed none 0.68/p30 0.67; falls none 0/90 p30 62/90 single 0; F +0.357 BK +0.204 LL +0.156 LR +0.163 YL +0.91 YR +1.06
+2026-10-06 13:06:13 trw3A_s43 model_2000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.205 forward2=0.329 backward1=-0.000 backward2=0.192 lateral_left1=0.171 lateral_right1=0.167 yaw_left5=0.971 yaw_right5=1.023 below=['backward_0p1']
+2026-10-06 13:29:47 trw3A_s42 model_3000: it 3000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 29/p30 33 deg; speed none 0.69/p30 0.64; falls none 0/90 p30 45/90 single 0; F +0.333 BK +0.194 LL +0.163 LR +0.191 YL +0.96 YR +0.97
+2026-10-06 13:34:21 trw3A_s42 model_3000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.162 forward2=0.300 backward1=0.001 backward2=0.182 lateral_left1=0.173 lateral_right1=0.193 yaw_left5=0.946 yaw_right5=1.035 below=['backward_0p1']
+2026-10-06 13:49:50 trw3A_s43 model_3000: it 3000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 30/p30 31 deg; speed none 0.67/p30 0.70; falls none 0/90 p30 64/90 single 0; F +0.331 BK +0.201 LL +0.146 LR +0.124 YL +1.13 YR +0.98
+2026-10-06 13:53:57 trw3A_s43 model_3000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.124 forward2=0.314 backward1=0.008 backward2=0.189 lateral_left1=0.155 lateral_right1=0.130 yaw_left5=1.120 yaw_right5=0.950 below=['backward_0p1']
+2026-10-06 14:14:33 trw3A_s42 model_4000: it 4000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 25/p30 18 deg; speed none 0.71/p30 0.67; falls none 0/90 p30 46/90 single 18; F +0.373 BK +0.170 LL +0.139 LR +0.157 YL +0.98 YR +0.94
+# 修正3（2026-10-06 14:25）: A 形 trw3A_s42 の model_4000 で、立ち止まり指令 S が 30/30 本とも 50 ステップ以内に転倒
+#   （3000 回では押しなしで転倒なし）。A 形は立ち止まり指令の最大が 1、動く指令の最大が 2 で、転倒しても罰がなく新しい指令が
+#   引けるため、「止まれと言われたら倒れて指令を引き直す」を覚えた、という判断。
+#   対策 A2: 指令の大きさが min_command_norm (0.2) 未満（立ち止まり含む）のときの速さを clamp(1 - |v^ - c^|/0.2, 0, 1) とし、
+#   どの指令でも指令どおりなら最大値 2 になるようにする（0.2 ちょうどで両方の式は比の線上で一致）。他は同じ。基準 W1-W5 は変更なし。
+#   trw3A_s42 を止め、A2 のシード 42（trw4_s42）を開始。trw3A_s43 は 4000 回の途中確認まで続けて同じ現象かを確かめてから止め、
+#   A2 のシード 43（trw4_s43）を開始する。

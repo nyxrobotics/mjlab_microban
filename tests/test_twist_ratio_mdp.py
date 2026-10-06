@@ -143,15 +143,43 @@ class DecompositionTest(unittest.TestCase):
             self.assertAlmostEqual(float(values[0]), 1.0, places=5)
 
     def test_standing_and_small_commands(self) -> None:
-        standing = parts([[0.0, 0.0, 0.0]] * 2, [[0.0, 0.0, 0.0], [0.07, -0.03, 0.3]])
-        self.assertTrue(torch.equal(standing.speed, torch.zeros(2)))
+        # Standing still earns the same speed 1 as exact tracking of a moving
+        # command; any motion lowers it on the scale of min_command_norm.
+        standing = parts(
+            [[0.0, 0.0, 0.0]] * 3,
+            [[0.0, 0.0, 0.0], [0.014, -0.006, 0.06], [0.07, -0.03, 0.3]],
+        )
+        self.assertAlmostEqual(float(standing.speed[0]), 1.0)
+        moved = math.sqrt(0.02**2 + 0.02**2 + 0.04**2)
+        self.assertAlmostEqual(
+            float(standing.speed[1]), 1.0 - moved / TWIST_RATIO_MIN_COMMAND_NORM, places=5
+        )
+        self.assertEqual(float(standing.speed[2]), 0.0)  # clamped at 0
         self.assertAlmostEqual(float(standing.error[0]), 0.0)
-        self.assertAlmostEqual(float(standing.error[1]), math.sqrt(0.01 + 0.01 + 0.04), places=5)
-        # A command below min_command_norm earns at most n / min_command_norm.
-        small = [0.07, 0.0, 0.0]  # n = 0.1
-        result = parts([small], [small])
-        self.assertAlmostEqual(float(result.speed[0]), 0.1 / TWIST_RATIO_MIN_COMMAND_NORM, places=5)
+        self.assertAlmostEqual(float(standing.error[1]), moved, places=5)
+        self.assertAlmostEqual(float(standing.error[2]), math.sqrt(0.01 + 0.01 + 0.04), places=5)
+        # A small command (n = 0.1) tracked exactly earns speed 1, standing
+        # still on it 1 - n / min_command_norm = 0.5.
+        small = [0.07, 0.0, 0.0]
+        result = parts([small] * 2, [small, [0.0, 0.0, 0.0]])
+        self.assertAlmostEqual(float(result.speed[0]), 1.0, places=5)
+        self.assertAlmostEqual(float(result.speed[1]), 0.5, places=5)
         self.assertAlmostEqual(float(result.error[0]), 0.0, places=6)
+
+    def test_every_command_has_the_same_best_value(self) -> None:
+        commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
+        values = twist_ratio_reward(torch.tensor(commands), torch.tensor(commands))
+        self.assertTrue(torch.allclose(values, torch.full((len(commands),), 2.0), atol=1e-5))
+
+    def test_the_speed_branches_meet_on_the_ray(self) -> None:
+        # n exactly at min_command_norm: both branches give s on the ray.
+        unit = torch.tensor([1.0, 1.0, 0.0]) / math.sqrt(2.0)
+        command = (unit * TWIST_RATIO_MIN_COMMAND_NORM * SCALE).tolist()
+        for k in (0.0, 0.3, 0.7, 1.0):
+            below = parts([[x * 0.999999 for x in command]], [scaled(command, k)])
+            above = parts([command], [scaled(command, k)])
+            self.assertAlmostEqual(float(below.speed[0]), k, places=4)
+            self.assertAlmostEqual(float(above.speed[0]), k, places=4)
 
     def test_yaw_is_part_of_the_ratio(self) -> None:
         command = [0.5, 0.0, 1.0]
@@ -224,12 +252,12 @@ class DecompositionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             twist_ratio(command, twist, uncommanded=torch.zeros(1, 3), uncommanded_scale=(0.7, 1.5))
 
-    def test_base_keeps_a_positive_reward_for_standing_upright(self) -> None:
+    def test_base_keeps_a_positive_reward_for_staying_upright(self) -> None:
         command = torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], [0.3, 0.1, 0.6], list(G)])
         twist = torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], [0.0, 0.0, 0.0], scaled(G, 0.3)])
         values = twist_ratio_reward(command, twist)
         self.assertEqual(TWIST_RATIO_BASE, 1.0)
-        expected = [1.0, 2.0, 1.0, 1.3]
+        expected = [2.0, 2.0, 1.0, 1.3]
         for value, want in zip(values.tolist(), expected, strict=True):
             self.assertAlmostEqual(value, want, places=5)
         shifted = twist_ratio_reward(command, twist, base=0.0)

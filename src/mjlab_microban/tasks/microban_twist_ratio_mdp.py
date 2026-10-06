@@ -19,8 +19,13 @@ and radians per second are comparable.  With ``c^ = c / scale``,
 
 ``a = clamp(p, 0, n)``
     progress along the command, capped at the command;
-``speed = a / max(n, min_command_norm)``
+``speed = a / n`` when ``n >= min_command_norm``
     the along-command speed fraction, in [0, 1];
+``speed = clamp(1 - |v^ - c^| / min_command_norm, 0, 1)`` for a smaller command
+    (standing included): a small command is tracked for precision, on the
+    scale of ``min_command_norm``.  Both branches agree on the commanded ray
+    at ``n = min_command_norm``, and every command, standing included, has
+    the same best value (speed 1 at exact tracking);
 ``error = sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)``
     the norm of everything that is not capped forward progress along the
     command -- the perpendicular part, the overshoot beyond the command, any
@@ -31,22 +36,22 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     monotonically with the angle to the command.
 
 The reward is ``base + speed - direction_penalty * error`` (``base`` 1 by
-default): 1 for standing still on a standing command, 2 at exact tracking of a
-moving command, and below 1 for anything off the command.  ``base`` keeps a
-positive reward for staying upright and still, as the exp tracking kernels this
-term replaces did; without it (``base = 0``) a walker trained from scratch
-barely learned to stay up (mean episode length 45 steps at update 200 against
-about 190 for the old reward; with ``base = 1`` 183 at update 400).  For a
-zero command (standing) ``speed = 0`` and ``error = sqrt(|v^|^2 + |w^|^2)``.
-Its maximum over the twists a robot can reach lies on the commanded ray:
-``s * c`` with the largest feasible ``s`` (exact tracking when the command is
-feasible).
-``min_command_norm`` keeps very small commands from carrying the full speed
-reward (the speed fraction of a command smaller than it is at most
-``n / min_command_norm``).  The uncommanded motion keeps a robot that topples
-in the commanded direction from collecting speed reward on the way down (the
-tracking kernels this term replaces penalised vertical velocity and roll/pitch
-rates the same way); ``uncommanded_scale=None`` leaves it out.
+default): 2 at exact tracking of any command (standing still on a standing
+command included), less for anything off the command.  ``base`` keeps a
+positive reward for staying upright, as the exp tracking kernels this term
+replaces did; without it (``base = 0``) a walker trained from scratch barely
+learned to stay up (mean episode length 45 steps at update 200 against about
+190 for the old reward; with ``base = 1`` 183 at update 400).  The equal best
+value matters because falling ends an episode and draws a new command: when a
+standing command could earn at most 1 against 2 for a moving one, a walker
+trained from scratch learned to fall at once when told to stand (all 30
+standing rollouts at update 4000).  For a zero command ``error =
+sqrt(|v^|^2 + |w^|^2)``.  The maximum over the twists a robot can reach lies on
+the commanded ray: ``s * c`` with the largest feasible ``s`` (exact tracking
+when the command is feasible).  The uncommanded motion keeps a robot that
+topples in the commanded direction from collecting speed reward on the way
+down (the tracking kernels this term replaces penalised vertical velocity and
+roll/pitch rates the same way); ``uncommanded_scale=None`` leaves it out.
 
 ``twist_ratio_velocity_reward`` is meant to replace the separate velocity
 tracking terms (exp kernels, L1 errors and the xy projection progress) of the
@@ -82,7 +87,7 @@ class TwistRatio(NamedTuple):
 
     command_norm: torch.Tensor  # (N,) n = |c^|
     along: torch.Tensor  # (N,) p = v^ . u (0 for a zero command)
-    speed: torch.Tensor  # (N,) a / max(n, min_command_norm), in [0, 1]
+    speed: torch.Tensor  # (N,) along-command speed fraction in [0, 1] (see doc)
     error: torch.Tensor  # (N,) sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)
 
 
@@ -121,7 +126,14 @@ def twist_ratio(
     unit = c / torch.where(moving, norm, torch.ones_like(norm)).unsqueeze(-1)
     along = (v * unit).sum(dim=-1)
     progress = torch.minimum(torch.clamp(along, min=0.0), norm)
-    speed = progress / torch.clamp(norm, min=min_command_norm)
+    large = norm >= min_command_norm
+    speed = torch.where(
+        large,
+        progress / torch.where(large, norm, torch.ones_like(norm)),
+        torch.clamp(
+            1.0 - torch.linalg.vector_norm(v - c, dim=-1) / min_command_norm, min=0.0
+        ),
+    )
     off = v - progress.unsqueeze(-1) * unit
     if uncommanded is not None:
         if uncommanded_scale is None:
