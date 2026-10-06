@@ -34,11 +34,12 @@
 | `tag` | `centered_home` | `forward_lean_home` | `<label>_<hash>` |
 | 歩行 ONNX 契約 | `v3_centered_home_servo_range` | `v4_forward_lean_home_servo_range` | `v3_<tag>_servo_range`（体幹 0°）/ `v4_<tag>_servo_range` |
 | 起き上がり契約 | `v5`（`v4` スタンプも記録envで確認して受理） | `v6` | `v5_<tag>` / `v6_<tag>` |
-| PICO v12 HOME / recipe | `centered_home_hip_plus1p198..._v5`、recipe `..._v11`、pose-release `..._v12` | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17`、pose-release `..._v18` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
-| パッケージャ | `..._packager_v6_centered_home_servo_range` | `..._packager_v7_forward_lean_home_servo_range` | `v6`/`v7` + `<tag>` |
-| 救済段階・upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
+| PICO v12 HOME / recipe | `centered_home_hip_plus1p198..._v5`、recipe `..._v11` | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
+| PICO の学習レシピ（2026-10-07 以降、どのHOMEでも新しい） | `centered_home_..._active_hand_arm_pose_release_twist_ratio_one_run_warmup1000_total9000_v1` | `forward_lean_home_..._twist_ratio_one_run_warmup1000_total9000_v1` | `<tag>_...` |
+| パッケージャ | `microban_pico_packager_one_run_v1_centered_home_servo_range` | `microban_pico_packager_one_run_v1_forward_lean_home_servo_range` | `..._<tag>_servo_range` |
+| upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
 | 固定値 | root z 0.170554885633559、足の横間隔 0.094 m（FK 0.0935） | root z 0.170430569776402、股・足首は前傾ブランチの全桁の値（yamlは12桁の正準値） | FK値 |
-| 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント | （なし） | （なし） |
+| 互換 | HOMEスタンプのない歩行チェックポイント | （なし） | （なし） |
 | HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 完全一致（同） | 1e-9 の許容（FK の最終桁の揺れ） |
 
 体幹ピッチ 0° のHOMEは中心ラインの仕組み（体幹座標系の目標、元の手先FK箱）、0° 以外は前傾ラインの仕組み
@@ -85,7 +86,7 @@ MuJoCo の更新などで FK が最終桁で揺れても、HOMEスタンプ・�
 ローダーが読めるHOMEでも、このチェックアウトの学習タスクが受け付けないものがある。
 `home_pose_tool.py show` と `balance_home_pose.py` は、候補のHOMEを別プロセスで
 `mjlab_microban.robot.home_pose.HOME` に入れて `mjlab_microban.tasks` をimportし（歩行・起き上がり各段階・
-PICO v12 と救済段階の全タスクの環境設定が組み立てられる、GPU不要、数秒）、結果を「training line」として表示する
+PICO の全タスクの環境設定が組み立てられる、GPU不要、数秒）、結果を「training line」として表示する
 （`mjlab_microban/robot/home_pose_training.py`）。規則の一覧を手で持たず、タスク自身に聞いている。
 
 | 変えたい値 | この学習ライン |
@@ -111,35 +112,17 @@ home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.
 
 ```bash
 # 学習側: home-config ブランチ（このディレクトリがあるチェックアウト）で実行する
-# ロボット側: home-config ブランチ（src/home_pose.py があるもの）の作業ツリー。
-#   デプロイ用のチェックアウトをそのまま使わず、専用の worktree を作る:
-git -C ../microban fetch origin
-git -C ../microban worktree add -b home-<label> ../microban_home-<label> origin/home-config
-python3 scripts/retrain_all_for_home.py --robot-repo ../microban_home-<label> --robot-branch home-<label> \
-    --training-branch home-<label>
+# ロボット側: 方策の契約（docs/policies.md）を実装したブランチの、専用の worktree
+uv run --locked python scripts/retrain_all_for_home.py --robot-repo ../microban_home-<label> \
+    --robot-branch home-<label> --training-branch home-<label>
 ```
 
-`--robot-repo` が `config/home_pose.yaml` を読まないロボットのチェックアウト（`src/home_pose.py` がない、
-たとえば `feature/neck-roll-pitch-camera`）なら、パイプラインも `write-robot` も最初に拒否する。
+コマンドは、HOME の確認と学習側のテスト一式（CPU）のあと、歩行・PICO・起き上がりをそれぞれ最初から
+1 本ずつ学習し、1 回ずつ判定し、書き出し、ロボット側に入れて検証し、両リポジトリにコミットする。判定に
+落ちたら止まる（救済はしない。原因を直して同じコマンドを回すと、済んだ段階は飛ばされる）。配線の確認は
+`--dry-run`（数十分）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md)。
 
-人手の介入なしで最後まで進むように、PICO v12 の 10000 境界は自動で段階的に救済する（9999 ゲート不合格 →
-model_9900 の pose-release コーナー救済を mix lf60, lf90, lf72, lf65 の順に → それも全部落ちたらゲート済みの
-model_7099 から 7100→10000 を学習し直す → 尽きたら止まる）。15000 境界も同じ（14999 ゲート不合格 → model_14900 の
-pose-release 最終シナリオ救済を mix pr_v1〜pr_v6 の順に（pr_v5/pr_v6 は評価器の押しも再生）→ 全部落ちたらゲート済みの model_10099 から 10100→15000 を
-学習し直す → 尽きたら止まる）。同じ親からの再学習は学習シードを変える（42, 43, ...）。
-ただし前傾HOME（体幹 +10°）では、前傾チェーン自身が 15000 境界で 10 回（シード 42/42/43/44 の再学習4回と
-救済6回、pr_v5/pr_v6 を含む）試して全部 14999 ゲートに落ちている（forward-lean-v2 の
-`docs/teleop_v12_hand_pose_release_final_rescue.md`）。前傾 yaml でこのパイプラインを回すと、同じ仕組みなので
-15000 境界で止まる見込みが高い。通すには 10100→15000 のレシピ自体の変更が要る（前傾ブランチ側でもまだ無い）。学習を回す前の配線確認は、どのHOMEでも
-`--dry-run` で数十分（そのHOMEの歩行があれば `--dry-run-walk-init`、編集したばかりのHOMEなら
-`--dry-run-plumbing`）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md) の「ドライラン」。
-
-コマンドは学習を始める前に、そのHOMEで学習側のテスト一式を CPU で実行する（約2分）。既知の失敗
-（`scripts/home_pipeline/known_test_failures.txt`、どのHOMEでも同じ既存の失敗）以外が1つでも落ちたら、
-GPU を使う前に止まる（終了コード3）。ブランチはそのHOMEで緑でなければならないため（下の「テスト」）。
-結果は state とリリース記録（`config/releases/<tag>.json` の `training_suite`）に残る。
-
-以下はそのコマンドが行う内容（手で行う場合の手順）。
+手で行う場合の手順の要点:
 
 1. `home_pose.yaml` を編集する（膝など。変えられる値は上の表）。
 2. （任意）`uv run python config/balance_home_pose.py` で重心を合わせる。既定は確認だけ（dry run）で、
@@ -152,14 +135,6 @@ GPU を使う前に止まる（終了コード3）。ブランチはそのHOME�
    `config/home_pose.yaml` を書き出す（`--check` で最新か確認できる）。学習タスクが受け付けないHOMEは
    書き出せない（契約文字列と手先FKはその学習タスクのコードが作るため。`--force` はない）。
    `config/home_pose.yaml` を読まないロボットのチェックアウトも拒否する。失敗はどれも `error: ...` の1行。
-5. すべてを最初から学習し直す: 歩行（`Mjlab-Velocity-Microban` 15000回とその続き、プローブで選択）、
-   起き上がり5段階、PICO v12（`scripts/train_microban_teleop_v12.sh start --source ...`）。
-   歩行チェックポイントには `microban_walk_home_pose` が記録され、v12の開始時に現在のHOMEと照合される。
-6. 3つのポリシーをロボットの `src/agents/` に入れる。ロボット側では `tests/test_shared_home.py` の固定値と、
-   ランごとに変わる値（`pico_hybrid.py` の歩行ソースSHA、`tools/validate_pico_policy.py` の `walk.onnx` SHA）
-   も更新する。PICOのパッケージは、そのロボット側ツリーに対して作る（`--microban-repo`）。
-7. 両方のリポジトリでテストを通し（学習側は `uv run --with pytest python -m pytest tests`。失敗は
-   `scripts/home_pipeline/known_test_failures.txt` のものだけ）、コミットする。
 
 ## 重心合わせツール（`balance_home_pose.py`）
 
@@ -187,7 +162,7 @@ uv run python config/balance_home_pose.py --no-training-check     # 学習ライ
   （ハッシュが変わるので表示で知らせる）。`--check` は「`--write` しても何も変わらない」ときだけ 0 を返す。
 - **「水平」**: ツールが合わせるのはピッチ方向。ロールは動かさないので、足裏がロールしていて床に縁でしか
   触れないHOME（股ロールだけを変えた、股ヨーと膝を組み合わせた、など）は「HOME soles are not flat on the floor」
-  で拒否する（接地面の定義が床の高さ基準の `scripts/home_pipeline/home_check.py` と一致する）。体幹を傾けると、
+  で拒否する（接地面の定義が床の高さ基準の `mjlab_microban/pipeline/home_check.py` と一致する）。体幹を傾けると、
   固定した股・足首ロールのため足裏にわずかなロールとつま先の内向き（体幹 +10° でロール約 0.08°、ヨー約 0.87°）が
   残るが、角48個すべてが床から 0.5 mm 以内なので受け付ける。表に「sole roll / sole yaw」として表示する。
   変更前のyamlで足裏が水平でない場合、接地を前提にした行（重心と足裏中央の差、かかと・つま先余裕、接地角数）は
@@ -249,12 +224,10 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 ## 等価性の確認（テスト）
 
 - `tests/test_home_pose_any_trunk.py`: 中心 yaml で `track-centered-home-clip`（5b5a9d0）、前傾 yaml で
-  `forward-lean-v2`（7ceb280）のモジュール定数・HOME 由来の関数値・登録された全タスクの env/play/rl 設定と runner が
-  一致すること（参照は `tests/fixtures/home_equivalence/*.json`、`tests/home_equivalence.py` で記録）。
-  中心HOMEで許す差は、新しいコマンド設定フィールドの既定値（`trunk_pitch=0.0`、`lf_rb_probability=0.9`）と
-  HOMEスタンプを付ける歩行 runner、それに整理で意図して変えた値（`INTENDED_CHANGES`、理由つき）だけ。
-  ステージゲートの判定基準は全HOMEで1本の表（時刻ごとに1プロファイル、手先 RMS 0.040 m）で、
-  パッケージはどのHOMEでも 10000 と 10100 のゲートを resume 系譜（`params/agent.yaml`）でたどって記録する。
+  `forward-lean-v2`（cd0ea78）の HOME 由来の値（`mjlab_microban.robot` のモジュール定数と、手先FK・HOMEスタンプ・
+  マーカー・パリティ用観測の関数値）が一致すること（参照は `tests/fixtures/home_equivalence/*.json`、
+  `tests/home_equivalence.py` で記録）。学習のレシピ（タスク設定・報酬・時刻・判定）は 2026-10-07 に作り直した
+  ので比べない。
 - テスト一式はどのHOMEのチェックアウトでも通る（`tests/home_cases.py`）:
   - ツール（重心合わせ・yaml 編集・ロボット yaml）のテストは、チェックアウトの `config/home_pose.yaml` ではなく
     `tests/fixtures/home_pose_centered.yaml` / `home_pose_forward_lean.yaml` を入力にする。
@@ -265,10 +238,8 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
     中心ブランチでも前傾の仕組みを、前傾ブランチでも中心の値を毎回確認する。それ以外のHOMEは両方を子プロセスで確認する。
   - 残りは HOME から期待値を計算する（公開HOMEでは文字通りの値と照合、それ以外は `<label>_<hash>` の規則）。
   - 前傾ブランチ（forward-lean-v2 cd0ea78）だけにあったテスト（`test_forward_lean_home.py`、
-    `test_pico_home_levelled_targets.py`、`test_teleop_v12_hand_pose_release_corner_rescue.py`、前傾の手先FK
-    `test_microban_hand_fk_forward_lean.py`）も入っている。
-  - 2026-10-06 時点で、中心・前傾（`balance --trunk-pitch-deg 10 --write`）・膝15°体幹5° のどの yaml でも、
-    失敗は既知の 21 failed / 16 errors（`known_test_failures.txt`）と同じ集合。
+    `test_pico_home_levelled_targets.py`、前傾の手先FK `test_microban_hand_fk_forward_lean.py`）も入っている。
+  - テストはどの yaml でも全部通る（パイプラインは 1 つでも落ちたら学習を始めない）。
 - 設定・定数の外での前傾ブランチとの違いは1つだけ: v12 の追従評価器は、指令した足先シナリオに測定値が1つも
   無い（rms/p95 が None）とき、forward-lean-v2 cd0ea78 では `float(None)` で異常終了したが、ここでは
   `foot_tracking_rms` / `foot_tracking_p95` の不合格として判定する（`_measured_within`）。合格になるものは変わらない。
@@ -283,12 +254,11 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 全HOME共通にしたため、中心HOMEでも元のブランチ（学習 5b5a9d0 / ロボット a62a793）より厳しい。どれも
 拒否する側への変更で、デプロイ済みの成果物（walk.onnx c9cdd852、getup.onnx 80cd7ddb、pico_teleop.onnx）は通る。
 
-- 学習 `train_microban_teleop_v12.sh start`: 歩行ソースの run の `params/env.yaml`（HOME 関節・root、±π クリップ、
+- 学習（パイプラインの PICO 段階の入口）: 歩行ソースの run の `params/env.yaml`（HOME 関節・root、±π クリップ、
   生の前回行動）と HOME スタンプを `export_walk_onnx.require_current_home_walk_checkpoint` で確認する
   （5b5a9d0 は確認なし、前傾ブランチと同じ）。
-- 学習パッケージャ: `--boundary-gate` のチェックポイントは最終チェックポイントの resume 系譜上でなければ拒否
-  （兄弟 run は不可）。ドライランの証跡（`dry_run*` キー、`DRYRUN_*` の強制パスのプローブ受領書）を含むものは
-  `dry_run=True`（`scripts/home_pipeline/dry_run_tools.py package`）以外では拒否する。
+- 学習パッケージャ: ドライランの証跡（`dry_run*` キー、`DRYRUN_*` の強制パスのプローブ受領書）を含むものは
+  `dry_run=True`（`mjlab_microban/pipeline/dry.py package`）以外では拒否する。
 - ロボット `walk.py`: `home_pose` スタンプのない walk.onnx を拒否（a62a793 は受理）。`getup.py`: スタンプの
   root 位置を z だけでなく x, y も比較。`pico_hybrid.py`: `v12_deployment_packager_revision` の一致を要求
   （a62a793 は未確認。デプロイ済みと前回のパッケージはどちらも持つ）、学習HOMEマーカーは 1e-9 許容ではなく
