@@ -67,6 +67,56 @@ class StateTest(unittest.TestCase):
             self.assertTrue(again.begin("pico", "a" * 64))
             self.assertEqual(again.state.step("pico")["inputs"], "a" * 64)
 
+    def test_a_crashed_or_stalled_training_continues_and_a_refusal_fails(self) -> None:
+        def run(state_dir: Path, cmd: list[str], kind: str) -> steps.Pipeline:
+            pipeline = fake_pipeline(state_dir)
+            pipeline.home = {"tag": "t", "joint_hash": "h"}
+            pipeline.prefix = "home_h"
+            pipeline.jobs = core.Jobs(pipeline.state, stall_minutes={"train": 20, "eval": 30},
+                                      wait_for_gpu=False, external_min_envs=1024)
+            pipeline.preflight = lambda: None
+            for name in steps.STEPS:
+                setattr(pipeline, f"step_{name}", lambda: None)
+
+            def step_walk() -> None:
+                if pipeline.begin("walk", "a" * 64):
+                    pipeline.jobs.run("train_walk" if kind == "train" else "export_walk", cmd, kind, gpu=False)
+
+            pipeline.step_walk = step_walk
+            return pipeline
+
+        def execute(pipeline: steps.Pipeline) -> None:
+            try:
+                pipeline.execute()
+            finally:
+                pipeline.state._lock_file.close()  # the process ended
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory) / "state"
+            crash = ["bash", "-c", "exit 1"]  # e.g. CUDA out of memory on the shared GPU
+            with self.assertRaises(core.JobStopped) as raised:
+                execute(run(state_dir, crash, "train"))
+            self.assertEqual(raised.exception.code, core.EXIT_STALL)
+            self.assertEqual(State(state_dir).step("walk")["status"], "running")
+            with self.assertRaises(core.JobStopped):  # the rerun enters the step again
+                execute(run(state_dir, crash, "train"))
+            self.assertEqual(State(state_dir).step("walk")["status"], "running")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory) / "state"
+            with self.assertRaises(PipelineError) as raised:  # an exporter refusing is a verdict
+                execute(run(state_dir, ["bash", "-c", "exit 1"], "eval"))
+            self.assertNotIsInstance(raised.exception, core.JobStopped)
+            self.assertEqual(State(state_dir).step("walk")["status"], "failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory) / "state"
+            pipeline = run(state_dir, ["bash", "-c", "sleep 600"], "train")
+            pipeline.jobs.stall_s["train"] = 0.0
+            with self.assertRaisesRegex(core.JobStopped, "STALL"):
+                execute(pipeline)
+            self.assertEqual(State(state_dir).step("walk")["status"], "running")
+
     def test_one_instance_per_state_dir(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first = State(Path(directory))

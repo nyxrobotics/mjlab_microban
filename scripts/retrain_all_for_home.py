@@ -25,7 +25,8 @@ GPU jobs run one at a time; a real run waits while another training uses the
 GPU.  A failed check stops the run with exit code 1 and a report; nothing is
 rescued.  Fix the cause (a committed recipe or code change) and run the same
 command again: steps whose inputs are unchanged are skipped, and a training
-that stopped continues from its last checkpoint.  State: <state dir>/
+that stopped without a verdict (crash, stall, Ctrl-C) continues from its last
+checkpoint.  State: <state dir>/
 state.json and STATUS.log (default artifacts/home_pipeline/<prefix>_<tag>/);
 --status prints it.
 
@@ -35,8 +36,9 @@ cannot pass (pipeline/dry.py; the package is marked not deployable), into a
 scratch robot clone (its origin push URL must be a local path); the robot
 commit stays local and nothing is pushed or committed in this repository.
 
-Exit codes: 0 done, 1 a check failed, 2 a job stalled, 3 bad input,
-4 another instance holds the state dir, 130 interrupted.
+Exit codes: 0 done, 1 a check failed, 2 a job stopped without a verdict (a
+training crashed, a job stalled; rerun to continue), 3 bad input, 4 another
+instance holds the state dir, 130 interrupted.
 """
 
 from __future__ import annotations

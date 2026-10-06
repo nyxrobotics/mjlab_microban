@@ -5,8 +5,9 @@ and is judged once, on the checkpoint its run ends with.  A failed judgment
 stops the run with exit code 1 and a report; the fix is a recipe change
 (committed) and a rerun, which skips every step whose inputs did not change.
 Nothing is rescued, retrained with another seed or judged against a relaxed
-threshold.  Training that stopped (crash, stall, Ctrl-C) continues from its
-last checkpoint on the rerun.
+threshold.  Training that stopped without a verdict (its process crashed or
+stalled, Ctrl-C: ``core.JobStopped``) leaves the step running and continues
+from its last checkpoint on the rerun.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from mjlab_microban.pipeline.core import (
     UV,
     UV_ONNX,
     Jobs,
+    JobStopped,
     PipelineError,
     State,
     capture,
@@ -794,6 +796,9 @@ class Pipeline:
         for name in STEPS:
             try:
                 getattr(self, f"step_{name}")()
+            except JobStopped as stopped:
+                self.log(f"[{name}] stays running: {str(stopped).splitlines()[0][:300]}; rerun to continue")
+                raise
             except PipelineError as error:
                 self.fail(name, str(error).splitlines()[0][:500] if str(error) else repr(error))
                 raise

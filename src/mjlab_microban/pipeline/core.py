@@ -42,6 +42,18 @@ class PipelineError(Exception):
         self.code = code
 
 
+class JobStopped(PipelineError):
+    """A job ended without a verdict: a training process that exited abnormally, or any stalled job.
+
+    The step stays ``running`` (not ``failed``): the rerun continues it, a
+    training from its last checkpoint.  A check that fails, a stop rule and a
+    judgment raise a plain ``PipelineError`` and mark the step ``failed``.
+    """
+
+    def __init__(self, message: str, code: int = EXIT_STALL) -> None:
+        super().__init__(message, code)
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -259,7 +271,9 @@ class Jobs:
         """Run one job to its end (stall detection, optional ``poll`` every 30 s).
 
         An exception raised by ``poll`` stops the job (its process group) and
-        propagates.
+        propagates.  A stall, and a ``train`` job's non-zero exit, raise
+        ``JobStopped`` (no verdict: the rerun continues); another job's non-zero
+        exit (an exporter or gate refusing) raises ``PipelineError``.
         """
 
         if gpu:
@@ -277,9 +291,8 @@ class Jobs:
                     pass
                 if time.time() - log.stat().st_mtime > self.stall_s[kind]:
                     self.kill(proc)
-                    raise PipelineError(
-                        f"STALL {name}: no output for {self.stall_s[kind] / 60:.0f} min, stopped (log {log})",
-                        EXIT_STALL)
+                    raise JobStopped(
+                        f"STALL {name}: no output for {self.stall_s[kind] / 60:.0f} min, stopped (log {log})")
                 if poll is not None:
                     poll()
             if poll is not None:
@@ -292,7 +305,8 @@ class Jobs:
         minutes = (time.time() - started) / 60
         if proc.returncode != 0 and check:
             tail = log.read_text(errors="replace")[-1500:].strip()
-            raise PipelineError(f"{name} failed rc={proc.returncode} after {minutes:.1f} min (log {log}):\n{tail}")
+            error = JobStopped if kind == "train" else PipelineError
+            raise error(f"{name} failed rc={proc.returncode} after {minutes:.1f} min (log {log}):\n{tail}")
         self.state.log(f"done {name} rc={proc.returncode} in {minutes:.1f} min")
         return proc.returncode, log
 
