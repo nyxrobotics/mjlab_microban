@@ -1600,19 +1600,6 @@ def set_stepping_parameters(
         env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
 
 
-def _sample_upper_body_pose(
-    env: ManagerBasedRlEnv, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg
-) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    limits = asset.data.soft_joint_pos_limits[env_ids][:, asset_cfg.joint_ids]
-    r = torch.rand(limits.shape[0], limits.shape[1], device=env.device)
-    return limits[..., 0] + r * (limits[..., 1] - limits[..., 0])
-
-
-        # right after a reset is a minor, brief inaccuracy, not worth the extra
-        # bookkeeping (matches home_stillness_reward's own reset() reasoning).
-
-
 class home_stillness_reward:
     """Reward the commanded joint TARGET (asset.data.joint_pos_target, not the
     measured joint_pos/joint_vel) holding still near home, but only once actually

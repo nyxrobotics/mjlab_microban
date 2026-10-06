@@ -17,9 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-LEGACY_VELOCITY_DIAGNOSTIC_REVISION = "microban_legacy_velocity_diagnostic_v1"
-
-
 @dataclass(frozen=True)
 class TwistScenario:
     """One body-frame twist held throughout an original-policy rollout."""

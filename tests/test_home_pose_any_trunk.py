@@ -156,6 +156,12 @@ INTENDED_CHANGES = {
     "const:mjlab_microban.scripts.export_teleop_v12_deployment._BOUNDARY_GATE_INHERITED_INFO_KEYS": (
         "left/right-order migration and recipe-switch markers removed"
     ),
+    **{
+        f"const:mjlab_microban.tasks.microban_getup_env_cfg.{name}": (
+            "unregistered v42 get-up reward set removed"
+        )
+        for name in ("GETUP_REWARD_SETS", "_POSE_FINAL_WEIGHTS")
+    },
 }
 
 

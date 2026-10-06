@@ -19,7 +19,6 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
 
-MICROBAN_TELEOP_V12_TASK_ID = "Mjlab-Teleop-V12-Microban"
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
 # HOME-bound identities (robot/home_contracts.py, from config/home_pose.yaml):
 # the centered HOME keeps

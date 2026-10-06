@@ -47,12 +47,10 @@ Reward sets sharing this contract:
 * "posture" (default): "redesign" plus HOME-stance terms (see
   _add_posture_rewards). Stands from fallen starts with feet together and
   straight legs; fine-tuned under simulated IMU delay for the robot.
-* "redesign": the v42 core, minus the terms measured to hurt, plus HoST's
-  post-standing terms -- every standing term gated above kneeling/squatting
-  height (see _add_redesign_rewards). Stands, but in a wide braced stance.
-* "v42": the exact reward recipe of 2026-09-25_18-47-14, the from-scratch
-  run behind the robot's 09-26 policy. In the current code it had not
-  stood by iteration 1500 (09-25: 30/64 at 1500).
+* "redesign": the 2026-09-25 from-scratch core, minus the terms measured to
+  hurt, plus HoST's post-standing terms -- every standing term gated above
+  kneeling/squatting height (see _add_redesign_rewards). Stands, but in a
+  wide braced stance.
 """
 
 import numpy as np
@@ -124,13 +122,13 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Servo goal range on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = SERVO_TARGET_RANGE_RAD
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-GETUP_REWARD_SETS = ("posture", "v42", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
+GETUP_REWARD_SETS = ("posture", "redesign", "calm_roll", "calm_effort_strong", "calm_push")
 # Fine-tuning stages after stage 2 (see docs/getup_training_export.md). Each
 # adds to the one before; see _add_calm_rewards for what each stage adds.
 _CALM_STAGE = {"calm_roll": 3, "calm_effort_strong": 4, "calm_push": 5}
 # Final (post-curriculum) standing_pose / hip_pose weights; 240/120 for the
 # HOME-stance sets (posture and every calm stage).
-_POSE_FINAL_WEIGHTS = {"v42": (30.0, 15.0), "redesign": (30.0, 15.0)}
+_POSE_FINAL_WEIGHTS = {"redesign": (30.0, 15.0)}
 # Lateral distance between the two foot bodies at HOME, by forward kinematics
 # of config/home_pose.yaml (robot/home_pose.py; 0.1 mm rounding).  The
 # centered HOME keeps its historical 0.094 m target (FK 0.0935 m).
@@ -336,10 +334,7 @@ def make_microban_getup_env_cfg(
         "hands": hands_ground_sensor_cfg.name,
         "self_collision": self_collision_sensor_cfg.name,
     }
-    if reward_set == "v42":
-        _add_v42_rewards(cfg, sensors)
-    else:
-        _add_redesign_rewards(cfg, sensors)
+    _add_redesign_rewards(cfg, sensors)
     calm_stage = _CALM_STAGE.get(reward_set, 0)
     if reward_set == "posture" or calm_stage:
         _add_posture_rewards(cfg)
@@ -615,23 +610,8 @@ def _add_shared_rewards(
     )
 
 
-def _add_v42_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
-    """Exact rewards of 2026-09-25_18-47-14 (stood from scratch by ~1200 it)."""
-
-    _add_shared_rewards(
-        cfg,
-        sensors,
-        standing_gate=STANDING_GATE_HEIGHT,
-        pose_gate=0.8 * HEAD_STANDING_HEIGHT,
-        effort_gate=0.85 * HEAD_STANDING_HEIGHT,
-    )
-    cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk",)
-    cfg.rewards["body_ang_vel"].weight = -0.05
-    cfg.rewards["angular_momentum"].weight = -0.01
-
-
 def _add_redesign_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
-    """v42's core, with each change tied to a measurement.
+    """The 2026-09-25 from-scratch core, with each change tied to a measurement.
 
     * Pose, stillness and torque terms gate at 0.9x H (0.2646), not 0.8x
       (0.2352): kneeling upright reaches 0.226-0.239, so the 0.8x gate paid

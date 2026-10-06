@@ -52,7 +52,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
         # module docstring); the v5 runner rejects the penalty outright.
         # From-scratch sets only; fine-tuning sets may add a clip-excess
         # barrier (see microban_getup_env_cfg.py).
-        for reward_set in ("posture", "v42", "redesign"):
+        for reward_set in ("posture", "redesign"):
             cfg = make_microban_getup_env_cfg(reward_set=reward_set)
             self.assertNotIn("raw_target_clip_excess", cfg.rewards)
             self.assertNotIn("push_robot", cfg.events)

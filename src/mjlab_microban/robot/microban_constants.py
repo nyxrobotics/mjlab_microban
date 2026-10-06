@@ -39,7 +39,6 @@ HOME_ANKLE_PITCH_RAD = HOME.joint_pos_rad["left_ankle_pitch"]
 # Historical name (the centered HOME's hip = -ankle pitch).
 HOME_PITCH_RAD = HOME_HIP_PITCH_RAD
 HOME_ROOT_POS = HOME.root_pos
-HOME_ROOT_HEIGHT_M = HOME_ROOT_POS[2]
 # Root orientation at HOME: HOME_TRUNK_PITCH_RAD about the trunk's y axis
 # (positive tips the trunk's x axis toward -z, i.e. leans forward), w-x-y-z.
 HOME_ROOT_QUAT_WXYZ = HOME.root_quat_wxyz
