@@ -31,7 +31,8 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
 )
-from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum, scaled
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
+from mjlab_microban.schedules import PICO_SCHEDULE
 from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotationCfg,
     foot_target_offset_b,
@@ -135,13 +136,14 @@ def _materialize_rotation_command_cfg(
     return UniformVelocityCommandWithRotationCfg(**values)
 
 
-# Hand targets (and the moving HMD and the no-step guard) at 7000, foot targets
-# at 10000, each tightened later.  The adapter columns of the frozen walker
-# open at the same updates (microban_teleop_v12_actor).
+# Hand targets (and the moving HMD and the no-step guard) after the critic
+# warm-up, foot targets later, each tightened later (mjlab_microban/schedules.py).  The
+# adapter columns of the frozen walker open at the same updates
+# (microban_teleop_v12_actor); before the hands no actor column trains.
 TELEOP_STAGES = (
     Stage(
         "enable moving-HMD, stationary no-step guard, and broad hand tracking",
-        scaled(7000),
+        PICO_SCHEDULE["hand"],
         (
             Setting("reward", "no_stepping", "weight", -1.0),
             Setting(
@@ -157,7 +159,7 @@ TELEOP_STAGES = (
     ),
     Stage(
         "tighten hand tracking",
-        scaled(8500),
+        PICO_SCHEDULE["hand_tighten"],
         (
             Setting("reward", "hand_target_tracking", "weight", 2.0),
             Setting(
@@ -167,7 +169,7 @@ TELEOP_STAGES = (
     ),
     Stage(
         "enable broad stationary foot tracking",
-        scaled(10000),
+        PICO_SCHEDULE["foot"],
         (
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
@@ -178,7 +180,7 @@ TELEOP_STAGES = (
     ),
     Stage(
         "tighten foot tracking",
-        scaled(12000),
+        PICO_SCHEDULE["foot_tighten"],
         (
             Setting("reward", "foot_target_tracking", "weight", 3.0),
             Setting(

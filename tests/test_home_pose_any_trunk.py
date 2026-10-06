@@ -12,18 +12,14 @@ on exactly:
   cd0ea78, which contains lean-final-rescue fc1c313..3fc519b and 005f55c; its
   walking and get-up tasks are those of forward-lean-centered-home).
 
-"Reproduces" means every module constant, every HOME-derived function result
-and the repr of every registered task's env / play / RL config and runner of
-the reference branch (tests/fixtures/home_equivalence/*.json, sha256 per key,
-recorded with tests/home_equivalence.py) is equal here.  The only allowed
-differences are new names this tree adds, the names of the modules, constants
-and tasks it deleted (never trained by the HOME pipeline), the values listed in
-INTENDED_CHANGES (each with its reason), and at the centered HOME the new
-command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
-``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
-their HOME (a subclass of mjlab's).  The stage-gate profile table is the same
-at every HOME (one profile per clock, hand RMS 0.040 m), so its values are
-listed in INTENDED_CHANGES.
+"Reproduces" means every HOME-derived value of the reference branch -- the
+constants of mjlab_microban.robot (HOME, its FK-derived quantities and
+contract strings) and the HOME-derived function results (hand FK metadata and
+evaluation offsets, the HOME stamps and markers, the ONNX parity corpus;
+tests/fixtures/home_equivalence/*.json, sha256 per key, recorded with
+tests/home_equivalence.py) -- is equal here.  The training recipes (task
+configs, rewards, schedules, gates) were rebuilt in stage C (2026-10-07) and
+are not compared.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
@@ -87,128 +83,13 @@ def _run_python(yaml_path: Path, code: str) -> str:
     return completed.stdout.strip().splitlines()[-1]
 
 
-# Task ids of the reference branches that the HOME pipeline never trained and
-# this tree no longer registers (their env / play / RL / runner keys are absent).
-UNREGISTERED_TASKS = frozenset({
-    "Mjlab-SafeVelocity-Microban",
-    "Mjlab-Getup-Microban-V42",
-    "Mjlab-Getup-Microban-Sym",
-    "Mjlab-Getup-Microban-NearHome5deg",
-    "Mjlab-Getup-Microban-Tipping",
-    "Mjlab-Tracking-Microban",
-    "Mjlab-Teleop-Microban",
-    "Mjlab-Teleop-Upright-Fullbody-Microban",
-    "Mjlab-Teleop-V12-Preview-Microban",
-    "Mjlab-Teleop-V12-Microban",
-    # Stage C: rescues removed (a failed gate is fixed by a recipe change).
-    "Mjlab-Teleop-V12-Corner-Rescue-Microban",
-    "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
-    "Mjlab-Teleop-V12-Final-Rescue-Microban",
-    "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban",
-    # Stage C: get-up is one run with scheduled switches.
-    "Mjlab-Getup-Microban-ImuDelay",
-    "Mjlab-Getup-Microban-CalmRoll-ImuDelay",
-    "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay",
-    "Mjlab-Getup-Microban-CalmPush-ImuDelay",
-    "Mjlab-Getup-Microban-Redesign",
-})
-
-
-# Values this tree changed on purpose, key -> reason.  Every entry was checked
-# by diffing the full dumps (tests/home_equivalence.py dump) before and after
-# the change: an RL config entry differs only by the removed runner options.
-_V12_TASKS = (
-    "Mjlab-Teleop-V12-HandPoseRelease-Microban",
-    "Mjlab-Teleop-V12-Corner-Rescue-Microban",
-    "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
-    "Mjlab-Teleop-V12-Final-Rescue-Microban",
-    "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban",
-)
-INTENDED_CHANGES = {
-    **{
-        f"task:{task}:rl": "runner options of the deleted consumer, preview, "
-        "deadline-fallback and recipe-switch modes removed "
-        "(checkpoint_consumer_mode, simulation_preview_mode, "
-        "deadline_fallback_resume*, experimental_recipe_switch, "
-        "release_recipe_switch_gate*; the pose-release tasks use the v12 runner "
-        "config class)"
-        for task in _V12_TASKS
-    },
-    "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES": (
-        "one profile per clock (deadline, strict, allowance variants removed)"
-    ),
-    "const:mjlab_microban.scripts.teleop_v12_stage.TRACKING_PROFILES": (
-        "one profile per clock (deadline, strict, allowance variants removed)"
-    ),
-    **{
-        f"const:mjlab_microban.scripts.{name}": "one profile per clock: the "
-        "accuracy-judging profiles are the published deployed-accuracy names"
-        for name in (
-            "evaluate_teleop_v12_tracking.HMD_HAND_PROFILE",
-            "evaluate_teleop_v12_tracking.FOOT_ACTIVATION_CANARY_PROFILE",
-            "evaluate_teleop_v12_tracking.WHOLE_BODY_PROFILE",
-            "evaluate_teleop_v12_tracking.FINAL_PROFILE",
-            "export_teleop_v12_deployment.FINAL_PROFILE",
-            "teleop_v12_corner_rescue.HMD_HAND_PROFILE",
-        )
-    },
-    **{
-        f"const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.{name}": (
-            "one accuracy table at every HOME (hand RMS 0.040 m, foot 0.05/0.08 m)"
-        )
-        for name in ("HAND_RMS_MAX_M", "FOOT_RMS_MAX_M", "FOOT_P95_MAX_M")
-    },
-    "const:mjlab_microban.scripts.export_teleop_v12_deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES": (
-        "every HOME's package records its 10000 / 10100 gates"
-    ),
-    "const:mjlab_microban.scripts.export_teleop_v12_deployment.SUPPORTED_FINAL_TRACKING_PROFILES": (
-        "deadline-fallback final profile removed"
-    ),
-    "const:mjlab_microban.scripts.export_teleop_v12_deployment._BOUNDARY_GATE_INHERITED_INFO_KEYS": (
-        "left/right-order migration and recipe-switch markers removed"
-    ),
-    **{
-        f"const:mjlab_microban.tasks.microban_getup_env_cfg.{name}": (
-            "unregistered v42 get-up reward set removed"
-        )
-        for name in ("GETUP_REWARD_SETS", "_POSE_FINAL_WEIGHTS")
-    },
-    # Stage C (2026-10-07) rebuilds the training recipes: one step-scheduled
-    # curriculum table per task (tasks/curriculum.py), the twist-ratio
-    # velocity term, no locomotion-prior critic term.  The HOME-derived values
-    # (module constants, calls) are still compared.
-    **{
-        f"task:{task}:{part}": "stage C recipe rebuild (curriculum table)"
-        for task in (
-            "Mjlab-Velocity-Microban",
-            "Mjlab-Getup-Microban",
-            "Mjlab-Teleop-V12-HandPoseRelease-Microban",
-        )
-        for part in ("env", "play")
-    },
-    "task:Mjlab-Getup-Microban:rl": "stage C: one 16500-update get-up run",
-    "const:mjlab_microban.tasks.microban_getup_env_cfg.NEAR_HOME_RESET": (
-        "stage C: one near-HOME reset at every HOME"
-    ),
-    "const:mjlab_microban.tasks.microban_getup_env_cfg.SCENE_CFG": (
-        "stage C: get-up uses the shared robot config (P125 on every servo, no neck P400)"
-    ),
-    "const:mjlab_microban.tasks.microban_teleop_v12_runner.TELEOP_V12_OBSERVATION_TERM_LAYOUTS": (
-        "stage C: the disabled locomotion-prior critic term removed (critic 137 -> 98)"
-    ),
-}
-
-
 def _deleted_here(key: str) -> bool:
-    """A reference key whose module, constant or task this tree deleted (not a regression).
+    """A reference key whose module or constant this tree deleted (not a regression).
 
-    Keys of modules and constants that still exist, and of tasks that are still
-    registered, must be present and equal (or listed in INTENDED_CHANGES).
+    Keys of modules and constants that still exist must be present and equal.
     """
 
     kind, _, rest = key.partition(":")
-    if kind == "task":
-        return rest.rsplit(":", 1)[0] in UNREGISTERED_TASKS
     if kind == "import":
         module = rest
     elif kind == "const":
@@ -262,7 +143,11 @@ class HomeEquivalenceTest(unittest.TestCase):
         import_errors = sorted(key for key, value in values.items() if key.startswith("import:"))
         self.assertEqual(import_errors, [], "modules that failed to import")
         current = home_equivalence.digest(values)
-        expected = json.loads(reference.read_text())
+        expected = {
+            key: digest
+            for key, digest in json.loads(reference.read_text()).items()
+            if key.startswith(("const:mjlab_microban.robot.", "call:", "import:mjlab_microban.robot"))
+        }
         missing = sorted(key for key in set(expected) - set(current) if not _deleted_here(key))
         different = sorted(
             key
@@ -270,16 +155,9 @@ class HomeEquivalenceTest(unittest.TestCase):
             if key in current
             and current[key] != expected[key]
             and key not in allowed
-            and key not in INTENDED_CHANGES
         )
         self.assertEqual(missing, [], "names of the reference branch missing here")
         self.assertEqual(different, [], "values that differ from the reference branch")
-        # Every registered task of the reference exists and matches (checked
-        # above), except the ones this tree no longer registers.
-        self.assertGreaterEqual(
-            sum(key.startswith("task:") for key in current),
-            sum(key.startswith("task:") and not _deleted_here(key) for key in expected),
-        )
 
     def test_centered_home_reproduces_track_centered_home_clip(self):
         self._compare(CENTERED_YAML, REFERENCES["centered"], centered=True)
@@ -339,10 +217,11 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                 "v12_hand_pose_release_recipe_revision": (
                     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
                     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
-                    "receiver_box_hands_active_hand_arm_pose_release_v18"
+                    "receiver_box_hands_active_hand_arm_pose_release_twist_ratio_one_run_"
+                    "warmup1000_total9000_v1"
                 ),
                 "v12_packager_revision": (
-                    "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
+                    "microban_pico_packager_one_run_v1_forward_lean_home_servo_range"
                 ),
                 "v12_target_frame": "robot_home_levelled_trunk_xyz_forward_left_up",
             },
@@ -368,24 +247,6 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
             if line and not line.startswith("#") and not line.startswith(("name:", "label:"))
         ]
         self.assertEqual(values(written), values(fixture))
-
-
-class RequiredBoundaryClocksTest(unittest.TestCase):
-    """The pipeline's HOME check reports the packager's required boundary clocks."""
-
-    def test_home_check_agrees_with_the_packager(self):
-        code = (
-            "import json, sys\n"
-            "sys.path.insert(0, 'scripts/home_pipeline')\n"
-            "import home_check\n"
-            "from mjlab_microban.robot.home_pose import HOME\n"
-            "from mjlab_microban.scripts import export_teleop_v12_deployment as d\n"
-            "print(json.dumps([home_check.check(HOME.path)['v12_required_boundary_gate_clocks'],"
-            " list(d.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES)]))"
-        )
-        for yaml_path, expected in ((CENTERED_YAML, [10000, 10100]), (LEAN_YAML, [10000, 10100])):
-            with self.subTest(yaml=yaml_path.name):
-                self.assertEqual(json.loads(_run_python(yaml_path, code)), [expected, expected])
 
 
 class DerivedHomeStringsTest(unittest.TestCase):

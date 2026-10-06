@@ -23,6 +23,7 @@ Nothing here imports mjlab; the training modules import these constants.
 from __future__ import annotations
 
 from mjlab_microban.robot.home_pose import HOME, signed_degree_token
+from mjlab_microban.schedules import PICO_CRITIC_WARMUP, PICO_TOTAL_UPDATES
 
 _TAG = HOME.tag
 _UPRIGHT = HOME.trunk_is_vertical
@@ -57,16 +58,16 @@ V12_RECIPE_REVISION = _contract(
     f"{_TAG}_{_V12_RECIPE_BASE}_v11",
     f"{_TAG}_{_V12_RECIPE_BASE}_{_V12_LEVELLED}_v17",
 )
-V12_HAND_POSE_RELEASE_RECIPE_REVISION = _contract(
-    "v12_hand_pose_release_recipe_revision",
-    f"{_TAG}_{_V12_RECIPE_BASE}_active_hand_arm_pose_release_v12",
-    f"{_TAG}_{_V12_RECIPE_BASE}_{_V12_LEVELLED}_active_hand_arm_pose_release_v18",
+# The PICO recipe every run trains (stage C, 2026-10-07): the active-hand arm
+# pose release, the twist-ratio velocity term and one run with a critic
+# warm-up (mjlab_microban/schedules.py).  New at every HOME: the published
+# strings (v12 / v18) named the segmented recipe of the old reward.
+V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
+    f"{_TAG}_{_V12_RECIPE_BASE}{'' if _UPRIGHT else '_' + _V12_LEVELLED}"
+    f"_active_hand_arm_pose_release_twist_ratio_one_run_warmup{PICO_CRITIC_WARMUP}"
+    f"_total{PICO_TOTAL_UPDATES}_v1"
 )
-V12_PACKAGER_REVISION = _contract(
-    "v12_packager_revision",
-    f"microban_teleop_v12_final_deployment_packager_v6_{_TAG}_servo_range",
-    f"microban_teleop_v12_final_deployment_packager_v7_{_TAG}_servo_range",
-)
+V12_PACKAGER_REVISION = f"microban_pico_packager_one_run_v1_{_TAG}_servo_range"
 
 # Independent upright full-body teleop task.
 UPRIGHT_FULLBODY_RECIPE_REVISION = _contract(

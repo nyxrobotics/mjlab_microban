@@ -102,7 +102,8 @@ from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum, scaled
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
+from mjlab_microban.schedules import GETUP_SCHEDULE, GETUP_TOTAL_UPDATES
 from mjlab_microban.tasks.mdp import (
     reward_based_staged_curriculum,
     head_height_reward,
@@ -131,10 +132,9 @@ GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Servo goal range on all 18 body joints (see module docstring).
 GETUP_ACTION_CLIP_RAD = SERVO_TARGET_RANGE_RAD
 GETUP_ACTION_CLIP = {r".*": (-GETUP_ACTION_CLIP_RAD, GETUP_ACTION_CLIP_RAD)}
-# Update at which each scheduled switch happens (see the module docstring),
-# and the length of the run.  The runner reads "refine" too.
-GETUP_SCHEDULE = {"imu_delay": 2500, "refine": 4000, "effort_push": 10000}
-GETUP_MAX_ITERATIONS = 16500
+# Update at which each scheduled switch happens (mjlab_microban/schedules.py; see the
+# module docstring), and the length of the run.  The runner reads "refine" too.
+GETUP_MAX_ITERATIONS = GETUP_TOTAL_UPDATES
 GETUP_IMU_DELAY_MAX_LAG = 3
 GETUP_REFINE_ACTION_STD = 0.5
 GETUP_REFINE_ENTROPY_COEF = 0.001
@@ -209,7 +209,7 @@ GETUP_STAGES = (
     ),
     Stage(
         "imu_delay",
-        scaled(GETUP_SCHEDULE["imu_delay"]),
+        GETUP_SCHEDULE["imu_delay"],
         tuple(
             Setting("observation", term, "delay_max_lag", GETUP_IMU_DELAY_MAX_LAG)
             for term in _IMU_TERMS
@@ -217,7 +217,7 @@ GETUP_STAGES = (
     ),
     Stage(
         "refine",
-        scaled(GETUP_SCHEDULE["refine"]),
+        GETUP_SCHEDULE["refine"],
         (
             Setting("reward", "standing_joint_vel", "weight", -4.0),
             Setting("reward", "raw_target_clip_excess", "weight", -0.2),
@@ -227,7 +227,7 @@ GETUP_STAGES = (
     ),
     Stage(
         "effort_push",
-        scaled(GETUP_SCHEDULE["effort_push"]),
+        GETUP_SCHEDULE["effort_push"],
         (
             Setting("reward", "roll_pose", "weight", 0.0),
             Setting("reward", "roll_pose_shoulder", "weight", 60.0),

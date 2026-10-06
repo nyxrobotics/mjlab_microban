@@ -1,6 +1,0 @@
-# Training-suite failures that predate the HOME pipeline and are the same at every
-# HOME (centered, forward-lean, knee-15 / trunk-5 checked on 2026-10-06): tests that
-# need artifacts, GPU-only paths or packages this checkout does not have.
-# scripts/retrain_all_for_home.py runs the suite before any GPU time and stops on
-# any other failure.  Remove a line when its test is fixed.
-tests/test_teleop_v12_deployment.py::test_runtime_validator_requires_cpu_only_pass

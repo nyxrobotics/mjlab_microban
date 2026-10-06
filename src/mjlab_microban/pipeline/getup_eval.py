@@ -1,14 +1,15 @@
 """Evaluate a get-up checkpoint (stand-up / push / standing posture) at HOME.
 
 usage:
-  uv run --locked python scripts/home_pipeline/getup_eval.py stand TASK CKPT \
+  uv run --locked python -m mjlab_microban.pipeline.getup_eval stand TASK CKPT \
       [--envs 64] [--seed 11] [--steps 999] [--imu-delay 3] [--noise] [--push x:0.3]
-  uv run --locked python scripts/home_pipeline/getup_eval.py posture TASK CKPT \
+  uv run --locked python -m mjlab_microban.pipeline.getup_eval posture TASK CKPT \
       [--envs 64] [--seed 11] [--steps 999]
 
-The repository copy of the get-up evaluations used for every stage of the
-2026-10 retraining (eval_v4.py / posture_v4.py): human-readable lines, then
-one ``RESULT {json}`` line that scripts/retrain_all_for_home.py parses.
+The get-up evaluations of the 2026-10 retraining (eval_v4.py /
+posture_v4.py): human-readable lines, then one ``RESULT {json}`` line that
+the pipeline parses.  TASK's play config (full IMU latency, no schedule) is
+the scene.
 Tilt is measured from HOME's trunk orientation (HOME_TRUNK_PITCH_RAD), so the
 numbers mean the same at a pitched-trunk HOME.
 

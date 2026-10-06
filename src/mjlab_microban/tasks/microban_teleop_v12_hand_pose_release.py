@@ -1,19 +1,20 @@
 """V12 PICO recipe: release the arms of active hands from the HOME pose reward.
 
 The inherited velocity ``pose`` term (weight 1.0, arm std 0.1 rad while
-standing) pulls every joint toward HOME.  Once hand targets activate (update
-7000) it fights the hand-tracking reward: a full reach to a corner of the
-reachable box drops the pose term from about 0.31 to 0.02 per step, and the v11
+standing) pulls every joint toward HOME.  Once hand targets activate
+(mjlab_microban/schedules.py) it fights the hand-tracking reward: a full
+reach to a corner of the reachable box drops the pose term from about 0.31 to 0.02 per step, and the v11
 chain settles on a steady ~40 % undershoot at the box corners.
 
 This recipe keeps the pose term exactly as in v11 except that, per env, the
 shoulder-pitch, shoulder-roll and elbow of each hand whose target is active are
 left out of the mean.  An inactive hand's arm and all other joints keep the v11
-term.  Before update 7000 no hand is active, so the term equals v11 bit for bit.
+term.  Before hand targets activate no hand is active, so the term equals v11
+bit for bit.
 
-It is the recipe every PICO chain trains (its own revision and task,
-``scripts/train_microban_teleop_v12.sh``); the canonical v11 task remains only
-as the base of this one and of the canonical rescues.
+It is the recipe every PICO run trains (its own revision and task,
+scripts/retrain_all_for_home.py); the canonical v11 task remains only as the
+base of this one.
 """
 
 from __future__ import annotations

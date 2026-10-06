@@ -78,42 +78,25 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     validate_teleop_v12_environment_contract,
 )
+from mjlab_microban.schedules import PICO_SCHEDULE, PICO_TOTAL_UPDATES
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
 
-# One profile per stage clock, the same at every HOME (no per-HOME, per-recipe
-# or allowance variants).  A gate records the profile name; the final one is
-# also recorded in the PICO package, whose robot validator accepts this
-# published name.  The names of the profiles that judge accuracy keep their
-# published "_deployed_accuracy_v1" suffix; their limits are the table below.
-PRE_ACTIVATION_EXPOSURE_PROFILE = "pre_hmd_hand_foot_exposure_reachable_safety_v2"
-EXPANDED_LOCOMOTION_PROFILE = "expanded_locomotion_pre_hmd_exposure_reachable_safety_v2"
-HMD_HAND_ACTIVATION_CANARY_PROFILE = "hmd_hand_activation_canary_reachable_safety_v1"
-HMD_HAND_PROFILE = "hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1"
-FOOT_ACTIVATION_CANARY_PROFILE = (
-    "whole_body_foot_activation_canary_reachable_safety_v1_deployed_accuracy_v1"
-)
-WHOLE_BODY_PROFILE = "whole_body_reachable_performance_v2_deployed_accuracy_v1"
+# One profile, the same at every HOME: a PICO run is judged once, on the
+# checkpoint it ends with, with every target type active (mjlab_microban/schedules.py:
+# any checkpoint after the foot targets were tightened).  The name is the
+# published "_deployed_accuracy_v1" one; its limits are the table below.
 FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
-TRACKING_PROFILES = (
-    PRE_ACTIVATION_EXPOSURE_PROFILE,
-    EXPANDED_LOCOMOTION_PROFILE,
-    HMD_HAND_ACTIVATION_CANARY_PROFILE,
-    HMD_HAND_PROFILE,
-    FOOT_ACTIVATION_CANARY_PROFILE,
-    WHOLE_BODY_PROFILE,
-    FINAL_PROFILE,
-)
+TRACKING_PROFILES = (FINAL_PROFILE,)
+# The canonical evaluation seed of the judgment; the pipeline's checks during
+# training use other (held-out) seeds and are never packaged.
+CANONICAL_SEED = 42
 
-# Accuracy limits of every profile that judges them (user decision: hand RMS
-# 0.040 m at every HOME).  Hand P95 0.05 m at the 10000 boundary and 10100
-# canary, 0.07 m for whole body and final; foot RMS 0.05 / P95 0.08 m.  The
-# whole-body interrupted-recovery profile uses the final numbers so that no
-# intermediate checkpoint is held tighter than the 15000 endpoint.
+# Accuracy limits (user decision: hand RMS 0.040 m at every HOME; hand P95
+# 0.07 m, foot RMS 0.05 / P95 0.08 m).
 HAND_RMS_MAX_M = 0.040
-HAND_P95_MAX_M = 0.05
-WHOLE_BODY_HAND_P95_MAX_M = 0.07
+HAND_P95_MAX_M = 0.07
 FOOT_RMS_MAX_M = 0.05
 FOOT_P95_MAX_M = 0.08
 DIRECTIONAL_RESPONSE_MINIMUM = {
@@ -130,7 +113,7 @@ TARGET_COLUMN_ABLATION_METHOD = (
 
 def tracking_profile_uses_perturbation(profile: str) -> bool:
     required_tracking_scenario_names(profile)
-    return profile in (EXPANDED_LOCOMOTION_PROFILE, FINAL_PROFILE)
+    return True
 
 
 def hand_tracking_rms_max_m(profile: str) -> float:
@@ -144,8 +127,6 @@ def hand_tracking_p95_max_m(profile: str) -> float:
     """Return the profile's hand P95 limit."""
 
     required_tracking_scenario_names(profile)
-    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE):
-        return WHOLE_BODY_HAND_P95_MAX_M
     return HAND_P95_MAX_M
 
 
@@ -202,45 +183,6 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
     """Return the exact ordered scenario set authenticated by a stage gate."""
 
     names_by_profile = {
-        PRE_ACTIVATION_EXPOSURE_PROFILE: (
-            "low_forward",
-            "max_hands_left",
-            "max_keypoints_left",
-        ),
-        EXPANDED_LOCOMOTION_PROFILE: (
-            "low_forward",
-            "max_forward",
-            "mixed_twist_forward_left",
-            "max_hands_left",
-            "max_keypoints_left",
-        ),
-        HMD_HAND_PROFILE: (
-            "low_forward",
-            "max_hands_left",
-            "max_hands_right",
-            "max_keypoints_left",
-        ),
-        HMD_HAND_ACTIVATION_CANARY_PROFILE: (
-            "low_forward",
-            "max_hands_left",
-            "max_hands_right",
-        ),
-        FOOT_ACTIVATION_CANARY_PROFILE: (
-            "low_forward",
-            "max_hands_left",
-            "max_hands_right",
-            "max_keypoints_left",
-            "max_keypoints_right",
-            "bounded_both_feet",
-        ),
-        WHOLE_BODY_PROFILE: (
-            "low_forward",
-            "max_hands_left",
-            "max_hands_right",
-            "max_keypoints_left",
-            "max_keypoints_right",
-            "bounded_both_feet",
-        ),
         FINAL_PROFILE: (
             "low_forward",
             "max_hands_left",
@@ -272,16 +214,11 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
         "nonzero_observation_coverage",
         "target_column_ablation_response",
         "twist_directional_response",
+        "hand_tracking_rms",
+        "hand_tracking_p95",
+        "foot_tracking_rms",
+        "foot_tracking_p95",
     }
-    if profile in (
-        HMD_HAND_PROFILE,
-        FOOT_ACTIVATION_CANARY_PROFILE,
-        WHOLE_BODY_PROFILE,
-        FINAL_PROFILE,
-    ):
-        names.update(("hand_tracking_rms", "hand_tracking_p95"))
-    if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE):
-        names.update(("foot_tracking_rms", "foot_tracking_p95"))
     return frozenset(names)
 
 
@@ -289,40 +226,21 @@ def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
     """Return target inputs that this curriculum stage must have learned to use."""
 
     required_tracking_scenario_names(profile)
-    if profile in (
-        HMD_HAND_ACTIVATION_CANARY_PROFILE,
-        HMD_HAND_PROFILE,
-    ):
-        return frozenset(("hand",))
-    if profile in (
-        FOOT_ACTIVATION_CANARY_PROFILE,
-        WHOLE_BODY_PROFILE,
-        FINAL_PROFILE,
-    ):
-        return frozenset(("hand", "foot"))
-    return frozenset()
+    return frozenset(("hand", "foot"))
 
 
 def required_tracking_profile(completed_updates: int) -> str:
-    """Return the stage profile of one clock (the same at every HOME)."""
+    """The profile of a checkpoint that may end a PICO run (see FINAL_PROFILE)."""
 
-    if isinstance(completed_updates, bool) or completed_updates <= 0:
-        raise ValueError("completed_updates must be a positive integer")
-    if completed_updates <= 3_000:
-        return PRE_ACTIVATION_EXPOSURE_PROFILE
-    if completed_updates <= 7_000:
-        return EXPANDED_LOCOMOTION_PROFILE
-    if completed_updates <= 7_100:
-        return HMD_HAND_ACTIVATION_CANARY_PROFILE
-    if completed_updates <= 10_000:
-        return HMD_HAND_PROFILE
-    if completed_updates <= 10_100:
-        return FOOT_ACTIVATION_CANARY_PROFILE
-    if completed_updates < 15_000:
-        return WHOLE_BODY_PROFILE
-    if completed_updates == 15_000:
-        return FINAL_PROFILE
-    raise ValueError("Contract-v12 training must not exceed 15000 updates")
+    if isinstance(completed_updates, bool) or not isinstance(completed_updates, int):
+        raise ValueError("completed_updates must be an integer")
+    if not PICO_SCHEDULE["foot_tighten"] < completed_updates <= PICO_TOTAL_UPDATES:
+        raise ValueError(
+            f"A PICO checkpoint is judged after update {PICO_SCHEDULE['foot_tighten']} "
+            f"(every target active and tightened) and at most at {PICO_TOTAL_UPDATES}; "
+            f"got {completed_updates}"
+        )
+    return FINAL_PROFILE
 
 
 def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
@@ -927,8 +845,8 @@ def run_evaluation(
     digest = sha256_file(checkpoint)
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError(f"Checkpoint SHA-256 mismatch: {digest}")
-    if seed != 42 or steps != 300 or settle_steps != 50:
-        raise ValueError("Canonical tracking gate requires seed42/300/settle50")
+    if steps != 300 or settle_steps != 50:
+        raise ValueError("The tracking evaluation runs 300 steps after a 50-step settle")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
     policy, iteration, infos = _load_actor(checkpoint, device=device)

@@ -13,7 +13,9 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
+from mjlab_microban.tasks.curriculum import bind_update_clock
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
+from mjlab_microban.schedules import PICO_STEPS_PER_UPDATE
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -297,6 +299,12 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         ):
             raise ValueError("Contract-v12 PPO optimizer recipe drifted")
 
+        if int(cfg.get("num_steps_per_env", -1)) != PICO_STEPS_PER_UPDATE:
+            raise ValueError(
+                f"Contract-v12 runs {PICO_STEPS_PER_UPDATE} env steps per update "
+                "(the adapter column schedule is in updates of that length)"
+            )
+        bind_update_clock(env.unwrapped, PICO_STEPS_PER_UPDATE)
         self.teleop_v12_training_resume = resume
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)

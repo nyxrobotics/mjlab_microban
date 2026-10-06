@@ -15,6 +15,7 @@ from mjlab_microban.robot.microban_constants import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
+from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
@@ -41,7 +42,7 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = home_contracts.V12_RECIPE_REVISION
 # canonical recipe except that the inherited HOME pose reward drops the
 # shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
 # active (an inactive hand's arm and every other joint keep the canonical
-# term).  It changes nothing before hand targets activate at update 7000.  Only
+# term).  It changes nothing before hand targets activate.  Only
 # its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or records
 # it.  Stage gates and the exporter accept its release-eligible lineages
 # (microban_teleop_v12_hand_pose_release_lineage): a fresh pose-release chain,
@@ -76,7 +77,6 @@ def teleop_v12_action_clip_cfg() -> dict[str, tuple[float, float]]:
     return {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
 
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 1.0e-4
-MICROBAN_TELEOP_V12_STAGE_BOUNDARIES = (3_000, 7_000, 10_000, 15_000)
 
 
 def make_microban_teleop_v12_env_cfg(
@@ -144,7 +144,7 @@ MicrobanTeleopV12RlCfg = MicrobanTeleopV12RunnerCfg(
     ),
     wandb_project="mjlab_microban_teleop_v12",
     experiment_name="mjlab_microban_teleop_v12",
-    save_interval=100,
+    save_interval=500,
     num_steps_per_env=MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
-    max_iterations=MICROBAN_TELEOP_V12_STAGE_BOUNDARIES[-1],
+    max_iterations=PICO_TOTAL_UPDATES,
 )

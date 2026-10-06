@@ -1,6 +1,6 @@
 """Balance check of config/home_pose.yaml for scripts/retrain_all_for_home.py.
 
-usage: uv run --locked python scripts/home_pipeline/home_check.py [--yaml PATH]
+usage: uv run --locked python -m mjlab_microban.pipeline.home_check [--yaml PATH]
 
 Prints one JSON object and never modifies the YAML.  Two definitions of the
 sole contact area are reported:
@@ -29,11 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from mjlab_microban.robot import home_pose  # noqa: E402
+from mjlab_microban.robot import home_pose
 
 GROUND_CONTACT_BAND_M = 1.0e-4
 WARN_OFFSET_M = 0.5e-3
@@ -119,9 +115,6 @@ def check(path: Path) -> dict[str, object]:
         "feet_lateral_m": hp.feet_lateral_m,
         "loader_contact": loader,
         "ground_contact": ground,
-        # Clocks whose stage gates a pose-release PICO package must record
-        # (export_teleop_v12_deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES).
-        "v12_required_boundary_gate_clocks": [10_000, 10_100],
     }
 
 

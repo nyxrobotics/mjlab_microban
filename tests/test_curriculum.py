@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import torch
 from mjlab.utils.buffers.delay_buffer import DelayBuffer
 
+from mjlab_microban import schedules
 from mjlab_microban.tasks import curriculum
 from mjlab_microban.tasks.curriculum import (
     Setting,
@@ -127,21 +128,21 @@ class StagedCurriculumTest(unittest.TestCase):
     def test_schedule_scale(self) -> None:
         import os
 
-        old = os.environ.get(curriculum.SCHEDULE_SCALE_ENV)
+        old = os.environ.get(schedules.SCHEDULE_SCALE_ENV)
         try:
-            os.environ[curriculum.SCHEDULE_SCALE_ENV] = "0.002"
+            os.environ[schedules.SCHEDULE_SCALE_ENV] = "0.002"
             self.assertEqual(
-                [curriculum.scaled(i) for i in (0, 2500, 4000, 10000, 16500)], [0, 5, 8, 20, 33]
+                [schedules.scaled(i) for i in (0, 2500, 4000, 10000, 16500)], [0, 5, 8, 20, 33]
             )
-            os.environ[curriculum.SCHEDULE_SCALE_ENV] = "2"
+            os.environ[schedules.SCHEDULE_SCALE_ENV] = "2"
             with self.assertRaises(ValueError):
-                curriculum.scaled(10)
+                schedules.scaled(10)
         finally:
             if old is None:
-                os.environ.pop(curriculum.SCHEDULE_SCALE_ENV, None)
+                os.environ.pop(schedules.SCHEDULE_SCALE_ENV, None)
             else:
-                os.environ[curriculum.SCHEDULE_SCALE_ENV] = old
-        self.assertEqual(curriculum.scaled(3000), 3000)
+                os.environ[schedules.SCHEDULE_SCALE_ENV] = old
+        self.assertEqual(schedules.scaled(3000), 3000)
 
 
 if __name__ == "__main__":

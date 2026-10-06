@@ -8,6 +8,8 @@ import torch
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
+from mjlab_microban.schedules import PICO_SCHEDULE
+
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
@@ -183,18 +185,19 @@ class TeleopV12ActorTest(unittest.TestCase):
             target.assert_optimizer_invariant(optimizer)
 
     def test_gradient_schedule_prevents_early_hmd_noise_contamination(self) -> None:
+        HAND, FOOT = PICO_SCHEDULE["hand"], PICO_SCHEDULE["foot"]
         self.assertEqual(teleop_v12_active_adapter_columns(0), ())
-        self.assertEqual(teleop_v12_active_adapter_columns(7_000 * 24), ())
+        self.assertEqual(teleop_v12_active_adapter_columns(HAND * 24), ())
         self.assertEqual(
-            teleop_v12_active_adapter_columns(7_000 * 24 + 24),
+            teleop_v12_active_adapter_columns(HAND * 24 + 24),
             (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_HAND_OBSERVATION_COLUMNS),
         )
         self.assertEqual(
-            teleop_v12_active_adapter_columns(10_000 * 24),
+            teleop_v12_active_adapter_columns(FOOT * 24),
             (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_HAND_OBSERVATION_COLUMNS),
         )
         self.assertEqual(
-            teleop_v12_active_adapter_columns(10_000 * 24 + 24),
+            teleop_v12_active_adapter_columns(FOOT * 24 + 24),
             TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
         )
 
@@ -218,7 +221,7 @@ class TeleopV12ActorTest(unittest.TestCase):
         self.assertTrue(torch.equal(first.weight, initial))
         target.assert_optimizer_invariant(optimizer)
 
-        common_step = 7_000 * 24 + 24
+        common_step = HAND * 24 + 24
         update()
         active = (
             *TELEOP_V12_HMD_OBSERVATION_COLUMNS,

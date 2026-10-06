@@ -165,13 +165,6 @@ _CENTERED_HOME_CONTRACTS = {
         "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
         "raw_prev_action_servo_range_pi_v11"
     ),
-    "v12_hand_pose_release_recipe_revision": (
-        "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-        "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_v12"
-    ),
-    "v12_packager_revision": (
-        "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
-    ),
     "upright_fullbody_recipe_revision": "physical_neutral_full_actor_from_scratch_raw83x18_v4",
     "upright_fullbody_home_revision": "physical_neutral_shoulder_zero_hip_neg10_v5",
 }
@@ -186,14 +179,6 @@ _FORWARD_LEAN_HOME_CONTRACTS = {
         "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
         "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
         "receiver_box_hands_v17"
-    ),
-    "v12_hand_pose_release_recipe_revision": (
-        "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
-        "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
-        "receiver_box_hands_active_hand_arm_pose_release_v18"
-    ),
-    "v12_packager_revision": (
-        "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
     ),
     "upright_fullbody_recipe_revision": (
         "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_"

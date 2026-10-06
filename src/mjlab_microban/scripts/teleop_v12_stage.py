@@ -1,4 +1,11 @@
-"""Create and validate hash-bound contract-v12 canary/boundary gates."""
+"""Create and validate the hash-bound gate of the checkpoint a PICO run ends with.
+
+A PICO run (one process, mjlab_microban/schedules.py) is judged once: the locomotion
+(9x300, seed 42), tracking (final profile, seed 42) and ONNX reports of the
+checkpoint it ends with -- its last update, or the earlier one the pipeline's
+checks adopted once the last stage had run at least half its length -- are
+validated and bound into one gate file, which the packager requires.
+"""
 
 from __future__ import annotations
 
@@ -64,8 +71,8 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
+from mjlab_microban.schedules import PICO_MIN_FINAL_UPDATES, PICO_TOTAL_UPDATES
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     validate_teleop_v12_home_pose,
@@ -778,28 +785,15 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     return checkpoint_sha, iteration, completed, infos
 
 
-def _checkpoint_kind(completed: int) -> str:
-    if completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES:
-        return "canonical_boundary"
-    if completed in (3_100, 7_100, 10_100):
-        return "activation_canary"
-    return "interrupted_recovery"
+GATE_SCHEMA_VERSION = 3
 
 
-def next_training_target(completed: int) -> tuple[int, bool]:
-    """Return the next enforced endpoint and whether it is an activation canary."""
-
-    if isinstance(completed, bool) or completed < 0:
-        raise ValueError("completed updates must be a non-negative integer")
-    if completed >= MICROBAN_TELEOP_V12_STAGE_BOUNDARIES[-1]:
-        raise ValueError("Final 15000-update boundary already reached")
-    for boundary, canary_end in ((3_000, 3_100), (7_000, 7_100), (10_000, 10_100)):
-        if boundary <= completed < canary_end:
-            return canary_end, True
-    for boundary in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES:
-        if completed < boundary:
-            return boundary, False
-    raise AssertionError("Unreachable contract-v12 stage route")
+def _require_final_clock(completed: int) -> None:
+    if not PICO_MIN_FINAL_UPDATES <= completed <= PICO_TOTAL_UPDATES:
+        raise ValueError(
+            f"A PICO run ends between update {PICO_MIN_FINAL_UPDATES} and {PICO_TOTAL_UPDATES}; "
+            f"this checkpoint completed {completed}"
+        )
 
 
 def create_gate(
@@ -814,6 +808,7 @@ def create_gate(
     tracking_report = tracking_report.resolve()
     onnx_report = onnx_report.resolve()
     checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
+    _require_final_clock(completed)
     locomotion = _load_json(locomotion_report)
     tracking = _load_json(tracking_report)
     onnx = _load_json(onnx_report)
@@ -825,17 +820,14 @@ def create_gate(
     _validate_locomotion_report(locomotion, expected_report_identity)
     tracking_profile = _validate_tracking_report(tracking, expected_report_identity)
     onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
-    canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     result = {
-        "schema_version": 2,
+        "schema_version": GATE_SCHEMA_VERSION,
         "gate": "microban_teleop_v12_stage",
         "status": "pass",
         "checkpoint": portable_bootstrap_artifact_path(checkpoint),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": iteration,
         "completed_updates": completed,
-        "canonical_boundary": canonical,
-        "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": tracking_profile,
         "reports": {
@@ -861,16 +853,15 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     gate = _load_json(gate_path)
     checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
+    _require_final_clock(completed)
     exact = {
-        "schema_version": 2,
+        "schema_version": GATE_SCHEMA_VERSION,
         "gate": "microban_teleop_v12_stage",
         "status": "pass",
         "checkpoint": portable_bootstrap_artifact_path(checkpoint),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": iteration,
         "completed_updates": completed,
-        "canonical_boundary": completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
-        "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": required_tracking_profile(completed),
     }
@@ -925,9 +916,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate")
     validate.add_argument("gate", type=Path)
     validate.add_argument("checkpoint", type=Path)
-    route = subparsers.add_parser("route")
-    route.add_argument("completed_updates", type=int)
-    route.add_argument("--shell", action="store_true")
     recipe = subparsers.add_parser("checkpoint-recipe")
     recipe.add_argument("checkpoint", type=Path)
     recipe.add_argument("--shell", action="store_true")
@@ -936,23 +924,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "route":
-        target, mandatory = next_training_target(args.completed_updates)
-        if args.shell:
-            print(f"{target} {int(mandatory)}", flush=True)
-        else:
-            print(
-                json.dumps(
-                    {
-                        "completed_updates": args.completed_updates,
-                        "target_updates": target,
-                        "mandatory_activation_canary": mandatory,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-        return 0
     if args.command == "checkpoint-recipe":
         kind = checkpoint_recipe_kind(args.checkpoint)
         if args.shell:

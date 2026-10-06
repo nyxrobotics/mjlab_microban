@@ -25,7 +25,6 @@ from mjlab_microban.robot.microban_constants import (
 from mjlab_microban.tasks.curriculum import (
     STEPS_PER_UPDATE_ATTR,
     bind_update_clock,
-    scaled,
     stage_log_line,
 )
 from mjlab_microban.tasks.microban_getup_action import (
@@ -304,7 +303,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         env = self.env.unwrapped
         steps = getattr(env, STEPS_PER_UPDATE_ATTR)
         counter = int(env.common_step_counter)
-        if counter < scaled(GETUP_SCHEDULE["refine"]) * steps:
+        if counter < GETUP_SCHEDULE["refine"] * steps:
             return False
         policy = self.alg.get_policy()
         with torch.no_grad():

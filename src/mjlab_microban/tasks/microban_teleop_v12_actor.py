@@ -27,6 +27,11 @@ from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
     microban_hand_fk_metadata,
 )
+from mjlab_microban.schedules import (
+    PICO_ADAPTER_SCHEDULE_REVISION,
+    PICO_SCHEDULE,
+    PICO_STEPS_PER_UPDATE,
+)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -190,9 +195,7 @@ TELEOP_V12_UNCHANGED_EXTRA_NORMALIZER_COLUMNS = tuple(
     for column in TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
     if column not in set(TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS)
 )
-TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION = (
-    "freeze_extra_to7000_then_hmd_hand_to10000_then_all_v1"
-)
+TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION = PICO_ADAPTER_SCHEDULE_REVISION
 
 
 def teleop_v12_target_normalizer_metadata() -> dict[str, object]:
@@ -233,9 +236,9 @@ def teleop_v12_active_adapter_columns(common_step_counter: int) -> tuple[int, ..
     # the exact boundary locked so the batch gathered before the curriculum
     # transition cannot update newly enabled columns.  The following rollout
     # ends above the boundary and is the first eligible batch.
-    if common_step_counter <= 7_000 * 24:
+    if common_step_counter <= PICO_SCHEDULE["hand"] * PICO_STEPS_PER_UPDATE:
         return ()
-    if common_step_counter <= 10_000 * 24:
+    if common_step_counter <= PICO_SCHEDULE["foot"] * PICO_STEPS_PER_UPDATE:
         return (
             *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
             *TELEOP_V12_HAND_OBSERVATION_COLUMNS,

@@ -23,6 +23,8 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
+
+from mjlab_microban.policy_contract import contract_metadata
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
@@ -283,6 +285,7 @@ def main() -> None:
                 "microban_getup_checkpoint_contract_stamp": checkpoint_stamp,
                 "checkpoint_sha256": checkpoint_sha256,
                 "checkpoint_filename": checkpoint.name,
+                **contract_metadata(),
             }
         )
         attach_metadata_to_onnx(str(temporary), metadata)

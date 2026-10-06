@@ -17,40 +17,16 @@ same updates.  Every applied stage prints one line in a fixed format::
 
 which the pipeline monitor checks against the table.
 
-``MICROBAN_SCHEDULE_SCALE`` (a dry-run setting, default 1) scales every table
-of this module's callers: ``scaled(iteration)``.  A scaled run is recorded as
-such in its checkpoints and is never exported for the robot.
+The tables' updates come from mjlab_microban/schedules.py, which scales them
+for dry runs (``MICROBAN_SCHEDULE_SCALE``).
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Sequence
 from typing import Any, NamedTuple
 
 STEPS_PER_UPDATE_ATTR = "microban_steps_per_update"
-SCHEDULE_SCALE_ENV = "MICROBAN_SCHEDULE_SCALE"
-
-
-def schedule_scale() -> float:
-    """The dry-run schedule scale (``MICROBAN_SCHEDULE_SCALE``, default 1)."""
-
-    raw = os.environ.get(SCHEDULE_SCALE_ENV, "").strip()
-    if not raw:
-        return 1.0
-    value = float(raw)
-    if not 0.0 < value <= 1.0:
-        raise ValueError(f"{SCHEDULE_SCALE_ENV} must be in (0, 1], got {raw!r}")
-    return value
-
-
-def scaled(iteration: int) -> int:
-    """``iteration`` under the dry-run schedule scale (at least 1 if positive)."""
-
-    scale = schedule_scale()
-    if scale == 1.0 or iteration == 0:
-        return iteration
-    return max(1, round(iteration * scale))
 
 
 class Setting(NamedTuple):

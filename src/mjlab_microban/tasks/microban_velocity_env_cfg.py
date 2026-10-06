@@ -41,7 +41,8 @@ from mjlab_microban.robot.microban_constants import (
     MICROBAN_ROBOT_CFG,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum, scaled
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
+from mjlab_microban.schedules import WALK_MAX_UPDATES, WALK_WIDEN_UPDATE
 from mjlab_microban.tasks.mdp import (
     no_stepping_penalty,
     feet_distance_penalty,
@@ -109,7 +110,7 @@ WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 WALK_STAGES = (
     Stage(
         "penalize stepping + increase velocity",
-        scaled(3000),
+        WALK_WIDEN_UPDATE,
         (
             Setting("command", "twist", "ranges.lin_vel_x", WALK_COMMAND_RANGES_FINAL["lin_vel_x"]),
             Setting("command", "twist", "ranges.ang_vel_z", WALK_COMMAND_RANGES_FINAL["ang_vel_z"]),
@@ -508,5 +509,5 @@ MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
     experiment_name="mjlab_microban_velocity",
     save_interval=500,
     num_steps_per_env=24,
-    max_iterations=15_000,
+    max_iterations=WALK_MAX_UPDATES,
 )

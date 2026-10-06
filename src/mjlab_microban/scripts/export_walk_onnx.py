@@ -41,6 +41,7 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.policy_contract import contract_metadata
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import (
     HOME_FRAME,
@@ -193,6 +194,7 @@ def build_walk_metadata(
             "checkpoint_sha256": checkpoint_sha256,
             "run_dir": run_dir,
             "iteration": int(iteration),
+            **contract_metadata(),
         }
     )
     return {key: _metadata_value(value) for key, value in metadata.items()}

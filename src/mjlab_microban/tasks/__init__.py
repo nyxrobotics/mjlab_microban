@@ -47,7 +47,7 @@ register_mjlab_task(
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
 # PICO v12: the active-hand arm pose-release recipe (every chain trains it;
-# scripts/train_microban_teleop_v12.sh).
+# scripts/retrain_all_for_home.py trains it in one run).
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(),

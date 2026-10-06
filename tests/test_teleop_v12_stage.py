@@ -1,4 +1,4 @@
-"""CPU-only regression tests for v12 stage routing and evidence gates."""
+"""CPU-only regression tests of the PICO judgment's evidence and its gate file."""
 
 from __future__ import annotations
 
@@ -23,18 +23,12 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DIRECTIONAL_RESPONSE_MINIMUM,
-    EXPANDED_LOCOMOTION_PROFILE,
     FINAL_PROFILE,
-    FOOT_ACTIVATION_CANARY_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-    HMD_HAND_ACTIVATION_CANARY_PROFILE,
-    HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-    PRE_ACTIVATION_EXPOSURE_PROFILE,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
-    WHOLE_BODY_PROFILE,
     _acceptance,
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
@@ -46,7 +40,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     required_target_column_ablation_targets,
     required_tracking_check_names,
     required_tracking_profile,
-    required_tracking_scenario_names,
     target_column_ablated_observation,
     target_column_ablation_observation_columns,
     tracking_profile_uses_perturbation,
@@ -56,12 +49,15 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     PRISTINE_PARITY_TOLERANCE,
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
-    _checkpoint_kind,
     _validate_tracking_report,
     checkpoint_recipe_kind,
     create_gate,
-    next_training_target,
     validate_gate,
+)
+from mjlab_microban.schedules import (
+    PICO_MIN_FINAL_UPDATES,
+    PICO_SCHEDULE,
+    PICO_TOTAL_UPDATES,
 )
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
@@ -70,14 +66,11 @@ from mjlab_microban.tasks.microban_policy_export import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
-    TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
-    TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     teleop_v12_active_adapter_columns,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -458,93 +451,57 @@ class TeleopV12StageTest(unittest.TestCase):
             (poses["b"][0], poses["f"][1]),
         )
 
-    def test_route_covers_recovery_boundaries_and_activation_canaries(self) -> None:
-        expected = {
-            601: (3_000, False),
-            2_999: (3_000, False),
-            3_000: (3_100, True),
-            3_001: (3_100, True),
-            3_099: (3_100, True),
-            3_100: (7_000, False),
-            7_000: (7_100, True),
-            7_099: (7_100, True),
-            7_100: (10_000, False),
-            10_000: (10_100, True),
-            10_099: (10_100, True),
-            10_100: (15_000, False),
-            14_999: (15_000, False),
-        }
-        for completed, route in expected.items():
+    def test_one_profile_for_the_checkpoint_a_run_ends_with(self) -> None:
+        for completed in (PICO_SCHEDULE["foot_tighten"] + 1, PICO_MIN_FINAL_UPDATES, PICO_TOTAL_UPDATES):
             with self.subTest(completed=completed):
-                self.assertEqual(next_training_target(completed), route)
-        with self.assertRaisesRegex(ValueError, "Final"):
-            next_training_target(15_000)
-
-    def test_one_tracking_profile_per_clock(self) -> None:
-        expected = {
-            601: PRE_ACTIVATION_EXPOSURE_PROFILE,
-            3_000: PRE_ACTIVATION_EXPOSURE_PROFILE,
-            3_001: EXPANDED_LOCOMOTION_PROFILE,
-            7_000: EXPANDED_LOCOMOTION_PROFILE,
-            7_001: HMD_HAND_ACTIVATION_CANARY_PROFILE,
-            7_100: HMD_HAND_ACTIVATION_CANARY_PROFILE,
-            7_101: HMD_HAND_PROFILE,
-            10_000: HMD_HAND_PROFILE,
-            10_001: FOOT_ACTIVATION_CANARY_PROFILE,
-            10_100: FOOT_ACTIVATION_CANARY_PROFILE,
-            10_101: WHOLE_BODY_PROFILE,
-            14_999: WHOLE_BODY_PROFILE,
-            15_000: FINAL_PROFILE,
-        }
-        for completed, profile in expected.items():
-            with self.subTest(completed=completed):
-                self.assertEqual(required_tracking_profile(completed), profile)
-        self.assertEqual(set(TRACKING_PROFILES), set(expected.values()))
-        self.assertEqual(len(TRACKING_PROFILES), 7)
+                self.assertEqual(required_tracking_profile(completed), FINAL_PROFILE)
+        for completed in (PICO_SCHEDULE["foot_tighten"], PICO_TOTAL_UPDATES + 1, 1):
+            with self.subTest(completed=completed), self.assertRaises(ValueError):
+                required_tracking_profile(completed)
+        self.assertEqual(TRACKING_PROFILES, (FINAL_PROFILE,))
         # The robot validator accepts this published final name.
         self.assertEqual(
             FINAL_PROFILE,
             "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
         )
-        with self.assertRaises(ValueError):
-            required_tracking_profile(15_001)
 
     def test_accuracy_limits_are_one_table(self) -> None:
-        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.05 m at
-        # 10000/10100 and 0.07 m for whole body and final; foot 0.05/0.08 m.
-        for profile in TRACKING_PROFILES:
-            with self.subTest(profile=profile):
-                self.assertEqual(hand_tracking_rms_max_m(profile), 0.040)
-                self.assertEqual(foot_tracking_rms_max_m(profile), 0.05)
-                self.assertEqual(foot_tracking_p95_max_m(profile), 0.08)
-                self.assertEqual(
-                    hand_tracking_p95_max_m(profile),
-                    0.07 if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE) else 0.05,
-                )
+        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m;
+        # foot 0.05/0.08 m.
+        self.assertEqual(hand_tracking_rms_max_m(FINAL_PROFILE), 0.040)
+        self.assertEqual(foot_tracking_rms_max_m(FINAL_PROFILE), 0.05)
+        self.assertEqual(foot_tracking_p95_max_m(FINAL_PROFILE), 0.08)
+        self.assertEqual(hand_tracking_p95_max_m(FINAL_PROFILE), 0.07)
         self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
-        self.assertTrue(tracking_profile_uses_perturbation(EXPANDED_LOCOMOTION_PROFILE))
-        self.assertFalse(tracking_profile_uses_perturbation(WHOLE_BODY_PROFILE))
         with self.assertRaises(ValueError):
             hand_tracking_rms_max_m("full_body_reachable_performance_perturbation_v2")
 
-    def test_stage_judges_the_report_under_its_clock_profile_only(self) -> None:
-        identity = {"sha256": "a" * 64, "iteration": 9_999, "completed_updates": 10_000}
+    def test_the_gate_judges_the_report_under_the_final_profile(self) -> None:
+        identity = {
+            "sha256": "a" * 64,
+            "iteration": PICO_TOTAL_UPDATES - 1,
+            "completed_updates": PICO_TOTAL_UPDATES,
+        }
         within = _tracking_report(identity, hand_rms=0.039)
         self.assertEqual(within["status"], "pass")
-        self.assertEqual(_validate_tracking_report(within, identity), HMD_HAND_PROFILE)
+        self.assertEqual(_validate_tracking_report(within, identity), FINAL_PROFILE)
         over = _tracking_report(identity, hand_rms=0.041)
         self.assertEqual(over["status"], "fail")
         with self.assertRaises(ValueError):
             _validate_tracking_report(over, identity)
         relabelled = deepcopy(within)
-        relabelled["profile"] = FOOT_ACTIVATION_CANARY_PROFILE
+        relabelled["profile"] = "whole_body_reachable_performance_v2_deployed_accuracy_v1"
         with self.assertRaisesRegex(ValueError, "schema/profile/status drifted"):
             _validate_tracking_report(relabelled, identity)
+        held_out = deepcopy(within)
+        held_out["settings"]["seed"] = 101
+        with self.assertRaises(ValueError):
+            _validate_tracking_report(held_out, identity)
 
     def test_final_gate_records_the_final_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkpoint = root / "model_14999.pt"
+            checkpoint = root / f"model_{PICO_TOTAL_UPDATES - 1}.pt"
             infos = {
                 "microban_teleop_training_contract_version": "12",
                 "microban_teleop_recipe_revision": (
@@ -556,15 +513,15 @@ class TeleopV12StageTest(unittest.TestCase):
                     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
                 ),
                 "active_actor_columns_at_save": list(
-                    teleop_v12_active_adapter_columns(15_000 * 24)
+                    teleop_v12_active_adapter_columns(PICO_TOTAL_UPDATES * 24)
                 ),
-                "env_state": {"common_step_counter": 15_000 * 24},
+                "env_state": {"common_step_counter": PICO_TOTAL_UPDATES * 24},
             }
-            torch.save({"iter": 14_999, "infos": infos}, checkpoint)
+            torch.save({"iter": PICO_TOTAL_UPDATES - 1, "infos": infos}, checkpoint)
             identity = {
                 "sha256": sha256_file(checkpoint),
-                "iteration": 14_999,
-                "completed_updates": 15_000,
+                "iteration": PICO_TOTAL_UPDATES - 1,
+                "completed_updates": PICO_TOTAL_UPDATES,
             }
             paths = {
                 "locomotion_report": root / "locomotion.json",
@@ -585,104 +542,65 @@ class TeleopV12StageTest(unittest.TestCase):
             gate_path.write_text(json.dumps(gate))
             self.assertEqual(validate_gate(gate_path, checkpoint), gate)
             tampered = deepcopy(gate)
-            tampered["tracking_profile"] = WHOLE_BODY_PROFILE
+            tampered["tracking_profile"] = "whole_body_reachable_performance_v2_deployed_accuracy_v1"
             gate_path.write_text(json.dumps(tampered))
             with self.assertRaises(ValueError):
                 validate_gate(gate_path, checkpoint)
 
-    def test_pose_release_chain_gates_under_the_unchanged_profiles(self) -> None:
-        infos = {
-            "microban_teleop_training_contract_version": "12",
-            "microban_teleop_recipe_revision": (
-                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-            ),
-            BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
-            "adapter_gradient_schedule_revision": (
-                TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
-            ),
-            "active_actor_columns_at_save": list(
-                teleop_v12_active_adapter_columns(10_000 * 24)
-            ),
-            "env_state": {"common_step_counter": 10_000 * 24},
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            onnx_path = root / "policy.onnx"
-            onnx_path.write_bytes(b"unit-test-onnx")
-            checkpoint = root / "model_9999.pt"
-            torch.save({"iter": 9_999, "infos": infos}, checkpoint)
-            identity = {
-                "sha256": sha256_file(checkpoint),
-                "iteration": 9_999,
-                "completed_updates": 10_000,
+    def test_an_adopted_earlier_checkpoint_is_gated_but_not_before_the_minimum(self) -> None:
+        for completed, accepted in ((PICO_MIN_FINAL_UPDATES, True), (PICO_MIN_FINAL_UPDATES - 1, False)):
+            infos = {
+                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_recipe_revision": (
+                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                ),
+                BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+                TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+                "adapter_gradient_schedule_revision": (
+                    TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
+                ),
+                "active_actor_columns_at_save": list(
+                    teleop_v12_active_adapter_columns(completed * 24)
+                ),
+                "env_state": {"common_step_counter": completed * 24},
             }
-            reports = {
-                "locomotion_report": root / "locomotion.json",
-                "tracking_report": root / "tracking.json",
-                "onnx_report": root / "onnx.json",
-            }
-            reports["locomotion_report"].write_text(
-                json.dumps(_locomotion_report(identity))
-            )
-            reports["tracking_report"].write_text(
-                json.dumps(_tracking_report(identity))
-            )
-            reports["onnx_report"].write_text(
-                json.dumps(_onnx_report(identity, onnx_path))
-            )
-            gate = create_gate(checkpoint=checkpoint, **reports)
-            self.assertEqual(
-                gate["tracking_profile"], required_tracking_profile(10_000)
-            )
-            self.assertEqual(checkpoint_recipe_kind(checkpoint), "hand_pose_release")
-            gate_path = root / "gate.json"
-            gate_path.write_text(json.dumps(gate))
-            self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-
-    def test_activation_canaries_require_causality_before_final_quality(self) -> None:
-        hand_canary_checks = required_tracking_check_names(
-            HMD_HAND_ACTIVATION_CANARY_PROFILE
-        )
-        self.assertNotIn("hand_tracking_rms", hand_canary_checks)
-        self.assertNotIn("hand_tracking_p95", hand_canary_checks)
-        self.assertEqual(
-            required_tracking_scenario_names(HMD_HAND_ACTIVATION_CANARY_PROFILE),
-            ("low_forward", "max_hands_left", "max_hands_right"),
-        )
-        self.assertFalse(
-            any(
-                any(
-                    abs(value) > 0.0
-                    for target in scenario.foot_target
-                    for value in target
+            with self.subTest(completed=completed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                onnx_path = root / "policy.onnx"
+                onnx_path.write_bytes(b"unit-test-onnx")
+                checkpoint = root / f"model_{completed - 1}.pt"
+                torch.save({"iter": completed - 1, "infos": infos}, checkpoint)
+                identity = {
+                    "sha256": sha256_file(checkpoint),
+                    "iteration": completed - 1,
+                    "completed_updates": completed,
+                }
+                reports = {
+                    "locomotion_report": root / "locomotion.json",
+                    "tracking_report": root / "tracking.json",
+                    "onnx_report": root / "onnx.json",
+                }
+                reports["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
+                reports["tracking_report"].write_text(
+                    json.dumps(_tracking_report(identity, profile=FINAL_PROFILE))
                 )
-                for scenario in _scenarios(HMD_HAND_ACTIVATION_CANARY_PROFILE)
-            )
-        )
-
-        foot_canary_checks = required_tracking_check_names(
-            FOOT_ACTIVATION_CANARY_PROFILE
-        )
-        self.assertIn("hand_tracking_rms", foot_canary_checks)
-        self.assertIn("hand_tracking_p95", foot_canary_checks)
-        self.assertNotIn("foot_tracking_rms", foot_canary_checks)
-        self.assertNotIn("foot_tracking_p95", foot_canary_checks)
-        self.assertTrue(
-            any(
-                any(
-                    abs(value) > 0.0
-                    for target in scenario.foot_target
-                    for value in target
-                )
-                for scenario in _scenarios(FOOT_ACTIVATION_CANARY_PROFILE)
-            )
-        )
+                reports["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
+                if not accepted:
+                    with self.assertRaisesRegex(ValueError, "A PICO run ends between"):
+                        create_gate(checkpoint=checkpoint, **reports)
+                    continue
+                gate = create_gate(checkpoint=checkpoint, **reports)
+                self.assertEqual(gate["schema_version"], 3)
+                self.assertEqual(gate["tracking_profile"], FINAL_PROFILE)
+                self.assertEqual(checkpoint_recipe_kind(checkpoint), "hand_pose_release")
+                gate_path = root / "gate.json"
+                gate_path.write_text(json.dumps(gate))
+                self.assertEqual(validate_gate(gate_path, checkpoint), gate)
 
     def test_tracking_acceptance_rejects_done_coverage_direction_and_active_error(
         self,
     ) -> None:
-        checks, status = _acceptance([_result()], WHOLE_BODY_PROFILE)
+        checks, status = _acceptance([_result()], FINAL_PROFILE)
         self.assertEqual(status, "pass")
         self.assertTrue(all(checks.values()))
         for mutation in (
@@ -697,7 +615,7 @@ class TeleopV12StageTest(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 failed, failed_status = _acceptance(
-                    [_result(**mutation)], WHOLE_BODY_PROFILE
+                    [_result(**mutation)], FINAL_PROFILE
                 )
                 self.assertEqual(failed_status, "fail")
                 self.assertFalse(all(failed.values()))
@@ -710,7 +628,7 @@ class TeleopV12StageTest(unittest.TestCase):
                     )
                 )
             ],
-            WHOLE_BODY_PROFILE,
+            FINAL_PROFILE,
         )
         self.assertEqual(allowed_status, "pass")
         self.assertTrue(allowed["actual_soft_limits"])
@@ -748,28 +666,7 @@ class TeleopV12StageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\[batch, 83\]"):
             target_column_ablated_observation(torch.zeros((1, 82)), "hand")
         self.assertEqual(
-            required_target_column_ablation_targets(PRE_ACTIVATION_EXPOSURE_PROFILE),
-            frozenset(),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(EXPANDED_LOCOMOTION_PROFILE),
-            frozenset(),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(HMD_HAND_ACTIVATION_CANARY_PROFILE),
-            frozenset(("hand",)),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(HMD_HAND_PROFILE),
-            frozenset(("hand",)),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(FOOT_ACTIVATION_CANARY_PROFILE),
-            frozenset(("hand", "foot")),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(WHOLE_BODY_PROFILE),
-            frozenset(("hand", "foot")),
+            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand", "foot"))
         )
 
         unresponsive = _result(
@@ -786,46 +683,34 @@ class TeleopV12StageTest(unittest.TestCase):
                 ),
             }
         )
-        for profile in (
-            PRE_ACTIVATION_EXPOSURE_PROFILE,
-            EXPANDED_LOCOMOTION_PROFILE,
-        ):
-            with self.subTest(profile=profile):
-                checks, status = _acceptance([unresponsive], profile)
-                self.assertEqual(status, "pass")
-                self.assertTrue(checks["target_column_ablation_response"])
-
+        checks, status = _acceptance([unresponsive], FINAL_PROFILE)
+        self.assertEqual(status, "fail")
+        self.assertFalse(checks["target_column_ablation_response"])
         hand_only = deepcopy(unresponsive)
         hand_only["target_column_ablation"]["hand"] = _ablation(
             target="hand", expected=True
         )
-        for profile in (HMD_HAND_ACTIVATION_CANARY_PROFILE, HMD_HAND_PROFILE):
-            checks, status = _acceptance([hand_only], profile)
-            self.assertEqual(status, "pass")
-            self.assertTrue(checks["target_column_ablation_response"])
-        for profile in (
-            FOOT_ACTIVATION_CANARY_PROFILE,
-            WHOLE_BODY_PROFILE,
-            FINAL_PROFILE,
-        ):
-            with self.subTest(profile=profile):
-                checks, status = _acceptance([hand_only], profile)
-                self.assertEqual(status, "fail")
-                self.assertFalse(checks["target_column_ablation_response"])
+        checks, status = _acceptance([hand_only], FINAL_PROFILE)
+        self.assertEqual(status, "fail")
+        self.assertFalse(checks["target_column_ablation_response"])
+        both = deepcopy(hand_only)
+        both["target_column_ablation"]["foot"] = _ablation(target="foot", expected=True)
+        checks, status = _acceptance([both], FINAL_PROFILE)
+        self.assertEqual(status, "pass")
 
     def test_tracking_ablation_evidence_is_exact_and_fail_closed(self) -> None:
         identity = {
             "sha256": "a" * 64,
-            "iteration": 10_000,
-            "completed_updates": 10_001,
+            "iteration": PICO_TOTAL_UPDATES - 1,
+            "completed_updates": PICO_TOTAL_UPDATES,
         }
         report = _tracking_report(identity)
         self.assertEqual(
             set(report["checks"]),
-            set(required_tracking_check_names(FOOT_ACTIVATION_CANARY_PROFILE)),
+            set(required_tracking_check_names(FINAL_PROFILE)),
         )
         self.assertIn("hand_tracking_rms", report["checks"])
-        self.assertNotIn("foot_tracking_rms", report["checks"])
+        self.assertIn("foot_tracking_rms", report["checks"])
         _validate_tracking_report(report, identity)
         active_index = next(
             index
@@ -882,10 +767,10 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(tuple(error.shape), (1,))
         torch.testing.assert_close(error, torch.tensor([0.01]))
 
-    def test_schema2_gate_accepts_hash_bound_interrupted_recovery(self) -> None:
+    def test_gate_evidence_is_hash_bound_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkpoint = root / "model_600.pt"
+            checkpoint = root / f"model_{PICO_TOTAL_UPDATES - 1}.pt"
             infos = {
                 "microban_teleop_training_contract_version": "12",
                 "microban_teleop_recipe_revision": (
@@ -896,15 +781,17 @@ class TeleopV12StageTest(unittest.TestCase):
                 "adapter_gradient_schedule_revision": (
                     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
                 ),
-                "active_actor_columns_at_save": [],
-                "env_state": {"common_step_counter": 601 * 24},
+                "active_actor_columns_at_save": list(
+                    teleop_v12_active_adapter_columns(PICO_TOTAL_UPDATES * 24)
+                ),
+                "env_state": {"common_step_counter": PICO_TOTAL_UPDATES * 24},
             }
-            torch.save({"iter": 600, "infos": infos}, checkpoint)
+            torch.save({"iter": PICO_TOTAL_UPDATES - 1, "infos": infos}, checkpoint)
             checkpoint_sha = sha256_file(checkpoint)
             identity = {
                 "sha256": checkpoint_sha,
-                "iteration": 600,
-                "completed_updates": 601,
+                "iteration": PICO_TOTAL_UPDATES - 1,
+                "completed_updates": PICO_TOTAL_UPDATES,
             }
             locomotion_path = root / "locomotion.json"
             tracking_path = root / "tracking.json"
@@ -923,12 +810,10 @@ class TeleopV12StageTest(unittest.TestCase):
                 tracking_report=tracking_path,
                 onnx_report=onnx_report_path,
             )
-            self.assertEqual(gate["schema_version"], 2)
-            self.assertEqual(gate["checkpoint_kind"], "interrupted_recovery")
+            self.assertEqual(gate["schema_version"], 3)
             gate_path = root / "gate.json"
             gate_path.write_text(json.dumps(gate))
             self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-            self.assertEqual(_checkpoint_kind(10_100), "activation_canary")
 
             corruptions = (
                 (locomotion_path, locomotion, ("checks",), {}),
