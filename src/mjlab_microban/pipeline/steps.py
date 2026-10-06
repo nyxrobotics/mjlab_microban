@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from datetime import datetime
@@ -20,6 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from mjlab_microban import schedules
+from mjlab_microban.pipeline.monitor import (
+    Check,
+    EarlyStop,
+    Monitor,
+    getup_abort_rules,
+    walk_abort_rules,
+    walk_check_abort,
+)
 from mjlab_microban.pipeline.core import (
     EXIT_INPUT,
     HOME_YAML,
@@ -104,7 +113,8 @@ class Pipeline:
         """The schedule constants as the training subprocesses see them."""
 
         code = ("import json; from mjlab_microban import schedules as s; print(json.dumps({"
-                "'walk_max': s.WALK_MAX_UPDATES, 'getup_total': s.GETUP_TOTAL_UPDATES, "
+                "'walk_max': s.WALK_MAX_UPDATES, 'walk_widen': s.WALK_WIDEN_UPDATE, "
+                "'check_every': s.scaled(1000), 'getup_total': s.GETUP_TOTAL_UPDATES, "
                 "'getup_min_final': s.GETUP_MIN_FINAL_UPDATES, 'pico_total': s.PICO_TOTAL_UPDATES, "
                 "'pico_min_final': s.PICO_MIN_FINAL_UPDATES, 'pico': s.pico_schedule_record(), "
                 "'getup': s.GETUP_SCHEDULE}))")
@@ -167,34 +177,82 @@ class Pipeline:
         self.state.save()
 
     def train(self, step: str, experiment: str, label: str, task: str, total: int, envs: int,
-              extra: list[str], *, fresh_extra: list[str] = (), poll=None) -> Path:
-        """Train ``label`` to model_<total - 1>, continuing from its last checkpoint."""
+              extra: list[str], *, fresh_extra: list[str] = (), monitor: Monitor | None = None) -> Path:
+        """Train ``label`` to model_<total - 1> (or the checkpoint ``monitor`` adopts early).
 
+        A stopped run continues from its last checkpoint.
+        """
+
+        adopted = self.state.step(step).get("adopted")
+        if adopted and Path(adopted).is_file():
+            self.log(f"[{step}] the run ended early with {adopted}")
+            return Path(adopted)
         final = find_checkpoint(experiment, label, total - 1)
-        if final is not None:
-            self.log(f"[{step}] {final.parent.name}/{final.name} exists")
-            return final
-        seed = str(self.cfg["seed"])
-        cmd = [*UV, "train", task, "--env.scene.num-envs", str(envs), "--env.seed", seed,
-               "--agent.seed", seed, "--agent.logger", "tensorboard", "--agent.run-name", label,
-               "--agent.upload-model", "False", "--enable-nan-guard", "True", *extra]
-        last = latest_checkpoint(experiment, label)
-        if last is not None:
-            done = int(last.stem.split("_")[1])
-            remaining = total - 1 - done
-            self.log(f"[{step}] continuing {last.parent.name}/{last.name}: {remaining} updates left")
-            cmd += ["--agent.max-iterations", str(remaining), "--agent.resume", "True",
-                    "--agent.load-run", f"^{last.parent.name}$",
-                    "--agent.load-checkpoint", f"^{last.name.replace('.', '[.]')}$"]
-        else:
-            cmd += ["--agent.max-iterations", str(total), *fresh_extra]
-        self.check_home_yaml()
-        self.jobs.run(f"train_{step}", cmd, "train", env=self.env, poll=poll)
-        self.check_home_yaml()
+        try:
+            if final is None:
+                seed = str(self.cfg["seed"])
+                cmd = [*UV, "train", task, "--env.scene.num-envs", str(envs), "--env.seed", seed,
+                       "--agent.seed", seed, "--agent.logger", "tensorboard", "--agent.run-name", label,
+                       "--agent.upload-model", "False", "--enable-nan-guard", "True", *extra]
+                last = latest_checkpoint(experiment, label)
+                if last is not None:
+                    done = int(last.stem.split("_")[1])
+                    remaining = total - 1 - done
+                    if monitor is not None:
+                        monitor.resumed_from = done + 1
+                    self.log(f"[{step}] continuing {last.parent.name}/{last.name}: {remaining} updates left")
+                    cmd += ["--agent.max-iterations", str(remaining), "--agent.resume", "True",
+                            "--agent.load-run", f"^{last.parent.name}$",
+                            "--agent.load-checkpoint", f"^{last.name.replace('.', '[.]')}$"]
+                else:
+                    cmd += ["--agent.max-iterations", str(total), *fresh_extra]
+                self.check_home_yaml()
+                self.jobs.run(f"train_{step}", cmd, "train", env=self.env,
+                              poll=None if monitor is None else monitor.poll,
+                              on_start=None if monitor is None else (lambda log: setattr(monitor, "log_path", log)))
+                self.check_home_yaml()
+            else:
+                self.log(f"[{step}] {final.parent.name}/{final.name} exists")
+            if monitor is not None:
+                monitor.finish()
+        except EarlyStop as stop:
+            if monitor is not None:
+                monitor.stop()
+            return stop.checkpoint
+        except BaseException:
+            if monitor is not None:
+                monitor.stop()
+            raise
         final = find_checkpoint(experiment, label, total - 1)
         if final is None:
             raise PipelineError(f"[{step}] model_{total - 1}.pt missing after training {label}")
         return final
+
+    def monitor(self, step: str, experiment: str, label: str, *, stages: dict[str, int],
+                check_updates: list[int], min_final: int, start_check, abort_rules=None,
+                check_abort=None) -> Monitor:
+        c = self.cfg[step]["check"]
+        if self.dry:
+            # A few-update dry policy: exercise the checks on its first
+            # checkpoints, record them, never stop early or abort on them.
+            check_updates = check_updates[: int(c.get("max_checks", 2))]
+            abort_rules = check_abort = None
+        return Monitor(state=self.state, jobs=self.jobs, record=self.state.step(step), experiment=experiment,
+                       label=label, expected_stages=stages, stage_tolerance=int(c["stage_tolerance"]),
+                       check_updates=check_updates, min_final_update=min_final, start_check=start_check,
+                       abort_rules=abort_rules, check_abort=check_abort, early_stop=not self.dry)
+
+    def start_check(self, name: str, commands: list[list[str]], verdict, *, sequential: bool = True) -> Check:
+        """One check: ``commands`` run one after another in one process group.
+
+        ``sequential=False`` runs every command even when an earlier one
+        failed (their reports, not their exit codes, are the verdict).
+        """
+
+        script = (" && " if sequential else " ; ").join(" ".join(_quote(word) for word in command)
+                                                        for command in commands)
+        process, log = self.jobs.start(name, ["bash", "-c", script], env=self.env)
+        return Check(update=-1, process=process, log=log, verdict=verdict)
 
     # -- steps -------------------------------------------------------------------
     def step_home(self) -> None:
@@ -240,11 +298,50 @@ class Pipeline:
             return
         c = self.cfg["walk"]
         label = f"{self.prefix}_walk_{inputs[:8]}"
-        final = self.train("walk", WALK_EXP, label, c["task"], self.sched["walk_max"], c["envs"],
-                           ["--agent.save-interval", str(c["save_interval"])])
+        every, total = self.sched["check_every"], self.sched["walk_max"]
+        monitor = self.monitor(
+            "walk", WALK_EXP, label,
+            stages={"penalize stepping + increase velocity": self.sched["walk_widen"]},
+            check_updates=list(range(every, total, every)), min_final=0,
+            start_check=self.walk_check, abort_rules=walk_abort_rules(c["check"]),
+            check_abort=walk_check_abort(c["check"]))
+        final = self.train("walk", WALK_EXP, label, c["task"], total, c["envs"],
+                           ["--agent.save-interval", str(c["save_interval"])], monitor=monitor)
+        if "adopted" not in self.state.step("walk") and not self.dry:
+            raise PipelineError(f"walking reached {total} updates without two consecutive passing checks "
+                                f"({self.state.step('walk')['checks']}): the recipe does not walk as wanted")
         walker = self.install_walker(final)
         self.finish("walk", {"checkpoint": str(walker), "sha256": sha256(walker), "run": final.parent.name,
                              "iteration": int(final.stem.split("_")[1])}, [walker])
+
+    def walk_check(self, checkpoint: Path) -> Check:
+        """Held-out W1-W5 (seeds 101-105) and the 9x300 source probe with a held-out seed."""
+
+        chk = self.cfg["walk"]["check"]
+        out = self.state.dir / "walk_checks"
+        out.mkdir(exist_ok=True)
+        probe_out = out / f"{checkpoint.parent.name}_{checkpoint.stem}_walk_probe.json"
+        receipt = out / f"{checkpoint.parent.name}_{checkpoint.stem}_9x300_seed{chk['probe_seed']}.json"
+        rules = {key: chk[key] for key in ("w1_angle_deg", "w2_axis_min", "w3_speed", "w4_falls",
+                                           "w5_single_min", "w5_still_max")}
+        commands = [
+            [*UV, "python", "-m", "mjlab_microban.pipeline.walk_probe", str(checkpoint), str(probe_out),
+             "--seeds", chk["seeds"], "--rules", json.dumps(rules)],
+            [*UV, "python", "-m", "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env", "--checkpoint",
+             str(checkpoint), "--expected-sha256", sha256(checkpoint), "--seed", str(chk["probe_seed"]),
+             "--output", str(receipt), "--force"],
+        ]
+
+        def verdict(_log: Path) -> dict[str, Any]:
+            probe = json.loads(probe_out.read_text())
+            probe.pop("rows", None)
+            nine = probe_verdict(json.loads(receipt.read_text()), self.cfg["walk"])
+            return {"passed": bool(probe["passed"] and nine["ok"]), "probe": probe, "nine_by_300": nine,
+                    "summary": {"W": probe["checks"], "angle": probe["angle_deg"], "speed": probe["speed"],
+                                "falls": probe["falls"], "9x300": nine["ok"],
+                                "9x300_worst": [nine["worst"], round(nine["worst_margin"], 4)]}}
+
+        return self.start_check(f"check_walk_{checkpoint.stem}", commands, verdict, sequential=False)
 
     def install_walker(self, checkpoint: Path) -> Path:
         """Copy the walker (and its params/) where the PICO provenance re-hashes it."""
@@ -311,9 +408,20 @@ class Pipeline:
                      "--agent.legacy-teleop-probe-receipt", str(receipt),
                      "--agent.legacy-teleop-probe-receipt-sha256", receipt_sha,
                      "--agent.save-pristine-checkpoint", "True"]
-        final = self.train("pico", PICO_EXP, label, c["task"], self.sched["pico_total"], c["envs"],
+        pico = self.sched["pico"]
+        every, total = self.sched["check_every"], self.sched["pico_total"]
+        monitor = self.monitor(
+            "pico", PICO_EXP, label,
+            stages={"enable moving-HMD, stationary no-step guard, and broad hand tracking": pico["hand_start"],
+                    "tighten hand tracking": pico["hand_tighten_start"],
+                    "enable broad stationary foot tracking": pico["foot_start"],
+                    "tighten foot tracking": pico["foot_tighten_start"]},
+            check_updates=list(range(pico["foot_tighten_start"] + every, total, every)),
+            # model_<N> has completed N + 1 updates.
+            min_final=self.sched["pico_min_final"] - 1, start_check=self.pico_check)
+        final = self.train("pico", PICO_EXP, label, c["task"], total, c["envs"],
                            ["--agent.num-steps-per-env", "24", "--agent.save-interval", str(c["save_interval"])],
-                           fresh_extra=fresh)
+                           fresh_extra=fresh, monitor=monitor)
         report_prefix, passed, failures = self.pico_judgment(final)
         if not passed and not self.dry:
             raise PipelineError(f"PICO judgment failed for {final.parent.name}/{final.name}: {failures} "
@@ -323,42 +431,65 @@ class Pipeline:
         self.finish("pico", {"checkpoint": str(final), "sha256": sha256(final), "report_prefix": report_prefix,
                              "passed": passed, "failures": failures}, [final])
 
+    def pico_commands(self, checkpoint: Path, prefix: Path, seed: int) -> list[tuple[str, list[str]]]:
+        digest = sha256(checkpoint)
+        return [
+            ("loco", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_checkpoint",
+                      str(checkpoint), "--expected-sha256", digest, "--seed", str(seed),
+                      "--output", f"{prefix}_9x300.json", "--force"]),
+            ("tracking", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking",
+                          str(checkpoint), "--expected-sha256", digest, "--seed", str(seed),
+                          "--output", f"{prefix}_tracking.json", "--force"]),
+            ("onnx", [*UV_ONNX, "python", "-m", "mjlab_microban.scripts.teleop_v12_onnx_gate", str(checkpoint),
+                      "--expected-sha256", digest, "--onnx", f"{prefix}.onnx", "--output", f"{prefix}_onnx.json",
+                      "--force"]),
+        ]
+
+    @staticmethod
+    def pico_failures(prefix: Path) -> list[str]:
+        failures = []
+        for name in ("9x300", "tracking", "onnx"):
+            path = Path(f"{prefix}_{name}.json")
+            if not path.is_file():
+                raise PipelineError(f"PICO evaluator {name} wrote no report ({path}): not a judgment "
+                                    "(rerun to evaluate again)")
+            data = json.loads(path.read_text())
+            failures += [f"{name}:{key}" for key, ok in sorted((data.get("checks") or {}).items()) if ok is not True]
+            if data.get("status") != "pass" and not any(f.startswith(name + ":") for f in failures):
+                failures.append(f"{name}:status")
+        return failures
+
+    def pico_check(self, checkpoint: Path) -> Check:
+        """The judgment's three evaluators with a held-out seed (never packaged)."""
+
+        out = self.state.dir / "pico_checks"
+        out.mkdir(exist_ok=True)
+        prefix = out / f"{checkpoint.parent.name}_{checkpoint.stem}"
+        commands = [cmd for _name, cmd in self.pico_commands(checkpoint, prefix,
+                                                               int(self.cfg["pico"]["check"]["seed"]))]
+
+        def verdict(_log: Path) -> dict[str, Any]:
+            failures = self.pico_failures(prefix)
+            return {"passed": not failures, "failures": failures, "summary": failures or "all checks pass"}
+
+        return self.start_check(f"check_pico_{checkpoint.stem}", commands, verdict, sequential=False)
+
     def pico_judgment(self, checkpoint: Path) -> tuple[str, bool, list[str]]:
         """The three PICO evaluators (seed 42) and, when all pass, the gate file."""
 
         out_dir = self.state.dir / "pico_judgment"
         out_dir.mkdir(exist_ok=True)
         prefix = out_dir / f"{checkpoint.parent.name}_{checkpoint.stem}"
-        digest = sha256(checkpoint)
-        reports = {name: Path(f"{prefix}_{name}.json") for name in ("9x300", "tracking", "onnx")}
-        for path in reports.values():
-            path.unlink(missing_ok=True)
-        for name, cmd in (
-            ("loco", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_checkpoint",
-                      str(checkpoint), "--expected-sha256", digest, "--output", str(reports["9x300"]),
-                      "--force"]),
-            ("tracking", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking",
-                          str(checkpoint), "--expected-sha256", digest, "--output", str(reports["tracking"]),
-                          "--force"]),
-            ("onnx", [*UV_ONNX, "python", "-m", "mjlab_microban.scripts.teleop_v12_onnx_gate", str(checkpoint),
-                      "--expected-sha256", digest, "--onnx", f"{prefix}.onnx", "--output", str(reports["onnx"]),
-                      "--force"]),
-        ):
+        for name in ("9x300", "tracking", "onnx"):
+            Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
+        for name, cmd in self.pico_commands(checkpoint, prefix, int(self.cfg["seed"])):
             self.jobs.run(f"pico_judgment_{name}", cmd, "eval", env=self.env, check=False)
-        failures = []
-        for name, path in reports.items():
-            if not path.is_file():
-                raise PipelineError(f"PICO evaluator {name} wrote no report for {checkpoint}: not a judgment "
-                                    "(rerun to evaluate again)")
-            data = json.loads(path.read_text())
-            failures += [f"{name}:{key}" for key, ok in sorted((data.get("checks") or {}).items()) if ok is not True]
-            if data.get("status") != "pass" and not any(f.startswith(name + ":") for f in failures):
-                failures.append(f"{name}:status")
+        failures = self.pico_failures(prefix)
         passed = not failures
         if passed:
             capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_stage", "create", str(checkpoint),
-                     str(reports["9x300"]), str(reports["tracking"]), str(reports["onnx"]), f"{prefix}_gate.json",
-                     "--force"], env=self.env, check=True, timeout=1800)
+                     f"{prefix}_9x300.json", f"{prefix}_tracking.json", f"{prefix}_onnx.json",
+                     f"{prefix}_gate.json", "--force"], env=self.env, check=True, timeout=1800)
         self.log(f"PICO judgment of {checkpoint.parent.name}/{checkpoint.name}: "
                  + ("PASS" if passed else f"FAIL {failures}"))
         return str(prefix), passed, failures
@@ -369,8 +500,19 @@ class Pipeline:
             return
         c = self.cfg["getup"]
         label = f"{self.prefix}_getup_{inputs[:8]}"
-        final = self.train("getup", GETUP_EXP, label, c["task"], self.sched["getup_total"], c["envs"],
-                           ["--agent.save-interval", str(c["save_interval"])])
+        g, every, total = self.sched["getup"], self.sched["check_every"], self.sched["getup_total"]
+        monitor = self.monitor(
+            "getup", GETUP_EXP, label,
+            stages={"start without IMU latency": 0, "imu_delay": g["imu_delay"], "refine": g["refine"],
+                    "refine exploration (std, Adam, learning rate, entropy)": g["refine"],
+                    "effort_push": g["effort_push"]},
+            # Recorded before refine and before effort, then the early-stop checks.
+            check_updates=sorted({*[u for u in self.scaled_list(c["check"]["record_at"]) if u < total],
+                                  *range(g["effort_push"] + every, total, every)}),
+            min_final=self.sched["getup_min_final"] - 1, start_check=self.getup_check,
+            abort_rules=getup_abort_rules(c["check"], [g["imu_delay"], g["refine"], g["effort_push"]]))
+        final = self.train("getup", GETUP_EXP, label, c["task"], total, c["envs"],
+                           ["--agent.save-interval", str(c["save_interval"])], monitor=monitor)
         summary = self.getup_judgment(final, "judgment")
         failures = getup_gate_failures(summary, c["gate"])
         if failures and not self.dry:
@@ -380,14 +522,42 @@ class Pipeline:
         self.finish("getup", {"checkpoint": str(final), "sha256": sha256(final), "summary": summary,
                               "passed": not failures, "failures": failures}, [final])
 
-    def getup_judgment(self, checkpoint: Path, name: str) -> dict[str, Any]:
+    def scaled_list(self, updates: list[int]) -> list[int]:
+        scale = float(self.cfg.get("schedule_scale", 1.0)) if self.dry else 1.0
+        return [u if scale == 1.0 else max(1, round(u * scale)) for u in updates]
+
+    def getup_commands(self, checkpoint: Path, seeds: dict[str, int]) -> list[tuple[str, list[str]]]:
         c = self.cfg["getup"]
-        results = {}
-        for eval_name, mode, seed, extra in c["evals"]:
+        commands = []
+        for eval_name, mode, _seed, extra in c["evals"]:
             cmd = [*UV, "python", "-m", "mjlab_microban.pipeline.getup_eval", mode, c["task"], str(checkpoint),
-                   "--seed", str(seed), *extra]
+                   "--seed", str(seeds[eval_name]), *extra]
             if "eval_envs" in c:
                 cmd += ["--envs", str(c["eval_envs"]), "--steps", str(c["eval_steps"])]
+            commands.append((eval_name, cmd))
+        return commands
+
+    def getup_check(self, checkpoint: Path) -> Check:
+        """The judgment's four evaluations with held-out seeds (record and early stop)."""
+
+        c = self.cfg["getup"]
+        commands = self.getup_commands(checkpoint, c["check"]["seeds"])
+
+        def verdict(log: Path) -> dict[str, Any]:
+            results = [json.loads(line[len("RESULT "):]) for line in log.read_text(errors="replace").splitlines()
+                       if line.startswith("RESULT ")]
+            if len(results) != len(commands):
+                raise PipelineError(f"get-up check wrote {len(results)} of {len(commands)} results")
+            summary = getup_summary(dict(zip((name for name, _ in commands), results)))
+            failures = getup_gate_failures(summary, c["gate"])
+            return {"passed": not failures, "failures": failures, "summary": summary}
+
+        return self.start_check(f"check_getup_{checkpoint.stem}", [cmd for _name, cmd in commands], verdict)
+
+    def getup_judgment(self, checkpoint: Path, name: str) -> dict[str, Any]:
+        seeds = {eval_name: seed for eval_name, _mode, seed, _extra in self.cfg["getup"]["evals"]}
+        results = {}
+        for eval_name, cmd in self.getup_commands(checkpoint, seeds):
             _, log = self.jobs.run(f"getup_{name}_{eval_name}", cmd, "eval", env=self.env)
             results[eval_name] = last_json_line(log.read_text(errors="replace"), prefix="RESULT ")
         summary = getup_summary(results)
@@ -671,5 +841,7 @@ def print_status(state_dir: Path) -> int:
         print(line)
     return 0
 
+
+_quote = shlex.quote
 
 __all__ = ["Pipeline", "STEPS", "print_status", "LOG_ROOT"]

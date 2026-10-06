@@ -254,13 +254,20 @@ class Jobs:
 
     def run(self, name: str, cmd: list[str], kind: str, *, env: dict[str, str] | None = None,
             cwd: Path = REPO, gpu: bool = True, check: bool = True,
-            poll: Callable[[], None] | None = None) -> tuple[int, Path]:
-        """Run one job to its end (stall detection, optional ``poll`` every 30 s)."""
+            poll: Callable[[], None] | None = None,
+            on_start: Callable[[Path], None] | None = None) -> tuple[int, Path]:
+        """Run one job to its end (stall detection, optional ``poll`` every 30 s).
+
+        An exception raised by ``poll`` stops the job (its process group) and
+        propagates.
+        """
 
         if gpu:
             self.wait_for_free_gpu(name)
         started = time.time()
         proc, log = self.start(name, cmd, env=env, cwd=cwd)
+        if on_start is not None:
+            on_start(log)
         try:
             while True:
                 try:

@@ -21,11 +21,36 @@ walk:
     yaw_left_0p5: 0.2
     yaw_right_0p5: 0.2
   probe_max_soft_limit_overshoot_rad: 0.0873
+  # Checks every 1000 updates while training (in parallel, one at a time):
+  # the held-out probe W1-W5 (pipeline/walk_probe.py, seeds 101-105) and the
+  # 9x300 probe above with seed 101.  Two consecutive passes (N, N+1000) end
+  # the run with model_<N+1000>; no stop by WALK_MAX_UPDATES fails the step.
+  check:
+    stage_tolerance: 1
+    seeds: "101,102,103,104,105"
+    probe_seed: 101
+    w1_angle_deg: [20, 30]          # ratio angle, no push / pushed (p30)
+    w2_axis_min: [0.03, 0.02, 0.15]  # every diagonal axis moves the commanded way
+    w3_speed: [0.25, 0.20]          # along-command speed fraction
+    w4_falls: [1, 5]                # diagonal falls of 90, no push / pushed; single-axis 0
+    w5_single_min: {F: 0.08, BK: 0.04, LL: 0.02, LR: 0.02, YL: 0.2, YR: 0.2}
+    w5_still_max: [0.05, 0.05, 0.2]
+    # Stop: the episode length of the old reward's walker was about twice
+    # these (falling over to cash in speed); at 12000 no hope.
+    episode_length_floor: [[500, 100], [2000, 300]]
+    hopeless_update: 12000
+    hopeless_angle_deg: 35
+    hopeless_speed: 0.15
 
 pico:
   task: Mjlab-Teleop-V12-HandPoseRelease-Microban
   envs: 2048
   save_interval: 500
+  # Checks every 1000 updates after the feet are tightened: the judgment's
+  # three evaluators with a held-out seed.
+  check:
+    stage_tolerance: 1
+    seed: 101
 
 getup:
   task: Mjlab-Getup-Microban
@@ -37,6 +62,18 @@ getup:
     - [stand_s5, stand, 5, [--imu-delay, "3", --noise]]
     - [push_s11, stand, 11, [--imu-delay, "3", --noise, --push, "x:0.3"]]
     - [posture_s11, posture, 11, []]
+  # Checks: recorded at record_at (before refine, before effort), then every
+  # 1000 updates after effort_push; the judgment's evaluations with held-out
+  # seeds.  Stop when standing_bonus drops (the policy stopped standing).
+  check:
+    stage_tolerance: 1
+    record_at: [3500, 9500]
+    seeds: {stand_s11: 21, stand_s5: 22, push_s11: 21, posture_s11: 21}
+    standing_bonus_floor: [[2499, 3.0], [4500, 3.5], [10500, 3.5]]
+    sustained_after: 2500
+    sustained_floor: 3.0
+    sustained_updates: 200
+    switch_grace: 500
   gate:
     min_fallen_standing_fraction: 0.85
     max_push_fall_fraction: 0.10
@@ -53,12 +90,15 @@ stall_minutes:
 external_training_min_envs: 1024
 
 dry:
-  # Every schedule (mjlab_microban/schedules.py) is scaled by this factor.
+  # Every schedule (mjlab_microban/schedules.py) is scaled by this factor;
+  # the checks run on the first two checkpoints only and are recorded (never
+  # stop or end a dry run).
   schedule_scale: 0.001
-  walk: {envs: 64, save_interval: 1}
-  pico: {envs: 64, save_interval: 1}
+  walk: {envs: 64, save_interval: 1, check: {stage_tolerance: 3, max_checks: 2}}
+  pico: {envs: 64, save_interval: 1, check: {stage_tolerance: 3, max_checks: 2}}
   getup:
     envs: 64
     save_interval: 1
     eval_envs: 16
     eval_steps: 150
+    check: {stage_tolerance: 3, max_checks: 2}

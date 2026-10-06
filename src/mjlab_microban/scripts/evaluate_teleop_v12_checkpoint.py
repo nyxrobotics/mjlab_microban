@@ -193,8 +193,8 @@ def run_evaluation(
     digest = sha256_file(checkpoint)
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError(f"Checkpoint SHA-256 mismatch: {digest}")
-    if steps != 300 or settle_steps != 50 or seed != 42:
-        raise ValueError("Canonical v12 gate requires seed42, 300 steps, settle50")
+    if steps != 300 or settle_steps != 50:
+        raise ValueError("The v12 locomotion evaluation runs 300 steps after a 50-step settle")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
     policy, iteration, _infos = _load_actor(checkpoint, device=device)
