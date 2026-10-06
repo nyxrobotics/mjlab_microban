@@ -40,15 +40,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-    validate_corner_rescue_canonical_lineage,
-)
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
-    assert_corner_rescue_foot_adapter_zero,
-    assert_corner_rescue_optimizer_step,
-)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     validate_teleop_v12_home_pose,
 )
@@ -99,21 +90,13 @@ def hand_pose_release_report_settings(infos: dict[str, Any]) -> dict[str, Any]:
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     ):
         return {}
-    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-        hand_pose_release_lineage,
-    )
-
-    return {
-        "recipe_revision": infos.get("microban_teleop_recipe_revision"),
-        "hand_pose_release_lineage": hand_pose_release_lineage(infos),
-    }
+    return {"recipe_revision": infos.get("microban_teleop_recipe_revision")}
 
 
 def _load_actor(
     checkpoint: Path,
     *,
     device: str,
-    allow_corner_rescue: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
@@ -127,23 +110,6 @@ def _load_actor(
         raise ValueError("Checkpoint is not contract-v12")
     validate_teleop_v12_home_pose(infos)
     require_bilateral_site_order(infos)
-    corner_lineage = validate_corner_rescue_canonical_lineage(
-        infos, iteration=iteration
-    )
-    is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-    )
-    if allow_corner_rescue and not is_final_corner_rescue:
-        raise ValueError(
-            "--allow-corner-rescue requires the exact final rescue checkpoint"
-        )
-    if is_final_corner_rescue:
-        assert corner_lineage is not None
-        assert_corner_rescue_foot_adapter_zero(payload)
-        assert_corner_rescue_optimizer_step(
-            payload,
-            expected_step=(MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP),
-        )
     expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
     if infos.get("previous_action_semantics") != "raw_actor_output":
         raise ValueError("Checkpoint previous-action semantics drifted")

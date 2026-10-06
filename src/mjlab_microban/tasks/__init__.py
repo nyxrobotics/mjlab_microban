@@ -13,22 +13,6 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
-    MicrobanTeleopV12CornerRescueRlCfg,
-    make_microban_teleop_v12_corner_rescue_env_cfg,
-)
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (
-    MicrobanTeleopV12CornerRescueOnPolicyRunner,
-)
-from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
-    MICROBAN_TELEOP_V12_FINAL_RESCUE_TASK_ID,
-    MicrobanTeleopV12FinalRescueRlCfg,
-    make_microban_teleop_v12_final_rescue_env_cfg,
-)
-from mjlab_microban.tasks.microban_teleop_v12_final_rescue_runner import (
-    MicrobanTeleopV12FinalRescueOnPolicyRunner,
-)
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     MicrobanTeleopV12HandPoseReleaseRlCfg,
@@ -104,66 +88,4 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12HandPoseReleaseRlCfg,
     runner_cls=MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
-    env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_corner_rescue_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopV12CornerRescueRlCfg,
-    runner_cls=MicrobanTeleopV12CornerRescueOnPolicyRunner,
-)
-
-# Pose-release variant of the 9901->10000 corner rescue (fresh pose-release
-# chain's model_9900; registered sampler mixes; saves keep the pose-release
-# recipe).
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (  # noqa: E402
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
-    MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
-    make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg,
-)
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue_runner import (  # noqa: E402
-    MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_CORNER_RESCUE_TASK_ID,
-    env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_hand_pose_release_corner_rescue_env_cfg(
-        play=True
-    ),
-    rl_cfg=MicrobanTeleopV12HandPoseReleaseCornerRescueRlCfg,
-    runner_cls=MicrobanTeleopV12HandPoseReleaseCornerRescueOnPolicyRunner,
-)
-
-# 14900->14999 final-scenario rescue; the sampler mix is read from
-# MICROBAN_V12_FINAL_RESCUE_MIX when the package is imported (launcher-set).
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_FINAL_RESCUE_TASK_ID,
-    env_cfg=make_microban_teleop_v12_final_rescue_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_final_rescue_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopV12FinalRescueRlCfg,
-    runner_cls=MicrobanTeleopV12FinalRescueOnPolicyRunner,
-)
-
-# Pose-release variant of the 14900->14999 final-scenario rescue (pose-release
-# model_14900 of a run whose 14999 gate failed; saves keep the pose-release
-# recipe).  The mix is read from MICROBAN_V12_PR_FINAL_RESCUE_MIX at import.
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (  # noqa: E402
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID,
-    MicrobanTeleopV12HandPoseReleaseFinalRescueRlCfg,
-    make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg,
-)
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_runner import (  # noqa: E402
-    MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_TASK_ID,
-    env_cfg=make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_hand_pose_release_final_rescue_env_cfg(
-        play=True
-    ),
-    rl_cfg=MicrobanTeleopV12HandPoseReleaseFinalRescueRlCfg,
-    runner_cls=MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner,
 )

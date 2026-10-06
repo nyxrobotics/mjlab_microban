@@ -9,7 +9,7 @@ tests/fixtures/home_equivalence/ from the branches each HOME was trained on:
 
 ``dump`` imports every module of mjlab_microban.robot / .tasks / .scripts and
 records each UPPER_CASE module constant, the zero-argument HOME-derived
-functions (hand FK metadata, HOME stamps, v12 marker, final-rescue scenarios,
+functions (hand FK metadata, HOME stamps, v12 marker,
 parity corpus) and the repr of every registered task's env / play env / RL
 config and runner class.  Values are normalised: memory addresses and the tree
 path are removed and sets are sorted.  It needs no GPU (CUDA_VISIBLE_DEVICES='').
@@ -90,7 +90,6 @@ def dump(root: Path) -> dict[str, str | None]:
         ("mjlab_microban.tasks.microban_getup_runner", "getup_home_pose"),
         ("mjlab_microban.scripts.export_walk_onnx", "walk_home_pose"),
         ("mjlab_microban.tasks.microban_teleop_v12_home_pose", "teleop_v12_home_pose_marker"),
-        ("mjlab_microban.tasks.microban_teleop_v12_final_rescue", "final_rescue_scenario_commands"),
     )
     for module_name, function_name in calls:
         key = f"call:{module_name}.{function_name}()"

@@ -100,6 +100,11 @@ UNREGISTERED_TASKS = frozenset({
     "Mjlab-Teleop-Upright-Fullbody-Microban",
     "Mjlab-Teleop-V12-Preview-Microban",
     "Mjlab-Teleop-V12-Microban",
+    # Stage C: rescues removed (a failed gate is fixed by a recipe change).
+    "Mjlab-Teleop-V12-Corner-Rescue-Microban",
+    "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
+    "Mjlab-Teleop-V12-Final-Rescue-Microban",
+    "Mjlab-Teleop-V12-HandPoseRelease-Final-Rescue-Microban",
 })
 
 
@@ -396,10 +401,7 @@ class DerivedHomeStringsTest(unittest.TestCase):
                         "from mjlab_microban.robot import home_contracts as c\n"
                         "print(json.dumps({'tag': HOME.tag, 'walk': c.WALK_CONTRACT_VERSION,"
                         " 'getup': c.GETUP_CONTRACT_VERSION, 'legacy': c.GETUP_LEGACY_STAMP,"
-                        " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION,"
-                        " 'corner': c.V12_CORNER_RESCUE_RECIPE_REVISION,"
-                        " 'pr_final': [c.V12_PR_FINAL_RESCUE_MARKER_REVISION,"
-                        " c.V12_PR_FINAL_RESCUE_SAMPLER_REVISION]}))",
+                        " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION}))",
                     )
                 )
                 tag = result["tag"]
@@ -413,38 +415,6 @@ class DerivedHomeStringsTest(unittest.TestCase):
                     result["recipe"].endswith("_v11"), pitch == 0.0, result["recipe"]
                 )
                 self.assertIn(tag, result["packager"])
-                self.assertIn(tag, result["corner"])
-                # The pose-release final rescue's strings carry the HOME too.
-                self.assertTrue(all(tag in value for value in result["pr_final"]), result["pr_final"])
-                self.assertEqual("home_levelled" in result["pr_final"][1], pitch != 0.0)
-
-
-class ForwardLeanOnlyTestsTest(unittest.TestCase):
-    """The pose-release final rescue keeps forward-lean-v2's published strings."""
-
-    def test_pose_release_final_rescue_tests_pass_at_the_forward_lean_home(self):
-        """forward-lean-v2's final rescue (fc1c313..cd0ea78) with its published strings."""
-
-        try:
-            import pytest  # noqa: F401
-        except ImportError:
-            self.skipTest("pytest is not installed")
-        completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs",
-             "tests/test_teleop_v12_hand_pose_release_final_rescue.py"],
-            env=_environment(LEAN_YAML), cwd=REPO_ROOT, capture_output=True, text=True,
-            timeout=1800, check=False,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-2000:])
-        self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
-        marker = _run_python(LEAN_YAML, (
-            "from mjlab_microban.tasks import microban_teleop_v12_hand_pose_release_final_rescue as m;"
-            "print(m.MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_MARKER_REVISION + ' ' + "
-            "m.MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_FINAL_RESCUE_SAMPLER_REVISION)"))
-        self.assertEqual(marker.split(), [
-            "recorded_pose_release_model14900_failed_final_scenarios_replay_99_updates_forward_lean_v1",
-            "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_pose_release_v1",
-        ])
 
 
 class HomePinnedTestsTest(unittest.TestCase):

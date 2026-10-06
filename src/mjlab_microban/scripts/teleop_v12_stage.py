@@ -61,18 +61,9 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     resolve_bootstrap_artifact_path,
     sha256_file,
 )
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-    assert_corner_rescue_foot_adapter_zero,
-    assert_corner_rescue_optimizer_step,
-    validate_corner_rescue_canonical_lineage,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -770,20 +761,10 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
         raise ValueError("Stage checkpoint iteration is invalid")
     checkpoint_sha = sha256_file(path)
-    corner_rescue = validate_corner_rescue_canonical_lineage(infos, iteration=iteration)
     if infos.get("adapter_gradient_schedule_revision") != (
         TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
     ):
         raise ValueError("Checkpoint is not the safe staged-mask v12 recipe")
-    if infos.get("microban_teleop_recipe_revision") == (
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-    ):
-        assert corner_rescue is not None
-        assert_corner_rescue_foot_adapter_zero(payload)
-        assert_corner_rescue_optimizer_step(
-            payload,
-            expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-        )
     completed = iteration + 1
     env_state = payload["infos"].get("env_state")
     if (
@@ -803,38 +784,6 @@ def _checkpoint_kind(completed: int) -> str:
     if completed in (3_100, 7_100, 10_100):
         return "activation_canary"
     return "interrupted_recovery"
-
-
-def pose_release_final_rescue_gate_marker(
-    infos: dict[str, Any],
-) -> tuple[str, dict[str, Any]] | None:
-    """The pose-release final-rescue marker a gate records, or ``None``.
-
-    A pose-release checkpoint carrying the final-rescue infos key (only the
-    rescue's model_14999 is consumable; the lineage loaders enforce that) has
-    its marker rebuilt from its recorded values and copied verbatim into the
-    gate, so the gate (and the package built from it) names the rescue.  The
-    canonical v11 final rescue keeps its existing gate content.
-    """
-
-    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
-        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
-    )
-    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue import (
-        validate_hand_pose_release_final_rescue_marker,
-    )
-
-    if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-    ):
-        return None
-    marker = infos.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY)
-    if marker is None:
-        return None
-    return (
-        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
-        validate_hand_pose_release_final_rescue_marker(marker),
-    )
 
 
 def next_training_target(completed: int) -> tuple[int, bool]:
@@ -904,21 +853,6 @@ def create_gate(
             "sha256": onnx_sha,
         },
     }
-    for key, value in _lineage_markers(infos).items():
-        result[key] = value
-    return result
-
-
-def _lineage_markers(infos: dict[str, Any]) -> dict[str, Any]:
-    """Rescue markers a gate copies from its checkpoint."""
-
-    result: dict[str, Any] = {}
-    corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
-    if corner_rescue is not None:
-        result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
-    pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
-    if pose_release_final_rescue is not None:
-        result[pose_release_final_rescue[0]] = pose_release_final_rescue[1]
     return result
 
 
@@ -939,7 +873,6 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
         "tracking_profile": required_tracking_profile(completed),
-        **_lineage_markers(infos),
     }
     if any(gate.get(name) != value for name, value in exact.items()):
         raise ValueError("V12 stage gate identity mismatch")
@@ -966,20 +899,17 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
 
 
 def checkpoint_recipe_kind(checkpoint: Path) -> str:
-    """Validate a stage checkpoint's lineage and name its training recipe.
+    """Validate a stage checkpoint and name its training recipe (``hand_pose_release``).
 
-    ``canonical`` for the v11 recipe (and its rescue lineages), or
-    ``hand_pose_release`` for a release-eligible pose-release checkpoint.  The
-    wrapper uses it to pick the training task for a resume.
+    The wrapper uses it to pick the training task for a resume.
     """
 
     _, _, _, infos = _checkpoint_identity(checkpoint.resolve())
-    recipe = infos.get("microban_teleop_recipe_revision")
-    if recipe == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION:
-        return "hand_pose_release"
-    if recipe == MICROBAN_TELEOP_V12_RECIPE_REVISION:
-        return "canonical"
-    return "rescue"
+    if infos.get("microban_teleop_recipe_revision") != (
+        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+    ):
+        raise ValueError("Checkpoint is not of the pose-release recipe")
+    return "hand_pose_release"
 
 
 def build_parser() -> argparse.ArgumentParser:

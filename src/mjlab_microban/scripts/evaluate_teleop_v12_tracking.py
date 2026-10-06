@@ -922,7 +922,6 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
-    allow_corner_rescue: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -932,15 +931,9 @@ def run_evaluation(
         raise ValueError("Canonical tracking gate requires seed42/300/settle50")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
-    policy, iteration, infos = _load_actor(
-        checkpoint,
-        device=device,
-        allow_corner_rescue=allow_corner_rescue,
-    )
+    policy, iteration, infos = _load_actor(checkpoint, device=device)
     completed = iteration + 1
-    required = (
-        HMD_HAND_PROFILE if allow_corner_rescue else required_tracking_profile(completed)
-    )
+    required = required_tracking_profile(completed)
     if profile is not None and profile != required:
         raise ValueError(f"Checkpoint requires tracking profile {required}")
     profile = required
@@ -1043,11 +1036,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--allow-corner-rescue",
-        action="store_true",
-        help="require the authenticated final model9999 corner-rescue checkpoint",
-    )
     return parser
 
 
@@ -1061,7 +1049,6 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
-        allow_corner_rescue=args.allow_corner_rescue,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

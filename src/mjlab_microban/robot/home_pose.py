@@ -175,20 +175,6 @@ _CENTERED_HOME_CONTRACTS = {
     "v12_packager_revision": (
         "microban_teleop_v12_final_deployment_packager_v6_centered_home_servo_range"
     ),
-    "v12_final_rescue_recipe_revision": "model14900_targeted_final_scenario_replay_to15000_v1",
-    "v12_final_rescue_marker_revision": (
-        "recorded_model14900_ordinary10_final_scenarios90_99_updates_v1"
-    ),
-    "v12_final_rescue_sampler_revision": (
-        "episode_shared_twist_foot_hand_evaluator_scenario_replay_v1"
-    ),
-    "v12_corner_rescue_recipe_revision": (
-        "model9900_targeted_bilateral_corner_pair_replay_to10000_v3"
-    ),
-    "v12_corner_rescue_marker_revision": (
-        "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_v3"
-    ),
-    "v12_corner_rescue_sampler_revision": "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_v2",
     "upright_fullbody_recipe_revision": "physical_neutral_full_actor_from_scratch_raw83x18_v4",
     "upright_fullbody_home_revision": "physical_neutral_shoulder_zero_hip_neg10_v5",
 }
@@ -211,61 +197,6 @@ _FORWARD_LEAN_HOME_CONTRACTS = {
     ),
     "v12_packager_revision": (
         "microban_teleop_v12_final_deployment_packager_v7_forward_lean_home_servo_range"
-    ),
-    "v12_final_rescue_recipe_revision": (
-        "model14900_targeted_final_scenario_replay_to15000_forward_lean_"
-        "home_levelled_receiver_box_v2"
-    ),
-    "v12_final_rescue_marker_revision": (
-        "recorded_model14900_ordinary10_final_scenarios90_99_updates_forward_lean_v2"
-    ),
-    "v12_final_rescue_sampler_revision": (
-        "episode_shared_twist_foot_hand_evaluator_scenario_replay_home_levelled_v2"
-    ),
-    "v12_corner_rescue_recipe_revision": (
-        "model9900_targeted_bilateral_corner_pair_replay_to10000_receiver_box_f_v4"
-    ),
-    "v12_corner_rescue_marker_revision": (
-        "recorded_model9900_uniform5_lf_rb90_lb_rf5_99_updates_receiver_box_f_v4"
-    ),
-    "v12_corner_rescue_sampler_revision": (
-        "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_v3"
-    ),
-    "v12_pr_corner_rescue_lf60_marker_revision": (
-        "recorded_pose_release_model9900_uniform5_lf_rb60_lb_rf35_99_updates_"
-        "receiver_box_f_v1"
-    ),
-    "v12_pr_corner_rescue_lf60_sampler_revision": (
-        "uniform_joint_box5pct_lf_rb60pct_lb_rf35pct_receiver_box_f_v1"
-    ),
-    "v12_pr_corner_rescue_lf65_marker_revision": (
-        "recorded_pose_release_model9900_uniform5_lf_rb65_lb_rf30_99_updates_"
-        "receiver_box_f_v1"
-    ),
-    "v12_pr_corner_rescue_lf65_sampler_revision": (
-        "uniform_joint_box5pct_lf_rb65pct_lb_rf30pct_receiver_box_f_pose_release_v1"
-    ),
-    "v12_pr_corner_rescue_lf72_marker_revision": (
-        "recorded_pose_release_model9900_uniform5_lf_rb72_lb_rf23_99_updates_"
-        "receiver_box_f_v1"
-    ),
-    "v12_pr_corner_rescue_lf72_sampler_revision": (
-        "uniform_joint_box5pct_lf_rb72pct_lb_rf23pct_receiver_box_f_pose_release_v1"
-    ),
-    "v12_pr_corner_rescue_lf90_marker_revision": (
-        "recorded_pose_release_model9900_uniform5_lf_rb90_lb_rf5_99_updates_"
-        "receiver_box_f_v1"
-    ),
-    "v12_pr_corner_rescue_lf90_sampler_revision": (
-        "uniform_joint_box5pct_lf_rb90pct_lb_rf5pct_receiver_box_f_pose_release_v1"
-    ),
-    "v12_pr_final_rescue_marker_revision": (
-        "recorded_pose_release_model14900_failed_final_scenarios_replay_"
-        "99_updates_forward_lean_v1"
-    ),
-    "v12_pr_final_rescue_sampler_revision": (
-        "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_"
-        "pose_release_v1"
     ),
     "upright_fullbody_recipe_revision": (
         "physical_neutral_full_actor_from_scratch_raw83x18_home_levelled_targets_"

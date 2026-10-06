@@ -10,19 +10,12 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    validate_corner_rescue_canonical_lineage,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     active_hand_arm_released_posture,
-)
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-    HAND_POSE_RELEASE_LINEAGE_FRESH,
-    hand_pose_release_lineage,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     hand_pose_release_report_settings,
@@ -159,10 +152,6 @@ class HandPoseReleaseRecipeTest(unittest.TestCase):
         )
         infos = self._infos(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION)
         self.assertEqual(
-            hand_pose_release_lineage(infos, iteration=14_999),
-            HAND_POSE_RELEASE_LINEAGE_FRESH,
-        )
-        self.assertEqual(
             _deployment_recipe_revision(infos),
             MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
         )
@@ -170,16 +159,12 @@ class HandPoseReleaseRecipeTest(unittest.TestCase):
     def test_fresh_chain_is_accepted_by_every_validator(self) -> None:
         infos = self._infos(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION)
         validate_teleop_v12_home_pose(infos)
-        self.assertIsNone(
-            validate_corner_rescue_canonical_lineage(infos, iteration=9999)
-        )
         self.assertEqual(
             hand_pose_release_report_settings(infos),
             {
                 "recipe_revision": (
                     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
                 ),
-                "hand_pose_release_lineage": HAND_POSE_RELEASE_LINEAGE_FRESH,
             },
         )
         self.assertEqual(
@@ -189,11 +174,11 @@ class HandPoseReleaseRecipeTest(unittest.TestCase):
             {},
         )
 
-    def test_another_recipe_is_not_a_pose_release_lineage(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not the hand pose-release recipe"):
-            hand_pose_release_lineage(
-                self._infos(MICROBAN_TELEOP_V12_RECIPE_REVISION)
-            )
+    def test_another_recipe_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Checkpoint recipe does not match"):
+            validate_teleop_v12_home_pose(self._infos(MICROBAN_TELEOP_V12_RECIPE_REVISION))
+        with self.assertRaisesRegex(ValueError, "Only a pose-release checkpoint"):
+            _deployment_recipe_revision(self._infos(MICROBAN_TELEOP_V12_RECIPE_REVISION))
 
 
 if __name__ == "__main__":

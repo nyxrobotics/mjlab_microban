@@ -34,15 +34,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-    assert_corner_rescue_foot_adapter_zero,
-    assert_corner_rescue_optimizer_step,
-    validate_corner_rescue_canonical_lineage,
-    validate_corner_rescue_lineage_marker,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE,
@@ -309,7 +300,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
 
         self.teleop_v12_training_resume = resume
         self.teleop_v12_bootstrap: TeleopV12BootstrapProvenance | None = None
-        self.teleop_v12_corner_rescue: dict | None = None
         super().__init__(env, cfg, log_dir=log_dir, device=device)
         if not isinstance(self.alg, LegacyAdapterPPO):
             raise TypeError("Contract-v12 runner requires LegacyAdapterPPO")
@@ -389,10 +379,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 self.teleop_v12_bootstrap
             ),
         }
-        if self.teleop_v12_corner_rescue is not None:
-            result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(
-                validate_corner_rescue_lineage_marker(self.teleop_v12_corner_rescue)
-            )
         return result
 
     def _save_pristine(self, path: Path) -> None:
@@ -458,18 +444,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 "A hand pose-release checkpoint trains only under its own task "
                 "(Mjlab-Teleop-V12-HandPoseRelease-Microban)"
             )
-        corner_rescue = validate_corner_rescue_canonical_lineage(
-            infos, iteration=iteration
-        )
-        if infos.get("microban_teleop_recipe_revision") == (
-            MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
-        ):
-            assert corner_rescue is not None
-            assert_corner_rescue_foot_adapter_zero(payload)
-            assert_corner_rescue_optimizer_step(
-                payload,
-                expected_step=MICROBAN_TELEOP_V12_CORNER_RESCUE_TARGET_OPTIMIZER_STEP,
-            )
         if infos.get("previous_action_semantics") != "raw_actor_output" or (
             infos.get("action_clip", object()) != MICROBAN_TELEOP_V12_ACTION_CLIP
         ):
@@ -494,7 +468,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         if sha256_file(resolved) != before_sha256:
             raise ValueError("Checkpoint changed while loading")
         self.teleop_v12_bootstrap = provenance
-        self.teleop_v12_corner_rescue = deepcopy(corner_rescue)
         assert_actor_frozen_against_source(self._actor, provenance)
         self._actor.bind_frozen_legacy_reference()
         expected_active = list(self._actor.active_adapter_columns())

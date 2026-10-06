@@ -41,10 +41,7 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     _export_onnx_atomic,
 )
-from mjlab_microban.scripts.teleop_v12_stage import (
-    pose_release_final_rescue_gate_marker,
-    validate_gate,
-)
+from mjlab_microban.scripts.teleop_v12_stage import validate_gate
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -62,13 +59,9 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     sha256_file,
     validate_bootstrap_provenance,
 )
-from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-    MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -425,9 +418,7 @@ _BOUNDARY_GATE_SHARED_INFO_KEYS = (
     BILATERAL_SITE_ORDER_INFO_KEY,
 )
 # Markers a boundary checkpoint may carry; a descendant carries them unchanged.
-_BOUNDARY_GATE_INHERITED_INFO_KEYS = (
-    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-)
+_BOUNDARY_GATE_INHERITED_INFO_KEYS: tuple[str, ...] = ()
 
 
 def _agent_resume_fields(params: Path) -> dict[str, str]:
@@ -616,24 +607,13 @@ def _boundary_stage_gate_lineage(
 
 
 def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
-    """Recipe string the package declares to the robot.
+    """Recipe string the package declares to the robot (the pose-release recipe)."""
 
-    A release-eligible active-hand arm pose-release checkpoint (lineage already
-    re-validated by the gate and actor loaders) declares its own recipe; every
-    other accepted lineage (v11 and its rescues) declares the v11 recipe.
-    """
-
-    if infos.get("microban_teleop_recipe_revision") == (
+    if infos.get("microban_teleop_recipe_revision") != (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     ):
-        from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-            hand_pose_release_lineage,
-        )
-
-        # Refuses the experimental switch (no allow flag here).
-        hand_pose_release_lineage(infos)
-        return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-    return MICROBAN_TELEOP_V12_RECIPE_REVISION
+        raise ValueError("Only a pose-release checkpoint is packaged")
+    return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
 
 
 def _onnx_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, str]:
@@ -741,54 +721,6 @@ def _runtime_guard(envelope: Mapping[str, Any]) -> list[float]:
     if not np.isfinite(as_float32).all() or bool(np.any(as_float32 < 0.0)):
         raise ValueError("Tracking evidence produced an invalid float32 runtime guard")
     return result
-
-
-def _final_rescue_metadata(
-    gate: Mapping[str, Any], infos: Mapping[str, Any]
-) -> dict[str, str]:
-    """Name a pose-release final rescue in the package (else nothing).
-
-    The rescue's model_14999 keeps the plain pose-release recipe, so its
-    marker (rebuilt from its recorded values and recorded verbatim by the
-    final gate) is what identifies the parent, the failed gate it replayed and
-    the mix.  A gate that omits or alters it is refused.
-    """
-
-    from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
-        MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY,
-    )
-
-    rescue = pose_release_final_rescue_gate_marker(dict(infos))
-    if rescue is None:
-        if infos.get("microban_teleop_recipe_revision") == (
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-        ) and gate.get(MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY) is not None:
-            raise ValueError(
-                "Final v12 gate names a final rescue its checkpoint does not carry"
-            )
-        return {}
-    key, marker = rescue
-    if gate.get(key) != marker:
-        raise ValueError(
-            "Final v12 gate does not record the checkpoint's pose-release final "
-            "rescue marker"
-        )
-    # The rescue trains on the final gate's own evaluator scenarios (exact
-    # commands, and for the push mixes also its fixed perturbation), so that
-    # gate is not a held-out test for them.  Say so in the package instead of
-    # leaving it implicit in the marker JSON.
-    replay = (
-        "evaluator_scenario_commands_and_perturbation"
-        if "scenario_push" in marker
-        else "evaluator_scenario_commands"
-    )
-    return {
-        "v12_final_rescue_marker_revision": str(marker["revision"]),
-        "v12_final_rescue_marker_json": _json(marker),
-        "v12_final_rescue_marker_sha256": _canonical_json_sha256(marker),
-        "v12_final_rescue_training_replay": replay,
-        "v12_final_rescue_final_gate_held_out": "false",
-    }
 
 
 def build_v12_deployment_metadata(
@@ -1125,7 +1057,6 @@ def build_v12_deployment_metadata(
         ),
         **microban_source_identity,
     }
-    metadata.update(_final_rescue_metadata(gate, infos))
     if boundary_stage_gates:
         metadata["v12_boundary_stage_gates_semantics"] = BOUNDARY_STAGE_GATES_SEMANTICS
         metadata["v12_boundary_stage_gates_json"] = _json(

@@ -185,7 +185,7 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         },
     }
     infos = {
-        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
         TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "trainable_actor_parameters": ["mlp.0.weight"],
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
@@ -561,6 +561,8 @@ def test_runtime_rejection_preserves_last_known_good_output(
             RuntimeError("runtime rejected")
         ),
     )
+    # The fixture final has no boundary gates (the package step is what fails).
+    monkeypatch.setattr(deployment, "POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES", ())
 
     with pytest.raises(RuntimeError, match="runtime rejected"):
         deployment.package_v12_deployment(
@@ -707,11 +709,6 @@ def _boundary_gate_fixture(
 def test_boundary_gates_record_the_10000_boundary_and_its_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-        corner_rescue_marker,
-    )
-
     validated: list[Path] = []
 
     def fake_validate_gate(gate_path: Path, checkpoint: Path) -> dict:
@@ -726,14 +723,6 @@ def test_boundary_gates_record_the_10000_boundary_and_its_profile(
     final_infos["microban_teleop_recipe_revision"] = (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     )
-    marker = corner_rescue_marker(
-        parent_checkpoint_sha256="a" * 64,
-        parent_strict_tracking_report_sha256="b" * 64,
-        hand_pose_release=True,
-        parent_strict_failed_checks=("hand_tracking_rms",),
-    )
-    final_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = marker
-
     boundary_infos = deepcopy(final_infos)
     gate_path = _boundary_gate_fixture(
         tmp_path, monkeypatch, name="rescue", infos=boundary_infos
@@ -876,7 +865,6 @@ def test_boundary_gates_record_the_10100_canary_and_are_discovered(
     "case",
     [
         "other_recipe",
-        "marker_not_carried",
         "final_clock",
         "interrupted_recovery",
         "duplicate_clock",
@@ -888,11 +876,6 @@ def test_boundary_gates_record_the_10100_canary_and_are_discovered(
 def test_boundary_gates_reject_foreign_or_nonboundary_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
-        MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-        corner_rescue_marker,
-    )
-
     monkeypatch.setattr(
         deployment,
         "validate_gate",
@@ -908,15 +891,6 @@ def test_boundary_gates_reject_foreign_or_nonboundary_gates(
     if case == "other_recipe":
         boundary_infos["microban_teleop_recipe_revision"] = (
             MICROBAN_TELEOP_V12_RECIPE_REVISION
-        )
-    elif case == "marker_not_carried":
-        boundary_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = (
-            corner_rescue_marker(
-                parent_checkpoint_sha256="a" * 64,
-                parent_strict_tracking_report_sha256="b" * 64,
-                hand_pose_release=True,
-                parent_strict_failed_checks=("hand_tracking_rms",),
-            )
         )
     elif case == "final_clock":
         fixture = {"completed": 15_000}
