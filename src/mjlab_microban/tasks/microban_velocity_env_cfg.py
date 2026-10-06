@@ -526,8 +526,21 @@ def make_microban_velocity_twist_ratio_env_cfg(
 
 
 # Candidates for a smaller ratio angle (2026-10-07), all form B3 at weight 8.
+# C1: axis_scale matched to what the forward-lean walkers reach on the largest
+# single-axis commands (held-out seeds 101-103, no push): forward 0.7 m/s ->
+# 0.07 (old walker cont2 29000), 0.17-0.20 (B3 4000/5000); lateral 0.3 m/s ->
+# 0.09-0.10 (old), 0.16-0.19 (B3); yaw 1.5 rad/s -> 1.44-1.49 (old),
+# 1.05-1.48 (B3).  Forward is the most limited axis relative to the envelope
+# (0.2 of 0.7), so dividing it by 0.7 understated a forward shortfall.
+MICROBAN_VELOCITY_TWIST_RATIO_REACHABLE_SCALE = (0.2, 0.18, 1.4)
 MICROBAN_VELOCITY_TWIST_RATIO_CANDIDATES = {
     "C2": {"form": "B3", "direction_penalty": 2.0},
+    "C1": {"form": "B3", "axis_scale": MICROBAN_VELOCITY_TWIST_RATIO_REACHABLE_SCALE},
+    "C3": {
+        "form": "B3",
+        "axis_scale": MICROBAN_VELOCITY_TWIST_RATIO_REACHABLE_SCALE,
+        "direction_penalty": 2.0,
+    },
 }
 
 
