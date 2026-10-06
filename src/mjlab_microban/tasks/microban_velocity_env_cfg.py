@@ -49,6 +49,7 @@ from mjlab_microban.tasks.mdp import (
     reset_root_state_uniform_world_yaw,
     upright as local_upright,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_soft_limit_excess_l1_sum
 from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
 SCENE_CFG = SceneCfg(
@@ -99,6 +100,11 @@ TWIST_AXIS_SCALE = tuple(
 # replaces (exp/twist-ratio-validation AB_result.md, recommendation of
 # 2026-10-07 01:15: the bounded time-filtered form, direction penalty 1).
 WALK_TWIST_RATIO_WEIGHT = 8.0
+# Per half-range of target excess beyond a soft joint limit, summed over the
+# joints: the parked arms of the 2026-10-07 release walker (model_9000,
+# standing) cost 6.3 per step where the twist term paid 7.9; a hip-roll target
+# 0.1 rad past its soft limit costs about 0.13.
+WALK_TARGET_SOFT_LIMIT_EXCESS_WEIGHT = -0.5
 WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
@@ -319,6 +325,16 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["foot_slip"].weight = -1.0
 
     cfg.rewards["action_rate_l2"].weight = -0.1
+
+    # Targets beyond the soft joint limits (linear in the unclipped target):
+    # without it the standing walker parked its arms at their stops with
+    # saturated outputs, where no position-based term has a gradient
+    # (microban_teleop_mdp.normalized_target_soft_limit_excess_l1_sum).
+    cfg.rewards["target_soft_limit_excess"] = RewardTermCfg(
+        func=normalized_target_soft_limit_excess_l1_sum,
+        weight=WALK_TARGET_SOFT_LIMIT_EXCESS_WEIGHT,
+        params={"action_name": "joint_pos"},
+    )
 
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,

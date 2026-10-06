@@ -57,6 +57,8 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     TWIST_AXIS_SCALE,
+    WALK_TARGET_SOFT_LIMIT_EXCESS_WEIGHT,
+    WALK_TWIST_RATIO_WEIGHT,
     make_microban_velocity_env_cfg,
 )
 
@@ -378,6 +380,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_reward.weight = PICO_TWIST_RATIO_WEIGHT
     if tuple(twist_reward.params["axis_scale"]) != TWIST_AXIS_SCALE:
         raise ValueError("PICO and walking must share the twist reward's axis scale")
+    # The target soft-limit barrier inherited from walking, at the same ratio
+    # to the twist term as in walking.
+    cfg.rewards["target_soft_limit_excess"].weight = (
+        WALK_TARGET_SOFT_LIMIT_EXCESS_WEIGHT * PICO_TWIST_RATIO_WEIGHT / WALK_TWIST_RATIO_WEIGHT
+    )
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["threshold_min"] = 0.02
     cfg.rewards["air_time"].params["threshold_max"] = 0.30
