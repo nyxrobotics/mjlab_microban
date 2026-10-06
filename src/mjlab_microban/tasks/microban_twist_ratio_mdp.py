@@ -43,12 +43,15 @@ maximum is exact tracking.  For an infeasible one it is near the commanded
 ray but not exactly on it: when only some axes are limited (typically
 forward/backward), over-producing the easier axes buys a little speed for a
 little error.  Over the reach box measured for the forward-lean walker
-(forward 0.2, backward 0.11, lateral 0.18 m/s, yaw 1.4 rad/s), 64 of 238
-infeasible commands have their best twist more than 1 deg off the ray, at
-most 11.3 deg (c = (0.3, 0.05, 1.0): best (0.2, 0.055, 1.10), reward 0.845
-against 0.833 on the ray).  The user's own form ``1 + speed - error`` has
-the same property (35.5 deg); this form only weakens it, and the walk check
-W1 (angle to the command ray) judges the walker that results.  For a zero
+(forward 0.2, backward 0.11, lateral 0.18 m/s, yaw 1.4 rad/s) and a grid of
+173 infeasible commands (forward -0.5..0.7, lateral +-0.3, yaw +-1.5), 42
+have their best twist more than 1 deg off the ray, at most 24.2 deg, where
+backward is the limit and yaw or lateral is commanded too (c = (-0.3, 0,
+0.75): best (-0.11, 0, 0.80), reward 0.705 against 0.683 on the ray); the
+diagonal commands of the walk check W1 have it about 15 deg off.  The user's
+own form ``1 + speed - error`` has the same property (70 commands, at most
+28.5 deg); this form only weakens it, and W1 (angle to the command ray)
+judges the walker that results.  For a zero
 command ``error = sqrt(|v^|^2 + |w^|^2)``.
 
 Why this form (walker trained from scratch at the forward-lean HOME,

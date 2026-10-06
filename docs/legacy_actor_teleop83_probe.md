@@ -1,5 +1,9 @@
 # Legacy locomotion actor in the 83-value teleop task
 
+> History: `model_14999.pt` and the receipt below were removed from the mainline;
+> they remain at tag `archive/pre-cleanup-2026-10-06`.  The walking source is now
+> the walker the HOME pipeline trains (`docs/teleop_v12_legacy_adapter.md`).
+
 This probe answers one narrow deadline question: can the proven
 `model_14999.pt` locomotion actor keep its original gait while the simulator is
 the nominal teleop env (`make_microban_teleop_env_cfg`, the environment of the

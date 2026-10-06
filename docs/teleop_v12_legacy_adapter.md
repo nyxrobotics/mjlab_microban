@@ -1,5 +1,9 @@
 # Microban teleop v12: legacy-preserving policy training
 
+> 履歴: 下の「固定した契約」の `checkpoints/xc330_velocity/model_14999.pt` と
+> `artifacts/legacy_teleop_probe/model_14999_teleop83_raw_9x300.json` は本線から消した。
+> タグ `archive/pre-cleanup-2026-10-06` に残っている。
+
 ## centered HOME + servo 範囲（±π）版（branch `track-centered-home-clip`）
 
 このブランチの v12 は旧HOME（股ピッチ -10°）の `xc330_velocity/model_14999.pt` ではなく、
