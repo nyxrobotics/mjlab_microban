@@ -9,7 +9,10 @@ User specification (2026-10-06):
 * reward speed only through the component of the motion along the command
   direction ("司令方向成分だけ取り出して報酬"), so moving fast in another direction
   earns nothing;
-* moving against the command is bad too ("反対向きもだめ").
+* moving against the command is bad too ("反対向きもだめ");
+* standing still must never pay better than moving the commanded way: a
+  deviating step forward is still a plus, an exact one a big plus ("多少ずれて
+  ても＋で、一致してたらめっちゃ＋").
 
 The commanded twist is (v_x, v_y, w_z) in the HOME-levelled trunk frame.  Each
 axis is divided by the command envelope's maximum (default 0.7 m/s, 0.3 m/s,
@@ -19,59 +22,59 @@ and radians per second are comparable.  With ``c^ = c / scale``,
 
 ``a = clamp(p, 0, n)``
     progress along the command, capped at the command;
-``speed = a / n`` when ``n >= min_command_norm``
-    the along-command speed fraction, in [0, 1];
-``speed = clamp(1 - |v^ - c^| / min_command_norm, 0, 1)`` for a smaller command
-    (standing included): a small command is tracked for precision, on the
-    scale of ``min_command_norm``.  Both branches agree on the commanded ray
-    at ``n = min_command_norm``, and every command, standing included, has
-    the same best value (speed 1 at exact tracking);
-``error = sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)``
-    the norm of everything that is not capped forward progress along the
-    command -- the perpendicular part, the overshoot beyond the command, any
-    backward part, and the uncommanded motion ``w^`` (vertical velocity, roll
-    and pitch rates, each divided by its scale, default 0.7 m/s, 1.5 rad/s,
-    1.5 rad/s) -- plus the backward part once more.  At the same speed k,
-    perpendicular motion costs k and opposite motion 2k; the error grows
-    monotonically with the angle to the command.
+``s = a / n`` when ``n >= min_command_norm``
+    the along-command speed fraction, in [0, 1]; for a smaller command
+    (standing included) ``s = clamp(1 - |v^ - c^| / min_command_norm, 0, 1)``:
+    a small command is tracked for precision on the scale of
+    ``min_command_norm`` (both branches agree on the commanded ray at
+    ``n = min_command_norm``);
+``e = sqrt(|v^ - a u|^2 + |w^|^2)``
+    the deviation: everything that is not capped progress along the command
+    (the perpendicular part, the overshoot beyond the command, any backward
+    part) and the uncommanded motion ``w^`` (vertical velocity, roll and pitch
+    rates divided by 0.7 m/s, 1.5 rad/s, 1.5 rad/s).
 
-The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
-[0, 1]: 1 at exact tracking of any command (standing still on a standing
-command included), 1/2 for standing still on a moving command, less for
-anything off the command, and never negative.  Its maximum over the twists a
-robot can reach lies on the commanded ray: ``s * c`` with the largest feasible
-``s`` (exact tracking when the command is feasible).  For a zero command
-``error = sqrt(|v^|^2 + |w^|^2)``.
+The reward (form B4) is::
 
-Why this form (walker trained from scratch at the forward-lean HOME,
-2026-10-06, held-out probes on seeds 101-105):
+    1 + s * (floor + (1 - floor) * exp(-e / deviation_scale))
+      - backward_penalty * max(0, -p) / max(n, min_command_norm)
 
-* ``speed - error`` (no constant part): no positive reward for staying upright
-  where the exp tracking kernels it replaces gave about half of the early
-  positive reward; episodes stayed near 45 steps at update 200 (old reward
-  190).
-* ``1 + speed - error`` with ``speed = a / max(n, min_command_norm)``: a
-  standing command could earn at most 1 against 2 for a moving one, and
-  falling ends an episode without a penalty and draws a new command; at update
-  4000 the walker fell within one second in every standing rollout.  The
-  small-command branch of ``speed`` gives every command the same best value.
-* ``1 + speed - error`` with that ``speed``: the reward goes negative after a
-  push, so falling can pay; 36-43 of 90 pushed diagonal rollouts fell from
-  update 5000 to 8000 (old reward 2 of 90 at 5000), and single-axis commands
-  were overshot about twice.
-* This bounded form: 4 of 90 at update 3000 with single-axis commands
-  tracked.
+* standing still on a moving command: 1; moving the commanded way: above 1
+  however large the deviation (at least ``1 + floor * s``); exact tracking:
+  ``1 + s``, so 2 for a feasible command and for standing still on a standing
+  command -- every command has the same best value;
+* motion perpendicular to the command: 1 (it earns nothing); motion against
+  the command: below 1;
+* on an infeasible command the best reachable twist keeps the commanded ratio
+  at the largest scale as long as the deviation gain
+  ``s (1 - floor) / deviation_scale`` beats the extra progress an off-ray
+  twist can buy (``deviation_scale`` small: the reward rises sharply near
+  exact agreement).
 
-The uncommanded motion keeps a robot that topples in the commanded direction
-from collecting speed reward on the way down (the tracking kernels this term
-replaces penalised vertical velocity and roll/pitch rates the same way);
-``uncommanded_scale=None`` leaves it out.
+Both the command and the motion are low-pass filtered with the same
+first-order filter (0.5 s) before the reward is evaluated
+(``twist_ratio_velocity``): the reward is about the direction and speed the
+robot walks at, not the sway within a stride.
 
-``twist_ratio_velocity_reward`` is meant to replace the separate velocity
-tracking terms (exp kernels, L1 errors and the xy projection progress) of the
-walking and PICO base reward configurations.  The module depends only on
-torch and mjlab (no robot constants, no other task module): the caller passes
-the HOME trunk pitch and, if its command envelope differs, the axis scale.
+Forms tried before (walker from scratch at the forward-lean HOME, held-out
+probes on seeds 101-105; details in the validation branch history):
+
+* ``speed - error``: no positive reward for standing upright; episodes stayed
+  near 45 steps at update 200 (old reward 190).
+* ``1 + speed - error``: a standing command could earn at most half of a moving
+  one and falling (no penalty) draws a new command, so the walker fell at once
+  when told to stand (update 4000); with equal best values (A2) the reward
+  could go negative after a push and 36-43 of 90 pushed rollouts fell.
+* ``(1 + speed) / 2 * exp(-error)`` (B2/B3): never negative, but a large
+  deviation made moving worth less than standing still: the walker stopped
+  answering small single-axis commands (B2, update 4000) or turning right
+  (B3, update 4000).  B4 keeps moving the commanded way above standing still.
+
+``twist_ratio_velocity`` is meant to replace the separate velocity tracking
+terms (exp kernels, L1 errors and the xy projection progress) of the walking
+and PICO base reward configurations.  The module depends only on torch and
+mjlab (no robot constants, no other task module): the caller passes the HOME
+trunk pitch and, if its command envelope differs, the axis scale.
 """
 
 from __future__ import annotations
@@ -90,7 +93,9 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 # Scale of the uncommanded motion (v_z m/s, w_x rad/s, w_y rad/s).
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_MIN_COMMAND_NORM = 0.2
-TWIST_RATIO_DIRECTION_PENALTY = 1.0
+TWIST_RATIO_PROGRESS_FLOOR = 0.4
+TWIST_RATIO_DEVIATION_SCALE = 0.15
+TWIST_RATIO_BACKWARD_PENALTY = 1.0
 TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
@@ -101,8 +106,9 @@ class TwistRatio(NamedTuple):
 
     command_norm: torch.Tensor  # (N,) n = |c^|
     along: torch.Tensor  # (N,) p = v^ . u (0 for a zero command)
-    speed: torch.Tensor  # (N,) along-command speed fraction in [0, 1] (see doc)
-    error: torch.Tensor  # (N,) sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)
+    speed: torch.Tensor  # (N,) s in [0, 1]
+    deviation: torch.Tensor  # (N,) e = sqrt(|v^ - a u|^2 + |w^|^2)
+    backward: torch.Tensor  # (N,) max(0, -p) / max(n, min_command_norm)
 
 
 def _scale_tensor(values: Sequence[float], like: torch.Tensor, width: int) -> torch.Tensor:
@@ -158,8 +164,27 @@ def twist_ratio(
             uncommanded_scale, command, uncommanded.shape[-1]
         )
         off = torch.cat((off, w), dim=-1)
-    error = torch.linalg.vector_norm(off, dim=-1) + torch.clamp(-along, min=0.0)
-    return TwistRatio(norm, along, speed, error)
+    deviation = torch.linalg.vector_norm(off, dim=-1)
+    backward = torch.clamp(-along, min=0.0) / torch.clamp(norm, min=min_command_norm)
+    return TwistRatio(norm, along, speed, deviation, backward)
+
+
+def twist_ratio_value(
+    parts: TwistRatio,
+    progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
+    deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
+    backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
+) -> torch.Tensor:
+    """Form B4 of the module doc from a decomposition."""
+
+    if not 0.0 < progress_floor < 1.0:
+        raise ValueError("progress_floor must be in (0, 1)")
+    if not deviation_scale > 0.0 or not backward_penalty > 0.0:
+        raise ValueError("deviation_scale and backward_penalty must be positive")
+    gain = progress_floor + (1.0 - progress_floor) * torch.exp(
+        -parts.deviation / deviation_scale
+    )
+    return 1.0 + parts.speed * gain - backward_penalty * parts.backward
 
 
 def twist_ratio_reward(
@@ -167,22 +192,18 @@ def twist_ratio_reward(
     twist: torch.Tensor,
     axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
     min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
-    direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+    progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
+    deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
+    backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
 ) -> torch.Tensor:
-    """``(1 + speed) / 2 * exp(-direction_penalty * error)`` per env."""
+    """The reward of the module doc per env (pure tensor form, no filter)."""
 
-    if not direction_penalty > 0.0:
-        raise ValueError("direction_penalty must be positive")
     parts = twist_ratio(
         command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
     )
-    return _bounded(parts, direction_penalty)
-
-
-def _bounded(parts: TwistRatio, direction_penalty: float) -> torch.Tensor:
-    return 0.5 * (1.0 + parts.speed) * torch.exp(-direction_penalty * parts.error)
+    return twist_ratio_value(parts, progress_floor, deviation_scale, backward_penalty)
 
 
 def home_levelled_velocities(
@@ -226,18 +247,17 @@ def home_levelled_twist(
 
 
 class twist_ratio_velocity:
-    """Reward term: the bounded twist-ratio reward on time-filtered motion.
+    """Reward term: the reward of the module doc on time-filtered motion.
 
     The command and the measured motion are both low-pass filtered with the
     same first-order filter (time constant ``filter_time_constant``, 0.5 s by
-    default; 0 uses the instantaneous values), and the reward of the module doc
-    is evaluated on the filtered values.  The reward is about the direction and
-    speed the robot walks at, not about the swaying within a stride: the
-    per-step lateral sway, vertical bob and roll/pitch rates of a normal gait
-    average out, while a sustained drift, a turn of the walking direction or a
-    fall do not.  Filtering the command the same way keeps a robot that follows
-    a new command at once on target while both settle.  Both filters start at
-    the current values on the first step of an episode.
+    default; 0 uses the instantaneous values), and the reward is evaluated on
+    the filtered values.  The per-step lateral sway, vertical bob and
+    roll/pitch rates of a normal gait average out, while a sustained drift, a
+    wrong walking direction or a fall do not.  Filtering the command the same
+    way keeps a robot that follows a new command at once on target while both
+    settle.  Both filters start at the current values on the first step of an
+    episode.
     """
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
@@ -258,8 +278,10 @@ class twist_ratio_velocity:
         trunk_pitch: float = 0.0,
         axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
         min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
-        direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
         uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+        progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
+        deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
+        backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
         filter_time_constant: float = TWIST_RATIO_FILTER_TIME_CONSTANT_S,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -293,42 +315,6 @@ class twist_ratio_velocity:
         if isinstance(extras, dict):
             log = extras.setdefault("log", {})
             log["Metrics/twist_ratio_speed"] = parts.speed.mean()
-            log["Metrics/twist_ratio_error"] = parts.error.mean()
-        return _bounded(parts, direction_penalty)
-
-
-def twist_ratio_velocity_reward(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    trunk_pitch: float = 0.0,
-    axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
-    min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
-    direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
-    uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """The bounded reward on the instantaneous motion (no filter).
-
-    Kept for reference: from scratch, the per-step gait sway made walking cost
-    more than standing still on small commands (the B2 walker stopped
-    answering single-axis commands at update 4000); train with the filtered
-    ``twist_ratio_velocity`` term.
-    """
-
-    command = env.command_manager.get_command(command_name)[:, :3]
-    linear, angular = home_levelled_velocities(env, trunk_pitch, asset_cfg)
-    twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
-    uncommanded = (
-        None
-        if uncommanded_scale is None
-        else torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
-    )
-    parts = twist_ratio(
-        command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
-    )
-    extras = getattr(env, "extras", None)
-    if isinstance(extras, dict):
-        log = extras.setdefault("log", {})
-        log["Metrics/twist_ratio_speed"] = parts.speed.mean()
-        log["Metrics/twist_ratio_error"] = parts.error.mean()
-    return _bounded(parts, direction_penalty)
+            log["Metrics/twist_ratio_deviation"] = parts.deviation.mean()
+            log["Metrics/twist_ratio_backward"] = parts.backward.mean()
+        return twist_ratio_value(parts, progress_floor, deviation_scale, backward_penalty)

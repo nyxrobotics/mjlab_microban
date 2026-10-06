@@ -1,4 +1,4 @@
-"""Ratio-keeping twist velocity reward (microban_twist_ratio_mdp)."""
+"""Ratio-keeping twist velocity reward (microban_twist_ratio_mdp, form B4)."""
 
 from __future__ import annotations
 
@@ -11,29 +11,32 @@ import torch
 
 from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     TWIST_RATIO_AXIS_SCALE,
-    TWIST_RATIO_DIRECTION_PENALTY,
-    TWIST_RATIO_MIN_COMMAND_NORM,
+    TWIST_RATIO_DEVIATION_SCALE,
+    TWIST_RATIO_PROGRESS_FLOOR,
+    home_levelled_twist,
     twist_ratio,
     twist_ratio_reward,
-    twist_ratio_velocity_reward,
+    twist_ratio_velocity,
 )
 
 SCALE = torch.tensor(TWIST_RATIO_AXIS_SCALE)
-HOME_TRUNK_PITCH_RAD = math.radians(10.0)  # forward-lean HOME (any value works)
 G = (0.7, 0.3, 1.5)  # infeasible diagonal: forward, left, counter-clockwise
+HOME_TRUNK_PITCH_RAD = math.radians(10.0)  # forward-lean HOME (any value works)
 
 
-def parts(commands, twists):
+def parts(commands, twists, uncommanded=None):
     return twist_ratio(
         torch.tensor(commands, dtype=torch.float32),
         torch.tensor(twists, dtype=torch.float32),
+        uncommanded=None if uncommanded is None else torch.tensor(uncommanded, dtype=torch.float32),
     )
 
 
-def reward(commands, twists):
+def reward(commands, twists, uncommanded=None):
     return twist_ratio_reward(
         torch.tensor(commands, dtype=torch.float32),
         torch.tensor(twists, dtype=torch.float32),
+        uncommanded=None if uncommanded is None else torch.tensor(uncommanded, dtype=torch.float32),
     )
 
 
@@ -57,145 +60,130 @@ class DecompositionTest(unittest.TestCase):
         # Robot scale_velocity while translating: 0.7 m/s, 0.3 m/s, 1.5 rad/s.
         self.assertEqual(TWIST_RATIO_AXIS_SCALE, (0.7, 0.3, 1.5))
 
-    def test_kept_ratio_costs_nothing_and_earns_its_scale(self) -> None:
+    def test_kept_ratio_has_no_deviation_and_earns_its_scale(self) -> None:
         commands = [list(G), [-0.4, 0.2, -0.9], [0.3, -0.1, 0.0], [0.0, 0.25, -1.2]]
         for k in (0.0, 0.25, 0.5, 1.0):
             result = parts(commands, [scaled(c, k) for c in commands])
             self.assertTrue(torch.allclose(result.speed, torch.full((4,), k), atol=1e-5))
-            self.assertTrue(torch.allclose(result.error, torch.zeros(4), atol=1e-5))
-
-    def test_forward_only_on_a_diagonal_command_is_penalised(self) -> None:
-        c_hat, u, _ = unit_and_normal(G)
-        lean = [0.289, -0.017, 0.94]  # the lean final's answer to G under push
-        result = parts([list(G)], [lean])
-        v_hat = torch.tensor(lean) / SCALE
-        along = float(v_hat @ u)
-        self.assertAlmostEqual(float(result.speed[0]), along / float(c_hat.norm()), places=5)
-        perpendicular = math.sqrt(float(v_hat @ v_hat) - along**2)
-        self.assertAlmostEqual(float(result.error[0]), perpendicular, places=5)
-        self.assertGreater(float(result.error[0]), 0.45)
-        # The same along-command progress with the commanded ratio wins.
-        kept = scaled(G, float(result.speed[0]))
-        values = reward([list(G)] * 2, [lean, kept])
-        self.assertGreater(float(values[1]), float(values[0]) + 0.2)
+            self.assertTrue(torch.allclose(result.deviation, torch.zeros(4), atol=1e-5))
+            values = reward(commands, [scaled(c, k) for c in commands])
+            self.assertTrue(torch.allclose(values, torch.full((4,), 1.0 + k), atol=1e-5))
 
     def test_fast_motion_in_another_direction_earns_only_its_projection(self) -> None:
         c_hat, u, w = unit_and_normal(G)
         v_hat = 0.1 * u + math.sqrt(4.0 - 0.01) * w  # |v^| = 2, mostly perpendicular
         result = parts([list(G)], [(v_hat * SCALE).tolist()])
         self.assertAlmostEqual(float(result.speed[0]), 0.1 / float(c_hat.norm()), places=5)
-        self.assertAlmostEqual(float(result.error[0]), math.sqrt(4.0 - 0.01), places=4)
-        slow = parts([list(G)], [(0.2 * u * SCALE).tolist()])
-        self.assertGreater(float(slow.speed[0]), float(result.speed[0]))
-        self.assertAlmostEqual(float(slow.error[0]), 0.0, places=5)
+        self.assertAlmostEqual(float(result.deviation[0]), math.sqrt(4.0 - 0.01), places=4)
 
-    def test_overshoot_is_not_rewarded(self) -> None:
+    def test_bad_inputs(self) -> None:
+        with self.assertRaises(ValueError):
+            twist_ratio(torch.zeros(2, 2), torch.zeros(2, 2))
+        with self.assertRaises(ValueError):
+            twist_ratio(torch.zeros(2, 3), torch.zeros(2, 3), axis_scale=(0.7, 0.0, 1.5))
+        with self.assertRaises(ValueError):
+            twist_ratio(
+                torch.zeros(1, 3), torch.zeros(1, 3), uncommanded=torch.zeros(1, 3), uncommanded_scale=None
+            )
+        with self.assertRaises(ValueError):
+            twist_ratio_reward(torch.zeros(1, 3), torch.zeros(1, 3), progress_floor=1.0)
+
+
+class FormB4Test(unittest.TestCase):
+    def test_still_below_deviating_progress_below_exact_progress(self) -> None:
+        c_hat, u, w = unit_and_normal(G)
+        k = 0.3 * float(c_hat.norm())
+        still = [0.0, 0.0, 0.0]
+        deviating = ((k * u + 0.6 * w) * SCALE).tolist()  # same progress, far off the ray
+        exact = ((k * u) * SCALE).tolist()
+        values = reward([list(G)] * 3, [still, deviating, exact]).tolist()
+        self.assertAlmostEqual(values[0], 1.0, places=6)
+        self.assertGreater(values[1], 1.0 + TWIST_RATIO_PROGRESS_FLOOR * 0.3 - 1e-6)
+        self.assertLess(values[1], values[2])
+        self.assertAlmostEqual(values[2], 1.3, places=5)
+
+    def test_any_progress_however_deviated_beats_standing_still(self) -> None:
+        _c, u, w = unit_and_normal(G)
+        for deviation in (0.1, 0.5, 2.0, 10.0):
+            value = reward([list(G)], [((0.05 * u + deviation * w) * SCALE).tolist()])
+            self.assertGreater(float(value[0]), 1.0)
+
+    def test_sideways_equals_standing_and_opposite_is_worse(self) -> None:
+        for command in (G, (0.7, -0.3, -1.5), (-0.4, 0.25, 0.9), (0.3, 0.0, 0.0), (0.0, 0.0, -2.0)):
+            c_hat, u, w = unit_and_normal(command)
+            k = 0.5
+            values = reward(
+                [list(command)] * 3,
+                [[0.0, 0.0, 0.0], (k * w * SCALE).tolist(), (-k * u * SCALE).tolist()],
+            ).tolist()
+            self.assertAlmostEqual(values[0], 1.0, places=6)
+            self.assertAlmostEqual(values[1], 1.0, places=5)
+            self.assertAlmostEqual(values[2], 1.0 - k / float(c_hat.norm()), places=5)
+            self.assertLess(values[2], values[0])
+
+    def test_no_bonus_beyond_the_command(self) -> None:
         commands = [list(G), [0.3, 0.0, 0.0], [0.0, -0.2, 0.0]]
         exact = reward(commands, commands)
+        self.assertTrue(torch.allclose(exact, torch.full((3,), 2.0), atol=1e-5))
         for k in (1.2, 2.0):
-            over = parts(commands, [scaled(c, k) for c in commands])
-            self.assertTrue(torch.allclose(over.speed, torch.ones(3)))
-            self.assertTrue(
-                torch.allclose(over.error, (k - 1.0) * over.command_norm, atol=1e-5)
-            )
-            self.assertTrue(bool((reward(commands, [scaled(c, k) for c in commands]) < exact).all()))
+            over = reward(commands, [scaled(c, k) for c in commands])
+            self.assertTrue(bool((over < exact).all()))
+            self.assertTrue(bool((over > 1.0 + TWIST_RATIO_PROGRESS_FLOOR - 1e-6).all()))
 
-    def test_opposite_motion_earns_nothing_and_costs_at_least_perpendicular(self) -> None:
-        for command in (G, (0.7, -0.3, -1.5), (-0.4, 0.25, 0.9), (0.3, 0.0, 0.0), (0.0, 0.0, -2.0)):
-            _, u, w = unit_and_normal(command)
-            k = 0.5
-            rows = [(-k * u * SCALE).tolist(), (k * w * SCALE).tolist()]
-            result = parts([list(command)] * 2, rows)
-            self.assertEqual(float(result.speed[0]), 0.0)
-            self.assertAlmostEqual(float(result.speed[1]), 0.0, places=5)
-            self.assertAlmostEqual(float(result.error[0]), 2.0 * k, places=5)
-            self.assertAlmostEqual(float(result.error[1]), k, places=5)
-            self.assertGreaterEqual(float(result.error[0]), float(result.error[1]))
-            values = reward([list(command)] * 2, rows)
-            self.assertLess(float(values[0]), float(values[1]))
+    def test_turning_with_drift_and_bob_beats_standing_still(self) -> None:
+        # Turning right in place at the command with lateral drift, forward
+        # creep, vertical bob and roll/pitch rates.
+        command = [0.0, 0.0, -0.5]
+        values = reward(
+            [command] * 3,
+            [[0.0, 0.0, 0.0], [0.05, 0.08, -0.5], [0.05, 0.08, -0.25]],
+            [[0.0, 0.0, 0.0], [0.08, 0.4, 0.3], [0.08, 0.4, 0.3]],
+        ).tolist()
+        self.assertAlmostEqual(values[0], 1.0, places=6)
+        self.assertGreater(values[1], 1.0 + TWIST_RATIO_PROGRESS_FLOOR - 1e-6)
+        self.assertGreater(values[2], 1.0)
+        self.assertGreater(values[1], values[2])
 
-    def test_error_grows_and_speed_falls_with_the_angle_to_the_command(self) -> None:
-        for command in (G, (0.3, 0.0, 0.0), (-0.3, 0.2, 0.0)):
-            _, u, w = unit_and_normal(command)
-            rows = [
-                ((math.cos(a) * u + math.sin(a) * w) * 0.4 * SCALE).tolist()
-                for a in (i * math.pi / 24 for i in range(25))
-            ]
-            result = parts([list(command)] * len(rows), rows)
-            for previous, current in itertools.pairwise(result.error.tolist()):
-                self.assertGreaterEqual(current + 1e-6, previous)
-            for previous, current in itertools.pairwise(result.speed.tolist()):
-                self.assertLessEqual(current, previous + 1e-6)
-
-    def test_single_axis_commands_track_their_axis(self) -> None:
-        for command in ([0.5, 0.0, 0.0], [-0.3, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, -1.0]):
-            candidates = [
-                command,
-                scaled(command, 0.7),
-                scaled(command, 1.3),
-                [command[0] + 0.05, command[1] + 0.05, command[2]],
-                [command[0], command[1], command[2] + 0.3],
-            ]
-            values = reward([command] * len(candidates), candidates)
-            self.assertEqual(int(torch.argmax(values)), 0, command)
-            self.assertAlmostEqual(float(values[0]), 1.0, places=5)  # the best value
-
-    def test_standing_and_small_commands(self) -> None:
-        # Standing still earns the same speed 1 as exact tracking of a moving
-        # command; any motion lowers it on the scale of min_command_norm.
-        standing = parts(
-            [[0.0, 0.0, 0.0]] * 3,
-            [[0.0, 0.0, 0.0], [0.014, -0.006, 0.06], [0.07, -0.03, 0.3]],
-        )
-        self.assertAlmostEqual(float(standing.speed[0]), 1.0)
-        moved = math.sqrt(0.02**2 + 0.02**2 + 0.04**2)
-        self.assertAlmostEqual(
-            float(standing.speed[1]), 1.0 - moved / TWIST_RATIO_MIN_COMMAND_NORM, places=5
-        )
-        self.assertEqual(float(standing.speed[2]), 0.0)  # clamped at 0
-        self.assertAlmostEqual(float(standing.error[0]), 0.0)
-        self.assertAlmostEqual(float(standing.error[1]), moved, places=5)
-        self.assertAlmostEqual(float(standing.error[2]), math.sqrt(0.01 + 0.01 + 0.04), places=5)
-        # A small command (n = 0.1) tracked exactly earns speed 1, standing
-        # still on it 1 - n / min_command_norm = 0.5.
-        small = [0.07, 0.0, 0.0]
-        result = parts([small] * 2, [small, [0.0, 0.0, 0.0]])
-        self.assertAlmostEqual(float(result.speed[0]), 1.0, places=5)
-        self.assertAlmostEqual(float(result.speed[1]), 0.5, places=5)
-        self.assertAlmostEqual(float(result.error[0]), 0.0, places=6)
-
-    def test_every_command_has_the_same_best_value(self) -> None:
-        commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
-        values = twist_ratio_reward(torch.tensor(commands), torch.tensor(commands))
-        self.assertTrue(torch.allclose(values, torch.ones(len(commands)), atol=1e-5))
-
-    def test_the_speed_branches_meet_on_the_ray(self) -> None:
-        # n exactly at min_command_norm: both branches give s on the ray.
-        unit = torch.tensor([1.0, 1.0, 0.0]) / math.sqrt(2.0)
-        command = (unit * TWIST_RATIO_MIN_COMMAND_NORM * SCALE).tolist()
-        for k in (0.0, 0.3, 0.7, 1.0):
-            below = parts([[x * 0.999999 for x in command]], [scaled(command, k)])
-            above = parts([command], [scaled(command, k)])
-            self.assertAlmostEqual(float(below.speed[0]), k, places=4)
-            self.assertAlmostEqual(float(above.speed[0]), k, places=4)
-
-    def test_yaw_is_part_of_the_ratio(self) -> None:
-        command = [0.5, 0.0, 1.0]
-        result = parts([command] * 3, [[0.5, 0.0, 0.0], [0.25, 0.0, 0.5], [0.0, 0.0, 1.0]])
-        self.assertGreater(float(result.error[0]), 0.4)
-        self.assertAlmostEqual(float(result.error[1]), 0.0, places=5)
-        self.assertAlmostEqual(float(result.speed[1]), 0.5, places=5)
-        self.assertGreater(float(result.error[2]), 0.4)
-
-    def test_mirror_symmetry(self) -> None:
+    def test_left_right_mirror_symmetry(self) -> None:
         def mirror(t):
             return [t[0], -t[1], -t[2]]
 
-        commands = [list(G), [0.6, 0.3, 1.2], [-0.4, 0.25, 0.9], [0.0, 0.0, 0.0], [0.0, 0.2, 0.0]]
-        twists = [[0.289, -0.017, 0.94], [0.2, 0.05, 0.3], [-0.1, -0.2, 0.4], [0.05, 0.02, 0.1], [0.0, 0.1, -0.2]]
-        base = reward(commands, twists)
-        mirrored = reward([mirror(c) for c in commands], [mirror(t) for t in twists])
+        commands = [list(G), [0.6, 0.3, 1.2], [-0.4, 0.25, 0.9], [0.0, 0.0, 0.5], [0.0, 0.2, 0.0], [0.0, 0.0, 0.0]]
+        twists = [[0.289, -0.017, 0.94], [0.2, 0.05, 0.3], [-0.1, -0.2, 0.4], [0.05, 0.08, 0.5], [0.0, 0.1, -0.2], [0.02, 0.01, 0.1]]
+        unc = [[0.05, 0.3, -0.2], [0.0, 0.1, 0.1], [0.02, -0.4, 0.2], [0.08, 0.4, 0.3], [0.0, 0.0, 0.0], [0.01, 0.1, 0.0]]
+        base = reward(commands, twists, unc)
+        mirrored = reward(
+            [mirror(c) for c in commands],
+            [mirror(t) for t in twists],
+            [[u[0], -u[1], u[2]] for u in unc],  # roll rate flips, pitch rate does not
+        )
         self.assertTrue(torch.allclose(base, mirrored, atol=1e-6))
+
+    def test_every_command_has_the_same_best_value(self) -> None:
+        commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
+        values = reward(commands, commands)
+        self.assertTrue(torch.allclose(values, torch.full((len(commands),), 2.0), atol=1e-5))
+
+    def test_standing_and_small_commands(self) -> None:
+        # A standing command: still = 2, moving lowers it toward 1, never below.
+        values = reward(
+            [[0.0, 0.0, 0.0]] * 3,
+            [[0.0, 0.0, 0.0], [0.014, -0.006, 0.06], [0.7, -0.3, 1.5]],
+        ).tolist()
+        self.assertAlmostEqual(values[0], 2.0, places=6)
+        self.assertTrue(1.0 < values[1] < 2.0)
+        self.assertAlmostEqual(values[2], 1.0, places=6)
+        # A small command (n = 0.1) tracked exactly earns 2, still 1.5.
+        small = [0.07, 0.0, 0.0]
+        values = reward([small] * 2, [small, [0.0, 0.0, 0.0]]).tolist()
+        self.assertAlmostEqual(values[0], 2.0, places=5)
+        self.assertAlmostEqual(values[1], 1.5, places=5)
+
+    def test_toppling_along_the_command_earns_less_than_walking(self) -> None:
+        command = [[0.5, 0.0, 0.0]] * 2
+        twist = [[0.5, 0.0, 0.0]] * 2
+        values = reward(command, twist, [[-0.8, 0.0, 3.0], [0.0, 0.0, 0.0]]).tolist()
+        self.assertLess(values[0], values[1] - 0.5)
 
     def test_best_reachable_twist_keeps_the_ratio_at_the_largest_scale(self) -> None:
         # A robot that reaches |v_x| <= 0.3, |v_y| <= 0.08, |w_z| <= 1.0 can do
@@ -221,132 +209,18 @@ class DecompositionTest(unittest.TestCase):
         best = grid[int(torch.argmax(values))]
         self.assertTrue(torch.allclose(best, torch.tensor(command), atol=0.011), best)
 
-    def test_toppling_along_the_command_earns_less_than_standing(self) -> None:
-        command = torch.tensor([[0.5, 0.0, 0.0]] * 3)
-        twist = torch.tensor([[0.5, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.0]])
-        # Falling forward (v_z -0.8 m/s, pitching 3 rad/s), walking with a
-        # small bob and sway, standing still.
-        uncommanded = torch.tensor([[-0.8, 0.0, 3.0], [0.05, 0.2, 0.2], [0.0, 0.0, 0.0]])
-        values = twist_ratio_reward(command, twist, uncommanded=uncommanded)
-        self.assertLess(float(values[0]), float(values[2]))
-        self.assertAlmostEqual(float(values[2]), 0.5, places=6)  # still on a moving command
-        bob = math.sqrt((0.05 / 0.7) ** 2 + 2 * (0.2 / 1.5) ** 2)
-        self.assertAlmostEqual(float(values[1]), math.exp(-bob), places=5)
-        self.assertGreater(float(values[1]), 0.75)
-        # Without the uncommanded motion the fall would earn the full reward.
-        planar = twist_ratio_reward(command, twist)
-        self.assertAlmostEqual(float(planar[0]), 1.0, places=5)
-
-    def test_uncommanded_motion_is_off_direction_motion(self) -> None:
-        command = torch.tensor([list(G)])
-        twist = torch.tensor([scaled(G, 0.4)])
-        result = twist_ratio(command, twist, uncommanded=torch.tensor([[0.0, 0.0, 0.0]]))
-        self.assertAlmostEqual(float(result.error[0]), 0.0, places=5)
-        result = twist_ratio(command, twist, uncommanded=torch.tensor([[0.07, 0.0, -0.15]]))
-        self.assertAlmostEqual(float(result.error[0]), math.sqrt(0.01 + 0.01), places=5)
-        self.assertAlmostEqual(float(result.speed[0]), 0.4, places=5)
-        with self.assertRaises(ValueError):
-            twist_ratio(command, twist, uncommanded=torch.zeros(1, 3), uncommanded_scale=None)
-        with self.assertRaises(ValueError):
-            twist_ratio(command, twist, uncommanded=torch.zeros(1, 3), uncommanded_scale=(0.7, 1.5))
-
-    def test_reward_is_bounded_and_never_negative(self) -> None:
-        # Falling can never pay: every value is in [0, 1].  Standing still
-        # is worth 1 on a standing command and 1/2 on a moving one.
-        torch.manual_seed(0)
-        commands = torch.randn(4096, 3) * torch.tensor([0.5, 0.25, 1.2])
-        commands[:256] = 0.0
-        twists = torch.randn(4096, 3) * torch.tensor([1.0, 1.0, 3.0])
-        uncommanded = torch.randn(4096, 3) * torch.tensor([1.0, 3.0, 3.0])
-        values = twist_ratio_reward(commands, twists, uncommanded=uncommanded)
-        self.assertGreaterEqual(float(values.min()), 0.0)
-        self.assertLessEqual(float(values.max()), 1.0)
-        still = twist_ratio_reward(
-            torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], list(G)]), torch.zeros(3, 3)
-        )
-        for value, want in zip(still.tolist(), [1.0, 0.5, 0.5], strict=True):
-            self.assertAlmostEqual(value, want, places=6)
-        half = twist_ratio_reward(torch.tensor([list(G)]), torch.tensor([scaled(G, 0.3)]))
-        self.assertAlmostEqual(float(half[0]), 0.65, places=5)
-
-    def test_bad_inputs(self) -> None:
-        with self.assertRaises(ValueError):
-            twist_ratio(torch.zeros(2, 2), torch.zeros(2, 2))
-        with self.assertRaises(ValueError):
-            twist_ratio(torch.zeros(2, 3), torch.zeros(2, 3), axis_scale=(0.7, 0.0, 1.5))
-        with self.assertRaises(ValueError):
-            twist_ratio_reward(torch.zeros(1, 3), torch.zeros(1, 3), direction_penalty=0.0)
-
-
-class RewardTermTest(unittest.TestCase):
-    def test_env_term_reads_the_home_levelled_twist(self) -> None:
-        # Robot at HOME (trunk pitched forward by HOME_TRUNK_PITCH_RAD) heading
-        # +x: its world twist reads unchanged in the HOME-levelled frame.
-        half = 0.5 * HOME_TRUNK_PITCH_RAD
-        twist = torch.tensor([[0.289, -0.017, 0.94], [0.2, 0.0857, 0.4286]])
-        data = SimpleNamespace(
-            root_link_quat_w=torch.tensor([[math.cos(half), 0.0, math.sin(half), 0.0]] * 2),
-            root_link_lin_vel_w=torch.stack((twist[:, 0], twist[:, 1], torch.zeros(2)), dim=-1),
-            root_link_ang_vel_w=torch.stack((torch.zeros(2), torch.zeros(2), twist[:, 2]), dim=-1),
-            root_link_lin_vel_b=None,
-            root_link_ang_vel_b=None,
-        )
-        command = torch.tensor([list(G)] * 2)
-        env = SimpleNamespace(
-            scene={"robot": SimpleNamespace(data=data)},
-            command_manager=SimpleNamespace(get_command=lambda name: command),
-            extras={"log": {}},
-        )
-        value = twist_ratio_velocity_reward(env, trunk_pitch=HOME_TRUNK_PITCH_RAD)
-        expected = twist_ratio_reward(command, twist)
-        self.assertTrue(torch.allclose(value, expected, atol=1e-5))
-        self.assertGreater(float(value[1]), float(value[0]))
-        self.assertIn("Metrics/twist_ratio_speed", env.extras["log"])
-        self.assertEqual(TWIST_RATIO_DIRECTION_PENALTY, 1.0)
-
-    def test_untilted_frame_reads_the_body_twist(self) -> None:
-        data = SimpleNamespace(
-            root_link_lin_vel_b=torch.tensor([[0.2, 0.1, 0.05]]),
-            root_link_ang_vel_b=torch.tensor([[0.3, -0.2, 0.6]]),
-        )
-        command = torch.tensor([[0.4, 0.2, 1.2]])
-        env = SimpleNamespace(
-            scene={"robot": SimpleNamespace(data=data)},
-            command_manager=SimpleNamespace(get_command=lambda name: command),
-        )
-        # Half the command along its direction; the vertical velocity and the
-        # roll/pitch rates (0.05 m/s, 0.3 and -0.2 rad/s) are uncommanded.
-        value = twist_ratio_velocity_reward(env)
-        uncommanded = math.sqrt((0.05 / 0.7) ** 2 + (0.3 / 1.5) ** 2 + (0.2 / 1.5) ** 2)
-        self.assertAlmostEqual(float(value[0]), 0.75 * math.exp(-uncommanded), places=5)
-        planar = twist_ratio_velocity_reward(env, uncommanded_scale=None)
-        self.assertAlmostEqual(float(planar[0]), 0.75, places=5)
-
-    def test_matches_the_task_home_levelled_velocity(self) -> None:
-        # Same frame as mjlab_microban.tasks.mdp.home_levelled_root_*_vel_b
-        # (skipped where that helper does not exist).
-        try:
-            from mjlab_microban.tasks.mdp import (
-                home_levelled_root_ang_vel_b,
-                home_levelled_root_lin_vel_b,
-            )
-        except ImportError:
-            self.skipTest("no task home_levelled_root_*_vel_b helpers")
-        from mjlab_microban.tasks.microban_twist_ratio_mdp import home_levelled_twist
-
-        torch.manual_seed(0)
-        quat = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
-        data = SimpleNamespace(
-            root_link_quat_w=quat,
-            root_link_lin_vel_w=torch.randn(8, 3),
-            root_link_ang_vel_w=torch.randn(8, 3),
-        )
-        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
-        twist = home_levelled_twist(env, HOME_TRUNK_PITCH_RAD)
-        linear = home_levelled_root_lin_vel_b(env, HOME_TRUNK_PITCH_RAD)
-        angular = home_levelled_root_ang_vel_b(env, HOME_TRUNK_PITCH_RAD)
-        self.assertTrue(torch.equal(twist[:, :2], linear[:, :2]))
-        self.assertTrue(torch.equal(twist[:, 2], angular[:, 2]))
+    def test_deviation_gain_rises_sharply_near_agreement(self) -> None:
+        c_hat, u, w = unit_and_normal(G)
+        k = 0.5 * float(c_hat.norm())
+        values = [
+            float(reward([list(G)], [((k * u + d * w) * SCALE).tolist()])[0])
+            for d in (0.0, TWIST_RATIO_DEVIATION_SCALE, 3 * TWIST_RATIO_DEVIATION_SCALE)
+        ]
+        self.assertAlmostEqual(values[0], 1.5, places=5)
+        drop = 0.5 * (1 - TWIST_RATIO_PROGRESS_FLOOR) * (1 - math.exp(-1))
+        self.assertAlmostEqual(values[1], 1.5 - drop, places=5)
+        for previous, current in itertools.pairwise(values):
+            self.assertLess(current, previous)
 
 
 class _FilterEnv:
@@ -375,8 +249,6 @@ class _FilterEnv:
 class FilteredTermTest(unittest.TestCase):
     @staticmethod
     def make(env, tau=0.5):
-        from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
-
         term = twist_ratio_velocity(SimpleNamespace(params={}), env)
         return lambda: term(env, filter_time_constant=tau), term
 
@@ -384,8 +256,11 @@ class FilteredTermTest(unittest.TestCase):
         env = _FilterEnv([list(G), [0.3, 0.0, 0.0]])
         env.move([scaled(G, 0.4), [0.3, 0.0, 0.0]])
         call, _term = self.make(env)
-        expected = twist_ratio_reward(env.command, torch.tensor([scaled(G, 0.4), [0.3, 0.0, 0.0]]))
+        expected = twist_ratio_reward(
+            env.command, torch.tensor([scaled(G, 0.4), [0.3, 0.0, 0.0]]), uncommanded=torch.zeros(2, 3)
+        )
         self.assertTrue(torch.allclose(call(), expected, atol=1e-6))
+        self.assertIn("Metrics/twist_ratio_speed", env.extras["log"])
 
     def test_zero_time_constant_is_the_instantaneous_reward(self) -> None:
         env = _FilterEnv([list(G)] * 3)
@@ -394,13 +269,12 @@ class FilteredTermTest(unittest.TestCase):
         for _ in range(5):
             twist = (torch.randn(3, 3) * torch.tensor([0.3, 0.2, 1.0])).tolist()
             env.move(twist)
-            self.assertTrue(
-                torch.allclose(call(), twist_ratio_reward(env.command, torch.tensor(twist)), atol=1e-6)
-            )
+            expected = twist_ratio_reward(env.command, torch.tensor(twist), uncommanded=torch.zeros(3, 3))
+            self.assertTrue(torch.allclose(call(), expected, atol=1e-6))
 
     def test_stride_sway_averages_out(self) -> None:
-        # Walking forward at 0.2 m/s with +-0.15 m/s lateral sway at 1.6 Hz
-        # (the command's own direction) and +-0.1 m/s vertical bob at 3.2 Hz.
+        # Walking forward at 0.2 m/s with +-0.15 m/s lateral sway at 1.6 Hz and
+        # +-0.1 m/s vertical bob at 3.2 Hz.
         env = _FilterEnv([[0.2, 0.0, 0.0]] * 2)
         call, _term = self.make(env)
         instant, _ = self.make(env, tau=0.0)
@@ -414,10 +288,9 @@ class FilteredTermTest(unittest.TestCase):
             instant_values.append(instant())
         filtered = torch.stack(filtered_values[100:]).mean(dim=0)
         instant = torch.stack(instant_values[100:]).mean(dim=0)
-        # Walking with sway earns clearly more than standing still (1/2).
-        self.assertGreater(float(filtered[0]), 0.85)
-        self.assertGreater(float(filtered[0]), float(instant[0]) + 0.1)
-        self.assertAlmostEqual(float(filtered[1]), 0.5, places=5)
+        self.assertGreater(float(filtered[0]), 1.6)
+        self.assertGreater(float(filtered[0]), float(instant[0]) + 0.2)
+        self.assertAlmostEqual(float(filtered[1]), 1.0, places=5)  # standing on a moving command
 
     def test_sustained_drift_is_not_averaged_out(self) -> None:
         env = _FilterEnv([[0.2, 0.0, 0.0]])
@@ -425,9 +298,9 @@ class FilteredTermTest(unittest.TestCase):
         for _ in range(200):
             env.move([[0.2, 0.1, 0.0]])
             value = call()
-        expected = twist_ratio_reward(env.command, torch.tensor([[0.2, 0.1, 0.0]]))
+        expected = twist_ratio_reward(env.command, torch.tensor([[0.2, 0.1, 0.0]]), uncommanded=torch.zeros(1, 3))
         self.assertAlmostEqual(float(value[0]), float(expected[0]), places=4)
-        self.assertLess(float(value[0]), 0.75)
+        self.assertLess(float(value[0]), 1.6)
 
     def test_a_robot_that_follows_a_new_command_at_once_stays_on_target(self) -> None:
         env = _FilterEnv([[0.3, 0.0, 0.0]])
@@ -438,7 +311,7 @@ class FilteredTermTest(unittest.TestCase):
         env.command = torch.tensor([[0.0, 0.2, 0.0]])
         env.move([[0.0, 0.2, 0.0]])
         values = [float(call()[0]) for _ in range(100)]
-        self.assertGreater(min(values), 0.999)
+        self.assertGreater(min(values), 1.999)
 
     def test_reset_restarts_the_filters_of_those_envs_only(self) -> None:
         env = _FilterEnv([[0.3, 0.0, 0.0]] * 2)
@@ -449,8 +322,47 @@ class FilteredTermTest(unittest.TestCase):
         env.move([[0.0, 0.0, 0.0]] * 2)
         term.reset(env_ids=torch.tensor([1]))
         value = call()
-        self.assertAlmostEqual(float(value[1]), 0.5, places=5)  # restarted: standing now
-        self.assertGreater(float(value[0]), 0.9)  # filter still near the walk
+        self.assertAlmostEqual(float(value[1]), 1.0, places=5)  # restarted: standing now
+        self.assertGreater(float(value[0]), 1.9)  # filter still near the walk
+
+
+class FrameTest(unittest.TestCase):
+    def test_env_term_reads_the_home_levelled_twist(self) -> None:
+        half = 0.5 * HOME_TRUNK_PITCH_RAD
+        twist = torch.tensor([[0.289, -0.017, 0.94], [0.2, 0.0857, 0.4286]])
+        data = SimpleNamespace(
+            root_link_quat_w=torch.tensor([[math.cos(half), 0.0, math.sin(half), 0.0]] * 2),
+            root_link_lin_vel_w=torch.stack((twist[:, 0], twist[:, 1], torch.zeros(2)), dim=-1),
+            root_link_ang_vel_w=torch.stack((torch.zeros(2), torch.zeros(2), twist[:, 2]), dim=-1),
+        )
+        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
+        self.assertTrue(torch.allclose(home_levelled_twist(env, HOME_TRUNK_PITCH_RAD), twist, atol=1e-6))
+
+    def test_matches_the_task_home_levelled_velocity(self) -> None:
+        # Same frame as mjlab_microban.tasks.mdp.home_levelled_root_*_vel_b
+        # (skipped where that helper does not exist).
+        try:
+            from mjlab_microban.tasks.mdp import (
+                home_levelled_root_ang_vel_b,
+                home_levelled_root_lin_vel_b,
+            )
+        except ImportError:
+            self.skipTest("no task home_levelled_root_*_vel_b helpers")
+        torch.manual_seed(0)
+        quat = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
+        data = SimpleNamespace(
+            root_link_quat_w=quat,
+            root_link_lin_vel_w=torch.randn(8, 3),
+            root_link_ang_vel_w=torch.randn(8, 3),
+        )
+        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
+        twist = home_levelled_twist(env, HOME_TRUNK_PITCH_RAD)
+        self.assertTrue(
+            torch.equal(twist[:, :2], home_levelled_root_lin_vel_b(env, HOME_TRUNK_PITCH_RAD)[:, :2])
+        )
+        self.assertTrue(
+            torch.equal(twist[:, 2], home_levelled_root_ang_vel_b(env, HOME_TRUNK_PITCH_RAD)[:, 2])
+        )
 
 
 if __name__ == "__main__":

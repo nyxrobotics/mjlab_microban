@@ -96,23 +96,17 @@ register_mjlab_task(
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
-# VALIDATION EXPERIMENT ONLY: walking with the twist-ratio velocity reward
-# (bounded form B2; trw5B2_* train it).  Earlier forms are in this branch's
-# history.
+# VALIDATION EXPERIMENT ONLY: walking with the twist-ratio velocity reward.
 from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
     make_microban_velocity_twist_ratio_env_cfg,
 )
 
-# B2 = instantaneous bounded form (trw5B2_*); B3 = the filtered class term.
-for _task_id, _filtered in (
-    ("Mjlab-Velocity-TwistRatio-Microban", True),
-    ("Mjlab-Velocity-TwistRatioB2-Microban", False),
-    ("Mjlab-Velocity-TwistRatioB3-Microban", True),
-):
+# Form B4 (trw7B4_*); earlier forms are in this branch's history.
+for _task_id in ("Mjlab-Velocity-TwistRatio-Microban", "Mjlab-Velocity-TwistRatioB4-Microban"):
     register_mjlab_task(
         task_id=_task_id,
-        env_cfg=make_microban_velocity_twist_ratio_env_cfg(filtered=_filtered),
-        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True, filtered=_filtered),
+        env_cfg=make_microban_velocity_twist_ratio_env_cfg(),
+        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True),
         rl_cfg=MicrobanVelocityRlCfg,
         runner_cls=MicrobanVelocityOnPolicyRunner,
     )

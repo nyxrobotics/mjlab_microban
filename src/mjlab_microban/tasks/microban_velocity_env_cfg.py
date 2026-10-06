@@ -489,30 +489,23 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 # VALIDATION EXPERIMENT ONLY (branch exp/twist-ratio-validation, never
 # merged): the walking task with the ratio-keeping twist reward
-# (microban_twist_ratio_mdp, bounded form B2) in place of its two exp velocity
-# tracking terms (weight 2 each), everything else equal.  The reward is in
-# [0, 1], so weight 8 gives the same best value as the two exp terms (4) plus
-# the same again for speed.  Earlier forms (A, A2, kernel B with the old small-
-# command speed) are in the history of this branch (5a8bbf8, 68ab716, d587882).
-MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 8.0
+# (microban_twist_ratio_mdp.twist_ratio_velocity, form B4, time-filtered) in
+# place of its two exp velocity tracking terms (weight 2 each), everything else
+# equal.  B4 is 1 standing still on a moving command and 2 at exact tracking,
+# so weight 4 gives the same range as the B2/B3 runs (weight 8 on [0, 1]):
+# 4 for standing, 8 at best.  Earlier forms are in this branch's history
+# (A 5a8bbf8, A2 68ab716, B2 b8bf931, B3 cf91eec).
+MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
 
 
-def make_microban_velocity_twist_ratio_env_cfg(
-    play: bool = False, filtered: bool = True
-) -> ManagerBasedRlEnvCfg:
-    """filtered=True: the twist_ratio_velocity class term (B3, time-filtered);
-    False: the instantaneous function (B2, trw5B2_* runs)."""
-
-    from mjlab_microban.tasks.microban_twist_ratio_mdp import (
-        twist_ratio_velocity,
-        twist_ratio_velocity_reward,
-    )
+def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
     cfg = make_microban_velocity_env_cfg(play=play)
     del cfg.rewards["track_linear_velocity"]
     del cfg.rewards["track_angular_velocity"]
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=twist_ratio_velocity if filtered else twist_ratio_velocity_reward,
+        func=twist_ratio_velocity,
         weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
         params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
