@@ -496,9 +496,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 # 4 for standing, 8 at best.  Earlier forms are in this branch's history
 # (A 5a8bbf8, A2 68ab716, B2 b8bf931, B3 cf91eec).
 MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
+# Weight per form of microban_twist_ratio_mdp (same range: 4 standing still on
+# a moving command, 8 at best).
+MICROBAN_VELOCITY_TWIST_RATIO_WEIGHTS = {"B3": 8.0, "B4": MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT}
 
 
-def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microban_velocity_twist_ratio_env_cfg(
+    play: bool = False, form: str = "B4"
+) -> ManagerBasedRlEnvCfg:
     from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
     cfg = make_microban_velocity_env_cfg(play=play)
@@ -506,8 +511,8 @@ def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBas
     del cfg.rewards["track_angular_velocity"]
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
         func=twist_ratio_velocity,
-        weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
+        weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHTS[form],
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, "form": form},
     )
     return cfg
 

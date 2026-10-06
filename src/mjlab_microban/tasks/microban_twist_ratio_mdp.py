@@ -34,10 +34,22 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     part) and the uncommanded motion ``w^`` (vertical velocity, roll and pitch
     rates divided by 0.7 m/s, 1.5 rad/s, 1.5 rad/s).
 
-The reward (form B4) is::
+Two forms are kept, selected by ``form`` (both on the same filtered
+decomposition; the better one is the configured default):
+
+form ``"B3"``::
+
+    (1 + s) / 2 * exp(-direction_penalty * (e + max(0, -p)))
+
+    in [0, 1]: 1 at exact tracking of any command, 1/2 standing still on a
+    moving command, never negative;
+
+form ``"B4"``::
 
     1 + s * (floor + (1 - floor) * exp(-e / deviation_scale))
       - backward_penalty * max(0, -p) / max(n, min_command_norm)
+
+Properties of B4:
 
 * standing still on a moving command: 1; moving the commanded way: above 1
   however large the deviation (at least ``1 + floor * s``); exact tracking:
@@ -93,7 +105,10 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 # Scale of the uncommanded motion (v_z m/s, w_x rad/s, w_y rad/s).
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_MIN_COMMAND_NORM = 0.2
-TWIST_RATIO_PROGRESS_FLOOR = 0.4
+TWIST_RATIO_FORMS = ("B3", "B4")
+TWIST_RATIO_FORM = "B4"
+TWIST_RATIO_DIRECTION_PENALTY = 1.0  # form B3
+TWIST_RATIO_PROGRESS_FLOOR = 0.4  # form B4 (with the next two)
 TWIST_RATIO_DEVIATION_SCALE = 0.15
 TWIST_RATIO_BACKWARD_PENALTY = 1.0
 TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
@@ -169,7 +184,18 @@ def twist_ratio(
     return TwistRatio(norm, along, speed, deviation, backward)
 
 
-def twist_ratio_value(
+def twist_ratio_value_b3(
+    parts: TwistRatio, direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY
+) -> torch.Tensor:
+    """Form B3 of the module doc from a decomposition."""
+
+    if not direction_penalty > 0.0:
+        raise ValueError("direction_penalty must be positive")
+    error = parts.deviation + torch.clamp(-parts.along, min=0.0)
+    return 0.5 * (1.0 + parts.speed) * torch.exp(-direction_penalty * error)
+
+
+def twist_ratio_value_b4(
     parts: TwistRatio,
     progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
     deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
@@ -187,6 +213,23 @@ def twist_ratio_value(
     return 1.0 + parts.speed * gain - backward_penalty * parts.backward
 
 
+def twist_ratio_value(
+    parts: TwistRatio,
+    form: str = TWIST_RATIO_FORM,
+    direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
+    progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
+    deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
+    backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
+) -> torch.Tensor:
+    """The selected form (``"B3"`` or ``"B4"``) of the module doc."""
+
+    if form == "B3":
+        return twist_ratio_value_b3(parts, direction_penalty)
+    if form == "B4":
+        return twist_ratio_value_b4(parts, progress_floor, deviation_scale, backward_penalty)
+    raise ValueError(f"unknown twist-ratio form {form!r}; expected one of {TWIST_RATIO_FORMS}")
+
+
 def twist_ratio_reward(
     command: torch.Tensor,
     twist: torch.Tensor,
@@ -194,6 +237,8 @@ def twist_ratio_reward(
     min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+    form: str = TWIST_RATIO_FORM,
+    direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
     deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
     backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
@@ -203,7 +248,9 @@ def twist_ratio_reward(
     parts = twist_ratio(
         command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
     )
-    return twist_ratio_value(parts, progress_floor, deviation_scale, backward_penalty)
+    return twist_ratio_value(
+        parts, form, direction_penalty, progress_floor, deviation_scale, backward_penalty
+    )
 
 
 def home_levelled_velocities(
@@ -279,6 +326,8 @@ class twist_ratio_velocity:
         axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
         min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
         uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+        form: str = TWIST_RATIO_FORM,
+        direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
         progress_floor: float = TWIST_RATIO_PROGRESS_FLOOR,
         deviation_scale: float = TWIST_RATIO_DEVIATION_SCALE,
         backward_penalty: float = TWIST_RATIO_BACKWARD_PENALTY,
@@ -317,4 +366,6 @@ class twist_ratio_velocity:
             log["Metrics/twist_ratio_speed"] = parts.speed.mean()
             log["Metrics/twist_ratio_deviation"] = parts.deviation.mean()
             log["Metrics/twist_ratio_backward"] = parts.backward.mean()
-        return twist_ratio_value(parts, progress_floor, deviation_scale, backward_penalty)
+        return twist_ratio_value(
+            parts, form, direction_penalty, progress_floor, deviation_scale, backward_penalty
+        )

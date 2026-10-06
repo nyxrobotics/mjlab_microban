@@ -365,5 +365,59 @@ class FrameTest(unittest.TestCase):
         )
 
 
+# Outputs of the filtered term and the pure reward as implemented when each
+# form was trained (B3: commit cf91eec, run trw6B3_s42; B4: commit 6d12626,
+# run trw7B4_s42) on the motion of _golden_sequence(); both forms must keep
+# reproducing them.
+GOLDEN = {"B3": {"filtered": [[0.409094, 0.409808, 0.310659, 0.209858, 0.189795, 0.400346], [0.414879, 0.412083, 0.3203, 0.226528, 0.205094, 0.407476], [0.426553, 0.411424, 0.328397, 0.255392, 0.210388, 0.421391], [0.437867, 0.413884, 0.332636, 0.271767, 0.214798, 0.428114], [0.450201, 0.43436, 0.346801, 0.293713, 0.22407, 0.431423], [0.464829, 0.445849, 0.347669, 0.307413, 0.236955, 0.440628], [0.480302, 0.463376, 0.349086, 0.314652, 0.235362, 0.45546], [0.481048, 0.488019, 0.355664, 0.328646, 0.237605, 0.459444], [0.487112, 0.493575, 0.360248, 0.336748, 0.253155, 0.463668], [0.504501, 0.498174, 0.349412, 0.351894, 0.263591, 0.481011], [0.513295, 0.492951, 0.352668, 0.359312, 0.271202, 0.484424], [0.525134, 0.508077, 0.349495, 0.374088, 0.283431, 0.496396], [0.526055, 0.516091, 0.353248, 0.37106, 0.296744, 0.499247], [0.521316, 0.520437, 0.367538, 0.377166, 0.29885, 0.503702], [0.528091, 0.512986, 0.367977, 0.395646, 0.302201, 0.508423], [0.530555, 0.497766, 0.372659, 0.420832, 0.315032, 0.513992], [0.530141, 0.496352, 0.379028, 0.416282, 0.312875, 0.508678], [0.539496, 0.499422, 0.384963, 0.416878, 0.301732, 0.505896], [0.544256, 0.502471, 0.389662, 0.434988, 0.307331, 0.499558], [0.547209, 0.504597, 0.421379, 0.426965, 0.317845, 0.496567], [0.541887, 0.510119, 0.482781, 0.435466, 0.33557, 0.500246], [0.539302, 0.52427, 0.52092, 0.436758, 0.349043, 0.503263], [0.548332, 0.530792, 0.517786, 0.451848, 0.353522, 0.502574], [0.557892, 0.538203, 0.520398, 0.456602, 0.350496, 0.519453], [0.566944, 0.544126, 0.621399, 0.471635, 0.361342, 0.536725]], "instantaneous_last": [0.552736, 0.566233, 0.170201, 0.689134, 0.285068, 0.478691]}, "B4": {"filtered": [[1.19428, 1.075648, 1.0, 0.945063, -1.008726, 1.191514], [1.190758, 1.073193, 1.0, 0.971963, -0.871314, 1.18094], [1.197968, 1.074452, 1.0, 1.011947, -0.799282, 1.193815], [1.205727, 1.080481, 1.0, 1.025147, -0.768825, 1.197844], [1.214954, 1.09838, 1.0, 1.042296, -0.691917, 1.189901], [1.226888, 1.106671, 1.0, 1.053899, -0.506315, 1.202249], [1.239324, 1.125355, 1.0, 1.060833, -0.451801, 1.220989], [1.239057, 1.140952, 1.0, 1.070233, -0.462671, 1.218391], [1.241085, 1.1472, 1.0, 1.077334, -0.323998, 1.222943], [1.250624, 1.153993, 1.0, 1.084134, -0.29038, 1.23681], [1.256128, 1.149799, 1.0, 1.088659, -0.199329, 1.228073], [1.255057, 1.154694, 1.0, 1.092481, -0.114888, 1.229136], [1.246561, 1.157825, 1.0, 1.087359, -0.046606, 1.219858], [1.241664, 1.16056, 1.0, 1.086196, 0.027035, 1.213301], [1.232853, 1.150005, 1.0, 1.090887, 0.032559, 1.204237], [1.226689, 1.130772, 1.0, 1.101219, 0.103879, 1.19484], [1.222183, 1.124191, 1.0, 1.090745, 0.119252, 1.176281], [1.220447, 1.120381, 1.0, 1.085516, 0.021715, 1.171732], [1.216321, 1.122407, 1.0, 1.095588, 0.051911, 1.162167], [1.21481, 1.113695, 1.027858, 1.087839, 0.172729, 1.145597], [1.207441, 1.117623, 1.099573, 1.090637, 0.265082, 1.145987], [1.20349, 1.140086, 1.147798, 1.094927, 0.312635, 1.137435], [1.212201, 1.151638, 1.141722, 1.104576, 0.305425, 1.136915], [1.220676, 1.161286, 1.14571, 1.108287, 0.272002, 1.15196], [1.227483, 1.169196, 1.277626, 1.120129, 0.337355, 1.178206]], "instantaneous_last": [1.251265, 1.271224, 1.0, 1.38617, 1.0, 1.404418]}}
+
+
+def _golden_sequence():
+    gen = torch.Generator().manual_seed(7)
+    commands = torch.tensor(
+        [[0.7, 0.3, 1.5], [0.0, 0.0, -0.5], [0.0, 0.0, 0.0], [-0.4, 0.25, 0.9], [0.07, 0.0, 0.0], [0.3, -0.1, 0.0]]
+    )
+    steps = []
+    for k in range(25):
+        twist = commands * (0.4 + 0.4 * math.sin(0.3 * k)) + 0.15 * torch.randn(6, 3, generator=gen)
+        unc = 0.2 * torch.randn(6, 3, generator=gen)
+        steps.append((twist, unc))
+    return commands, steps
+
+
+class FormsTest(unittest.TestCase):
+    def test_each_form_reproduces_the_implementation_it_was_trained_with(self) -> None:
+        commands, steps = _golden_sequence()
+        for form in ("B3", "B4"):
+            env = _FilterEnv(commands.tolist())
+            term = twist_ratio_velocity(SimpleNamespace(params={}), env)
+            for (twist, unc), expected in zip(steps, GOLDEN[form]["filtered"], strict=True):
+                env.data.root_link_lin_vel_b = torch.stack((twist[:, 0], twist[:, 1], unc[:, 0]), -1)
+                env.data.root_link_ang_vel_b = torch.stack((unc[:, 1], unc[:, 2], twist[:, 2]), -1)
+                value = term(env, form=form)
+                self.assertTrue(torch.allclose(value, torch.tensor(expected), atol=2e-6), form)
+            last = twist_ratio_reward(commands, steps[-1][0], uncommanded=steps[-1][1], form=form)
+            self.assertTrue(
+                torch.allclose(last, torch.tensor(GOLDEN[form]["instantaneous_last"]), atol=2e-6), form
+            )
+
+    def test_b3_is_bounded_with_the_same_best_value_for_every_command(self) -> None:
+        commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
+        exact = twist_ratio_reward(torch.tensor(commands), torch.tensor(commands), form="B3")
+        self.assertTrue(torch.allclose(exact, torch.ones(len(commands)), atol=1e-5))
+        still = twist_ratio_reward(torch.tensor([list(G)]), torch.zeros(1, 3), form="B3")
+        self.assertAlmostEqual(float(still[0]), 0.5, places=6)
+        torch.manual_seed(0)
+        values = twist_ratio_reward(
+            torch.randn(2048, 3), torch.randn(2048, 3) * 2.0, uncommanded=torch.randn(2048, 3), form="B3"
+        )
+        self.assertGreaterEqual(float(values.min()), 0.0)
+        self.assertLessEqual(float(values.max()), 1.0)
+
+    def test_unknown_form_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            twist_ratio_reward(torch.zeros(1, 3), torch.zeros(1, 3), form="B5")
+
+
 if __name__ == "__main__":
     unittest.main()
