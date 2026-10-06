@@ -1,5 +1,9 @@
 """Provisional user-waiver gate for exactly one forward-lean v12 final checkpoint.
 
+TEMPORARY.  Delete this module, tests/test_teleop_v12_user_waiver.py and the
+lines tagged ``TEMPORARY user waiver`` in export_teleop_v12_deployment.py when
+the twist-ratio replacement model is installed on forward-lean-home.
+
 This is not a stage gate pass.  The user decided (2026-10-06) to install the
 forward-lean pose-release ``model_14999.pt`` of run
 ``2026-10-06_01-05-06_lean_v12_pr_10100_to15000`` on the robot's forward-lean
@@ -52,7 +56,6 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import ONNX_PARITY_TOLERAN
 from mjlab_microban.scripts.teleop_v12_onnx_gate import (
     ONNX_PARITY_RELATIVE_TOLERANCE,
     ONNX_PARITY_RULE,
-    ONNX_RUNTIME_CPU_PARITY_CHECK,
     parity_bound_ratio,
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
@@ -87,6 +90,8 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
 )
 
+ONNX_REFERENCE_PARITY_CHECK = "reference_evaluator_full83_parity"
+ONNX_RUNTIME_CPU_PARITY_CHECK = "onnxruntime_cpu_full83_parity"
 USER_WAIVER_REVISION = "provisional_user_waiver_lean_pr_model_14999_v1"
 USER_WAIVER_GATE_STATUS = "provisional_user_waiver"
 USER_WAIVER_TRACKING_PROFILE = (
@@ -610,9 +615,331 @@ def validate_user_waiver_gate(gate_path: Path, checkpoint: Path) -> dict[str, An
     return gate
 
 
+def record_onnx_evidence(
+    *, checkpoint: Path, expected_sha256: str, onnx_path: Path
+) -> dict[str, Any]:
+    """teleop_v12_onnx_gate.run_gate, recording (not raising on) a parity miss.
+
+    Same checkpoint load, neutral legacy parity (still raises), export and
+    64-sample full-83 corpus as the gate; the report adds the per-sample
+    evidence and has ``status == "fail"`` when a bound ratio exceeds 1.
+    """
+
+    import copy
+
+    import onnx
+    import onnxruntime as ort
+    import torch
+    from onnx.reference import ReferenceEvaluator
+    from tensordict import TensorDict
+
+    from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
+    from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
+        PRISTINE_PARITY_TOLERANCE,
+        _export_onnx_atomic,
+        _legacy_model,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_actor import (
+        LEGACY_TO_TELEOP_OBSERVATION_INDEX,
+        TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+        load_bootstrap_source_state,
+        validate_bootstrap_provenance,
+    )
+    from mjlab_microban.tasks.microban_teleop_v12_runner import (
+        TELEOP_V12_BOOTSTRAP_INFO_KEY,
+    )
+
+    checkpoint = checkpoint.expanduser().resolve()
+    if sha256_file(checkpoint) != expected_sha256:
+        raise ValueError("Checkpoint SHA-256 mismatch")
+    target, iteration, infos = _load_actor(checkpoint, device="cpu")
+    source = _legacy_model()
+    source.load_state_dict(
+        load_bootstrap_source_state(
+            validate_bootstrap_provenance(
+                infos.get(TELEOP_V12_BOOTSTRAP_INFO_KEY), verify_files=True
+            )
+        ),
+        strict=True,
+    )
+    source.eval()
+    generator = torch.Generator().manual_seed(20260925)
+    neutral = torch.randn(10_000, 83, generator=generator)
+    neutral[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS] = 0.0
+    legacy = neutral[:, [target_index for _, target_index in LEGACY_TO_TELEOP_OBSERVATION_INDEX]]
+    with torch.inference_mode():
+        expected_actions = copy.deepcopy(source).double()(
+            TensorDict({"actor": legacy.double()}, batch_size=[10_000])
+        )
+        actual_actions = copy.deepcopy(target).double()(
+            TensorDict({"actor": neutral.double()}, batch_size=[10_000])
+        )
+    neutral_max = float(torch.max(torch.abs(actual_actions - expected_actions)).item())
+    if neutral_max > PRISTINE_PARITY_TOLERANCE:
+        raise ValueError(f"Neutral legacy parity failed: {neutral_max}")
+    _export_onnx_atomic(target, onnx_path)
+    model = onnx.load(onnx_path)
+    onnx.checker.check_model(model, full_check=True)
+    reference = ReferenceEvaluator(model)
+    runtime = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    if runtime.get_providers() != ["CPUExecutionProvider"]:
+        raise RuntimeError("ONNX Runtime did not select CPUExecutionProvider only")
+    export_model = target.as_onnx(verbose=False).cpu().eval()
+    observations = torch.randn(64, 83, generator=generator)
+    per: dict[str, list[float]] = {
+        "reference_evaluator_absolute_errors": [],
+        "onnxruntime_cpu_absolute_errors": [],
+        "reference_evaluator_bound_ratios": [],
+        "onnxruntime_cpu_bound_ratios": [],
+        "maximum_absolute_expected_outputs": [],
+    }
+    with torch.inference_mode():
+        for observation in observations:
+            batch = observation.unsqueeze(0)
+            expected = export_model(batch).numpy()
+            (reference_actual,) = reference.run(None, {"obs": batch.numpy()})
+            (runtime_actual,) = runtime.run(None, {"obs": batch.numpy()})
+            for prefix, actual in (
+                ("reference_evaluator", reference_actual),
+                ("onnxruntime_cpu", runtime_actual),
+            ):
+                per[f"{prefix}_absolute_errors"].append(
+                    float(np.max(np.abs(actual - expected)))
+                )
+                per[f"{prefix}_bound_ratios"].append(
+                    parity_bound_ratio(actual, expected, atol=ONNX_PARITY_TOLERANCE)
+                )
+            per["maximum_absolute_expected_outputs"].append(
+                float(np.max(np.abs(expected)))
+            )
+    maxima = {name: max(values) for name, values in per.items()}
+    if not all(math.isfinite(value) for value in maxima.values()):
+        raise ValueError("ONNX parity evidence is non-finite")
+    failed = [
+        name
+        for name, ratio in (
+            (ONNX_REFERENCE_PARITY_CHECK, maxima["reference_evaluator_bound_ratios"]),
+            (ONNX_RUNTIME_CPU_PARITY_CHECK, maxima["onnxruntime_cpu_bound_ratios"]),
+        )
+        if ratio > 1.0
+    ]
+    return {
+        "schema_version": 1,
+        "gate": "microban_teleop_v12_checkpoint_onnx",
+        "status": "fail" if failed else "pass",
+        "checkpoint": {
+            "path": str(checkpoint),
+            "sha256": expected_sha256,
+            "iteration": iteration,
+            "completed_updates": iteration + 1,
+        },
+        "neutral_legacy_parity": {
+            "samples": 10_000,
+            "maximum_absolute_error": neutral_max,
+            "tolerance": PRISTINE_PARITY_TOLERANCE,
+            "teleop_only_columns": "exact_zero",
+        },
+        "onnx": {
+            "path": str(onnx_path.resolve()),
+            "sha256": sha256_file(onnx_path),
+            "opset": 18,
+            "input_shape": [1, 83],
+            "output_shape": [1, 18],
+            "reference_samples": 64,
+            "input_coverage": "deterministic_nonzero_all_83_columns",
+            "teleop_only_columns_nonzero": True,
+            "reference_evaluator_maximum_absolute_error": maxima[
+                "reference_evaluator_absolute_errors"
+            ],
+            "onnxruntime_cpu_maximum_absolute_error": maxima[
+                "onnxruntime_cpu_absolute_errors"
+            ],
+            "onnxruntime_version": ort.__version__,
+            "onnxruntime_providers": runtime.get_providers(),
+            "tolerance": ONNX_PARITY_TOLERANCE,
+            "relative_tolerance": ONNX_PARITY_RELATIVE_TOLERANCE,
+            "parity_rule": ONNX_PARITY_RULE,
+            "maximum_absolute_expected_output": maxima[
+                "maximum_absolute_expected_outputs"
+            ],
+            "reference_evaluator_maximum_bound_ratio": maxima[
+                "reference_evaluator_bound_ratios"
+            ],
+            "onnxruntime_cpu_maximum_bound_ratio": maxima[
+                "onnxruntime_cpu_bound_ratios"
+            ],
+            "per_sample": per,
+        },
+        "parity_failure_recording": True,
+        "failed_checks": failed,
+    }
+
+
+# --- packager hooks (export_teleop_v12_deployment, tagged TEMPORARY) --------
+
+
+def require_user_waiver_final_gate(
+    gate: Mapping[str, Any],
+    *,
+    checkpoint: Path,
+    checkpoint_sha256: str,
+    expected_tracking_profile: str | None,
+) -> None:
+    """The packager's final-gate identity check for the waiver gate."""
+
+    record = user_waiver_record()
+    expected = {
+        "schema_version": 2,
+        "gate": "microban_teleop_v12_stage",
+        "status": USER_WAIVER_GATE_STATUS,
+        "checkpoint_sha256": USER_WAIVER_CHECKPOINT_SHA256,
+        "iteration": USER_WAIVER_CHECKPOINT_ITERATION,
+        "completed_updates": USER_WAIVER_COMPLETED_UPDATES,
+        "canonical_boundary": True,
+        "checkpoint_kind": "canonical_boundary",
+        "tracking_profile": USER_WAIVER_TRACKING_PROFILE,
+        "user_waiver": record,
+        "user_waiver_sha256": canonical_json_sha256(record),
+    }
+    mismatches = [name for name, value in expected.items() if gate.get(name) != value]
+    if checkpoint_sha256 != USER_WAIVER_CHECKPOINT_SHA256:
+        mismatches.append("checkpoint")
+    if expected_tracking_profile not in (None, FINAL_COMPLETION_ALLOWANCE_PROFILE):
+        mismatches.append("expected_tracking_profile")
+    if checkpoint.name != USER_WAIVER_CHECKPOINT_FILENAME:
+        mismatches.append("checkpoint_filename")
+    if mismatches:
+        raise ValueError(
+            "Not the recorded provisional user-waiver gate; mismatched fields: "
+            + ", ".join(mismatches)
+        )
+
+
+def user_waiver_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, str]:
+    """``_onnx_parity_rule_metadata`` for the waiver: its two values exactly."""
+
+    expected = {
+        "parity_rule": ONNX_PARITY_RULE,
+        "relative_tolerance": ONNX_PARITY_RELATIVE_TOLERANCE,
+        "maximum_absolute_expected_output": USER_WAIVER_MAXIMUM_EXPECTED_OUTPUT,
+        "onnxruntime_cpu_maximum_bound_ratio": USER_WAIVER_ONNX_BOUND_RATIO,
+    }
+    reference_ratio = onnx_evidence.get("reference_evaluator_maximum_bound_ratio")
+    if (
+        any(onnx_evidence.get(name) != value for name, value in expected.items())
+        or isinstance(reference_ratio, bool)
+        or not isinstance(reference_ratio, (int, float))
+        or not 0.0 <= float(reference_ratio) <= 1.0
+    ):
+        raise ValueError("User-waiver ONNX parity evidence drifted")
+    return {
+        "v12_onnx_parity_rule": ONNX_PARITY_RULE,
+        "v12_onnx_parity_relative_tolerance": str(ONNX_PARITY_RELATIVE_TOLERANCE),
+        "v12_onnx_parity_max_abs_expected_output": str(
+            USER_WAIVER_MAXIMUM_EXPECTED_OUTPUT
+        ),
+        "v12_onnx_reference_max_bound_ratio": str(float(reference_ratio)),
+        "v12_onnxruntime_cpu_max_bound_ratio": str(USER_WAIVER_ONNX_BOUND_RATIO),
+    }
+
+
+def user_waiver_final_parity(
+    actor: Any, path: Path, *, tolerance: float
+) -> dict[str, float]:
+    """``_validate_final_parity`` exempting only the waived runtime sample.
+
+    The exempt sample may not exceed its recorded bound ratio; the reference
+    evaluator and every other sample keep the normal bound.
+    """
+
+    import onnx
+    import onnxruntime as ort
+    import torch
+    from onnx.reference import ReferenceEvaluator
+
+    generator = torch.Generator().manual_seed(20260925)
+    torch.randn(10_000, 83, generator=generator)
+    observations = torch.randn(64, 83, generator=generator)
+    reference = ReferenceEvaluator(onnx.load(path))
+    runtime = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    if runtime.get_providers() != ["CPUExecutionProvider"]:
+        raise RuntimeError("Deployment parity did not use CPUExecutionProvider only")
+    export_model = actor.as_onnx(verbose=False).cpu().eval()
+    reference_max = runtime_max = bound_ratio = waived_ratio = 0.0
+    with torch.inference_mode():
+        for index, observation in enumerate(observations):
+            batch = observation.unsqueeze(0)
+            expected = export_model(batch).detach().cpu().numpy()
+            (reference_actual,) = reference.run(None, {"obs": batch.numpy()})
+            (runtime_actual,) = runtime.run(None, {"obs": batch.numpy()})
+            reference_max = max(
+                reference_max, float(np.max(np.abs(reference_actual - expected)))
+            )
+            runtime_max = max(
+                runtime_max, float(np.max(np.abs(runtime_actual - expected)))
+            )
+            runtime_ratio = parity_bound_ratio(runtime_actual, expected, atol=tolerance)
+            if index == USER_WAIVER_ONNX_SAMPLE_INDEX:
+                waived_ratio, runtime_ratio = runtime_ratio, 0.0
+            bound_ratio = max(
+                bound_ratio,
+                parity_bound_ratio(reference_actual, expected, atol=tolerance),
+                runtime_ratio,
+            )
+    values = (reference_max, runtime_max, bound_ratio, waived_ratio)
+    if (
+        not all(math.isfinite(value) for value in values)
+        or bound_ratio > 1.0
+        or waived_ratio > USER_WAIVER_ONNX_BOUND_RATIO
+    ):
+        raise ValueError(f"User-waiver final ONNX parity failed: {values}")
+    return {
+        "reference_maximum_absolute_error": reference_max,
+        "onnxruntime_cpu_maximum_absolute_error": runtime_max,
+    }
+
+
+def user_waiver_package_metadata(
+    gate: Mapping[str, Any],
+    recorded_parity: Mapping[str, Any] | None,
+    *,
+    smoke_corpus_sha256: str,
+) -> dict[str, str]:
+    """The waiver's package metadata (exact record, recorded-corpus parity)."""
+
+    from mjlab_microban.scripts.export_teleop_v12_deployment import _json
+
+    record = user_waiver_record()
+    if (
+        gate.get("user_waiver") != record
+        or recorded_parity is None
+        or dict(recorded_parity) != gate.get("user_waiver_recorded_corpus_parity")
+        or recorded_parity.get("status") != "pass"
+        or recorded_parity.get("corpus_sha256") != smoke_corpus_sha256
+    ):
+        raise ValueError(
+            "Provisional user-waiver package needs the gate's exact record and a "
+            "matching passing recorded-corpus parity"
+        )
+    return {
+        "v12_provisional_install": "true",
+        "v12_user_waiver_revision": USER_WAIVER_REVISION,
+        "v12_user_waiver_json": _json(record),
+        "v12_user_waiver_sha256": canonical_json_sha256(record),
+        "v12_user_waiver_recorded_corpus_parity_json": _json(dict(recorded_parity)),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    record = subparsers.add_parser("record-onnx")
+    record.add_argument("checkpoint", type=Path)
+    record.add_argument("--onnx", type=Path, required=True)
+    record.add_argument("--output", type=Path, required=True)
+    record.add_argument("--force", action="store_true")
     create = subparsers.add_parser("create")
     create.add_argument("checkpoint", type=Path)
     create.add_argument("locomotion_report", type=Path)
@@ -628,6 +955,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "record-onnx":
+        if not args.force and (args.onnx.exists() or args.output.exists()):
+            raise FileExistsError("Output exists (pass --force)")
+        report = record_onnx_evidence(
+            checkpoint=args.checkpoint,
+            expected_sha256=USER_WAIVER_CHECKPOINT_SHA256,
+            onnx_path=args.onnx.expanduser().resolve(),
+        )
+        publish_json_atomic(args.output, report)
+        print(json.dumps(report, sort_keys=True), flush=True)
+        return 0
     if args.command == "create":
         if args.output.exists() and not args.force:
             raise FileExistsError("Gate exists (pass --force)")

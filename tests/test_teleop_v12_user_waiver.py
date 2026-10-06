@@ -1,4 +1,8 @@
-"""The provisional user waiver accepts exactly its three recorded exceptions."""
+"""The provisional user waiver accepts exactly its three recorded exceptions.
+
+TEMPORARY: delete with src/mjlab_microban/scripts/teleop_v12_user_waiver.py
+when the twist-ratio replacement model is installed.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,8 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
 from mjlab_microban.scripts.teleop_v12_onnx_gate import (
     ONNX_PARITY_RELATIVE_TOLERANCE,
     ONNX_PARITY_RULE,
+)
+from mjlab_microban.scripts.teleop_v12_user_waiver import (
     ONNX_REFERENCE_PARITY_CHECK,
     ONNX_RUNTIME_CPU_PARITY_CHECK,
 )
@@ -391,7 +397,7 @@ def _rule_evidence(**overrides: object) -> dict:
 
 
 def test_parity_rule_metadata_ships_only_the_waived_values() -> None:
-    metadata = deployment._onnx_parity_rule_metadata(_rule_evidence(), user_waiver=True)
+    metadata = waiver.user_waiver_parity_rule_metadata(_rule_evidence())
     assert metadata["v12_onnxruntime_cpu_max_bound_ratio"] == "1.0178567171096802"
     assert metadata["v12_onnx_parity_max_abs_expected_output"] == "219.99908447265625"
     with pytest.raises(ValueError):  # not without the waiver
@@ -403,9 +409,7 @@ def test_parity_rule_metadata_ships_only_the_waived_values() -> None:
         {"reference_evaluator_maximum_bound_ratio": 1.01},
     ):
         with pytest.raises(ValueError):
-            deployment._onnx_parity_rule_metadata(
-                _rule_evidence(**drift), user_waiver=True
-            )
+            waiver.user_waiver_parity_rule_metadata(_rule_evidence(**drift))
 
 
 def _recorded_parity(corpus_sha256: str) -> dict:
