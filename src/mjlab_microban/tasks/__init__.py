@@ -102,6 +102,19 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
 )
 
 # Form B4 (trw7B4_*); earlier forms are in this branch's history.
+from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
+    MICROBAN_VELOCITY_TWIST_RATIO_CANDIDATES,
+)
+
+for _name, _settings in MICROBAN_VELOCITY_TWIST_RATIO_CANDIDATES.items():
+    register_mjlab_task(
+        task_id=f"Mjlab-Velocity-TwistRatio{_name}-Microban",
+        env_cfg=make_microban_velocity_twist_ratio_env_cfg(**_settings),
+        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True, **_settings),
+        rl_cfg=MicrobanVelocityRlCfg,
+        runner_cls=MicrobanVelocityOnPolicyRunner,
+    )
+
 for _task_id in ("Mjlab-Velocity-TwistRatio-Microban", "Mjlab-Velocity-TwistRatioB4-Microban"):
     register_mjlab_task(
         task_id=_task_id,

@@ -502,8 +502,11 @@ MICROBAN_VELOCITY_TWIST_RATIO_WEIGHTS = {"B3": 8.0, "B4": MICROBAN_VELOCITY_TWIS
 
 
 def make_microban_velocity_twist_ratio_env_cfg(
-    play: bool = False, form: str = "B4"
+    play: bool = False, form: str = "B4", **settings
 ) -> ManagerBasedRlEnvCfg:
+    """``settings``: extra twist_ratio_velocity parameters (e.g. direction_penalty,
+    axis_scale) of the candidate being tried."""
+
     from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
     cfg = make_microban_velocity_env_cfg(play=play)
@@ -512,9 +515,20 @@ def make_microban_velocity_twist_ratio_env_cfg(
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
         func=twist_ratio_velocity,
         weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHTS[form],
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, "form": form},
+        params={
+            "command_name": "twist",
+            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+            "form": form,
+            **settings,
+        },
     )
     return cfg
+
+
+# Candidates for a smaller ratio angle (2026-10-07), all form B3 at weight 8.
+MICROBAN_VELOCITY_TWIST_RATIO_CANDIDATES = {
+    "C2": {"form": "B3", "direction_penalty": 2.0},
+}
 
 
 MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(

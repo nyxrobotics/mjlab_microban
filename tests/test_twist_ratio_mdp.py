@@ -414,6 +414,30 @@ class FormsTest(unittest.TestCase):
         self.assertGreaterEqual(float(values.min()), 0.0)
         self.assertLessEqual(float(values.max()), 1.0)
 
+    def test_b3_settings_change_the_formula_as_written(self) -> None:
+        # direction_penalty k: exp(-k * (e + max(0, -p))); axis_scale changes
+        # the normalization of both command and motion.
+        torch.manual_seed(3)
+        commands = torch.randn(64, 3) * torch.tensor([0.4, 0.2, 1.0])
+        twists = torch.randn(64, 3) * torch.tensor([0.3, 0.15, 0.8])
+        unc = torch.randn(64, 3) * 0.2
+        for k in (1.0, 1.5, 2.0):
+            for scale in ((0.7, 0.3, 1.5), (0.35, 0.2, 1.2)):
+                c = commands / torch.tensor(scale)
+                v = twists / torch.tensor(scale)
+                n = c.norm(dim=-1)
+                u = c / n.unsqueeze(-1)
+                p = (v * u).sum(-1)
+                a = torch.minimum(p.clamp(min=0.0), n)
+                s = torch.where(n >= 0.2, a / n, (1 - (v - c).norm(dim=-1) / 0.2).clamp(min=0.0))
+                w = unc / torch.tensor((0.7, 1.5, 1.5))
+                e = torch.cat((v - a.unsqueeze(-1) * u, w), -1).norm(dim=-1)
+                expected = 0.5 * (1 + s) * torch.exp(-k * (e + (-p).clamp(min=0.0)))
+                value = twist_ratio_reward(
+                    commands, twists, axis_scale=scale, uncommanded=unc, form="B3", direction_penalty=k
+                )
+                self.assertTrue(torch.allclose(value, expected, atol=1e-6), (k, scale))
+
     def test_unknown_form_is_refused(self) -> None:
         with self.assertRaises(ValueError):
             twist_ratio_reward(torch.zeros(1, 3), torch.zeros(1, 3), form="B5")
