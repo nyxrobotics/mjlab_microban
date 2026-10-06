@@ -37,12 +37,12 @@ WALK_REWARD_WEIGHTS = {
     "action_rate_l2": -0.1, "air_time": 3.0, "angular_momentum": -0.02, "body_ang_vel": -0.05,
     "dof_pos_limits": -1.0, "feet_distance": -1000.0, "foot_clearance": -2.0, "foot_slip": -1.0,
     "foot_swing_height": -0.25, "no_stepping": 0.0, "pose": 1.0, "self_collisions": -1.0,
-    "twist_ratio_velocity": 4.0, "upright": 1.0,
+    "twist_ratio_velocity": 8.0, "upright": 1.0,
 }
 PICO_ONLY_REWARD_WEIGHTS = {
     "action_rate_l2": -0.02, "dof_pos_limits": -10.0, "feet_distance": -100.0,
     "foot_target_tracking": 1.0, "hand_target_tracking": 0.0, "joint_soft_limit_guard": -5.0,
-    "twist_ratio_velocity": 16.0,
+    "twist_ratio_velocity": 32.0,
 }
 
 
@@ -102,6 +102,7 @@ class TwistRatioScaleTest(unittest.TestCase):
             self.assertEqual(tuple(term.params["axis_scale"]), TWIST_AXIS_SCALE)
             self.assertEqual(term.params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
             self.assertEqual(term.params["command_name"], "twist")
+            self.assertEqual(term.params["direction_penalty"], 1.0)
         self.assertEqual(PICO_TWIST_RATIO_WEIGHT, 4 * WALK_TWIST_RATIO_WEIGHT)
 
     def test_reward_tables(self) -> None:

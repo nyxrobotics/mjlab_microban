@@ -94,9 +94,12 @@ TWIST_AXIS_SCALE = tuple(
     max(abs(value) for value in WALK_COMMAND_RANGES_FINAL[axis])
     for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z")
 )
-# B4 is 1 standing still on a moving command and 2 at exact tracking: weight 4
-# spans 4..8 (exp/twist-ratio-validation, AB_result 2026-10-07).
-WALK_TWIST_RATIO_WEIGHT = 4.0
+# The twist-ratio term is in [0, 1] (1/2 standing still on a moving command,
+# 1 at exact tracking): weight 8 spans 4..8, the range of the two exp terms it
+# replaces (exp/twist-ratio-validation AB_result.md, recommendation of
+# 2026-10-07 01:15: the bounded time-filtered form, direction penalty 1).
+WALK_TWIST_RATIO_WEIGHT = 8.0
+WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
 # penalize standing still on a moving command.  (The command's rotation-env
@@ -220,8 +223,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
-    # Velocity: one twist-ratio term (microban_twist_ratio_mdp, form B4) in
-    # the HOME-levelled trunk frame, the axes scaled by the final command
+    # Velocity: one twist-ratio term (microban_twist_ratio_mdp) in the
+    # HOME-levelled trunk frame, the axes scaled by the final command
     # envelope.  It replaces mjlab's two exp tracking terms (weight 2 each).
     del cfg.rewards["track_linear_velocity"]
     del cfg.rewards["track_angular_velocity"]
@@ -232,6 +235,7 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "command_name": "twist",
             "trunk_pitch": HOME_TRUNK_PITCH_RAD,
             "axis_scale": TWIST_AXIS_SCALE,
+            "direction_penalty": WALK_TWIST_RATIO_DIRECTION_PENALTY,
         },
     )
 

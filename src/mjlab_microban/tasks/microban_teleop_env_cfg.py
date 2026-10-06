@@ -60,10 +60,10 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
 )
 
 
-# The twist-ratio velocity term inherited from walking (form B4, weight 4
-# there) at four times walking's weight, the ratio the replaced PICO velocity
-# terms had to walking's.
-PICO_TWIST_RATIO_WEIGHT = 16.0
+# The twist-ratio velocity term inherited from walking (weight 8 there) at four
+# times walking's weight, the ratio the replaced PICO velocity terms had to
+# walking's (16 from standing still to exact tracking).
+PICO_TWIST_RATIO_WEIGHT = 32.0
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
 MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
