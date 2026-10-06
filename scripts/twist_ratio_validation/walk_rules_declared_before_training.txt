@@ -27,3 +27,10 @@
 # 報告: シードごとに、W1-W5 をすべて満たすチェックポイント、最初に満たした回数、W1-W3 の推移。
 #   「望んだ動き」= W1-W3 を満たし、W4-W5 も保たれていること。
 2026-10-06 10:44:59 start trw_s42 and trw_s43 (Mjlab-Velocity-TwistRatio-Microban, 4096 envs, 20000 its, cwd /tmp/claude-1000/-home-rtx-server-Git-projects-microban/d1f0f65a-ee88-4c31-b554-95f79532c226/scratchpad/twist_ratio/wt)
+2026-10-06 10:49:56 baseline (current lean walker cont2 model_29000, same held-out probe): it 29000: FAIL [W1=NG W2=ok W3=ok W4=ok W5=ok] angle none 48/p30 50 deg; speed none 0.40/p30 0.36; falls none 0/90 p30 1/90 single 0; F +0.164 BK +0.134 LL +0.063 LR +0.060 YL +0.45 YR +0.52
+# 修正（2026-10-06 10:58、最初の途中確認より前）: trw_s42/trw_s43 を約 220 回で止めた。
+#   理由: 新しい報酬が、指令の向きに倒れていくロボットにも速さの報酬を払っていた（上下速度と横転・前転の角速度を見ていなかった）。
+#   証拠: 150 回目の平均エピソード長 52-61 ステップ（旧報酬の前回学習は同じ回数で 198）、Metrics/twist_ratio_speed 0.48-0.60（まだ歩けないのに高い）。
+#   対策: 指令にない動き（上下速度 /0.7 m/s、横転・前転の角速度 /1.5 rad/s）を、指令方向でない動きとして誤差のノルムに含める
+#   （置き換え前の exp の追従項も上下速度と横転・前転の角速度を減点していた）。重み・その他・基準 W1-W5 は変更なし。
+#   新しい学習: trw2_s42, trw2_s43（同じ設定、最大 20000 回、1000 回ごとに途中確認）。止めた 2 本は DO_NOT_USE.txt。
