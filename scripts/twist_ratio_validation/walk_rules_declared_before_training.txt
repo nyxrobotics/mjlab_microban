@@ -41,3 +41,5 @@
 #   形の比較（各 1 本, 学習シード 42, 4096 envs, 約 400 回）: A = 1 + speed - error（重み 4）, B = (1 + speed)/2 * exp(-error)（重み 8）。
 #   どちらも「速さは指令方向の成分だけ・それた分と反対向きは減点」は同じ。400 回時点の平均エピソード長が旧報酬（約 190）に近い方を採用し、
 #   その形でシード 42/43 の 20000 回本番（trw3_*）を始める。基準 W1-W5 は変更なし。
+2026-10-06 11:09:16 start trw3A_s42 and trw3B_s42 (A/B of the reward form)
+2026-10-06 11:29:08 A/B at 400: A mean episode length 183.11, B 208.55 (old reward 221.19); both >= 166 -> A adopted (coordinator's rule). trw3B_s42 stopped; trw3A_s42 continues as the seed-42 run; started trw3A_s43

@@ -30,10 +30,17 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     perpendicular motion costs k and opposite motion 2k; the error grows
     monotonically with the angle to the command.
 
-The reward is ``speed - direction_penalty * error``.  For a zero command
-(standing) ``speed = 0`` and ``error = sqrt(|v^|^2 + |w^|^2)``.  Its maximum
-over the twists a robot can reach lies on the commanded ray: ``s * c`` with the
-largest feasible ``s`` (exact tracking when the command is feasible).
+The reward is ``base + speed - direction_penalty * error`` (``base`` 1 by
+default): 1 for standing still on a standing command, 2 at exact tracking of a
+moving command, and below 1 for anything off the command.  ``base`` keeps a
+positive reward for staying upright and still, as the exp tracking kernels this
+term replaces did; without it (``base = 0``) a walker trained from scratch
+barely learned to stay up (mean episode length 45 steps at update 200 against
+about 190 for the old reward; with ``base = 1`` 183 at update 400).  For a
+zero command (standing) ``speed = 0`` and ``error = sqrt(|v^|^2 + |w^|^2)``.
+Its maximum over the twists a robot can reach lies on the commanded ray:
+``s * c`` with the largest feasible ``s`` (exact tracking when the command is
+feasible).
 ``min_command_norm`` keeps very small commands from carrying the full speed
 reward (the speed fraction of a command smaller than it is at most
 ``n / min_command_norm``).  The uncommanded motion keeps a robot that topples
@@ -65,6 +72,7 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_MIN_COMMAND_NORM = 0.2
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
+TWIST_RATIO_BASE = 1.0
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -136,15 +144,16 @@ def twist_ratio_reward(
     direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+    base: float = TWIST_RATIO_BASE,
 ) -> torch.Tensor:
-    """``speed - direction_penalty * error`` per env (pure tensor form)."""
+    """``base + speed - direction_penalty * error`` per env (pure tensor form)."""
 
     if not direction_penalty > 0.0:
         raise ValueError("direction_penalty must be positive")
     parts = twist_ratio(
         command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
     )
-    return parts.speed - direction_penalty * parts.error
+    return base + parts.speed - direction_penalty * parts.error
 
 
 def home_levelled_velocities(
@@ -195,6 +204,7 @@ def twist_ratio_velocity_reward(
     min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
     direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+    base: float = TWIST_RATIO_BASE,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward term: the ratio-keeping velocity reward of the module doc."""
@@ -215,4 +225,4 @@ def twist_ratio_velocity_reward(
         log = extras.setdefault("log", {})
         log["Metrics/twist_ratio_speed"] = parts.speed.mean()
         log["Metrics/twist_ratio_error"] = parts.error.mean()
-    return parts.speed - direction_penalty * parts.error
+    return base + parts.speed - direction_penalty * parts.error

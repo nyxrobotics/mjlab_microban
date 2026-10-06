@@ -493,14 +493,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
 
 
-def twist_ratio_offset_reward(env, command_name: str = "twist", trunk_pitch: float = 0.0):
-    """Variant A: 1 + speed - error (the linear form with a constant alive part)."""
-
-    from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity_reward
-
-    return 1.0 + twist_ratio_velocity_reward(env, command_name, trunk_pitch)
-
-
 def twist_ratio_kernel_reward(env, command_name: str = "twist", trunk_pitch: float = 0.0):
     """Variant B: (1 + speed) / 2 * exp(-error), bounded in [0, 1]."""
 
@@ -531,10 +523,12 @@ def make_microban_velocity_twist_ratio_env_cfg(
         twist_ratio_velocity_reward,
     )
 
-    func, weight = {
-        "linear": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
-        "offset": (twist_ratio_offset_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
-        "kernel": (twist_ratio_kernel_reward, 2.0 * MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT),
+    # "offset" (variant A, adopted) is the module's reward (base 1);
+    # "linear" is the first form (base 0); "kernel" is variant B.
+    func, weight, extra = {
+        "linear": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {"base": 0.0}),
+        "offset": (twist_ratio_velocity_reward, MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {}),
+        "kernel": (twist_ratio_kernel_reward, 2.0 * MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT, {}),
     }[variant]
     cfg = make_microban_velocity_env_cfg(play=play)
     del cfg.rewards["track_linear_velocity"]
@@ -542,7 +536,7 @@ def make_microban_velocity_twist_ratio_env_cfg(
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
         func=func,
         weight=weight,
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, **extra},
     )
     return cfg
 

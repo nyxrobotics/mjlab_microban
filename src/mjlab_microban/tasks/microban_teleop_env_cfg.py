@@ -680,7 +680,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
         func=twist_ratio_velocity_reward,
         weight=16.0,
-        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
+        # The stopped 7099 validation run trained the first form (base 0).
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD, "base": 0.0},
     )
 
     # V2 converged to a wide static stance because the inherited term penalized
