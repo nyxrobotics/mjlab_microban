@@ -27,7 +27,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
 from mjlab.envs.mdp.observations import last_action
 from mjlab.utils.os import dump_yaml
 
@@ -36,10 +35,6 @@ from home_cases import CENTERED_HOME_TAG, PUBLISHED_CONTRACT_STRINGS, home_tag  
 
 from mjlab_microban.robot.home_contracts import GETUP_LEGACY_STAMP, contract_strings
 from mjlab_microban.robot.microban_constants import HOME_FRAME
-from mjlab_microban.scripts.export_getup_onnx import (
-    CONTRACT_VERSION,
-    _full_precision_csv,
-)
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 from mjlab_microban.tasks.microban_getup_runner import (
     GETUP_ANGULAR_VELOCITY_FRAME,
@@ -103,7 +98,6 @@ class GetupExportContractTest(unittest.TestCase):
     def test_version(self) -> None:
         expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), contract_strings())
         self.assertEqual(GETUP_CONTRACT_VERSION, expected["getup_contract_version"])
-        self.assertEqual(CONTRACT_VERSION, GETUP_CONTRACT_VERSION)
         # Only the centered HOME accepts the v4-stamped v5 runs of 2026-10-03.
         self.assertEqual(GETUP_LEGACY_STAMP, "v4" if home_tag() == CENTERED_HOME_TAG else None)
 
@@ -168,11 +162,6 @@ class GetupExportContractTest(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     require_getup_checkpoint_contract(ok, infos, require_recorded_env=True)
-
-    def test_clip_metadata_is_exactly_pi(self) -> None:
-        text = _full_precision_csv(np.full(18, math.pi))
-        values = [float(value) for value in text.split(",")]
-        self.assertEqual(values, [math.pi] * 18)
 
 
 if __name__ == "__main__":

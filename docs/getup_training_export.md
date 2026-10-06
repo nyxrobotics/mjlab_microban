@@ -99,7 +99,7 @@ training, then export it with both paths explicit (replace `<new-run>` and
 ```bash
 uv run --locked python -m mjlab_microban.scripts.export_getup_onnx \
   --checkpoint logs/rsl_rl/mjlab_microban_getup/<new-run>/model_<N>.pt \
-  --output artifacts/getup_v5.onnx
+  --output artifacts/getup.onnx --gate-report <release>/getup_gate.json
 ```
 
 The exporter refuses an existing output unless `--replace` is passed. It loads
@@ -116,12 +116,10 @@ observation normalizer, and finite raw actions at upright, inverted and
 sideways initial orientations (non-finite output is the robot runtime's only
 actor fault).
 
-The resulting file contains the v5 markers (`microban_getup_contract=v5`,
-`microban_getup_previous_action_semantics=raw_policy_output`), the stamp the
-checkpoint carried (`microban_getup_checkpoint_contract_stamp`), the HOME
-pose as JSON, a checkpoint SHA-256, joint order, default pose, and the
-absolute action clip (`action_clip_lower`/`action_clip_upper`, exactly
--π/+π written at full precision). Its metadata is for the
+The resulting file carries the robot's contract microban-policy-1
+(docs/policies.md): the HOME stamp, the layout, the checkpoint and its passed
+gate (`--gate-report`, the pipeline's judgment) and the startup self-test rows
+of a seeded rollout in the play env.  Its metadata is for the
 robot runtime to verify before enabling automatic recovery. Training and
 export alone do not prove that the learned maneuver stands the physical robot
 up; inspect the new policy in simulation before copying it to the robot.

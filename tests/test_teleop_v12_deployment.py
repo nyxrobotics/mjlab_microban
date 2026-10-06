@@ -13,7 +13,7 @@ from home_cases import CENTERED_HOME_TAG, FORWARD_LEAN_HOME_TAG, home_tag  # noq
 
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
 from mjlab_microban.policy_contract import POLICY_CONTRACT
-from mjlab_microban.robot.microban_constants import SERVO_KP_POLICY
+from mjlab_microban.robot.microban_hand_fk import microban_hand_fk_metadata
 from mjlab_microban.schedules import (
     PICO_MIN_FINAL_UPDATES,
     PICO_TOTAL_UPDATES,
@@ -47,11 +47,6 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     BILATERAL_SITE_ORDER_INFO_KEY,
     require_bilateral_site_order,
-)
-from mjlab_microban.teleop_v12_safety import (
-    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG,
-    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
-    COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD,
 )
 
 # Synthetic identities: the velocity source is chosen per chain.
@@ -234,13 +229,14 @@ def test_final_gate_profile_is_the_one_final_profile(tmp_path: Path) -> None:
             )
 
 
-def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> None:
+def test_metadata_is_the_pico_contract_and_derives_guard(tmp_path: Path) -> None:
     checkpoint = tmp_path / FINAL_NAME
     checkpoint.write_bytes(b"checkpoint")
     gate_path = tmp_path / "gate.json"
     gate_path.write_text("{}", encoding="utf-8")
-    gate, locomotion, tracking, onnx_report, infos = _evidence(tmp_path)
+    gate, _locomotion, tracking, _onnx_report, infos = _evidence(tmp_path)
     gate["checkpoint_sha256"] = _sha(checkpoint)
+    rows = deployment._self_test_rows(tracking)
     metadata = deployment.build_v12_deployment_metadata(
         checkpoint=checkpoint,
         checkpoint_sha256=_sha(checkpoint),
@@ -248,80 +244,37 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         gate=gate,
         infos=infos,
         bootstrap=_bootstrap(),
-        locomotion=locomotion,
         tracking=tracking,
-        onnx_report=onnx_report,
-        packager_parity={
-            "reference_maximum_absolute_error": 1.0e-6,
-            "onnxruntime_cpu_maximum_absolute_error": 2.0e-6,
-        },
+        self_test_observations=rows,
+        self_test_actions=[[0.5] * 18 for _ in rows],
+        dry_run=False,
     )
-    assert not deployment.REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
-    assert json.loads(metadata["runtime_raw_action_guard_absmax_json"]) == [24.0] * 18
-    assert metadata["v12_stage_gate_sha256"] == _sha(gate_path)
-    assert metadata["deployment_accepted"] == "true"
-    assert metadata["v12_bilateral_site_order_revision"] == (
-        MICROBAN_BILATERAL_SITE_ORDER_REVISION
-    )
-    # The contract keys; no robot source hashes any more.
-    assert metadata["policy_contract"] == POLICY_CONTRACT
-    assert metadata["servo_kp"] == str(SERVO_KP_POLICY)
-    assert json.loads(metadata["pico_schedule_json"]) == pico_schedule_record()
-    assert metadata["checkpoint_iteration"] == str(PICO_TOTAL_UPDATES - 1)
-    assert metadata["checkpoint_completed_updates"] == str(PICO_TOTAL_UPDATES)
-    assert not [key for key in metadata if key.startswith("microban_") and key.endswith("_sha256")]
-    assert "v12_lr_order_migration_revision" not in metadata
-    assert metadata["v12_actual_dynamic_soft_limit_overshoot_max_deg"] == str(
-        ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_DEG
-    )
-    assert metadata["v12_actual_dynamic_soft_limit_overshoot_max_rad"] == str(
-        ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-    )
-    assert metadata["v12_commanded_target_soft_limit_excess_max_rad"] == str(
-        COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD
-    )
-    assert metadata["hand_target_lower"] == [-0.08] * 6
-    assert metadata["hand_target_upper"] == [0.08] * 6
-    hand_target_fk = json.loads(metadata["hand_target_fk"])
-    assert hand_target_fk["joint_upper_deg"] == [
-        [25.0, 30.0, -10.0],
-        [25.0, -10.0, -10.0],
-    ]
-    from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
-    from mjlab_microban.robot.microban_hand_fk import MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M
+    from test_policy_contract import ROBOT_COMMON_KEYS, ROBOT_PICO_KEYS
 
-    # The published HOMEs' boxes (hand FK v2 at the centered HOME, the levelled
-    # receiver box of hand FK v4 at the forward-lean HOME); another HOME's own.
-    assert hand_target_fk["normalizer_abs_bound_m"] == {
-        CENTERED_HOME_TAG: [0.063, 0.0388, 0.0605],
-        FORWARD_LEAN_HOME_TAG: [0.064, 0.0388, 0.0458],
-    }.get(home_tag(), list(MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M))
-    if HOME_TRUNK_PITCH_RAD != 0.0:
-        levelled = "robot_home_levelled_trunk_xyz_forward_left_up"
-        assert hand_target_fk["target_frame"] == levelled
-        assert metadata["foot_target_frame"] == levelled
-        assert metadata["hand_target_frame"] == levelled
-    assert metadata["action_clip_semantics"] == (
-        "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
-        "all_body_joints_radians"
+    assert set(metadata) == ROBOT_COMMON_KEYS | ROBOT_PICO_KEYS | {"run_path"}
+    assert all(isinstance(value, str) for value in metadata.values())
+    assert metadata["microban_policy_contract"] == POLICY_CONTRACT
+    assert metadata["microban_policy_kind"] == "pico"
+    assert metadata["gate_report_sha256"] == _sha(gate_path)
+    assert metadata["checkpoint_iteration"] == str(PICO_TOTAL_UPDATES - 1)
+    assert metadata["previous_action_semantics"] == "raw_policy_output"
+    assert json.loads(metadata["pico_raw_action_guard_json"]) == [24.0] * 18
+    assert json.loads(metadata["pico_curriculum_json"]) == pico_schedule_record()
+    assert metadata["pico_walk_checkpoint_sha256"] == LEGACY_VELOCITY_CHECKPOINT_SHA256
+    assert json.loads(metadata["pico_hand_target_lower_json"]) == [-0.08] * 6
+    assert json.loads(metadata["pico_hand_target_fk_json"]) == json.loads(
+        json.dumps(microban_hand_fk_metadata())
     )
-    assert metadata["action_target_semantics"] == (
-        "default_joint_pos_plus_raw_action_times_scale_saturated_at_action_clip"
-    )
-    assert metadata["runtime_action_semantics"] == (
-        "raw_default_plus_scale_then_servo_goal_range_saturation_v3"
-    )
-    # Written at full precision: a 3-decimal "3.142" would be wider than the
-    # servo goal range the robot enforces.
-    for key, sign in (("action_clip_lower", -1.0), ("action_clip_upper", 1.0)):
-        assert isinstance(metadata[key], str)
-        assert deployment._wire_metadata_value(metadata[key]) == metadata[key]
-        assert [float(value) for value in metadata[key].split(",")] == [
-            sign * math.pi
-        ] * 18
-    assert metadata["physical_motor_target_guard_semantics"] == (
-        "finite_target_then_servo_goal_range_saturation_pi_v3"
-    )
+    assert json.loads(metadata["self_test_observations_json"]) == rows
+    assert metadata["joint_names"].split(",")[:3] == ["head", "neck_roll", "neck_pitch"]
+    defaults = [float(value) for value in metadata["default_joint_pos"].split(",")]
+    assert len(defaults) == 21
+    if home_tag() == CENTERED_HOME_TAG:
+        assert metadata["pico_target_frame"] == "robot_trunk_xyz_forward_left_up"
+    elif home_tag() == FORWARD_LEAN_HOME_TAG:
+        assert metadata["pico_target_frame"] == "robot_home_levelled_trunk_xyz_forward_left_up"
+    for key in ("action_clip_lower", "action_clip_upper"):
+        assert [abs(float(value)) for value in metadata[key].split(",")] == [math.pi] * 18
 
 
 def test_deployment_requires_the_corrected_bilateral_site_order() -> None:
@@ -406,6 +359,7 @@ def test_a_failed_final_check_preserves_last_known_good_output(
         }
 
     monkeypatch.setattr(deployment, "_validate_final_parity", parity)
+    monkeypatch.setattr(deployment, "_actor_outputs", lambda _actor, rows: [[0.0] * 18 for _ in rows])
     attached: dict[str, object] = {}
 
     def attach(_path: str, metadata: dict[str, object]) -> None:
@@ -415,10 +369,7 @@ def test_a_failed_final_check_preserves_last_known_good_output(
     monkeypatch.setattr(
         deployment,
         "_read_onnx_metadata",
-        lambda _path: {
-            key: deployment._wire_metadata_value(value)
-            for key, value in attached.items()
-        },
+        lambda _path: dict(attached),
     )
     with pytest.raises(RuntimeError, match="final parity rejected"):
         deployment.package_v12_deployment(
@@ -432,75 +383,20 @@ def test_a_failed_final_check_preserves_last_known_good_output(
     assert not list(tmp_path.glob(".*.captured"))
 
 
-def test_runtime_smoke_corpus_comes_from_the_final_tracking_report():
-    from mjlab_microban.scripts.export_teleop_v12_deployment import _runtime_smoke_corpus
-
+def test_self_test_rows_are_the_final_tracking_observations():
     rows = [[0.0] * 5 + [-1.0] + [0.0] * 77 for _ in range(16)]
-    assert _runtime_smoke_corpus({"runtime_smoke_observations": rows}) == rows
+    assert deployment._self_test_rows({"runtime_smoke_observations": rows}) == rows
+    fast = [0.0] * 5 + [-1.0] + [0.0] * 21 + [20.0] * 21 + [0.0] * 35
+    assert deployment._self_test_rows({"runtime_smoke_observations": rows[:8] + [fast]}) == rows[:8]
     for bad in (
         {},
         {"runtime_smoke_observations": rows[:7]},
-        {"runtime_smoke_observations": rows * 5},
         {"runtime_smoke_observations": [row[:82] for row in rows]},
-        {"runtime_smoke_observations": [[float("nan")] * 83] + rows[1:]},
+        {"runtime_smoke_observations": [[float("nan")] * 83] * 16},
         {"runtime_smoke_observations": [[True] * 83] + rows[1:]},
     ):
         with pytest.raises(ValueError):
-            _runtime_smoke_corpus(bad)
-
-
-def _normwise_onnx_evidence() -> dict[str, object]:
-    return {
-        "tolerance": 2.0e-5,
-        "parity_rule": (
-            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
-        ),
-        "relative_tolerance": 1.0e-6,
-        "maximum_absolute_expected_output": 46.55878829956055,
-        "onnxruntime_cpu_maximum_absolute_error": 2.47955322265625e-05,
-        "onnxruntime_cpu_maximum_bound_ratio": 0.451808363199234,
-        "reference_evaluator_maximum_absolute_error": 9.5367431640625e-06,
-        "reference_evaluator_maximum_bound_ratio": 0.1619720607995987,
-    }
-
-
-def test_onnx_parity_rule_metadata_ships_the_normwise_bound() -> None:
-    metadata = deployment._onnx_parity_rule_metadata(_normwise_onnx_evidence())
-    assert metadata == {
-        "v12_onnx_parity_rule": (
-            "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
-        ),
-        "v12_onnx_parity_relative_tolerance": "1e-06",
-        "v12_onnx_parity_max_abs_expected_output": "46.55878829956055",
-        "v12_onnx_reference_max_bound_ratio": "0.1619720607995987",
-        "v12_onnxruntime_cpu_max_bound_ratio": "0.451808363199234",
-    }
-    # The robot's cap atol + rtol * magnitude covers the shipped CPU error.
-    cap = 2.0e-5 + float(metadata["v12_onnx_parity_relative_tolerance"]) * float(
-        metadata["v12_onnx_parity_max_abs_expected_output"]
-    )
-    assert 2.47955322265625e-05 <= cap
-
-
-def test_onnx_parity_rule_metadata_absent_for_absolute_only_report() -> None:
-    assert deployment._onnx_parity_rule_metadata({"tolerance": 2.0e-5}) == {}
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    (
-        ("parity_rule", "elementwise_v0"),
-        ("relative_tolerance", 1.0e-5),
-        ("maximum_absolute_expected_output", math.nan),
-        ("onnxruntime_cpu_maximum_bound_ratio", 1.01),
-        ("reference_evaluator_maximum_bound_ratio", None),
-    ),
-)
-def test_onnx_parity_rule_metadata_rejects_drift(name: str, value: object) -> None:
-    evidence = _normwise_onnx_evidence()
-    evidence[name] = value
-    with pytest.raises(ValueError):
-        deployment._onnx_parity_rule_metadata(evidence)
+            deployment._self_test_rows(bad)
 
 
 def test_dry_run_evidence_is_refused_outside_dry_runs(
@@ -526,4 +422,3 @@ def test_dry_run_evidence_is_refused_outside_dry_runs(
         "checkpoint info dry_run_clock_lift_from",
         "source probe receipt dry_run_forced_pass_not_deployable",
     ]
-    assert deployment.DRY_RUN_METADATA_KEY == "dry_run_not_deployable"

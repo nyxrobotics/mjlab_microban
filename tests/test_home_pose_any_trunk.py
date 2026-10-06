@@ -23,8 +23,9 @@ are not compared.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
-forward-lean-v2 and requires ONNX files byte-identical to the published ones
-once the policy-contract keys (docs/policies.md) are removed.
+forward-lean-v2 twice: the two exports are byte-identical (the self-test
+rollout is seeded), and their graph and weights are byte-identical to the
+published files' (the metadata is the new contract, docs/policies.md).
 """
 
 from __future__ import annotations
@@ -349,7 +350,7 @@ def _git_show(commit: str, path: str, destination: Path) -> bool:
     "set MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1 (CPU re-export of four checkpoints, minutes)",
 )
 class ExportEquivalenceTest(unittest.TestCase):
-    """Re-exporting each HOME's walking / get-up checkpoint is byte-identical."""
+    """Re-exports are reproducible and keep the published graphs and weights."""
 
     SOURCE_COMMIT = "5442e8838535c48e3e36bbb57ed016614e29ff3b"  # forward-lean-v2
     CASES = (
@@ -382,35 +383,37 @@ class ExportEquivalenceTest(unittest.TestCase):
                 self.assertEqual(
                     hashlib.sha256((root / "published.onnx").read_bytes()).hexdigest(), published_sha
                 )
-                output = root / "export.onnx"
-                completed = subprocess.run(
-                    [sys.executable, "-m", f"mjlab_microban.scripts.{exporter}", "--checkpoint",
-                     str(run_dir / checkpoint), "--output", str(output), "--device", "cpu"],
-                    env=_environment(yaml_path), cwd=REPO_ROOT, capture_output=True, text=True,
-                    timeout=1800, check=False,
+                gate = root / "gate.json"
+                write = subprocess.run(
+                    [sys.executable, "-c",
+                     "import sys; from pathlib import Path; from mjlab_microban import policy_contract as p; "
+                     "p.write_gate_report(Path(sys.argv[1]), sys.argv[2], p.sha256_file(sys.argv[3]), "
+                     "passed=True, dry_run=False, evidence={'test': 'export equivalence'})",
+                     str(gate), "walk" if exporter == "export_walk_onnx" else "getup", str(run_dir / checkpoint)],
+                    env=_environment(yaml_path), cwd=REPO_ROOT, capture_output=True, text=True, check=False,
                 )
-                self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
-                # The policy-contract keys (2026-10-07) are the only addition:
-                # without them the file is byte-identical to the published one.
-                self.assertEqual(hashlib.sha256(_without_contract_keys(output)).hexdigest(), published_sha)
+                self.assertEqual(write.returncode, 0, write.stderr[-3000:])
+                outputs = []
+                for index in range(2):
+                    outputs.append(root / f"export_{index}.onnx")
+                    completed = subprocess.run(
+                        [sys.executable, "-m", f"mjlab_microban.scripts.{exporter}", "--checkpoint",
+                         str(run_dir / checkpoint), "--output", str(outputs[-1]), "--gate-report", str(gate),
+                         "--device", "cpu"],
+                        env=_environment(yaml_path), cwd=REPO_ROOT, capture_output=True, text=True,
+                        timeout=1800, check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+                self.assertEqual(outputs[0].read_bytes(), outputs[1].read_bytes())
+                self.assertEqual(_without_metadata(outputs[0]), _without_metadata(root / "published.onnx"))
 
 
-def _without_contract_keys(path: Path) -> bytes:
+def _without_metadata(path: Path) -> bytes:
     import onnx
 
-    from mjlab_microban.policy_contract import contract_metadata
-
     model = onnx.load(str(path))
-    keys = set(contract_metadata())
-    kept = [prop for prop in model.metadata_props if prop.key not in keys]
-    if len(kept) != len(model.metadata_props) - len(keys):
-        raise AssertionError("the export lacks some policy-contract keys")
     del model.metadata_props[:]
-    model.metadata_props.extend(kept)
-    with tempfile.TemporaryDirectory() as directory:
-        stripped = Path(directory) / "stripped.onnx"
-        onnx.save(model, str(stripped))
-        return stripped.read_bytes()
+    return model.SerializeToString()
 
 
 if __name__ == "__main__":

@@ -6,15 +6,14 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the walking ONNX metadata (HOME-bound contract, servo-range target bound).
+"""Contract tests for the walking ONNX export: microban-policy-1 at the current HOME.
 
-v3 at the centered upright HOME, v4 at the forward-lean HOME, "<v>_<tag>" elsewhere.
+The metadata itself is policy_contract.contract_metadata (tests/test_policy_contract.py);
+here: the play env's layout, the builder's drift checks and the recorded run.
 """
 
 from __future__ import annotations
 
-import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,12 +23,9 @@ import onnx
 from mjlab.envs.mdp.observations import last_action
 from onnx import TensorProto, helper
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from home_cases import PUBLISHED_CONTRACT_STRINGS, home_tag  # noqa: E402
-
-from mjlab_microban.robot.home_contracts import contract_strings
 from mjlab_microban.robot.microban_constants import (
     HOME_FRAME,
+    HOME_PROJECTED_GRAVITY,
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
@@ -61,8 +57,6 @@ def _base(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "run_path": "local",
         "joint_names": list(JOINT_NAMES),
-        "joint_stiffness": [1.0] * len(JOINT_NAMES),
-        "joint_damping": [0.0] * len(JOINT_NAMES),
         # float32 copy of HOME, as the env's default_joint_pos tensor holds it.
         "default_joint_pos": [
             float(np.float32(HOME_FRAME.joint_pos[name])) for name in JOINT_NAMES
@@ -75,14 +69,23 @@ def _base(**overrides: object) -> dict[str, object]:
     return base
 
 
+def _row(scale: float) -> list[float]:
+    row = [0.0] * OBSERVATION_WIDTH
+    row[3:6] = list(HOME_PROJECTED_GRAVITY)
+    row[-1] = scale
+    return row
+
+
 def _build(base: dict[str, object] | None = None, **overrides: object) -> dict[str, str]:
     kwargs: dict[str, object] = {
         "action_clip_lower": [-SERVO_TARGET_RANGE_RAD] * 18,
         "action_clip_upper": [SERVO_TARGET_RANGE_RAD] * 18,
+        "checkpoint": Path("/logs/2026-10-03_13-40-19_chome_servo_walk/model_500.pt"),
         "checkpoint_sha256": SHA,
-        "checkpoint_filename": "model_500.pt",
-        "run_dir": "2026-10-03_13-40-19_chome_servo_walk",
-        "iteration": 500,
+        "gate_report_sha256": "cd" * 32,
+        "self_test_observations": [_row(0.01 * i) for i in range(8)],
+        "self_test_actions": [[0.0] * 18 for _ in range(8)],
+        "dry_run": False,
     }
     kwargs.update(overrides)
     return build_walk_metadata(base or _base(), **kwargs)  # type: ignore[arg-type]
@@ -165,36 +168,23 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         self.assertIsNone(previous.clip)
         self.assertIsNone(previous.scale)
 
-    def test_metadata_keys_and_values(self) -> None:
+    def test_metadata_is_the_walk_contract(self) -> None:
         metadata = _build()
-        # Keys WalkMove and the mjlab auto-export already use, unchanged.
+        self.assertEqual(metadata["microban_policy_kind"], "walk")
+        self.assertEqual(metadata["microban_recipe"], "microban-walk-twist-ratio-1")
         names = metadata["joint_names"].split(",")
         self.assertEqual(names, list(JOINT_NAMES))
         default = dict(zip(names, (float(v) for v in metadata["default_joint_pos"].split(","))))
-        # Exact float64 HOME, not mjlab's 3-decimal rounding.
+        # Exact float64 HOME, not the env's float32 copy or mjlab's 3 decimals.
         self.assertEqual(default, dict(HOME_FRAME.joint_pos))
-        self.assertEqual(metadata["observation_names"], ",".join(OBSERVATION_TERMS))
-        self.assertEqual(metadata["command_names"], "twist")
-        self.assertEqual(float(metadata["action_scale"]), 1.0)
-        for key in ("joint_stiffness", "joint_damping"):
-            self.assertEqual(len(metadata[key].split(",")), len(JOINT_NAMES))
-        # v2 additions.
         self.assertEqual(metadata["action_joint_names"].split(","), list(ROBOT_OBSERVATION_DOF_ORDER))
-        self.assertEqual([float(v) for v in metadata["action_clip_lower"].split(",")], [-SERVO_TARGET_RANGE_RAD] * 18)
-        self.assertEqual([float(v) for v in metadata["action_clip_upper"].split(",")], [SERVO_TARGET_RANGE_RAD] * 18)
-        self.assertEqual(metadata["previous_action_semantics"], "raw_policy_output")
-        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), contract_strings())
-        self.assertEqual(metadata["walk_contract_version"], expected["walk_contract_version"])
-        home = json.loads(metadata["home_pose"])
-        self.assertEqual(home["joint_pos_rad"], dict(HOME_FRAME.joint_pos))
-        self.assertEqual(home["root_pos_m"], list(HOME_FRAME.pos))
-        self.assertEqual(home["root_quat_wxyz"], list(HOME_FRAME.rot))
+        self.assertEqual(metadata["observation_joint_names"].split(","), list(ROBOT_OBSERVATION_DOF_ORDER))
+        self.assertEqual(metadata["observation_schema_json"],
+                         '[["base_ang_vel",3],["projected_gravity",3],["joint_pos",18],["joint_vel",18],'
+                         '["actions",18],["command",3]]')
         self.assertEqual(metadata["checkpoint_filename"], "model_500.pt")
+        self.assertEqual(metadata["checkpoint_iteration"], "500")
         self.assertEqual(metadata["checkpoint_sha256"], SHA)
-        self.assertEqual(metadata["run_dir"], "2026-10-03_13-40-19_chome_servo_walk")
-        self.assertEqual(metadata["run_path"], metadata["run_dir"])
-        self.assertEqual(metadata["iteration"], "500")
-        self.assertTrue(all(isinstance(value, str) for value in metadata.values()))
 
     def test_metadata_round_trips_through_onnx(self) -> None:
         obs = helper.make_tensor_value_info("obs", TensorProto.FLOAT, [1, OBSERVATION_WIDTH])
@@ -227,7 +217,7 @@ class WalkExportMetadataContractTest(unittest.TestCase):
             lambda: _build(action_clip_lower=[-1.57] * 18),
             lambda: _build(action_clip_upper=[SERVO_TARGET_RANGE_RAD] * 17),
             lambda: _build(checkpoint_sha256="not-a-digest"),
-            lambda: _build(iteration=-1),
+            lambda: _build(checkpoint=Path("/logs/run/last.pt")),
         )
         for case in cases:
             with self.assertRaises(ValueError):

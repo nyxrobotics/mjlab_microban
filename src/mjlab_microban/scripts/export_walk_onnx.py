@@ -14,13 +14,14 @@ the HOME of config/home_pose.yaml (centered: trunk vertical; forward-lean: trunk
 policy's own raw (unclipped) output.  The checkpoint's run directory must have
 recorded that same HOME and clip, the live play env must match it, and the
 exported ONNX is checked against the torch actor before an artifact is published.
+The metadata is the robot's contract microban-policy-1 (policy_contract.py):
+the gate report is the pipeline's judgment of this checkpoint, and the startup
+self-test rows come from a seeded rollout of the checkpoint in the play env.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import uuid
 from collections.abc import Mapping, Sequence
@@ -41,28 +42,19 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-from mjlab_microban.policy_contract import contract_metadata
-from mjlab_microban.robot import home_contracts
+from mjlab_microban import policy_contract
 from mjlab_microban.robot.microban_constants import (
     HOME_FRAME,
     HOME_PROJECTED_GRAVITY,
-    HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
-from mjlab_microban.tasks.microban_getup_runner import HOME_ROOT_RECORDED_ATOL, getup_home_pose
+from mjlab_microban.tasks.microban_getup_runner import HOME_ROOT_RECORDED_ATOL
 from mjlab_microban.tasks.microban_velocity_runner import require_walk_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 
 TASK = "Mjlab-Velocity-Microban"
-# HOME-bound (robot/home_contracts.py): "v3_centered_home_servo_range" at the
-# centered HOME, "v4_forward_lean_home_servo_range" at the forward-lean HOME
-# (v3's target rule there), "v3_/v4_<label>_<joint hash>_servo_range" at any
-# other.  v2 was the centered HOME with a +-1.57 clip.
-CONTRACT_VERSION = home_contracts.WALK_CONTRACT_VERSION
-# WalkMove feeds back the ONNX model's own last raw output (mjlab last_action).
-PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 ACTION_SCALE = 1.0
 # Same layout WalkMove.build_observation assembles: gyro, gravity, joint
 # position minus default, joint velocity, last raw action, (vx, vy, vyaw).
@@ -81,12 +73,9 @@ OBSERVATION_WIDTH = sum(OBSERVATION_TERM_DIMS)
 COMMAND_NAMES = ("twist",)
 PARITY_SAMPLES = 256
 PARITY_TOLERANCE = 1e-4
-# Base-metadata keys the robot (and mjlab's own auto-export) already use.
+# mjlab's get_base_metadata() keys the builder checks against the contract.
 BASE_METADATA_KEYS = (
-    "run_path",
     "joint_names",
-    "joint_stiffness",
-    "joint_damping",
     "default_joint_pos",
     "command_names",
     "observation_names",
@@ -94,57 +83,23 @@ BASE_METADATA_KEYS = (
 )
 
 
-def walk_home_pose() -> dict[str, object]:
-    """The shared HOME, in the same JSON shape as get-up's metadata."""
-
-    return getup_home_pose()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _csv(values: Sequence[object]) -> str:
-    """CSV like mjlab's list_to_csv_str, but without its 3-decimal rounding.
-
-    Readers parse each field with float(); repr keeps HOME exact (e.g. the
-    0.0209158 rad hip pitch, which the 3-decimal form turns into 0.021).
-    """
-
-    return ",".join(
-        repr(float(value)) if isinstance(value, (int, float)) else str(value)
-        for value in values
-    )
-
-
-def _metadata_value(value: object) -> str:
-    if isinstance(value, (list, tuple)):
-        return _csv(value)
-    if isinstance(value, float):
-        return repr(value)
-    return str(value)
-
-
 def build_walk_metadata(
     base: Mapping[str, object],
     *,
     action_clip_lower: Sequence[float],
     action_clip_upper: Sequence[float],
+    checkpoint: Path,
     checkpoint_sha256: str,
-    checkpoint_filename: str,
-    run_dir: str,
-    iteration: int,
+    gate_report_sha256: str,
+    self_test_observations: Sequence[Sequence[float]],
+    self_test_actions: Sequence[Sequence[float]],
+    dry_run: bool,
 ) -> dict[str, str]:
-    """Build the string metadata map attached to a walking ONNX.
+    """The walking ONNX metadata: microban-policy-1 (policy_contract.py).
 
-    ``base`` is mjlab's get_base_metadata(); its key names and CSV formats are
-    kept so WalkMove (joint_names + default_joint_pos) keeps working.  The
-    default pose is replaced by the exact float64 HOME after checking it is
-    the env default the actor was trained against.
+    ``base`` is mjlab's get_base_metadata() of the play env; it must describe
+    the contract's layout at the current HOME (the env default pose is the
+    HOME the actor was trained against).
     """
 
     missing = [key for key in BASE_METADATA_KEYS if key not in base]
@@ -157,8 +112,6 @@ def build_walk_metadata(
     home = np.array([HOME_FRAME.joint_pos[name] for name in joint_names], dtype=np.float64)
     if default.shape != home.shape or not np.allclose(default, home, rtol=0, atol=1e-6):
         raise ValueError("Env default joint pose is not the current HOME")
-    if not set(ACTION_JOINT_NAMES) <= set(joint_names):
-        raise ValueError("Action joints are missing from joint_names")
     if tuple(base["observation_names"]) != OBSERVATION_TERMS:  # type: ignore[arg-type]
         raise ValueError(f"Unexpected observation_names {base['observation_names']}")
     if tuple(base["command_names"]) != COMMAND_NAMES:  # type: ignore[arg-type]
@@ -167,37 +120,18 @@ def build_walk_metadata(
         raise ValueError(f"Walking action scale must be {ACTION_SCALE}")
     lower = [float(value) for value in action_clip_lower]
     upper = [float(value) for value in action_clip_upper]
-    if len(lower) != ACTION_WIDTH or len(upper) != ACTION_WIDTH:
-        raise ValueError("Action clip must have one bound per action joint")
-    if lower != [-SERVO_TARGET_RANGE_RAD] * ACTION_WIDTH or upper != [
-        SERVO_TARGET_RANGE_RAD
-    ] * ACTION_WIDTH:
+    if lower != [-SERVO_TARGET_RANGE_RAD] * ACTION_WIDTH or upper != [SERVO_TARGET_RANGE_RAD] * ACTION_WIDTH:
         raise ValueError("Walking action clip differs from the servo goal range (+-pi)")
-    if len(checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in checkpoint_sha256):
-        raise ValueError("checkpoint_sha256 must be a lowercase SHA-256 hex digest")
-    if not checkpoint_filename.endswith(".pt") or not run_dir or int(iteration) < 0:
-        raise ValueError("Invalid checkpoint provenance")
-
-    metadata: dict[str, object] = {key: base[key] for key in BASE_METADATA_KEYS}
-    metadata["run_path"] = run_dir
-    metadata["default_joint_pos"] = home.tolist()
-    metadata["action_scale"] = ACTION_SCALE
-    metadata.update(
-        {
-            "action_joint_names": list(ACTION_JOINT_NAMES),
-            "action_clip_lower": lower,
-            "action_clip_upper": upper,
-            "previous_action_semantics": PREVIOUS_ACTION_SEMANTICS,
-            "walk_contract_version": CONTRACT_VERSION,
-            "home_pose": json.dumps(walk_home_pose(), sort_keys=True, separators=(",", ":")),
-            "checkpoint_filename": checkpoint_filename,
-            "checkpoint_sha256": checkpoint_sha256,
-            "run_dir": run_dir,
-            "iteration": int(iteration),
-            **contract_metadata(),
-        }
+    return policy_contract.contract_metadata(
+        "walk",
+        joint_names=joint_names,
+        checkpoint=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        gate_report_sha256=gate_report_sha256,
+        self_test_observations=self_test_observations,
+        self_test_actions=self_test_actions,
+        dry_run=dry_run,
     )
-    return {key: _metadata_value(value) for key, value in metadata.items()}
 
 
 def _attach_metadata(path: Path, metadata: Mapping[str, str]) -> None:
@@ -226,7 +160,7 @@ _RecordedConfigLoader.add_multi_constructor("tag:yaml.org,2002:python/", _constr
 
 
 def require_recorded_walk_contract(env_yaml: Path) -> None:
-    """Refuse a run whose recorded HOME, clip or feedback differs from CONTRACT_VERSION.
+    """Refuse a run whose recorded HOME, clip or feedback differs from the contract.
 
     The metadata is built from the current code, so exporting an older run
     (another HOME, hip -10 deg HOME, no clip, ...) would silently mislabel it.
@@ -285,7 +219,7 @@ def require_current_home_walk_checkpoint(path: Path) -> None:
 
 
 def _inspect_checkpoint(path: Path) -> tuple[str, int]:
-    before = _sha256(path)
+    before = policy_contract.sha256_file(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     require_walk_home_pose(checkpoint.get("infos"))
     actor = checkpoint.get("actor_state_dict")
@@ -297,7 +231,7 @@ def _inspect_checkpoint(path: Path) -> tuple[str, int]:
     iteration = checkpoint.get("iter")
     if not isinstance(iteration, int) or iteration < 0:
         raise ValueError("Checkpoint has no training iteration")
-    if _sha256(path) != before:
+    if policy_contract.sha256_file(path) != before:
         raise ValueError("Checkpoint changed during inspection")
     return before, iteration
 
@@ -465,6 +399,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, type=Path, help="Walking model_N.pt")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
+    parser.add_argument("--gate-report", required=True, type=Path,
+                        help="The pipeline's passed walk gate report of this checkpoint")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Accept a dry run's forced gate and mark the ONNX not deployable")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
     return parser.parse_args()
@@ -480,10 +418,13 @@ def main() -> None:
         raise FileExistsError(f"Output already exists: {output} (use --replace explicitly)")
     run_dir = checkpoint.parent
     require_recorded_walk_contract(run_dir / "params" / "env.yaml")
-    checkpoint_sha256, iteration = _inspect_checkpoint(checkpoint)
+    checkpoint_sha256, _iteration = _inspect_checkpoint(checkpoint)
+    gate_report_sha256 = policy_contract.gate_report("walk", args.gate_report, checkpoint_sha256,
+                                                     dry_run=args.dry_run)
 
     env_cfg = load_env_cfg(TASK, play=True)
     env_cfg.scene.num_envs = 1
+    env_cfg.seed = policy_contract.SELF_TEST_SEED
     agent_cfg = load_rl_cfg(TASK)
     env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device)
     wrapped = RslRlVecEnvWrapper(env)
@@ -498,22 +439,26 @@ def main() -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         runner.export_policy_to_onnx(str(temporary.parent), temporary.name)
         _validate_onnx(temporary)
+        policy = runner.get_inference_policy(device="cpu")
+        rows, actions = policy_contract.rollout_self_test("walk", wrapped, policy)
         metadata = build_walk_metadata(
             get_base_metadata(env, run_path=run_dir.name),
             action_clip_lower=lower.tolist(),
             action_clip_upper=upper.tolist(),
+            checkpoint=checkpoint,
             checkpoint_sha256=checkpoint_sha256,
-            checkpoint_filename=checkpoint.name,
-            run_dir=run_dir.name,
-            iteration=iteration,
+            gate_report_sha256=gate_report_sha256,
+            self_test_observations=rows,
+            self_test_actions=actions,
+            dry_run=args.dry_run,
         )
         _attach_metadata(temporary, metadata)
         _validate_onnx(temporary)
-        policy = runner.get_inference_policy(device="cpu")
         max_abs_diff = _parity(policy, temporary)
         if max_abs_diff > PARITY_TOLERANCE:
             raise ValueError(f"ONNX/torch actor mismatch {max_abs_diff:.3g} > {PARITY_TOLERANCE}")
-        if _sha256(checkpoint) != checkpoint_sha256:
+        self_test = policy_contract.check_self_test(temporary, metadata)
+        if policy_contract.sha256_file(checkpoint) != checkpoint_sha256:
             raise ValueError("Checkpoint changed during export")
         if args.replace:
             os.replace(temporary, output)
@@ -522,10 +467,9 @@ def main() -> None:
             # file atomically and fails if another process created the name.
             os.link(temporary, output)
             temporary.unlink()
-        print(json.dumps(metadata, indent=2))
         print(
             f"onnxruntime vs torch actor, {PARITY_SAMPLES} random observations: "
-            f"max abs diff {max_abs_diff:.3e}"
+            f"max abs diff {max_abs_diff:.3e}; self-test {len(rows)} rows at {self_test:.3f} x bound"
         )
         print(f"Exported validated walking ONNX: {output}")
     finally:

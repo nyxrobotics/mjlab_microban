@@ -112,7 +112,8 @@ class Pipeline:
     def _schedules(self) -> dict[str, Any]:
         """The schedule constants as the training subprocesses see them."""
 
-        code = ("import json; from mjlab_microban import schedules as s; print(json.dumps({"
+        code = ("import json; from mjlab_microban import schedules as s, policy_contract as p; print(json.dumps({"
+                "'contract': p.POLICY_CONTRACT, 'recipes': dict(p.RECIPES), "
                 "'walk_max': s.WALK_MAX_UPDATES, 'walk_widen': s.WALK_WIDEN_UPDATE, "
                 "'check_every': s.scaled(1000), 'getup_total': s.GETUP_TOTAL_UPDATES, "
                 "'getup_min_final': s.GETUP_MIN_FINAL_UPDATES, 'pico_total': s.PICO_TOTAL_UPDATES, "
@@ -369,7 +370,8 @@ class Pipeline:
         self.log(f"walker 9x300 probe (seed 42): {'PASS' if verdict['ok'] else 'FAIL'} "
                  f"worst margin {verdict['worst_margin']:+.4f} ({verdict['worst']}), responses "
                  f"{ {k: round(v, 3) for k, v in verdict['responses'].items()} }, falls {verdict['falls']}")
-        self.state.step("pico")["walker_probe"] = verdict
+        self.state.step("pico")["walker_probe"] = {**verdict, "receipt": str(receipt),
+                                                   "receipt_sha256": sha256(receipt)}
         self.state.save()
         if verdict["ok"]:
             return receipt
@@ -413,10 +415,10 @@ class Pipeline:
         monitor = self.monitor(
             "pico", PICO_EXP, label,
             stages={"enable moving-HMD, stationary no-step guard, and broad hand tracking": pico["hand_start"],
-                    "tighten hand tracking": pico["hand_tighten_start"],
+                    "tighten hand tracking": pico["hand_tighten"],
                     "enable broad stationary foot tracking": pico["foot_start"],
-                    "tighten foot tracking": pico["foot_tighten_start"]},
-            check_updates=list(range(pico["foot_tighten_start"] + every, total, every)),
+                    "tighten foot tracking": pico["foot_tighten"]},
+            check_updates=list(range(pico["foot_tighten"] + every, total, every)),
             # model_<N> has completed N + 1 updates.
             min_final=self.sched["pico_min_final"] - 1, start_check=self.pico_check)
         final = self.train("pico", PICO_EXP, label, c["task"], total, c["envs"],
@@ -572,61 +574,91 @@ class Pipeline:
             return
         out = self.state.dir / "release"
         out.mkdir(exist_ok=True)
-        walk = Path(self.state.step("walk")["outputs"]["checkpoint"])
-        getup = Path(self.state.step("getup")["outputs"]["checkpoint"])
-        pico = self.state.step("pico")["outputs"]
-        files = {"walk": out / "walk.onnx", "getup": out / "getup.onnx", "pico_teleop": out / "pico_teleop.onnx"}
-        for name, module, checkpoint in (("walk", "export_walk_onnx", walk), ("getup", "export_getup_onnx", getup)):
-            self.jobs.run(f"export_{name}", [*UV, "python", "-m", f"mjlab_microban.scripts.{module}",
-                                             "--checkpoint", str(checkpoint), "--output", str(files[name]),
-                                             "--replace"], "eval", env=self.env, gpu=False)
+        steps = self.state.data["steps"]
+        checkpoints = {"walk": Path(steps["walk"]["outputs"]["checkpoint"]),
+                       "getup": Path(steps["getup"]["outputs"]["checkpoint"]),
+                       "pico": Path(steps["pico"]["outputs"]["checkpoint"])}
+        files = {kind: out / name for kind, name in (("walk", "walk.onnx"), ("getup", "getup.onnx"),
+                                                     ("pico", "pico_teleop.onnx"))}
+        gates = self.write_gate_reports(out, checkpoints)
+        for kind, module in (("walk", "export_walk_onnx"), ("getup", "export_getup_onnx")):
+            self.jobs.run(f"export_{kind}", [*UV, "python", "-m", f"mjlab_microban.scripts.{module}",
+                                             "--checkpoint", str(checkpoints[kind]), "--output", str(files[kind]),
+                                             "--gate-report", str(gates[kind]), "--replace",
+                                             *(["--dry-run"] if self.dry else [])],
+                          "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""}, gpu=False)
+        pico = steps["pico"]["outputs"]
         prefix = pico["report_prefix"]
         if pico["passed"]:
             cmd = [*UV_ONNX, "python", "-m", "mjlab_microban.scripts.export_teleop_v12_deployment",
                    "--checkpoint", pico["checkpoint"], "--stage-gate", f"{prefix}_gate.json",
-                   "--output", str(files["pico_teleop"]), "--force"]
+                   "--output", str(files["pico"]), "--force"]
         else:  # dry run only (a real run stopped at the judgment)
             cmd = [*UV_ONNX, "python", "-m", "mjlab_microban.pipeline.dry", "package", pico["checkpoint"], prefix,
-                   str(out / "DRYRUN_pico_gate.json"), str(files["pico_teleop"])]
+                   str(out / "DRYRUN_pico_gate.json"), str(files["pico"])]
         _, log = self.jobs.run("export_pico", cmd, "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""}, gpu=False)
         receipt = last_json_line(log.read_text(errors="replace"))
-        if receipt.get("status") != "pass" or receipt.get("output_sha256") != sha256(files["pico_teleop"]):
+        if receipt.get("status") != "pass" or receipt.get("output_sha256") != sha256(files["pico"]):
             raise PipelineError(f"PICO packaging failed: {receipt}")
-        manifest = self.manifest(files, walk, getup, Path(pico["checkpoint"]))
+        manifest = self.manifest(files, checkpoints)
         manifest_path = out / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
         self.finish("export", {"dir": str(out), "manifest_sha256": sha256(manifest_path)},
-                    [*files.values(), manifest_path])
+                    [*files.values(), manifest_path, *gates.values()])
 
-    def manifest(self, files: dict[str, Path], walk: Path, getup: Path, pico: Path) -> dict[str, Any]:
+    def write_gate_reports(self, out: Path, checkpoints: dict[str, Path]) -> dict[str, Path]:
+        """The walk and get-up judgments as their exporters check them (policy_contract.gate_report)."""
+
         steps = self.state.data["steps"]
-        code = ("import json; from mjlab_microban import policy_contract as p; "
-                "print(json.dumps({'contract': p.POLICY_CONTRACT, 'schema': p.MANIFEST_SCHEMA_VERSION}))")
-        contract = json.loads(capture([*UV, "python", "-c", code], env=self.env, check=True,
-                                      timeout=600).stdout.strip().splitlines()[-1])
-        checkpoints = {"walk": walk, "getup": getup, "pico_teleop": pico}
-        return {
-            "schema_version": contract["schema"],
-            "policy_contract": contract["contract"],
-            "dry_run_not_deployable": self.dry,
-            "home": {"tag": self.home["tag"], "joint_hash": self.home["joint_hash"],
-                     "yaml_sha256": self.yaml_sha256},
-            "policies": {
-                name: {"file": path.name, "sha256": sha256(path),
-                       "checkpoint": checkpoints[name].name, "checkpoint_sha256": sha256(checkpoints[name])}
-                for name, path in files.items()
-            },
+        walk_probe = steps["pico"].get("walker_probe") or {}
+        evidence = {
+            "walk": {"passed": "adopted" in steps["walk"] and bool(walk_probe.get("ok")),
+                     "checks": steps["walk"].get("checks"), "adopted": steps["walk"].get("adopted"),
+                     "source_probe_9x300": walk_probe},
+            "getup": {"passed": bool(steps["getup"]["outputs"]["passed"]),
+                      "summary": steps["getup"]["outputs"]["summary"],
+                      "failures": steps["getup"]["outputs"]["failures"],
+                      "judgment_sha256": sha256(self.state.dir / "getup_judgment.json")},
+        }
+        gates = {}
+        for kind, record in evidence.items():
+            gates[kind] = out / f"{kind}_gate.json"
+            code = ("import json, sys; from pathlib import Path; from mjlab_microban import policy_contract as p; "
+                    "a = json.loads(sys.argv[1]); p.write_gate_report(Path(a['path']), a['kind'], a['sha'], "
+                    "passed=a['passed'], dry_run=a['dry'], evidence=a['evidence'])")
+            arguments = {"path": str(gates[kind]), "kind": kind, "sha": sha256(checkpoints[kind]),
+                         "passed": record["passed"], "dry": self.dry, "evidence": record}
+            result = capture([*UV, "python", "-c", code, json.dumps(arguments, default=str)], env=self.env,
+                             timeout=600)
+            if result.returncode != 0:
+                raise PipelineError(f"no {kind} gate report: {(result.stderr or result.stdout).strip()[-800:]}")
+        return gates
+
+    def manifest(self, files: dict[str, Path], checkpoints: dict[str, Path]) -> dict[str, Any]:
+        """src/agents/manifest.json (policy_contract.manifest), built in the training env."""
+
+        steps = self.state.data["steps"]
+        extra = {
+            "home_joint_hash": self.home["joint_hash"],
+            "home_yaml_sha256": self.yaml_sha256,
+            "training_branch": git(REPO, "rev-parse", "--abbrev-ref", "HEAD"),
             "judgments": {
                 "walk_source_probe": steps["pico"].get("walker_probe"),
                 "pico": {k: steps["pico"]["outputs"][k] for k in ("passed", "failures")},
                 "getup": {k: steps["getup"]["outputs"][k] for k in ("summary", "passed", "failures")},
             },
-            "schedules": {"pico": self.sched["pico"], "getup": self.sched["getup"],
-                          "walk_max_updates": self.sched["walk_max"]},
-            "training": {"commit": git(REPO, "rev-parse", "HEAD"), "branch": git(REPO, "rev-parse",
-                                                                              "--abbrev-ref", "HEAD")},
+            "checkpoints": {kind: path.name for kind, path in checkpoints.items()},
             "created": f"{datetime.now():%F %T}",
         }
+        arguments = {"files": {kind: str(path) for kind, path in files.items()},
+                     "checkpoints": {kind: sha256(path) for kind, path in checkpoints.items()},
+                     "commit": git(REPO, "rev-parse", "HEAD"), "dry": self.dry, "extra": extra}
+        code = ("import json, sys; from mjlab_microban import policy_contract as p; a = json.loads(sys.argv[1]); "
+                "print(json.dumps(p.manifest(files=a['files'], checkpoint_sha256=a['checkpoints'], "
+                "training_commit=a['commit'], dry_run=a['dry'], extra=a['extra'])))")
+        out = capture([*UV, "python", "-c", code, json.dumps(arguments, default=str)], env=self.env, check=True,
+                      timeout=600)
+        return json.loads(out.stdout.strip().splitlines()[-1])
 
     def robot_env(self) -> dict[str, str]:
         env = {"PYTHONPATH": str(self.robot / "src"), "CUDA_VISIBLE_DEVICES": ""}
@@ -647,12 +679,9 @@ class Pipeline:
         capture([*UV, "python", "config/home_pose_tool.py", "write-robot", "--microban-repo", str(self.robot)],
                 check=True, timeout=1200)
         validator = self.robot / "tools" / "validate_policies.py"
-        if not validator.is_file():
-            raise PipelineError(f"{self.robot} does not implement the policy contract (no tools/validate_policies.py): "
-                                "install into a robot branch that reads src/agents/manifest.json (docs/policies.md)")
         out = release / "robot_validation.json"
         valid = capture(["uv", "run", "--project", str(self.robot), "--locked", "python", str(validator),
-                         "src/agents/manifest.json"], cwd=self.robot, env=self.robot_env(), timeout=1800)
+                         "src/agents"], cwd=self.robot, env=self.robot_env(), timeout=1800)
         out.write_text(valid.stdout or valid.stderr)
         if valid.returncode != 0:
             raise PipelineError("the robot rejected the release (tools/validate_policies.py): "
@@ -674,8 +703,9 @@ class Pipeline:
             return
         h = self.home
         manifest = json.loads((Path(self.state.step("export")["outputs"]["dir"]) / "manifest.json").read_text())
-        body = (f"HOME {h['tag']} (hash {h['joint_hash']}).  Policy contract {manifest['policy_contract']};\n"
-                + "".join(f"{name} {entry['sha256'][:16]} from {entry['checkpoint']}\n"
+        body = (f"HOME {h['tag']} (hash {h['joint_hash']}).  Policy contract {manifest['contract']};\n"
+                + "".join(f"{name} {entry['sha256'][:16]} from {manifest['checkpoints'][name]} "
+                          f"({entry['checkpoint_sha256'][:16]})\n"
                           for name, entry in manifest["policies"].items())
                 + f"Robot validator and tests pass ({self.state.step('install')['outputs']['robot_tests']}).\n"
                   "Generated by mjlab_microban scripts/retrain_all_for_home.py.")
@@ -689,7 +719,9 @@ class Pipeline:
         if not self.dry:
             rel = REPO / "config" / "releases" / h["tag"]
             rel.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(Path(self.state.step("export")["outputs"]["dir"]) / "manifest.json", rel / "manifest.json")
+            release = Path(self.state.step("export")["outputs"]["dir"])
+            for name in ("manifest.json", "walk_gate.json", "getup_gate.json"):
+                shutil.copyfile(release / name, rel / name)
             (rel / "release.json").write_text(json.dumps(
                 {"steps": self.state.data["steps"], "robot": {"branch": self.robot_branch, "commit": robot_commit}},
                 indent=1, sort_keys=True, default=str) + "\n")
@@ -736,6 +768,21 @@ class Pipeline:
             else:
                 git(self.robot, "switch", "-c", self.robot_branch)
             self.log(f"robot repo: now on {self.robot_branch} (was {current})")
+        self.require_robot_contract()
+
+    def require_robot_contract(self) -> None:
+        """The robot checkout implements this repository's contract (before any training)."""
+
+        source = self.robot / "src" / "policy_contract.py"
+        if not source.is_file() or not (self.robot / "tools" / "validate_policies.py").is_file():
+            raise PipelineError(f"{self.robot} does not implement the policy contract (no src/policy_contract.py "
+                                "or tools/validate_policies.py): use a robot branch made from runtime-cleanup "
+                                "(docs/policies.md)", EXIT_INPUT)
+        robot = robot_contract_constants(source)
+        ours = {"POLICY_CONTRACT": self.sched["contract"], "RECIPES": self.sched["recipes"]}
+        if robot != ours:
+            raise PipelineError(f"the robot's contract {robot} differs from this repository's {ours} "
+                                f"({source}); change both sides together", EXIT_INPUT)
 
     def execute(self) -> int:
         self.state.lock()
@@ -753,6 +800,23 @@ class Pipeline:
                 raise
         self.log("==== ALL STEPS DONE")
         return 0
+
+
+def robot_contract_constants(source: Path) -> dict[str, Any]:
+    """POLICY_CONTRACT and RECIPES of the robot's src/policy_contract.py (read, not imported)."""
+
+    import ast
+
+    found: dict[str, Any] = {}
+    for node in ast.parse(source.read_text(encoding="utf-8")).body:
+        target = node.target if isinstance(node, ast.AnnAssign) else (
+            node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None)
+        if isinstance(target, ast.Name) and target.id in ("POLICY_CONTRACT", "RECIPES") and node.value is not None:
+            try:
+                found[target.id] = ast.literal_eval(node.value)
+            except ValueError:
+                pass
+    return found
 
 
 def commit(repo: Path, paths: list[str], message: str) -> str:

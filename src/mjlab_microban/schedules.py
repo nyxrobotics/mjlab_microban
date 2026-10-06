@@ -82,11 +82,13 @@ PICO_ADAPTER_SCHEDULE_REVISION = (
 
 
 def pico_schedule_record() -> dict[str, int]:
-    """The PICO schedule as the package and the manifest record it."""
+    """The PICO curriculum as the package records it (pico_curriculum_json)."""
 
     return {
         "critic_warmup": PICO_CRITIC_WARMUP,
-        **{f"{name}_start": update for name, update in PICO_SCHEDULE.items()},
+        "hand_start": PICO_SCHEDULE["hand"],
+        "hand_tighten": PICO_SCHEDULE["hand_tighten"],
+        "foot_start": PICO_SCHEDULE["foot"],
+        "foot_tighten": PICO_SCHEDULE["foot_tighten"],
         "total": PICO_TOTAL_UPDATES,
-        "min_final": PICO_MIN_FINAL_UPDATES,
     }

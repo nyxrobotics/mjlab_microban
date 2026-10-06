@@ -31,19 +31,20 @@ The packager, on CPU:
    (bootstrap provenance) and the corrected bilateral site order, and refuses
    dry-run evidence unless it packages a dry run;
 3. exports a fixed-shape `obs[1,83] -> actions[1,18]` float32 graph;
-4. writes the robot's metadata from the validated evidence (docs/policies.md):
-   the policy contract, the servo gain, the HOME, the PICO schedule, the
-   per-joint runtime guard derived from the final tracking envelope, the
-   startup self-test observations of the final tracking rollouts, the target
-   ranges and frames;
+4. writes the robot's contract microban-policy-1 from the validated evidence
+   (docs/policies.md): the HOME stamp and layout, the PICO targets, frame and
+   curriculum, the per-joint raw-action guard derived from the final tracking
+   envelope, and the startup self-test: the final tracking rollouts' actor
+   observations (possible states only) with the actor's deterministic output
+   for each;
 5. checks parity of PyTorch, ONNX `ReferenceEvaluator` and ONNX Runtime
    `CPUExecutionProvider` on a deterministic 64-sample corpus before and after
-   the metadata is attached, and publishes with `os.replace` and a directory
-   `fsync`.
+   the metadata is attached, runs the robot's self-test rule on the final
+   file, and publishes with `os.replace` and a directory `fsync`.
 
-It no longer runs or hashes the robot's sources: the robot checks a release
-when it is installed (its `tools/validate_policies.py` on the manifest and its
-tests) and at every start (the self-test observations).
+It does not run or hash the robot's sources: the robot checks a release when
+it is installed (`tools/validate_policies.py src/agents` and its tests) and at
+every start (the self-test).
 
 ## Tracking profile
 

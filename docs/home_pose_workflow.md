@@ -14,8 +14,8 @@ home_pose.yaml を編集 → (任意) balance_home_pose.py --write → retrain_a
 ```bash
 # 学習リポジトリ: home-config ブランチ（またはそこから作ったブランチ）のチェックアウトで実行する。
 cd ../mjlab_microban_homecfg
-# ロボットリポジトリ: 方策の契約（docs/policies.md、src/agents/manifest.json と tools/validate_policies.py）を
-# 実装したブランチの、専用の worktree を使う。パイプラインはこの worktree のブランチを切り替え、書き換える。
+# ロボットリポジトリ: 方策の契約 microban-policy-1（docs/policies.md、runtime-cleanup から作ったブランチ）を
+# 実装したブランチの、専用の worktree を使う（契約の版とレシピ id が合わなければ学習の前に止まる）。パイプラインはこの worktree のブランチを切り替え、書き換える。
 git -C ../microban worktree add -b home-lean ../microban_home-lean <契約を実装したロボットのブランチ>
 # 1. HOMEを編集する（変えられる値は config/README.md の表）。name / label も新しい姿勢に合わせる。
 # 2. 重心を足裏の前後中央に戻す（任意）。--trunk-pitch-deg 10 なら前傾HOME。
@@ -43,7 +43,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | pico | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、`config/pipeline.yaml` の閾値）、bootstrap ゲート。`Mjlab-Teleop-V12-HandPoseRelease-Microban` を1本（2048 env、critic の準備 1000 → 手 → 足、合計 9000）。最後に判定1回: 歩行 9×300・追従（最終プロファイル、手先 RMS 0.040 m）・ONNX（どれも seed 42）。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
 | getup | `Mjlab-Getup-Microban` を1本（4096 env、16500 回。IMU 遅延 2500、calm と探索の切り替え 4000、effort と押し 10000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位でクリップに張り付く割合 > 0.05 |
 | export | walk.onnx、getup.onnx、pico_teleop.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
-| install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents/manifest.json` とテスト一式を実行 | バリデータかテストが落ちる |
+| install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents` とテスト一式を実行 | バリデータかテストが落ちる |
 | commit | ロボットのブランチにコミットして push、学習側は `config/home_pose.yaml` と `config/releases/<tag>/`（manifest.json と記録）をコミットして push | |
 
 判定に落ちたら、その場で止まって報告する（終了コード 1）。救済、乱数の種を変えた学習のやり直し、

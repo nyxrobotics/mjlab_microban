@@ -4,14 +4,15 @@ Both paths must be explicit.  The checkpoint's get-up contract (v5 at the
 centered HOME, v6 at the forward-lean HOME; decided from the run's recorded
 params/env.yaml: the current HOME, +-pi servo-range clip, raw
 previous-action feedback) and the exported ONNX normalizer are checked before
-an artifact is published.
+an artifact is published.  The metadata is the robot's contract
+microban-policy-1 (policy_contract.py): the gate report is the pipeline's
+judgment of this checkpoint, and the startup self-test rows come from a seeded
+rollout of the checkpoint in the play env.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import uuid
 from dataclasses import asdict
@@ -22,33 +23,23 @@ import onnx
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
-from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
-
-from mjlab_microban.policy_contract import contract_metadata
+from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from onnx import numpy_helper
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban import policy_contract
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.robot.microban_constants import (
     HOME_PROJECTED_GRAVITY,
-    HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD
-from mjlab_microban.tasks.microban_getup_runner import (
-    GETUP_ANGULAR_VELOCITY_FRAME,
-    GETUP_CONTRACT_VERSION,
-    getup_home_pose,
-    require_getup_checkpoint_contract,
-)
+from mjlab_microban.tasks.microban_getup_runner import require_getup_checkpoint_contract
 
 TASK = "Mjlab-Getup-Microban"
-CONTRACT_VERSION = GETUP_CONTRACT_VERSION
-# The robot's getup.py feeds back the ONNX model's own last raw output.
-PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 OBSERVATION_TERMS = (
     "base_ang_vel",
     "projected_gravity",
@@ -60,14 +51,6 @@ OBSERVATION_WIDTH = 60
 ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _require_new_checkpoint(path: Path) -> tuple[str, str]:
     """Require a current-contract training checkpoint; return its SHA-256 and stamp.
 
@@ -77,20 +60,16 @@ def _require_new_checkpoint(path: Path) -> tuple[str, str]:
     exports (as v5), while a +-1.57 clip or old-HOME v4 run is refused.
     """
 
-    before = _sha256(path)
+    before = policy_contract.sha256_file(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     stamp = require_getup_checkpoint_contract(
         path, checkpoint.get("infos"), require_recorded_env=True
     )
     if not isinstance(checkpoint.get("actor_state_dict"), dict):
         raise ValueError("Checkpoint has no actor_state_dict")
-    if _sha256(path) != before:
+    if policy_contract.sha256_file(path) != before:
         raise ValueError("Checkpoint changed during inspection")
     return before, stamp
-
-
-def _full_precision_csv(values: np.ndarray) -> str:
-    return ",".join(repr(float(value)) for value in values)
 
 
 def _tensor_shape(value: onnx.ValueInfoProto) -> tuple[int | str, ...]:
@@ -235,6 +214,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, type=Path, help="get-up model_N.pt (in its run directory with params/env.yaml)")
     parser.add_argument("--output", required=True, type=Path, help="Destination ONNX artifact")
+    parser.add_argument("--gate-report", required=True, type=Path,
+                        help="The pipeline's passed get-up gate report of this checkpoint")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Accept a dry run's forced gate and mark the ONNX not deployable")
     parser.add_argument("--replace", action="store_true", help="Replace an existing output")
     parser.add_argument("--device", default="cpu", help="Model load device (default: cpu)")
     return parser.parse_args()
@@ -248,16 +231,24 @@ def main() -> None:
         raise ValueError("Expected a .pt checkpoint and .onnx output")
     if output.exists() and not args.replace:
         raise FileExistsError(f"Output already exists: {output} (use --replace explicitly)")
-    checkpoint_sha256, checkpoint_stamp = _require_new_checkpoint(checkpoint)
+    checkpoint_sha256, _stamp = _require_new_checkpoint(checkpoint)
+    gate_report_sha256 = policy_contract.gate_report("getup", args.gate_report, checkpoint_sha256,
+                                                     dry_run=args.dry_run)
 
     env_cfg = load_env_cfg(TASK, play=True)
     env_cfg.scene.num_envs = 1
+    env_cfg.seed = policy_contract.SELF_TEST_SEED
     agent_cfg = load_rl_cfg(TASK)
     env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device)
     wrapped = RslRlVecEnvWrapper(env)
     temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp.onnx")
     try:
-        lower, upper = _action_contract(env)
+        _action_contract(env)
+        robot = env.scene["robot"]
+        default = robot.data.default_joint_pos[0].detach().cpu().numpy().astype(np.float64)
+        home = np.array([policy_contract.HOME.joint_pos_rad[name] for name in robot.joint_names])
+        if not np.allclose(default, home, rtol=0, atol=1e-6):
+            raise ValueError("Get-up env default joint pose is not the current HOME")
         runner = load_runner_cls(TASK)(wrapped, asdict(agent_cfg), device=args.device)
         runner.load(
             str(checkpoint), load_cfg={"actor": True}, strict=True,
@@ -266,31 +257,22 @@ def main() -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         runner.export_policy_to_onnx(str(temporary.parent), temporary.name)
         _validate_onnx(temporary)
-        metadata = get_base_metadata(env, run_path=checkpoint.parent.name)
-        metadata.update(
-            {
-                "action_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
-                # Full precision: mjlab's list formatter rounds to 3 decimals,
-                # which would publish 3.142 > pi.
-                "action_clip_lower": _full_precision_csv(lower),
-                "action_clip_upper": _full_precision_csv(upper),
-                "microban_getup_previous_action_semantics": PREVIOUS_ACTION_SEMANTICS,
-                "microban_getup_contract": CONTRACT_VERSION,
-                "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
-                "microban_getup_home_pose": json.dumps(
-                    getup_home_pose(), sort_keys=True, separators=(",", ":")
-                ),
-                # The contract string the training runner stamped ("v4" for
-                # centered v5 runs started before the version bump).
-                "microban_getup_checkpoint_contract_stamp": checkpoint_stamp,
-                "checkpoint_sha256": checkpoint_sha256,
-                "checkpoint_filename": checkpoint.name,
-                **contract_metadata(),
-            }
+        policy = runner.get_inference_policy(device="cpu")
+        rows, actions = policy_contract.rollout_self_test("getup", wrapped, policy)
+        metadata = policy_contract.contract_metadata(
+            "getup",
+            joint_names=robot.joint_names,
+            checkpoint=checkpoint,
+            checkpoint_sha256=checkpoint_sha256,
+            gate_report_sha256=gate_report_sha256,
+            self_test_observations=rows,
+            self_test_actions=actions,
+            dry_run=args.dry_run,
         )
         attach_metadata_to_onnx(str(temporary), metadata)
         _validate_onnx(temporary)
-        if _sha256(checkpoint) != checkpoint_sha256:
+        self_test = policy_contract.check_self_test(temporary, metadata)
+        if policy_contract.sha256_file(checkpoint) != checkpoint_sha256:
             raise ValueError("Checkpoint changed during export")
         if args.replace:
             os.replace(temporary, output)
@@ -299,6 +281,7 @@ def main() -> None:
             # file atomically and fails if another process created the name.
             os.link(temporary, output)
             temporary.unlink()
+        print(f"self-test {len(rows)} rows at {self_test:.3f} x bound")
         print(f"Exported validated get-up ONNX: {output}")
     finally:
         temporary.unlink(missing_ok=True)
