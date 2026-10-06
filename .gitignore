@@ -6,22 +6,12 @@ src/mjlab_microban/robot/microban/scad/
 .venv/*
 
 logs/*
-# Frozen velocity sources referenced as repo://checkpoints/...; contract-v12
-# provenance records and re-hashes them, so they stay local like logs/.
+# Training outputs, gates, packages and the selected walker copies stay local;
+# releases are kept by tag (archive/pre-cleanup-2026-10-06 has the history).
 checkpoints/
 wandb/*
 policy.onnx
-# Generated evaluation artifacts stay local, except for the immutable source
-# receipt that contract-v12 checkpoints re-hash on every save/resume.  Keeping
-# that one exact file in Git makes repo:// provenance portable to another PC.
 artifacts/*
-!artifacts/legacy_teleop_probe/
-artifacts/legacy_teleop_probe/*
-!artifacts/legacy_teleop_probe/model_14999_teleop83_raw_9x300.json
 
-# Generated/recorded motion datasets are reproducible inputs, not source.  Keep
-# them local; the training guide records how to regenerate and checksum them.
-data/motions/*.jsonl
-data/motions/*.npz
-!data/motions/microban_twist2_walk002_locomotion_prior.npz
-!data/motions/microban_twist2_walk002_crouched_home.npz
+# Recorded motion datasets (no task of the HOME pipeline reads one) stay local.
+data/motions/
