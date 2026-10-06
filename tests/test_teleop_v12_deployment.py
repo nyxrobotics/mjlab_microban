@@ -3,11 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import CENTERED_HOME_TAG, FORWARD_LEAN_HOME_TAG, home_tag  # noqa: E402
 
 from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
@@ -473,7 +477,20 @@ def test_metadata_covers_runtime_contract_and_derives_guard(tmp_path: Path) -> N
         [25.0, 30.0, -10.0],
         [25.0, -10.0, -10.0],
     ]
-    assert hand_target_fk["normalizer_abs_bound_m"] == [0.063, 0.0388, 0.0605]
+    from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
+    from mjlab_microban.robot.microban_hand_fk import MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M
+
+    # The published HOMEs' boxes (hand FK v2 at the centered HOME, the levelled
+    # receiver box of hand FK v4 at the forward-lean HOME); another HOME's own.
+    assert hand_target_fk["normalizer_abs_bound_m"] == {
+        CENTERED_HOME_TAG: [0.063, 0.0388, 0.0605],
+        FORWARD_LEAN_HOME_TAG: [0.064, 0.0388, 0.0458],
+    }.get(home_tag(), list(MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M))
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        levelled = "robot_home_levelled_trunk_xyz_forward_left_up"
+        assert hand_target_fk["target_frame"] == levelled
+        assert metadata["foot_target_frame"] == levelled
+        assert metadata["hand_target_frame"] == levelled
     assert metadata["action_clip_semantics"] == (
         "absolute_target_saturated_at_servo_goal_range_pi_no_software_clip_"
         "all_body_joints_radians"
@@ -1273,6 +1290,7 @@ def test_boundary_gate_controls_pass_on_the_exact_ancestry(
     )
 
 
+@pytest.mark.centered_home_pinned
 @pytest.mark.skipif(
     V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
     reason="only the centered HOME has no required pose-release boundary gates",

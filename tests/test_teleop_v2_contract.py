@@ -27,6 +27,7 @@ from rsl_rl.models import MLPModel
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
+from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
 from mjlab_microban.tasks.mdp import no_stepping_penalty
 from mjlab_microban.tasks.microban_locomotion_prior import (
     MICROBAN_LOCOMOTION_PRIOR_COMMAND_WIDTH,
@@ -805,10 +806,21 @@ class TeleopConfigurationTest(unittest.TestCase):
             commanded_planar_velocity_progress,
         )
         self.assertEqual(cfg.rewards["commanded_planar_velocity_progress"].weight, 2.0)
+        # Velocities are read with HOME's forward trunk lean removed (a
+        # vertical trunk keeps the original params).
+        lean = {"trunk_pitch": HOME_TRUNK_PITCH_RAD} if HOME_TRUNK_PITCH_RAD != 0.0 else {}
         self.assertEqual(
             cfg.rewards["commanded_planar_velocity_progress"].params,
-            {"command_name": "twist", "command_threshold": 0.01},
+            {"command_name": "twist", "command_threshold": 0.01, **lean},
         )
+        if lean:
+            for name in (
+                "track_linear_velocity",
+                "track_angular_velocity",
+                "linear_velocity_error_l1",
+                "yaw_velocity_error_l1",
+            ):
+                self.assertEqual(cfg.rewards[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
         self.assertEqual(cfg.rewards["air_time"].weight, 3.0)
         self.assertEqual(cfg.rewards["air_time"].params["threshold_min"], 0.02)
         self.assertEqual(cfg.rewards["air_time"].params["threshold_max"], 0.30)

@@ -6,11 +6,15 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Contract tests for the walking ONNX metadata (v3 centered HOME, servo-range target bound)."""
+"""Contract tests for the walking ONNX metadata (HOME-bound contract, servo-range target bound).
+
+v3 at the centered upright HOME, v4 at the forward-lean HOME, "<v>_<tag>" elsewhere.
+"""
 
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +24,15 @@ import onnx
 from mjlab.envs.mdp.observations import last_action
 from onnx import TensorProto, helper
 
-from mjlab_microban.robot.microban_constants import HOME_FRAME, SERVO_TARGET_RANGE_RAD
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import PUBLISHED_CONTRACT_STRINGS, home_tag  # noqa: E402
+
+from mjlab_microban.robot.home_contracts import robot_contract_strings
+from mjlab_microban.robot.microban_constants import (
+    HOME_FRAME,
+    HOME_TRUNK_PITCH_RAD,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab_microban.scripts.export_walk_onnx import (
     ACTION_JOINT_NAMES,
     OBSERVATION_TERMS,
@@ -85,7 +97,7 @@ scene:
         - 0.0
         - 0.0
         - {z!r}
-        rot: !!python/tuple [1.0, 0.0, 0.0, 0.0]
+        rot: !!python/tuple {rot!r}
         joint_pos:
 {joints}
 actions:
@@ -108,13 +120,20 @@ observations:
 """
 
 
-def _env_yaml(path: Path, *, hip_pitch: float | None = None, lower: float = -SERVO_TARGET_RANGE_RAD) -> Path:
+def _env_yaml(
+    path: Path,
+    *,
+    hip_pitch: float | None = None,
+    lower: float = -SERVO_TARGET_RANGE_RAD,
+    rot: tuple[float, float, float, float] | None = None,
+) -> Path:
     joints = dict(HOME_FRAME.joint_pos)
     if hip_pitch is not None:
         joints["left_hip_pitch"] = hip_pitch
     path.write_text(
         _ENV_YAML.format(
             z=HOME_FRAME.pos[2],
+            rot=list(HOME_FRAME.rot if rot is None else rot),
             lower=lower,
             upper=SERVO_TARGET_RANGE_RAD,
             joints="\n".join(f"          {name}: {value!r}" for name, value in joints.items()),
@@ -135,6 +154,13 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         self.assertTrue(action.use_default_offset)
         self.assertEqual(action.clip, {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)})
         self.assertEqual(cfg.scene.entities["robot"].init_state.joint_pos, HOME_FRAME.joint_pos)
+        self.assertEqual(tuple(cfg.scene.entities["robot"].init_state.rot), HOME_FRAME.rot)
+        if HOME_TRUNK_PITCH_RAD != 0.0:
+            # Upright reward and velocity tracking are centred on HOME's trunk
+            # lean (a vertical trunk keeps mjlab's own terms and params).
+            self.assertEqual(cfg.rewards["upright"].params["pitch"], HOME_TRUNK_PITCH_RAD)
+            for name in ("track_linear_velocity", "track_angular_velocity"):
+                self.assertEqual(cfg.rewards[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
         self.assertEqual(tuple(cfg.observations["actor"].terms), OBSERVATION_TERMS)
         previous = cfg.observations["actor"].terms["actions"]
         self.assertIs(previous.func, last_action)
@@ -159,7 +185,8 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         self.assertEqual([float(v) for v in metadata["action_clip_lower"].split(",")], [-SERVO_TARGET_RANGE_RAD] * 18)
         self.assertEqual([float(v) for v in metadata["action_clip_upper"].split(",")], [SERVO_TARGET_RANGE_RAD] * 18)
         self.assertEqual(metadata["previous_action_semantics"], "raw_policy_output")
-        self.assertEqual(metadata["walk_contract_version"], "v3_centered_home_servo_range")
+        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), robot_contract_strings())
+        self.assertEqual(metadata["walk_contract_version"], expected["walk_contract_version"])
         home = json.loads(metadata["home_pose"])
         self.assertEqual(home["joint_pos_rad"], dict(HOME_FRAME.joint_pos))
         self.assertEqual(home["root_pos_m"], list(HOME_FRAME.pos))
@@ -215,6 +242,12 @@ class WalkExportMetadataContractTest(unittest.TestCase):
             for bad in (
                 _env_yaml(root / "old_home.yaml", hip_pitch=-0.17453292519943295),
                 _env_yaml(root / "old_clip.yaml", lower=-1.57),
+                # HOME joints with another root attitude (the forward-lean
+                # joints with an upright root, or the reverse).
+                _env_yaml(
+                    root / "other_root.yaml",
+                    rot=(1.0, 0.0, 0.0, 0.0) if HOME_TRUNK_PITCH_RAD != 0.0 else (0.996, 0.0, 0.0872, 0.0),
+                ),
             ):
                 with self.assertRaises(ValueError):
                     require_recorded_walk_contract(bad)

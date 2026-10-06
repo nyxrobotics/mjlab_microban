@@ -16,6 +16,9 @@ from unittest import mock
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import CENTERED_HOME_YAML, home_tag  # noqa: E402
+
 from mjlab_microban.robot import home_pose
 from mjlab_microban.robot.home_pose import (
     HOME_JOINT_NAMES,
@@ -48,7 +51,9 @@ PITCH_JOINTS = set(balance.BALANCED_JOINTS)
 
 
 def yaml_joints() -> dict[str, float]:
-    return dict(load_home_pose().joint_pos_deg)
+    """The centered HOME's joints (its fixture, whatever HOME this checkout is)."""
+
+    return dict(load_home_pose(CENTERED_HOME_YAML).joint_pos_deg)
 
 
 def with_pairs(joints: dict[str, float], **pairs: float) -> dict[str, float]:
@@ -100,7 +105,7 @@ class SolverTest(unittest.TestCase):
         )
 
     def test_centered_yaml_is_a_fixed_point(self):
-        result = balance.balance_home_yaml(home_pose.HOME_POSE_YAML)
+        result = balance.balance_home_yaml(CENTERED_HOME_YAML)
         self.assertFalse(result.changed)
         self.assertTrue(result.before_within_tolerance)
         self.assertEqual(dict(result.after_deg), dict(result.before_deg))
@@ -127,7 +132,7 @@ class SolverTest(unittest.TestCase):
 
     def test_trunk_pitch_10_reproduces_the_forward_lean_solve(self):
         result = balance.balance_home_yaml(
-            home_pose.HOME_POSE_YAML, trunk_pitch_deg=10.0
+            CENTERED_HOME_YAML, trunk_pitch_deg=10.0
         )
         self.assertTrue(result.changed)
         self.assertAlmostEqual(
@@ -329,7 +334,7 @@ class CliTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
         self.path = self.directory / "home_pose.yaml"
-        shutil.copyfile(home_pose.HOME_POSE_YAML, self.path)
+        shutil.copyfile(CENTERED_HOME_YAML, self.path)
 
     def tearDown(self):
         shutil.rmtree(self.directory)
@@ -621,7 +626,7 @@ class HomePoseToolTest(unittest.TestCase):
     def test_failures_are_one_line(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "home_pose.yaml"
-            shutil.copyfile(home_pose.HOME_POSE_YAML, path)
+            shutil.copyfile(CENTERED_HOME_YAML, path)
             rewrite_home_pose_yaml(path, joint_pos_deg={"left_knee": 20.0, "right_knee": 20.0})
             cases = (
                 (("show", "--yaml", str(path), "--no-training-check"), "soles are not flat"),
@@ -643,7 +648,7 @@ class HomePoseToolTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         summary = json.loads(completed.stdout)
         self.assertEqual(summary["training_line"], {"ok": True, "error": None})
-        self.assertEqual(summary["tag"], "centered_home")
+        self.assertEqual(summary["tag"], home_tag())
 
 
 class LazyHomeTest(unittest.TestCase):

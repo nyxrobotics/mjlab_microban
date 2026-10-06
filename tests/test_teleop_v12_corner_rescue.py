@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import CENTERED_HOME_TAG, FORWARD_LEAN_HOME_TAG, home_tag  # noqa: E402
 
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
@@ -156,10 +160,20 @@ class TeleopV12CornerRescueTest(unittest.TestCase):
         degrees = torch.rad2deg(
             corner_pair_joint_targets(device="cpu", dtype=torch.float64)
         )
+        # Named pose F's shoulder pitch: -25 deg in the centered HOME's hand-FK
+        # box, -20 deg in the forward-lean HOME's levelled receiver box (hand FK
+        # v4).  Another HOME takes F and B from its own box (same pairing).
+        from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import _named_joint_pose
+
+        f = {CENTERED_HOME_TAG: -25.0, FORWARD_LEAN_HOME_TAG: -20.0}.get(home_tag())
+        if f is not None:
+            forward, backward = (f, 25.0, -50.0), (25.0, 20.0, -10.0)
+        else:
+            forward, backward = _named_joint_pose("F"), _named_joint_pose("B")
         expected = torch.tensor(
             [
-                [[-25.0, 25.0, -50.0], [25.0, -20.0, -10.0]],
-                [[25.0, 20.0, -10.0], [-25.0, -25.0, -50.0]],
+                [list(forward), [backward[0], -backward[1], backward[2]]],
+                [list(backward), [forward[0], -forward[1], forward[2]]],
             ],
             dtype=torch.float64,
         )

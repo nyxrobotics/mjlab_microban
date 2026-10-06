@@ -48,7 +48,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 LEAN_YAML = FIXTURES / "home_pose_forward_lean.yaml"
-CENTERED_YAML = REPO_ROOT / "config" / "home_pose.yaml"
+CENTERED_YAML = FIXTURES / "home_pose_centered.yaml"
 REFERENCES = {
     "centered": FIXTURES / "home_equivalence" / "centered_home_track-centered-home-clip_5b5a9d0.json",
     "forward_lean": FIXTURES / "home_equivalence" / "forward_lean_home_forward-lean-v2_cd0ea78.json",
@@ -358,6 +358,46 @@ class ForwardLeanOnlyTestsTest(unittest.TestCase):
             "recorded_pose_release_model14900_failed_final_scenarios_replay_99_updates_forward_lean_v1",
             "episode_shared_twist_foot_hand_failed_scenario_replay_home_levelled_pose_release_v1",
         ])
+
+
+class HomePinnedTestsTest(unittest.TestCase):
+    """The tests pinned to one published HOME pass at that HOME, from any checkout.
+
+    A HOME branch's own config/home_pose.yaml runs its pinned tests directly
+    (tests/home_cases.py); the other published HOME's pinned tests are run here
+    in a subprocess at its fixture YAML, so the centered branch still checks
+    the forward-lean mechanisms and the reverse.  Any other HOME runs both.
+    """
+
+    def _run_marked(self, yaml_path: Path, marker: str) -> None:
+        try:
+            import pytest  # noqa: F401
+        except ImportError:
+            self.skipTest("pytest is not installed")
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs", "-m", marker,
+             "tests"],
+            env=_environment(yaml_path), cwd=REPO_ROOT, capture_output=True, text=True,
+            timeout=3000, check=False,
+        )
+        summary = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+        self.assertEqual(completed.returncode, 0, completed.stdout[-4000:] + completed.stderr[-2000:])
+        self.assertIn(" passed", summary)
+        self.assertNotIn("skipped", summary, completed.stdout[-4000:])
+
+    def test_forward_lean_pinned_tests_pass_at_the_forward_lean_home(self):
+        import home_cases
+
+        if home_cases.AT_FORWARD_LEAN_HOME:
+            self.skipTest("this checkout is the forward-lean HOME: its pinned tests ran directly")
+        self._run_marked(LEAN_YAML, "forward_lean_home_pinned")
+
+    def test_centered_pinned_tests_pass_at_the_centered_home(self):
+        import home_cases
+
+        if home_cases.AT_CENTERED_HOME:
+            self.skipTest("this checkout is the centered HOME: its pinned tests ran directly")
+        self._run_marked(CENTERED_YAML, "centered_home_pinned")
 
 
 def _git_show(commit: str, path: str, destination: Path) -> bool:

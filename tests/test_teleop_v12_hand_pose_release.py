@@ -1,8 +1,9 @@
-"""Opt-in active-hand arm pose-release recipe: reward math and recipe gating."""
+"""Active-hand arm pose-release recipe: reward math and recipe gating."""
 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -23,6 +24,9 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_SWITCH_INFO_KEY,
+)
+from mjlab_microban.tasks import (
+    microban_teleop_v12_hand_pose_release_lineage as lineage_module,
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
     HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH,
@@ -174,12 +178,86 @@ _PARENT_GATE = (
 )
 
 
+# Only the centered HOME pins a switch parent (its gated model_7099); every
+# other HOME (the forward-lean one included) trains a fresh chain only.  The
+# switch mechanism itself is exercised at every HOME under this test-only pin.
+_TEST_PARENT_SHA256 = "d" * 64
+
+
+def _pin_test_parent():
+    return mock.patch.object(
+        lineage_module,
+        "HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256",
+        _TEST_PARENT_SHA256,
+    )
+
+
+class NoPinnedSwitchParentTest(unittest.TestCase):
+    @unittest.skipUnless(
+        HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 is None,
+        "this HOME pins a switch parent (the centered HOME's gated model_7099)",
+    )
+    def test_no_parent_is_pinned_and_every_switch_is_refused(self) -> None:
+        self.assertIsNone(HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256)
+        with self.assertRaisesRegex(ValueError, "fresh pose-release chain"):
+            hand_pose_release_recipe_switch_marker(
+                parent_checkpoint_path=_PARENT_CHECKPOINT,
+                parent_checkpoint_sha256=_TEST_PARENT_SHA256,
+                parent_stage_gate_path=_PARENT_GATE,
+                parent_stage_gate_sha256="b" * 64,
+            )
+        with _pin_test_parent():
+            marker = _release_marker()
+        with self.assertRaisesRegex(ValueError, "drifted"):
+            validate_hand_pose_release_recipe_switch_marker(marker)
+        infos = {
+            "microban_teleop_recipe_revision": (
+                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            ),
+            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: marker,
+        }
+        with self.assertRaises(ValueError):
+            hand_pose_release_lineage(infos, verify_parent=False)
+        with self.assertRaisesRegex(ValueError, "fresh pose-release chain"):
+            validate_hand_pose_release_switch_parent_payload(
+                {"iter": 7099, "infos": {}}, checkpoint_sha256=_TEST_PARENT_SHA256
+            )
+
+    def test_fresh_chain_uses_the_home_pose_release_string(self) -> None:
+        from mjlab_microban.robot.home_pose import HOME
+
+        self.assertTrue(
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION.startswith(f"{HOME.tag}_")
+        )
+        self.assertIn(
+            "active_hand_arm_pose_release",
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        )
+        self.assertNotEqual(
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+            MICROBAN_TELEOP_V12_RECIPE_REVISION,
+        )
+        infos = {
+            "microban_teleop_recipe_revision": (
+                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            ),
+            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+        }
+        self.assertEqual(
+            hand_pose_release_lineage(infos, iteration=14_999),
+            HAND_POSE_RELEASE_LINEAGE_FRESH,
+        )
+        self.assertEqual(
+            _deployment_recipe_revision(infos),
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        )
+
+
 def _release_marker(**overrides) -> dict:
     values = {
         "parent_checkpoint_path": _PARENT_CHECKPOINT,
-        "parent_checkpoint_sha256": (
-            HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
-        ),
+        "parent_checkpoint_sha256": _TEST_PARENT_SHA256,
         "parent_stage_gate_path": _PARENT_GATE,
         "parent_stage_gate_sha256": "b" * 64,
         **overrides,
@@ -188,6 +266,11 @@ def _release_marker(**overrides) -> dict:
 
 
 class HandPoseReleaseRecipeGateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = _pin_test_parent()
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _infos(self, recipe: str, **extra) -> dict:
         return {
             "microban_teleop_recipe_revision": recipe,
@@ -346,7 +429,7 @@ class HandPoseReleaseRecipeGateTest(unittest.TestCase):
     def test_parent_payload_must_be_the_unmarked_canonical_model_7099(
         self,
     ) -> None:
-        sha = HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
+        sha = _TEST_PARENT_SHA256
         payload = {
             "iter": 7099,
             "infos": {
@@ -389,8 +472,10 @@ _REAL_GATE = resolve_bootstrap_artifact_path(_PARENT_GATE)
 
 
 @unittest.skipUnless(
-    _REAL_PARENT.is_file() and _REAL_GATE.is_file(),
-    "gated canonical model_7099 artifacts are not present",
+    HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256 is not None
+    and _REAL_PARENT.is_file()
+    and _REAL_GATE.is_file(),
+    "no switch parent is pinned at this HOME, or its gated model_7099 is not present",
 )
 class HandPoseReleaseRealParentTest(unittest.TestCase):
     """Validate the pinned parent and its stage gate exactly as consumers do."""

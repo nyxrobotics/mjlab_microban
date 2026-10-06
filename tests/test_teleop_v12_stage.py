@@ -1331,11 +1331,21 @@ class TeleopV12StageTest(unittest.TestCase):
     def test_pose_release_lineages_gate_under_the_unchanged_profiles(
         self,
     ) -> None:
+        parent_sha256 = HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
+        if parent_sha256 is None:
+            # Only the centered HOME pins a switch parent; elsewhere the switch
+            # mechanism is exercised under a test-only pin.
+            parent_sha256 = "d" * 64
+            pin = mock.patch(
+                "mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage."
+                "HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256",
+                parent_sha256,
+            )
+            pin.start()
+            self.addCleanup(pin.stop)
         marker = hand_pose_release_recipe_switch_marker(
             parent_checkpoint_path="repo://logs/run_7000_to7100/model_7099.pt",
-            parent_checkpoint_sha256=(
-                HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256
-            ),
+            parent_checkpoint_sha256=parent_sha256,
             parent_stage_gate_path="repo://artifacts/run_model_7099_gate.json",
             parent_stage_gate_sha256="b" * 64,
         )

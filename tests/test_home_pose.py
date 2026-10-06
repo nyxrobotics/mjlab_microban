@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import sys
 import tempfile
 import time
 import unittest
@@ -12,6 +13,9 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import CENTERED_HOME_YAML, centered_home_only, home_yaml_override  # noqa: E402
 
 from mjlab_microban.robot import home_pose
 from mjlab_microban.robot.home_pose import (
@@ -67,9 +71,18 @@ def radians(joints_deg):
     return {name: float(np.deg2rad(value)) for name, value in joints_deg.items()}
 
 
+def centered_home():
+    """The centered HOME, loaded from its fixture (any checkout HOME)."""
+
+    return load_home_pose(CENTERED_HOME_YAML)
+
+
+@centered_home_only
 class CenteredHomeIsReproducedTest(unittest.TestCase):
+    """The centered config/home_pose.yaml gives the centered branches' module values."""
+
     def test_yaml_inputs(self):
-        self.assertEqual(HOME.path, home_pose.HOME_POSE_YAML)
+        self.assertEqual(HOME.path, Path(home_yaml_override() or home_pose.HOME_POSE_YAML))
         self.assertEqual(HOME.label, "centered_home")
         self.assertEqual(HOME.trunk_pitch_deg, 0.0)
         self.assertEqual(dict(HOME.joint_pos_deg), CENTERED_DEG)
@@ -254,7 +267,7 @@ class YamlEditTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
         self.path = self.directory / "home_pose.yaml"
-        shutil.copyfile(home_pose.HOME_POSE_YAML, self.path)
+        shutil.copyfile(CENTERED_HOME_YAML, self.path)
 
     def tearDown(self):
         shutil.rmtree(self.directory)
@@ -287,7 +300,7 @@ class YamlEditTest(unittest.TestCase):
         self.assertAlmostEqual(edited.root_pos[2], LEAN_ROOT_Z, delta=1.0e-12)
         # A changed HOME drops the centered compatibility overrides.
         self.assertEqual(edited.tag, f"centered_home_{edited.joint_hash}")
-        self.assertNotEqual(edited.joint_hash, HOME.joint_hash)
+        self.assertNotEqual(edited.joint_hash, centered_home().joint_hash)
         self.assertEqual(edited.feet_lateral_m, 0.0941)
 
     def test_unflat_edit_is_refused_on_load(self):
@@ -317,7 +330,7 @@ class RobotYamlTest(unittest.TestCase):
         parsed = yaml.safe_load(render_robot_home_pose_yaml(document))
         self.assertEqual(parsed, json.loads(json.dumps(document)))
         self.assertEqual(parsed["joint_pos_rad"], dict(HOME.joint_pos_rad))
-        self.assertEqual(parsed["root_pos_m"], [0.0, 0.0, CENTERED_ROOT_Z])
+        self.assertEqual(parsed["root_pos_m"], list(HOME.root_pos))
         self.assertEqual(parsed["hand_target_fk"], json.loads(json.dumps(microban_hand_fk_metadata())))
         self.assertEqual(parsed["fk"]["com_m"][1], HOME.analysis.com[1])
 
@@ -349,7 +362,9 @@ class RobotYamlTest(unittest.TestCase):
             self.assertFalse(path.exists())
             write_robot_home_pose(repo)
             self.assertTrue(write_robot_home_pose(repo, check=True)[1])
-            path.write_text(path.read_text().replace("0.170554885633559", "0.17"))
+            root_z = repr(HOME.root_pos[2])
+            self.assertIn(root_z, path.read_text())
+            path.write_text(path.read_text().replace(root_z, "0.17"))
             self.assertFalse(write_robot_home_pose(repo, check=True)[1])
             with self.assertRaises(FileNotFoundError):
                 write_robot_home_pose(repo / "src")
@@ -366,7 +381,11 @@ class WalkHomeStampTest(unittest.TestCase):
         require_walk_home_pose({WALK_HOME_POSE_INFO_KEY: getup_home_pose()})
         # Unstamped walking checkpoints predate the stamp: accepted only at the
         # centered HOME they were trained at.
-        require_walk_home_pose({})
+        if HOME.tag == "centered_home":
+            require_walk_home_pose({})
+        else:
+            with self.assertRaises(ValueError):
+                require_walk_home_pose({})
         other = getup_home_pose()
         other["root_pos_m"] = [0.0, 0.0, 0.17]
         with self.assertRaises(ValueError):
@@ -381,7 +400,7 @@ class FloorContactAndRootZPinTest(unittest.TestCase):
     """Review round 4: rolled soles and the root z rounding boundary."""
 
     def centered_deg(self, **pairs) -> dict[str, float]:
-        joints = dict(HOME.joint_pos_deg)
+        joints = dict(CENTERED_DEG)
         for joint, (left, right) in pairs.items():
             joints[f"left_{joint}"], joints[f"right_{joint}"] = left, right
         return joints
@@ -408,34 +427,39 @@ class FloorContactAndRootZPinTest(unittest.TestCase):
     def test_current_and_lean_homes_are_on_the_floor(self):
         self.assertTrue(HOME.analysis.soles_on_floor)
         self.assertEqual(HOME.analysis.ground_contact_corner_count, 48)
-        self.assertEqual(HOME.analysis.sole_contact_lift_m, 0.0)
+        # A pitched HOME's 12-decimal hip/ankle values leave the soles level
+        # to within FK rounding (5.4e-5 m of lift at the forward-lean HOME).
+        self.assertLess(HOME.analysis.sole_contact_lift_m, 1.0e-4)
+        self.assertEqual(centered_home().analysis.sole_contact_lift_m, 0.0)
         lean = home_pose_from_values(joint_pos_deg=lean_joints_deg(), trunk_pitch_deg=10.0)
         self.assertTrue(lean.analysis.soles_on_floor)
         self.assertLess(lean.analysis.sole_contact_lift_m, 1.0e-4)
 
     def test_centered_root_z_is_pinned_not_rounded(self):
-        fk = HOME.analysis.root_pos[2]
+        centered = centered_home()
+        fk = centered.analysis.root_pos[2]
         # FK sits ~2 ulps below the 15-decimal rounding boundary; a 3-ulp
         # drift would flip a 15-decimal rounding, the pin does not move.
         drifted = fk
         for _ in range(3):
             drifted = math.nextafter(drifted, 1.0)
         self.assertNotEqual(round(fk, 15), round(drifted, 15))
-        self.assertEqual(HOME.root_pos[2], 0.170554885633559)
-        self.assertLess(abs(HOME.root_pos[2] - fk), home_pose.ROOT_Z_PIN_TOLERANCE_M)
+        self.assertEqual(centered.root_pos[2], 0.170554885633559)
+        self.assertLess(abs(centered.root_pos[2] - fk), home_pose.ROOT_Z_PIN_TOLERANCE_M)
         self.assertEqual(
-            home_pose.LEGACY_HOME_OVERRIDES[HOME.joint_hash]["root_z_m"], 0.170554885633559
+            home_pose.LEGACY_HOME_OVERRIDES[centered.joint_hash]["root_z_m"], 0.170554885633559
         )
 
     def test_pinned_root_z_must_match_fk(self):
         original = home_pose.LEGACY_HOME_OVERRIDES
+        centered = centered_home()
         try:
             home_pose.LEGACY_HOME_OVERRIDES = {
-                HOME.joint_hash: {"tag": "centered_home", "root_z_m": 0.1706}
+                centered.joint_hash: {"tag": "centered_home", "root_z_m": 0.1706}
             }
             with self.assertRaisesRegex(ValueError, "differs from its published value"):
                 home_pose_from_values(
-                    joint_pos_deg=dict(HOME.joint_pos_deg), trunk_pitch_deg=0.0,
+                    joint_pos_deg=dict(centered.joint_pos_deg), trunk_pitch_deg=0.0,
                     label="centered_home",
                 )
         finally:
@@ -455,10 +479,15 @@ class FloorContactAndRootZPinTest(unittest.TestCase):
         stamp["root_pos_m"][2] += 1.0e-12
         self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
         # The HOMEs with published artifacts pin their values and compare
-        # exactly, as their branches did (stamp == HOME, root atol 1e-12).
-        self.assertTrue(HOME.is_legacy)
-        self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (0.0, 1.0e-12))
-        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        # exactly, as their branches did (stamp == HOME, root atol 1e-12);
+        # any other HOME keeps the 1e-9 FK-noise tolerance.
+        if HOME.is_legacy:
+            self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (0.0, 1.0e-12))
+            self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        else:
+            self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (1.0e-9, 1.0e-9))
+            self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 0.0))
         stamp["root_pos_m"][2] += 1.0e-6
         self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
         stamp = json.loads(json.dumps(getup_home_pose()))

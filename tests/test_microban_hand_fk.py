@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
 import mujoco
 import numpy as np
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from home_cases import centered_home_only  # noqa: E402
 
 from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_HOME_JOINT_RAD,
@@ -23,6 +27,7 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_default_hand_positions,
     microban_hand_fk_metadata,
     microban_hand_offsets_from_arm_joints,
+    microban_hand_target_offsets_from_arm_joints,
     microban_hand_positions_from_arm_joints,
     microban_reachable_hand_evaluation_offsets,
     sample_microban_reachable_hand_targets,
@@ -93,6 +98,7 @@ class MicrobanHandFkTest(unittest.TestCase):
             atol=0.0,
         )
 
+    @centered_home_only  # the forward-lean box: test_microban_hand_fk_forward_lean.py
     def test_joint_box_samples_are_reachable_finite_and_bounded(self) -> None:
         count = 100_000
         active = torch.ones(count, 2, dtype=torch.bool)
@@ -163,6 +169,7 @@ class MicrobanHandFkTest(unittest.TestCase):
         )
         self.assertIn("uniform_independent_joint_box", metadata["sampling"])
 
+    @centered_home_only  # the forward-lean box: test_microban_hand_fk_forward_lean.py
     def test_grid_aabb_fits_normalizer_and_runtime_live_margin(self) -> None:
         minimum = torch.tensor(MICROBAN_HAND_FK_OFFSET_AABB_MIN_M)
         maximum = torch.tensor(MICROBAN_HAND_FK_OFFSET_AABB_MAX_M)
@@ -189,7 +196,9 @@ class MicrobanHandFkTest(unittest.TestCase):
                     dtype=torch.float64,
                 )
             )
-            expected = microban_hand_offsets_from_arm_joints(joints)
+            # Target offsets: the HOME-levelled frame (the trunk frame at a
+            # vertical HOME trunk).
+            expected = microban_hand_target_offsets_from_arm_joints(joints)
             actual = torch.tensor(offsets_by_name[name], dtype=torch.float64)
             torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
             torch.testing.assert_close(actual[0, (0, 2)], actual[1, (0, 2)])
