@@ -86,7 +86,9 @@ class Pipeline:
         self.env: dict[str, str] = {}
         if dry:
             self.env[schedules.SCHEDULE_SCALE_ENV] = str(self.cfg["schedule_scale"])
-            os.environ[schedules.SCHEDULE_SCALE_ENV] = self.env[schedules.SCHEDULE_SCALE_ENV]
+        elif os.environ.get(schedules.SCHEDULE_SCALE_ENV):
+            raise PipelineError(f"{schedules.SCHEDULE_SCALE_ENV} is set: a release trains the full schedules",
+                                EXIT_INPUT)
         self.sched = self._schedules()
         self.home = self._home_identity()
         prefix = ("dryrun_" if dry else "home_") + self.home["joint_hash"]
@@ -216,9 +218,10 @@ class Pipeline:
         training_line = json.loads(show.stdout).get("training_line")
         self.log(f"HOME {home['tag']} (hash {home['joint_hash']}), training line {training_line}")
         out = self.state.dir / "training_suite.out"
+        # The suite checks the real schedules: never under the dry-run scale.
         rc, _ = self.jobs.run("training_suite", [*UV, "--with", "pytest", "python", "-m", "pytest", "-q",
                                                  "-p", "no:cacheprovider", "tests"], "eval",
-                              env={**self.env, "CUDA_VISIBLE_DEVICES": ""}, gpu=False, check=False)
+                              env={"CUDA_VISIBLE_DEVICES": ""}, gpu=False, check=False)
         log = sorted((self.state.dir / "logs").glob("*_training_suite.log"))[-1]
         shutil.copyfile(log, out)
         summary = next((line for line in reversed(out.read_text().splitlines()) if " passed" in line
