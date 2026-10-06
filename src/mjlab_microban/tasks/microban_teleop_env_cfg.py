@@ -40,13 +40,6 @@ from mjlab_microban.tasks.mdp import (
     set_command_velocity,
     set_stepping_parameters,
 )
-from mjlab_microban.tasks.microban_locomotion_prior import (
-    MICROBAN_LOCOMOTION_PRIOR_PATH,
-    MICROBAN_LOCOMOTION_PRIOR_SHA256,
-    LocomotionPriorCommandCfg,
-    locomotion_prior_action_target_error_exp,
-    locomotion_prior_joint_position_error_exp,
-)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -211,9 +204,6 @@ MICROBAN_TELEOP_LOW_SIGNED_AXIS_RANGES = {
     "yaw_left": (0.40, 1.20),
     "yaw_right": (-1.20, -0.40),
 }
-MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT = 0.0
-MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT = 0.0
-MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD = 0.15
 
 
 def _materialize_rotation_command_cfg(
@@ -583,40 +573,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         rel_active=0.0,
         trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
-    # This command is privileged: it is appended only to the critic below and
-    # never changes the actor's deployment-stable 83-value observation schema.
-    # Keep the term and all reward/termination shapes in play mode too, but
-    # disable it so every one of its 39 values and both rewards are exact zero.
-    cfg.commands["locomotion_prior"] = LocomotionPriorCommandCfg(
-        resampling_time_range=(1.0e9, 1.0e9),
-        motion_file=str(MICROBAN_LOCOMOTION_PRIOR_PATH),
-        expected_sha256=MICROBAN_LOCOMOTION_PRIOR_SHA256,
-        # Retain the 39-wide critic term for checkpoint topology stability, but
-        # never activate the dynamically rejected walk004 reference.
-        enabled=False,
-    )
-    cfg.observations["critic"].terms["locomotion_prior"] = ObservationTermCfg(
-        func=velocity_mdp.generated_commands,
-        params={"command_name": "locomotion_prior"},
-    )
-    cfg.rewards["locomotion_prior_action_target"] = RewardTermCfg(
-        func=locomotion_prior_action_target_error_exp,
-        weight=MICROBAN_TELEOP_PRIOR_ACTION_REWARD_WEIGHT,
-        params={
-            "command_name": "locomotion_prior",
-            "action_name": "joint_pos",
-            "std": MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
-        },
-    )
-    cfg.rewards["locomotion_prior_joint_position"] = RewardTermCfg(
-        func=locomotion_prior_joint_position_error_exp,
-        weight=MICROBAN_TELEOP_PRIOR_JOINT_REWARD_WEIGHT,
-        params={
-            "command_name": "locomotion_prior",
-            "std": MICROBAN_TELEOP_PRIOR_REWARD_STD_RAD,
-        },
-    )
-    cfg.terminations.pop("locomotion_prior_clip_finished", None)
 
     # V11 never applies the dynamically rejected walk004 prior or direct BC.
     # Fresh actor-only bootstrap begins with a narrow, measured forward regime,

@@ -85,7 +85,6 @@ TELEOP_V12_OBSERVATION_TERM_LAYOUTS = {
         ("foot_contact_forces", 6),
         ("foot_target", 6),
         ("hand_target", 8),
-        ("locomotion_prior", 39),
     ),
 }
 

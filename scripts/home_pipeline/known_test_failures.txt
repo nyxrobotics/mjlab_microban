@@ -3,12 +3,4 @@
 # need artifacts, GPU-only paths or packages this checkout does not have.
 # scripts/retrain_all_for_home.py runs the suite before any GPU time and stops on
 # any other failure.  Remove a line when its test is fixed.
-tests/test_locomotion_prior.py::LocomotionPriorArtifactTest::test_vendored_artifact_is_exact_and_has_audited_shapes
-tests/test_locomotion_prior.py::LocomotionPriorResetTest::test_nonteleported_reset_uses_smooth_launch_then_enters_clip
-tests/test_locomotion_prior.py::LocomotionPriorResetTest::test_partial_teleport_selects_only_eligible_forward_rows
-tests/test_locomotion_prior.py::LocomotionPriorResetTest::test_reset_latches_only_pure_forward_and_writes_only_leg_joints
-tests/test_locomotion_prior.py::LocomotionPriorRewardTest::test_rewards_are_masked_by_eligibility_and_blend
-tests/test_locomotion_prior.py::LocomotionPriorRewardTest::test_rewards_use_per_joint_mean_square_not_sum
-tests/test_locomotion_prior.py::LocomotionPriorScheduleTest::test_command_is_39_wide_non_looping_and_play_can_be_exact_zero
-tests/test_locomotion_prior.py::LocomotionPriorScheduleTest::test_phase_advance_aligns_with_explicit_and_automatic_reset
 tests/test_teleop_v12_deployment.py::test_runtime_validator_requires_cpu_only_pass

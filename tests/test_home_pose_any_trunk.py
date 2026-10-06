@@ -168,8 +168,9 @@ INTENDED_CHANGES = {
         for name in ("GETUP_REWARD_SETS", "_POSE_FINAL_WEIGHTS")
     },
     # Stage C (2026-10-07) rebuilds the training recipes: one step-scheduled
-    # curriculum table per task (tasks/curriculum.py).  The HOME-derived
-    # values (module constants, calls) are still compared.
+    # curriculum table per task (tasks/curriculum.py), the twist-ratio
+    # velocity term, no locomotion-prior critic term.  The HOME-derived values
+    # (module constants, calls) are still compared.
     **{
         f"task:{task}:{part}": "stage C recipe rebuild (curriculum table)"
         for task in (
@@ -180,9 +181,13 @@ INTENDED_CHANGES = {
             "Mjlab-Getup-Microban-CalmEffortStrong-ImuDelay",
             "Mjlab-Getup-Microban-CalmPush-ImuDelay",
             "Mjlab-Getup-Microban-Redesign",
+            "Mjlab-Teleop-V12-HandPoseRelease-Microban",
         )
         for part in ("env", "play")
     },
+    "const:mjlab_microban.tasks.microban_teleop_v12_runner.TELEOP_V12_OBSERVATION_TERM_LAYOUTS": (
+        "stage C: the disabled locomotion-prior critic term removed (critic 137 -> 98)"
+    ),
 }
 
 
