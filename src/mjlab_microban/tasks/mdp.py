@@ -792,81 +792,6 @@ def _home_levelled_quat(quat_w: torch.Tensor, trunk_pitch: float) -> torch.Tenso
     return quat_mul(quat_w, unpitch)
 
 
-def track_linear_velocity_home_frame(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str,
-    trunk_pitch: float = 0.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """mjlab's track_linear_velocity, in the HOME-levelled trunk frame.
-
-    mjlab reads root_link_lin_vel_b. With a HOME trunk leaning
-    ``trunk_pitch`` forward that frame tips the walking velocity: at 10 deg
-    the forward speed reads 1.5 % low and 17 % of it shows up as vertical
-    velocity, which the z term penalizes (0.7 m/s: -14 % reward). Rotating
-    the lean back out keeps the reward's meaning of the upright-HOME tasks.
-    trunk_pitch = 0 is exactly mjlab's term.
-    """
-
-    asset: Entity = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
-    actual = quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
-    xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
-    z_error = torch.square(actual[:, 2])
-    return torch.exp(-(xy_error + z_error) / std**2)
-
-
-def track_angular_velocity_home_frame(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str,
-    trunk_pitch: float = 0.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """mjlab's track_angular_velocity, in the HOME-levelled trunk frame.
-
-    In the leaning trunk frame a pure yaw rate w reads w*cos(lean) about z
-    and w*sin(lean) about x, which the xy term penalizes (10 deg, 1.5 rad/s:
-    -13 % reward). trunk_pitch = 0 is exactly mjlab's term.
-    """
-
-    asset: Entity = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
-    actual = quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
-    z_error = torch.square(command[:, 2] - actual[:, 2])
-    xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-    return torch.exp(-(z_error + xy_error) / std**2)
-
-
-def home_levelled_root_lin_vel_b(
-    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
-) -> torch.Tensor:
-    """Root linear velocity in the HOME-levelled trunk frame (see above)."""
-
-    asset: Entity = env.scene[asset_cfg.name]
-    if trunk_pitch == 0.0:
-        return asset.data.root_link_lin_vel_b
-    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
-    return quat_apply_inverse(frame, asset.data.root_link_lin_vel_w)
-
-
-def home_levelled_root_ang_vel_b(
-    env: ManagerBasedRlEnv, trunk_pitch: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
-) -> torch.Tensor:
-    """Root angular velocity in the HOME-levelled trunk frame (see above)."""
-
-    asset: Entity = env.scene[asset_cfg.name]
-    if trunk_pitch == 0.0:
-        return asset.data.root_link_ang_vel_b
-    frame = _home_levelled_quat(asset.data.root_link_quat_w, trunk_pitch)
-    return quat_apply_inverse(frame, asset.data.root_link_ang_vel_w)
-
-
 def reset_root_state_uniform_world_yaw(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
@@ -1515,49 +1440,6 @@ class reward_based_staged_curriculum:
                 self.rewards[name].zero_()  # Reset rewards to avoid immediately triggering the next stage
 
         return {"stage": self.current_stage}
-
-
-def set_command_velocity(
-    env,
-    lin_vel_x=None,
-    lin_vel_y=None,
-    ang_vel_z=None,
-    rotation_env_ang_vel_z=None,
-) -> None:
-    """
-    Helper function to set the command velocity parameters in the environment.
-    """
-    cmd = env.command_manager.get_term_cfg("twist")
-    if lin_vel_x is not None:
-        cmd.ranges.lin_vel_x = lin_vel_x
-    if lin_vel_y is not None:
-        cmd.ranges.lin_vel_y = lin_vel_y
-    if ang_vel_z is not None:
-        cmd.ranges.ang_vel_z = ang_vel_z
-    if rotation_env_ang_vel_z is not None:
-        cmd.rotation_env_ang_vel_range = rotation_env_ang_vel_z
-
-
-def set_stepping_parameters(
-    env,
-    air_time_weight: float | None = None,
-    no_stepping_penalty_weight: float | None = None,
-    rel_standing_envs: float | None = None,
-    rel_rotation_envs: float | None = None,
-) -> None:
-    """
-    Helper function to set stepping/standing curriculum parameters.
-    """
-    if air_time_weight is not None:
-        env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-    if no_stepping_penalty_weight is not None:
-        env.reward_manager.get_term_cfg(
-            "no_stepping"
-        ).weight = no_stepping_penalty_weight
-    if rel_standing_envs is not None:
-        env.command_manager.get_term_cfg("twist").rel_standing_envs = rel_standing_envs
-    if rel_rotation_envs is not None:
-        env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
 
 
 class home_stillness_reward:

@@ -338,32 +338,6 @@ class FrameTest(unittest.TestCase):
         env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
         self.assertTrue(torch.allclose(home_levelled_twist(env, HOME_TRUNK_PITCH_RAD), twist, atol=1e-6))
 
-    def test_matches_the_task_home_levelled_velocity(self) -> None:
-        # Same frame as mjlab_microban.tasks.mdp.home_levelled_root_*_vel_b
-        # (skipped where that helper does not exist).
-        try:
-            from mjlab_microban.tasks.mdp import (
-                home_levelled_root_ang_vel_b,
-                home_levelled_root_lin_vel_b,
-            )
-        except ImportError:
-            self.skipTest("no task home_levelled_root_*_vel_b helpers")
-        torch.manual_seed(0)
-        quat = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
-        data = SimpleNamespace(
-            root_link_quat_w=quat,
-            root_link_lin_vel_w=torch.randn(8, 3),
-            root_link_ang_vel_w=torch.randn(8, 3),
-        )
-        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
-        twist = home_levelled_twist(env, HOME_TRUNK_PITCH_RAD)
-        self.assertTrue(
-            torch.equal(twist[:, :2], home_levelled_root_lin_vel_b(env, HOME_TRUNK_PITCH_RAD)[:, :2])
-        )
-        self.assertTrue(
-            torch.equal(twist[:, 2], home_levelled_root_ang_vel_b(env, HOME_TRUNK_PITCH_RAD)[:, 2])
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

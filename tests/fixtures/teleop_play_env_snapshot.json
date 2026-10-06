@@ -1,0 +1,88 @@
+{
+ "curriculum": [],
+ "events": [
+  "base_com",
+  "dof_armature_randomization",
+  "dof_friction_randomization",
+  "encoder_bias",
+  "foot_friction",
+  "push_robot",
+  "reset_base",
+  "reset_robot_joints"
+ ],
+ "foot": {
+  "both_feet_lift_height_range": [
+   0.0025,
+   0.012
+  ],
+  "both_feet_reach_xy_range": [
+   -0.01,
+   0.01
+  ],
+  "lift_height_range": [
+   0.0025,
+   0.05
+  ],
+  "reach_xy_range": [
+   -0.03,
+   0.03
+  ],
+  "rel_both_feet_envs": 0.0,
+  "rel_single_support_envs": 0.0
+ },
+ "hand": {
+  "rel_active": 0.0
+ },
+ "push": {
+  "x": [
+   0.0,
+   0.0
+  ],
+  "y": [
+   0.0,
+   0.0
+  ]
+ },
+ "terminations": [
+  "fell_over",
+  "out_of_terrain_bounds",
+  "time_out"
+ ],
+ "twist": {
+  "init_velocity_prob": 0.0,
+  "rel_forward_envs": 0.2,
+  "rel_heading_envs": 0.0,
+  "rel_rotation_envs": 0.0,
+  "rel_standing_envs": 0.0,
+  "rel_world_envs": 0.0,
+  "resampling_time_range": [
+   3.0,
+   8.0
+  ],
+  "rotation_env_ang_vel_range": [
+   -1.5,
+   1.5
+  ],
+  "rotation_min_ang_vel": 0.5,
+  "signed_axis_probabilities": null,
+  "signed_axis_ranges": null
+ },
+ "twist_ranges": {
+  "ang_vel_z": [
+   -0.75,
+   0.75
+  ],
+  "heading": [
+   -3.141592653589793,
+   3.141592653589793
+  ],
+  "lin_vel_x": [
+   -0.5,
+   0.5
+  ],
+  "lin_vel_y": [
+   -0.3,
+   0.3
+  ]
+ }
+}

@@ -47,10 +47,9 @@ from mjlab_microban.tasks.mdp import (
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
     reset_root_state_uniform_world_yaw,
-    track_angular_velocity_home_frame,
-    track_linear_velocity_home_frame,
     upright as local_upright,
 )
+from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
 SCENE_CFG = SceneCfg(
     terrain=TerrainEntityCfg(
@@ -83,6 +82,22 @@ SIM_CFG = SimulationCfg(
     # njmax=1024,
 )
 
+# The command envelope after the update-3000 stage (forward, lateral, yaw).
+WALK_COMMAND_RANGES_FINAL = {
+    "lin_vel_x": (-0.7, 0.7),
+    "lin_vel_y": (-0.3, 0.3),
+    "ang_vel_z": (-1.5, 1.5),
+}
+# The twist reward's axis scale: each axis's largest commanded magnitude
+# (0.7 m/s, 0.3 m/s, 1.5 rad/s), shared with PICO.
+TWIST_AXIS_SCALE = tuple(
+    max(abs(value) for value in WALK_COMMAND_RANGES_FINAL[axis])
+    for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z")
+)
+# B4 is 1 standing still on a moving command and 2 at exact tracking: weight 4
+# spans 4..8 (exp/twist-ratio-validation, AB_result 2026-10-07).
+WALK_TWIST_RATIO_WEIGHT = 4.0
+
 # One stage at update 3000: widen the forward and yaw command ranges and
 # penalize standing still on a moving command.  (The command's rotation-env
 # extensions below are instance attributes that the train CLI's config
@@ -93,8 +108,8 @@ WALK_STAGES = (
         "penalize stepping + increase velocity",
         scaled(3000),
         (
-            Setting("command", "twist", "ranges.lin_vel_x", (-0.7, 0.7)),
-            Setting("command", "twist", "ranges.ang_vel_z", (-1.5, 1.5)),
+            Setting("command", "twist", "ranges.lin_vel_x", WALK_COMMAND_RANGES_FINAL["lin_vel_x"]),
+            Setting("command", "twist", "ranges.ang_vel_z", WALK_COMMAND_RANGES_FINAL["ang_vel_z"]),
             Setting("reward", "no_stepping", "weight", -1.0),
         ),
     ),
@@ -205,22 +220,20 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
-    # A HOME that leans the trunk HOME_TRUNK_PITCH_RAD forward tracks the
-    # velocities in the trunk frame with that lean rotated back out (mjlab's
-    # terms read the leaning body frame; see track_linear_velocity_home_frame).
-    # A vertical-trunk HOME keeps mjlab's own terms.
-    if HOME_TRUNK_PITCH_RAD != 0.0:
-        for name, func in (
-            ("track_linear_velocity", track_linear_velocity_home_frame),
-            ("track_angular_velocity", track_angular_velocity_home_frame),
-        ):
-            cfg.rewards[name].func = func
-            cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
-    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
-    cfg.rewards["track_linear_velocity"].weight = 2.0
-
-    cfg.rewards["track_angular_velocity"].params["std"] = np.sqrt(0.5)
-    cfg.rewards["track_angular_velocity"].weight = 2.0
+    # Velocity: one twist-ratio term (microban_twist_ratio_mdp, form B4) in
+    # the HOME-levelled trunk frame, the axes scaled by the final command
+    # envelope.  It replaces mjlab's two exp tracking terms (weight 2 each).
+    del cfg.rewards["track_linear_velocity"]
+    del cfg.rewards["track_angular_velocity"]
+    cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
+        func=twist_ratio_velocity,
+        weight=WALK_TWIST_RATIO_WEIGHT,
+        params={
+            "command_name": "twist",
+            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+            "axis_scale": TWIST_AXIS_SCALE,
+        },
+    )
 
     std_standing = {
         r".*head.*": 0.3,
@@ -424,8 +437,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # cfg.events["reset_base"].interval_range_s = (0.0, 0.0)
         # cfg.events["reset_base"].mode = "interval"
 
-        # del cfg.rewards["track_linear_velocity"]
-        # del cfg.rewards["track_angular_velocity"]
         # del cfg.rewards["pose"]
         # del cfg.rewards["upright"]
         # cfg.terminations = {}

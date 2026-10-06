@@ -26,7 +26,6 @@ import torch
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.actions import JointPositionAction
-from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
@@ -35,8 +34,6 @@ from mjlab_microban.tasks.mdp import (
     FootTargetCommandCfg,
     HandTargetCommand,
     HandTargetCommandCfg,
-    home_levelled_root_ang_vel_b,
-    home_levelled_root_lin_vel_b,
 )
 from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
 
@@ -195,170 +192,6 @@ def normalized_joint_soft_limit_guard_l1_sum(
     lower_excess = torch.clamp(preferred_lower - dangerous_lower, min=0.0)
     upper_excess = torch.clamp(dangerous_upper - preferred_upper, min=0.0)
     return ((lower_excess + upper_excess) / (0.5 * span)).sum(dim=-1)
-
-
-def linear_velocity_tracking_error_l1(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    trunk_pitch: float = 0.0,
-) -> torch.Tensor:
-    """Return body-frame planar velocity error with a non-vanishing gradient.
-
-    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame
-    (mdp.track_linear_velocity_home_frame).
-    """
-
-    command = env.command_manager.get_command(command_name)
-    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
-    return torch.abs(command[:, :2] - actual[:, :2]).sum(dim=-1)
-
-
-def yaw_velocity_tracking_error_l1(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    trunk_pitch: float = 0.0,
-) -> torch.Tensor:
-    """Return absolute body-frame yaw-rate error (HOME-levelled, see above)."""
-
-    command = env.command_manager.get_command(command_name)
-    actual = home_levelled_root_ang_vel_b(env, trunk_pitch, asset_cfg)
-    return torch.abs(command[:, 2] - actual[:, 2])
-
-
-def planar_velocity_tracking_exp(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str = "twist",
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    trunk_pitch: float = 0.0,
-) -> torch.Tensor:
-    """Track body-frame XY velocity without penalizing gait vertical motion.
-
-    Mjlab's generic linear-velocity reward adds squared base vertical velocity
-    inside the same exponential.  At Microban's low command speeds and the
-    sharpened 0.10 m/s scale, that suppresses the vertical motion needed to
-    unload and lift a foot.  Vertical stability remains covered by the upright,
-    pose, body-angular-velocity, contact, and fall terms.
-
-    ``trunk_pitch`` (the HOME trunk's forward lean) reads the velocity in the
-    HOME-levelled trunk frame (mdp.track_linear_velocity_home_frame); 0 is
-    the body frame.
-    """
-
-    if not math.isfinite(std) or std <= 0.0:
-        raise ValueError("planar velocity tracking std must be finite and positive")
-    command = env.command_manager.get_command(command_name)
-    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
-    error = torch.square(command[:, :2] - actual[:, :2]).sum(
-        dim=-1
-    )
-    return torch.exp(-error / std**2)
-
-
-def commanded_planar_velocity_progress(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    command_threshold: float = 0.01,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    trunk_pitch: float = 0.0,
-) -> torch.Tensor:
-    """Reward commanded body-frame XY progress, bounded to ``[0, 1]``.
-
-    ``trunk_pitch`` != 0 reads the velocity in the HOME-levelled trunk frame.
-    """
-
-    if not math.isfinite(command_threshold) or command_threshold <= 0.0:
-        raise ValueError("command_threshold must be finite and positive")
-    command = env.command_manager.get_command(command_name)
-    if command is None or command.ndim != 2 or command.shape != (env.num_envs, 3):
-        raise ValueError("planar velocity progress requires an (num_envs, 3) command")
-    if not bool(torch.isfinite(command).all()):
-        raise ValueError("planar velocity progress command must be finite")
-
-    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
-    if actual.ndim != 2 or actual.shape != (env.num_envs, 3):
-        raise ValueError(
-            "planar velocity progress requires an (num_envs, 3) body velocity"
-        )
-    if not bool(torch.isfinite(actual).all()):
-        raise ValueError("planar velocity progress body velocity must be finite")
-
-    command_xy = command[:, :2]
-    actual_xy = actual[:, :2]
-    command_norm_sq = torch.square(command_xy).sum(dim=-1)
-    aligned_progress = (actual_xy * command_xy).sum(dim=-1)
-    if not bool(torch.isfinite(command_norm_sq).all()) or not bool(
-        torch.isfinite(aligned_progress).all()
-    ):
-        raise ValueError("planar velocity progress arithmetic must remain finite")
-    active_command = command_norm_sq > command_threshold**2
-    aligned_fraction = aligned_progress / torch.clamp(
-        command_norm_sq, min=command_threshold**2
-    )
-    reward = torch.clamp(aligned_fraction, min=0.0, max=1.0) * active_command
-    env.extras["log"]["Metrics/commanded_planar_velocity_progress"] = reward.mean()
-    return reward
-
-
-class ResumeSafeStepBasedStagedCurriculum:
-    """Apply every curriculum stage due at the environment's global step.
-
-    MjLab persists ``common_step_counter`` in a checkpoint, but manager-term
-    instances are rebuilt when a run resumes.  A single-stage ``if`` therefore
-    leaves a resumed environment temporarily (or permanently, if no episode
-    resets) at stage zero.  Advancing in a ``while`` loop reconstructs the exact
-    stage-derived reward and command configuration in one manager compute call.
-    """
-
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv) -> None:
-        del env
-        stages = cfg.params.get("stages")
-        if not isinstance(stages, list):
-            raise TypeError("Resume-safe curriculum requires a list of stages")
-
-        previous_step = -1
-        for index, stage in enumerate(stages):
-            if not isinstance(stage, dict):
-                raise TypeError(f"Curriculum stage {index} must be a dictionary")
-            missing = {"name", "step", "apply"} - stage.keys()
-            if missing:
-                raise ValueError(
-                    f"Curriculum stage {index} is missing {sorted(missing)}"
-                )
-            step = stage["step"]
-            if not isinstance(step, int) or isinstance(step, bool) or step < 0:
-                raise ValueError(
-                    f"Curriculum stage {index} step must be a non-negative integer"
-                )
-            if step <= previous_step:
-                raise ValueError("Curriculum stage steps must be strictly increasing")
-            if not callable(stage["apply"]):
-                raise TypeError(f"Curriculum stage {index} apply must be callable")
-            previous_step = step
-
-        self.current_stage = 0
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor | slice,
-        stages: list[dict[str, Any]],
-    ) -> dict[str, int]:
-        del env_ids
-        while (
-            self.current_stage < len(stages)
-            and env.common_step_counter >= stages[self.current_stage]["step"]
-        ):
-            stage = stages[self.current_stage]
-            print(
-                f"Curriculum stage {self.current_stage + 1}: "
-                f"{stage['name']} at step {env.common_step_counter}"
-            )
-            stage["apply"](env)
-            self.current_stage += 1
-        return {"stage": self.current_stage}
 
 
 class ResetFixedFootTargetCommand(FootTargetCommand):
@@ -757,12 +590,19 @@ class HmdNeckTargetMotion:
         self,
         env: ManagerBasedRlEnv,
         env_ids: torch.Tensor | None,
+        neutral_probability: float | None = None,
         **_unused: Any,
     ) -> None:
         # Step events are always dispatched for all environments.  Per-env
         # episode resets are handled by reset(), which only rewrites those rows.
         if env_ids is not None:
             raise ValueError("HmdNeckTargetMotion step event expects env_ids=None")
+        # The params are passed on every call, so a curriculum stage that
+        # writes params["neutral_probability"] takes effect at once.
+        if neutral_probability is not None:
+            if not 0.0 <= neutral_probability <= 1.0:
+                raise ValueError("neutral_probability must be in [0, 1]")
+            self.neutral_probability = float(neutral_probability)
 
         self.time_to_retarget_s -= env.step_dt
         due = (self.time_to_retarget_s <= 0.0).nonzero().flatten()
