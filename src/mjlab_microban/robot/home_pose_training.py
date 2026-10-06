@@ -20,7 +20,7 @@ Instead of a hand-kept list of such rules, ``check_training_line`` asks the
 tasks themselves: a fresh Python process installs the candidate HOME as
 ``mjlab_microban.robot.home_pose.HOME`` and imports ``mjlab_microban.tasks``,
 which builds the env configs of every registered Microban task (walking,
-get-up stages, PICO v12 and its rescue stages).  If that import fails, none of
+get-up and the PICO pose-release task).  If that import fails, none of
 them can be retrained at the HOME, and the first error says why.  It takes a
 few seconds (torch + mjlab import) and needs no GPU.
 """

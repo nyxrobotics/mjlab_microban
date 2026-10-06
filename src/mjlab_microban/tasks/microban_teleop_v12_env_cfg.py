@@ -38,16 +38,12 @@ MICROBAN_TELEOP_V12_HOME_POSE_REVISION = home_contracts.V12_HOME_POSE_REVISION
 # neck pose is the level headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  With a
 # vertical trunk all of that is the trunk frame and neck_pitch 0 (v11).
 MICROBAN_TELEOP_V12_RECIPE_REVISION = home_contracts.V12_RECIPE_REVISION
-# Opt-in successor recipe (v12 centered / v18 forward-lean): identical to the
+# The recipe that is trained and packaged (task
+# ``Mjlab-Teleop-V12-HandPoseRelease-Microban``, one run from scratch): the
 # canonical recipe except that the inherited HOME pose reward drops the
 # shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
 # active (an inactive hand's arm and every other joint keep the canonical
-# term).  It changes nothing before hand targets activate.  Only
-# its own task (``Mjlab-Teleop-V12-HandPoseRelease-Microban``) trains or records
-# it.  Stage gates and the exporter accept its release-eligible lineages
-# (microban_teleop_v12_hand_pose_release_lineage): a fresh pose-release chain,
-# or (centered HOME only) the pinned recipe switch at the gated canonical
-# model_7099.
+# term), with the twist-ratio velocity term and the one-run schedule.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     home_contracts.V12_HAND_POSE_RELEASE_RECIPE_REVISION
 )

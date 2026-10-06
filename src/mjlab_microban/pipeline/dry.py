@@ -132,7 +132,7 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str) -
     gate_path = Path(gate_out)
     checkpoint_path = Path(checkpoint)
     stage._validate_locomotion_report = lambda report, identity: None
-    stage._validate_tracking_report = lambda report, identity, **_kwargs: report.get("profile")
+    stage._validate_tracking_report = lambda report, identity: report.get("profile")
     locomotion, tracking = forced_reports(report_prefix, gate_path.parent,
                                           ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD)
 

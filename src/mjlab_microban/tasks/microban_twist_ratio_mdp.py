@@ -38,10 +38,18 @@ and radians per second are comparable.  With ``c^ = c / scale``,
 The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
 [0, 1]: 1 at exact tracking of any command (standing still on a standing
 command included), 1/2 for standing still on a moving command, less for
-anything off the command, and never negative.  Its maximum over the twists a
-robot can reach lies on the commanded ray: ``s * c`` with the largest feasible
-``s`` (exact tracking when the command is feasible).  For a zero command
-``error = sqrt(|v^|^2 + |w^|^2)``.
+anything off the command, and never negative.  For a feasible command its
+maximum is exact tracking.  For an infeasible one it is near the commanded
+ray but not exactly on it: when only some axes are limited (typically
+forward/backward), over-producing the easier axes buys a little speed for a
+little error.  Over the reach box measured for the forward-lean walker
+(forward 0.2, backward 0.11, lateral 0.18 m/s, yaw 1.4 rad/s), 64 of 238
+infeasible commands have their best twist more than 1 deg off the ray, at
+most 11.3 deg (c = (0.3, 0.05, 1.0): best (0.2, 0.055, 1.10), reward 0.845
+against 0.833 on the ray).  The user's own form ``1 + speed - error`` has
+the same property (35.5 deg); this form only weakens it, and the walk check
+W1 (angle to the command ray) judges the walker that results.  For a zero
+command ``error = sqrt(|v^|^2 + |w^|^2)``.
 
 Why this form (walker trained from scratch at the forward-lean HOME,
 2026-10-06, held-out probes on seeds 101-105):

@@ -89,10 +89,6 @@ from mjlab_microban.teleop_v12_safety import (
 # published "_deployed_accuracy_v1" one; its limits are the table below.
 FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
 TRACKING_PROFILES = (FINAL_PROFILE,)
-# The canonical evaluation seed of the judgment; the pipeline's checks during
-# training use other (held-out) seeds and are never packaged.
-CANONICAL_SEED = 42
-
 # Accuracy limits (user decision: hand RMS 0.040 m at every HOME; hand P95
 # 0.07 m, foot RMS 0.05 / P95 0.08 m).
 HAND_RMS_MAX_M = 0.040

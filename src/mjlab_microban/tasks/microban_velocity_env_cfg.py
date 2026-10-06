@@ -12,7 +12,6 @@ import numpy as np
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.terminations import root_height_below_minimum
@@ -413,64 +412,19 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     #---------------------------- Play mode -------------------------
+    # No curriculum, standing or rotation-only commands, pushes or observation
+    # noise.  The command ranges stay the initial ones: the PICO play env (its
+    # 9x300 probe and stage gates, tests/fixtures/teleop_play_env_snapshot.json)
+    # inherits them, and the walk evaluators write their commands directly.
     if play:
         cfg.curriculum = {}
-        
         cfg.commands["twist"].rel_standing_envs = 0.0
         cfg.commands["twist"].rel_rotation_envs = 0.0
-
         cfg.events["push_robot"].params["velocity_range"] = {
             "x": (0.0, 0.0),
             "y": (0.0, 0.0),
         }
-
-        # cfg.commands["twist"].ranges.lin_vel_x = (0.5, 0.5)
-        # cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
-        # cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
-        # cfg.commands["twist"].rotation_env_ang_vel_range = (1.0, 1.0)
-
-        # cfg.commands["twist"].ranges.lin_vel_x = (-0.7, 0.7)
-        # cfg.commands["twist"].ranges.lin_vel_y = (-0.3, 0.3)
-        # cfg.commands["twist"].ranges.ang_vel_z = (-1.5, 1.5)
-        # cfg.commands["twist"].rotation_env_ang_vel_range = (-3.0, 3.0)
-
-        # Can be used to edit neutral pose with a zero agent
-        # cfg.events["reset_base"].params["pose_range"]["x"] = (0.0, 0.0)
-        # cfg.events["reset_base"].params["pose_range"]["y"] = (0.0, 0.0)
-        # cfg.events["reset_base"].params["pose_range"]["z"] = (0.3, 0.3)
-        # cfg.events["reset_base"].params["pose_range"]["yaw"] = (0.0, 0.0)
-        # cfg.events["reset_base"].interval_range_s = (0.0, 0.0)
-        # cfg.events["reset_base"].mode = "interval"
-
-        # del cfg.rewards["pose"]
-        # del cfg.rewards["upright"]
-        # cfg.terminations = {}
-
         cfg.observations["actor"].enable_corruption = False
-
-        # Can be used to print something every step
-        def debug(env: ManagerBasedRlEnv, _):
-            env.observation_manager.compute_group("actor", update_history=True)
-
-            terms = dict(env.observation_manager.get_active_iterable_terms(env_idx=0))
-
-            base_ang_vel = terms["actor-base_ang_vel"]
-            projected_gravity = terms["actor-projected_gravity"]
-
-            print("\n")
-            print(f"base_ang_vel: ")
-            print(f"x: {base_ang_vel[0]:.3f}")
-            print(f"y: {base_ang_vel[1]:.3f}")
-            print(f"z: {base_ang_vel[2]:.3f}")
-            print("\n")
-            print(f"projected_gravity: ")
-            print(f"x: {projected_gravity[0]:.3f}")
-            print(f"y: {projected_gravity[1]:.3f}")
-            print(f"z: {projected_gravity[2]:.3f}")
-
-        # cfg.events["debug"] = EventTermCfg(
-        #     func=debug, mode="interval", interval_range_s=(0.0, 0.0)
-        # )
 
     return cfg
 

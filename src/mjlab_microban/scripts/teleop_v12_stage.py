@@ -32,7 +32,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
-    TRACKING_PROFILES,
     _aggregate_action_envelopes,
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
@@ -344,30 +343,20 @@ def _require_action_envelope(
 def _validate_tracking_report(
     report: dict[str, Any],
     expected_identity: dict[str, int | str],
-    *,
-    profile_override: str | None = None,
-    allowed_failed_checks: frozenset[str] = frozenset(),
 ) -> str:
-    """Validate one tracking report; return the profile it was judged under.
+    """Validate one passing tracking report; return the profile it was judged under.
 
-    Without an override the profile of the report's clock is required (one
-    profile per clock, the same at every HOME).
+    The profile of the report's clock is required (one profile per clock, the
+    same at every HOME).
     """
 
     completed = int(expected_identity["completed_updates"])
-    if profile_override is not None and profile_override not in TRACKING_PROFILES:
-        raise ValueError("Tracking report profile override is invalid")
-    profile = (
-        required_tracking_profile(completed)
-        if profile_override is None
-        else profile_override
-    )
-    expected_statuses = {"pass"} if not allowed_failed_checks else {"pass", "fail"}
+    profile = required_tracking_profile(completed)
     if (
         report.get("schema_version") != 1
         or report.get("gate") != "microban_teleop_v12_tracking"
         or report.get("profile") != profile
-        or report.get("status") not in expected_statuses
+        or report.get("status") != "pass"
     ):
         raise ValueError("Tracking report schema/profile/status drifted")
     _require_report_identity(report, expected_identity, "Tracking")
@@ -417,11 +406,6 @@ def _validate_tracking_report(
     ):
         raise ValueError("Tracking report scenario set/order drifted")
     scenarios = _tracking_scenarios(profile)
-    # Rescue tooling (never a gate: gates pass no allowed failures) may accept
-    # a report failing these two per-scenario checks; the evidence must still
-    # be well formed and the recomputed checks must match the report.
-    soft_limit_failure_allowed = "actual_soft_limits" in allowed_failed_checks
-    twist_failure_allowed = "twist_directional_response" in allowed_failed_checks
     for result, scenario in zip(results, scenarios, strict=True):
         assert isinstance(result, dict)
         expected_command = {
@@ -445,19 +429,10 @@ def _validate_tracking_report(
             or result.get("raw_action_recurrence_verified_steps") != 300
             or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
             or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
-            or (
-                not soft_limit_failure_allowed
-                and float(result["maximum_actual_soft_limit_violation_rad"])
-                > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-            )
+            or float(result["maximum_actual_soft_limit_violation_rad"])
+            > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             or result.get("hmd_motion_evidence_passed") is not True
-            or (
-                result.get("twist_directional_response_passed") is not True
-                and not (
-                    twist_failure_allowed
-                    and result.get("twist_directional_response_passed") is False
-                )
-            )
+            or result.get("twist_directional_response_passed") is not True
             or not isinstance(coverage, dict)
             or coverage.get("passed") is not True
             or coverage.get("foot_target_expected") is not expects_foot
@@ -616,10 +591,7 @@ def _validate_tracking_report(
                 != DIRECTIONAL_RESPONSE_MINIMUM[axis]
                 or item.get("passed")
                 is not (signed >= DIRECTIONAL_RESPONSE_MINIMUM[axis])
-                or (
-                    not twist_failure_allowed
-                    and signed < DIRECTIONAL_RESPONSE_MINIMUM[axis]
-                )
+                or signed < DIRECTIONAL_RESPONSE_MINIMUM[axis]
             ):
                 raise ValueError("Tracking directional response failed")
         if result.get("twist_directional_response_passed") is not all(
@@ -635,20 +607,7 @@ def _validate_tracking_report(
         recomputed, status = _tracking_acceptance(results, profile)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Tracking result evidence is malformed") from exc
-    required_checks = required_tracking_check_names(profile)
-    if not allowed_failed_checks:
-        checks = _require_exact_true_checks(report, required_checks, "Tracking")
-    else:
-        checks = report.get("checks")
-        if (
-            not isinstance(checks, dict)
-            or set(checks) != set(required_checks)
-            or any(type(value) is not bool for value in checks.values())
-        ):
-            raise ValueError("Tracking report check set is incomplete or drifted")
-        failed = {name for name, value in checks.items() if not value}
-        if not failed.issubset(allowed_failed_checks):
-            raise ValueError("Tracking report contains a non-rescuable failing check")
+    checks = _require_exact_true_checks(report, required_tracking_check_names(profile), "Tracking")
     if report.get("status") != status or recomputed != checks:
         raise ValueError("Tracking checks do not match result evidence")
     envelope = _require_action_envelope(
