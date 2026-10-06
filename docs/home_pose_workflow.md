@@ -170,6 +170,19 @@ PICOの最終パッケージでは、転倒した DRYRUN チェックポイン�
 テスト 272 passed / 2 skipped。同じパッケージを `MICROBAN_ALLOW_DRYRUN_POLICY` なしで `tools/validate_pico_policy.py`
 にかけると「DRY RUN package」で拒否される。膝15度の plumbing ドライランはこの版では再実行していない。
 
+再々実測（2026-10-06、home-config 3b2dabf = 落ちたゲートの判定・再学習のシード・15000 境界の救済を入れた版、
+ロボット 2ffe8d2、64 env、GPU は空き、ジョブは1本ずつ）:
+
+| ドライラン | 9999 / 15000 の経路 | 所要 | 終了コード | 結果 |
+| --- | --- | --- | --- | --- |
+| 前傾 yaml、`--dry-run-walk-init` 前傾 cont2 `model_29000.pt`、`--dry-run-simulate-9999 retrain --dry-run-simulate-15000 rescue` | 9999: 試行1と救済 lf60/lf90/lf72/lf65 が落ち、model_7099 からシード 43 の試行2が合格。15000: 14999 不合格 → 最終救済 pr_v1 不合格 → pr_v2 合格 | 4357 s | 0 | カナリア 3099/7099/10099 はシード 43 で1回再学習。パッケージに `v12_final_rescue_marker_*`・`v12_final_rescue_training_replay = evaluator_scenario_commands`・`v12_final_rescue_final_gate_held_out = false` と 10000/10100 の境界ゲートが入り、ロボットのバリデータ pass、テスト 272 passed / 2 skipped |
+| 膝15度、`--dry-run-plumbing`、`--dry-run-simulate-9999 rescue --dry-run-simulate-15000 retrain` | 9999: 救済 lf60 不合格 → lf90 合格。15000: 14999 不合格 → pr_v1〜pr_v6 の6本すべて不合格 → model_10099 からシード 43 の試行2が合格 | 1994 s | 0 | ロボットのバリデータ pass、テスト 272 passed / 2 skipped |
+
+ドライランの救済バリデータは dry の親を「optimizer clock drifted」で拒否する（記録のみ、plumbing では強制しない）。
+本番の判定経路（追従で落ちて ONNX の報告が無いゲートを判定として扱い、カナリアの再学習や救済に進む）は
+ドライランでは通らないので、単体テスト（`RealGateVerdictTest`、`GateCrashTest`）と、本物の評価スクリプトに偽の評価器を
+つないだ再現（落ちたゲートが `(False, ['hand_tracking_rms'], [])` と判定され記録される）で確かめた。
+
 ## 所要時間の目安（RTX 5000 Ada 1枚、他の学習と共用だった 2026-10 の実測から）
 
 | 段階 | 実測 | 
