@@ -186,6 +186,14 @@ PICOの最終パッケージでは、転倒した DRYRUN チェックポイン�
 | 前傾 yaml、`--dry-run-walk-init` 前傾 cont2 `model_29000.pt`、`--dry-run-simulate-9999 retrain --dry-run-simulate-15000 rescue` | 9999: 試行1と救済 lf60/lf90/lf72/lf65 が落ち、model_7099 からシード 43 の試行2が合格。15000: 14999 不合格 → 最終救済 pr_v1 不合格 → pr_v2 合格 | 4357 s | 0 | カナリア 3099/7099/10099 はシード 43 で1回再学習。パッケージに `v12_final_rescue_marker_*`・`v12_final_rescue_training_replay = evaluator_scenario_commands`・`v12_final_rescue_final_gate_held_out = false` と 10000/10100 の境界ゲートが入り、ロボットのバリデータ pass、テスト 272 passed / 2 skipped |
 | 膝15度、`--dry-run-plumbing`、`--dry-run-simulate-9999 rescue --dry-run-simulate-15000 retrain` | 9999: 救済 lf60 不合格 → lf90 合格。15000: 14999 不合格 → pr_v1〜pr_v6 の6本すべて不合格 → model_10099 からシード 43 の試行2が合格 | 1994 s | 0 | ロボットのバリデータ pass、テスト 272 passed / 2 skipped |
 
+2026-10-06、home-config 57be9f6（膝15度・体幹5° の yaml、新しいクローン、`--dry-run-plumbing --dry-run-simulate-failures
+--dry-run-simulate-9999 rescue`）: 最初にテスト一式（21 failed / 708 passed / 16 errors、既知の失敗だけ、2.1 分）。
+カナリア 3099 の再学習が run ディレクトリ（`params/` だけ）を作った直後に SIGTERM（終了コード 130）→ 同じコマンドで再開すると
+テストは記録から飛ばし、「canary 3099: resuming the interrupted retry ... with training seed 43」で `--seed 43` の再学習から続けた。
+9999: 救済の親報告は `--profile hmd_hand_reachable_performance_foot_exposure_v2` で書かれ（以前は deployed-accuracy
+プロファイルで、本番ではバリデータが必ず拒否していた）、lf60 不合格 → lf90 合格。再開から 55 分で終了コード 0、
+リリース記録に `training_suite`、ロボットのバリデータ pass、テスト 272 passed / 2 skipped、ロボットのコミットはローカルだけ。
+
 ドライランの救済バリデータは dry の親を「optimizer clock drifted」で拒否する（記録のみ、plumbing では強制しない）。
 本番の判定経路（追従で落ちて ONNX の報告が無いゲートを判定として扱い、カナリアの再学習や救済に進む）は
 ドライランでは通らないので、単体テスト（`RealGateVerdictTest`、`GateCrashTest`）と、本物の評価スクリプトに偽の評価器を
