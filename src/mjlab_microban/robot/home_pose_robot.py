@@ -1,11 +1,11 @@
 """Write the robot repository's ``config/home_pose.yaml`` from the training HOME.
 
 The robot (microban) has no MuJoCo at runtime, so it reads a generated YAML
-with the HOME joint angles and every derived value and contract identifier it
-checks: NEUTRAL_POSE (radians, bit-exact), root position/quaternion, projected
-gravity at HOME, the HOME-bound contract strings and the hand-target FK
-contract.  ``config/home_pose_tool.py write-robot`` calls
-``write_robot_home_pose``.
+with the HOME joint angles and every derived value it checks: NEUTRAL_POSE
+(radians, bit-exact), root position/quaternion, projected gravity at HOME and
+the hand-target FK contract (schema 2: no HOME-bound contract strings; the
+policies carry the one contract ``microban-policy-1``, docs/policies.md).
+``config/home_pose_tool.py write-robot`` calls ``write_robot_home_pose``.
 
 The output is a strict YAML subset the robot parses without PyYAML: ``#``
 comment lines, ``key:`` lines that open a nested mapping (two-space indent),
@@ -25,7 +25,7 @@ from typing import Any
 from mjlab_microban.robot.home_pose import HOME, HomePose
 
 ROBOT_HOME_POSE_RELATIVE_PATH = Path("config") / "home_pose.yaml"
-ROBOT_HOME_POSE_SCHEMA_VERSION = 1
+ROBOT_HOME_POSE_SCHEMA_VERSION = 2
 
 _HEADER = """\
 # Microban HOME pose for the robot runtime -- GENERATED, do not edit by hand.
@@ -33,18 +33,9 @@ _HEADER = """\
 # Source of truth: mjlab_microban config/home_pose.yaml (the training repo).
 # Regenerate after changing HOME there (and after retraining every policy):
 #   uv run python config/home_pose_tool.py write-robot --microban-repo <this repo>
-# src/home_pose.py reads this file; constants.NEUTRAL_POSE, the HOME root pose,
-# the HOME projected gravity and every HOME-bound policy contract string come
-# from it.  Policies trained at another HOME are refused.
+# src/home_pose.py reads this file; constants.NEUTRAL_POSE, the HOME root pose
+# and the HOME projected gravity come from it.  Policies whose home_pose stamp is another HOME are refused.
 """
-
-
-def robot_contract_strings() -> dict[str, str]:
-    """HOME-bound identifiers the robot checks (robot/home_contracts.py)."""
-
-    from mjlab_microban.robot.home_contracts import robot_contract_strings as strings
-
-    return strings()
 
 
 def robot_home_pose_document(home: HomePose = HOME) -> dict[str, Any]:
@@ -68,7 +59,6 @@ def robot_home_pose_document(home: HomePose = HOME) -> dict[str, Any]:
         "projected_gravity": list(home.projected_gravity),
         "joint_pos_deg": dict(home.joint_pos_deg),
         "joint_pos_rad": dict(home.joint_pos_rad),
-        "contracts": robot_contract_strings(),
         "hand_target_fk": microban_hand_fk_metadata(),
         # Informational FK values (not used by the robot runtime).
         "fk": {

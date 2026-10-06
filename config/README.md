@@ -132,8 +132,9 @@ uv run --locked python scripts/retrain_all_for_home.py --robot-repo ../microban_
    `uv run python config/home_pose_tool.py show` で根元高さ・余裕・頭高さ・`tag`・`training_line` を確認する
    （学習タスクが受け付けないHOME、足裏が水平でないyamlは `error: ...` の1行で終了コード1）。
 4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_home-<label>` でロボット側の
-   `config/home_pose.yaml` を書き出す（`--check` で最新か確認できる）。学習タスクが受け付けないHOMEは
-   書き出せない（契約文字列と手先FKはその学習タスクのコードが作るため。`--force` はない）。
+   `config/home_pose.yaml`（`schema_version: 2`、HOMEごとの契約文字列は持たない）を書き出す（`--check` で
+   最新か確認できる）。学習タスクが受け付けないHOMEは書き出せない（手先FKはその学習タスクのコードが作るため。
+   `--force` はない）。
    `config/home_pose.yaml` を読まないロボットのチェックアウトも拒否する。失敗はどれも `error: ...` の1行。
 
 ## 重心合わせツール（`balance_home_pose.py`）

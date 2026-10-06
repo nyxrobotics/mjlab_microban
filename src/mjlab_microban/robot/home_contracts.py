@@ -86,8 +86,12 @@ UPRIGHT_FULLBODY_HOME_REVISION = _contract(
 ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS = bool(HOME.override("accepts_unstamped_walk_checkpoints", False))
 
 
-def robot_contract_strings() -> dict[str, str]:
-    """The HOME-bound identifiers the robot runtime checks (robot config/home_pose.yaml)."""
+def contract_strings() -> dict[str, str]:
+    """The HOME-bound identifiers stamped into this HOME's checkpoints and gates.
+
+    Training-side only: the robot checks a policy's ``home_pose`` stamp and the
+    one contract ``microban-policy-1`` (policy_contract.py), not these.
+    """
 
     return {
         "walk_contract_version": WALK_CONTRACT_VERSION,

@@ -85,9 +85,9 @@ def _show(arguments: argparse.Namespace) -> int:
         if training is not None and not training.ok:
             raise ToolError(f"--contracts needs the training tasks: {training.error}")
         warnings.filterwarnings("ignore")
-        from mjlab_microban.robot.home_pose_robot import robot_contract_strings
+        from mjlab_microban.robot.home_contracts import contract_strings
 
-        summary["contracts"] = robot_contract_strings()
+        summary["contracts"] = contract_strings()
     print(json.dumps(summary, indent=2))
     if training is not None and not training.ok:
         raise ToolError(

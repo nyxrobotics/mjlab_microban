@@ -34,7 +34,7 @@ from mjlab.utils.os import dump_yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from home_cases import CENTERED_HOME_TAG, PUBLISHED_CONTRACT_STRINGS, home_tag  # noqa: E402
 
-from mjlab_microban.robot.home_contracts import GETUP_LEGACY_STAMP, robot_contract_strings
+from mjlab_microban.robot.home_contracts import GETUP_LEGACY_STAMP, contract_strings
 from mjlab_microban.robot.microban_constants import HOME_FRAME
 from mjlab_microban.scripts.export_getup_onnx import (
     CONTRACT_VERSION,
@@ -101,7 +101,7 @@ def _post_clip_feedback(cfg) -> None:
 
 class GetupExportContractTest(unittest.TestCase):
     def test_version(self) -> None:
-        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), robot_contract_strings())
+        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), contract_strings())
         self.assertEqual(GETUP_CONTRACT_VERSION, expected["getup_contract_version"])
         self.assertEqual(CONTRACT_VERSION, GETUP_CONTRACT_VERSION)
         # Only the centered HOME accepts the v4-stamped v5 runs of 2026-10-03.

@@ -120,7 +120,7 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
         self.assertEqual(STANDING_HEIGHT, CENTERED_ROOT_Z)
 
     def test_identity_strings(self):
-        from mjlab_microban.robot.home_pose_robot import robot_contract_strings
+        from mjlab_microban.robot.home_contracts import contract_strings
         from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
             MICROBAN_TELEOP_V12_HOME_POSE_REVISION,
         )
@@ -131,7 +131,7 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
             "centered_home_hip_plus1p198384259489_ankle_minus1p198384259489_shoulder_zero_v5",
         )
         self.assertEqual(
-            robot_contract_strings(),
+            contract_strings(),
             {
                 "walk_contract_version": "v3_centered_home_servo_range",
                 "getup_contract_version": "v5",

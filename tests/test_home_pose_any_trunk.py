@@ -181,7 +181,7 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                 " 'rad': dict(HOME.joint_pos_rad), 'deg_in': dict(HOME.input_joint_pos_deg),"
                 " 'root': HOME.root_pos, 'quat': HOME.root_quat_wxyz, 'g': HOME.projected_gravity,"
                 " 'head': HOME.head_standing_height_m, 'feet': HOME.feet_lateral_m,"
-                " 'robot': c.robot_contract_strings(), 'getup_legacy': c.GETUP_LEGACY_STAMP,"
+                " 'robot': c.contract_strings(), 'getup_legacy': c.GETUP_LEGACY_STAMP,"
                 " 'unstamped': c.ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS}))",
             )
         )

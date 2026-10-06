@@ -27,7 +27,7 @@ from onnx import TensorProto, helper
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from home_cases import PUBLISHED_CONTRACT_STRINGS, home_tag  # noqa: E402
 
-from mjlab_microban.robot.home_contracts import robot_contract_strings
+from mjlab_microban.robot.home_contracts import contract_strings
 from mjlab_microban.robot.microban_constants import (
     HOME_FRAME,
     HOME_TRUNK_PITCH_RAD,
@@ -183,7 +183,7 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         self.assertEqual([float(v) for v in metadata["action_clip_lower"].split(",")], [-SERVO_TARGET_RANGE_RAD] * 18)
         self.assertEqual([float(v) for v in metadata["action_clip_upper"].split(",")], [SERVO_TARGET_RANGE_RAD] * 18)
         self.assertEqual(metadata["previous_action_semantics"], "raw_policy_output")
-        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), robot_contract_strings())
+        expected = PUBLISHED_CONTRACT_STRINGS.get(home_tag(), contract_strings())
         self.assertEqual(metadata["walk_contract_version"], expected["walk_contract_version"])
         home = json.loads(metadata["home_pose"])
         self.assertEqual(home["joint_pos_rad"], dict(HOME_FRAME.joint_pos))
