@@ -5,7 +5,10 @@ it ends).  It
 
 * reads the new lines of the training log: the update counter, the metrics
   the rules need, and every ``Curriculum stage ... (update U)`` line, which
-  must come within a tolerance of the update the table (schedules.py) says;
+  must name a stage of the task's table (WALK_STAGES / TELEOP_STAGES /
+  GETUP_STAGES, read by the pipeline) and come within a tolerance of its
+  update; once the run ends (``require_stages``) every stage due by its last
+  checkpoint must have been seen;
 * applies the policy's stop rules to the metrics (``abort`` -> the run stops
   with a report: no point in training on);
 * starts one check at a time on saved checkpoints (a separate process,
@@ -109,12 +112,23 @@ class Monitor:
         self.record["stages_seen"][name] = update
         expected = self.expected_stages.get(name)
         if expected is None:
-            return
+            raise PipelineError(f"curriculum stage {name!r} (update {update}) is not in the schedule table "
+                                f"{sorted(self.expected_stages)}: the run trains another schedule")
         latest = max(expected, self.resumed_from) + self.stage_tolerance
         if not expected <= update <= latest:
             raise PipelineError(f"curriculum stage {name!r} applied at update {update}, the table says "
                                 f"{expected} (tolerance +{self.stage_tolerance}): the schedule did not run as written")
         self.state.log(f"stage {name} at update {update} (table {expected})")
+
+    def require_stages(self, final_update: int) -> None:
+        """Every stage the table starts by ``final_update`` (plus the tolerance) was applied."""
+
+        missing = sorted(name for name, update in self.expected_stages.items()
+                         if update + self.stage_tolerance <= final_update
+                         and name not in self.record["stages_seen"])
+        if missing:
+            raise PipelineError(f"the run reached update {final_update} without applying the curriculum "
+                                f"stages {missing}: the schedule did not run as written")
 
     # -- checks ------------------------------------------------------------------------
     def due_checks(self) -> list[int]:

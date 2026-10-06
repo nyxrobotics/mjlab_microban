@@ -112,13 +112,14 @@ class Pipeline:
     def _schedules(self) -> dict[str, Any]:
         """The schedule constants as the training subprocesses see them."""
 
-        code = ("import json; from mjlab_microban import schedules as s, policy_contract as p; print(json.dumps({"
+        code = ("import json; from mjlab_microban import schedules as s, policy_contract as p; "
+                "from mjlab_microban.pipeline.steps import stage_tables; print(json.dumps({"
                 "'contract': p.POLICY_CONTRACT, 'recipes': dict(p.RECIPES), "
-                "'walk_max': s.WALK_MAX_UPDATES, 'walk_widen': s.WALK_WIDEN_UPDATE, "
+                "'walk_max': s.WALK_MAX_UPDATES, "
                 "'check_every': s.scaled(1000), 'getup_total': s.GETUP_TOTAL_UPDATES, "
                 "'getup_min_final': s.GETUP_MIN_FINAL_UPDATES, 'pico_total': s.PICO_TOTAL_UPDATES, "
                 "'pico_min_final': s.PICO_MIN_FINAL_UPDATES, 'pico': s.pico_schedule_record(), "
-                "'getup': s.GETUP_SCHEDULE}))")
+                "'getup': s.GETUP_SCHEDULE, 'stages': stage_tables()}))")
         out = capture([*UV, "python", "-c", code], env=self.env, check=True, timeout=600)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -219,6 +220,7 @@ class Pipeline:
         except EarlyStop as stop:
             if monitor is not None:
                 monitor.stop()
+                monitor.require_stages(int(stop.checkpoint.stem.split("_")[1]))
             return stop.checkpoint
         except BaseException:
             if monitor is not None:
@@ -227,6 +229,8 @@ class Pipeline:
         final = find_checkpoint(experiment, label, total - 1)
         if final is None:
             raise PipelineError(f"[{step}] model_{total - 1}.pt missing after training {label}")
+        if monitor is not None:
+            monitor.require_stages(total - 1)
         return final
 
     def monitor(self, step: str, experiment: str, label: str, *, stages: dict[str, int],
@@ -302,7 +306,7 @@ class Pipeline:
         every, total = self.sched["check_every"], self.sched["walk_max"]
         monitor = self.monitor(
             "walk", WALK_EXP, label,
-            stages={"penalize stepping + increase velocity": self.sched["walk_widen"]},
+            stages=self.sched["stages"]["walk"],
             check_updates=list(range(every, total, every)), min_final=0,
             start_check=self.walk_check, abort_rules=walk_abort_rules(c["check"]),
             check_abort=walk_check_abort(c["check"]))
@@ -414,10 +418,7 @@ class Pipeline:
         every, total = self.sched["check_every"], self.sched["pico_total"]
         monitor = self.monitor(
             "pico", PICO_EXP, label,
-            stages={"enable moving-HMD, stationary no-step guard, and broad hand tracking": pico["hand_start"],
-                    "tighten hand tracking": pico["hand_tighten"],
-                    "enable broad stationary foot tracking": pico["foot_start"],
-                    "tighten foot tracking": pico["foot_tighten"]},
+            stages=self.sched["stages"]["pico"],
             check_updates=list(range(pico["foot_tighten"] + every, total, every)),
             # model_<N> has completed N + 1 updates.
             min_final=self.sched["pico_min_final"] - 1, start_check=self.pico_check)
@@ -505,9 +506,7 @@ class Pipeline:
         g, every, total = self.sched["getup"], self.sched["check_every"], self.sched["getup_total"]
         monitor = self.monitor(
             "getup", GETUP_EXP, label,
-            stages={"start without IMU latency": 0, "imu_delay": g["imu_delay"], "refine": g["refine"],
-                    "refine exploration (std, Adam, learning rate, entropy)": g["refine"],
-                    "effort_push": g["effort_push"]},
+            stages=self.sched["stages"]["getup"],
             # Recorded before refine and before effort, then the early-stop checks.
             check_updates=sorted({*[u for u in self.scaled_list(c["check"]["record_at"]) if u < total],
                                   *range(g["effort_push"] + every, total, every)}),
@@ -800,6 +799,25 @@ class Pipeline:
                 raise
         self.log("==== ALL STEPS DONE")
         return 0
+
+
+def stage_tables() -> dict[str, dict[str, int]]:
+    """Stage name -> start update of each task's curriculum table (imports the tasks).
+
+    Get-up also logs its refine switch of the exploration (the runner's
+    GETUP_REFINE_EXPLORATION_STAGE) at the refine update.
+    """
+
+    from mjlab_microban.schedules import GETUP_SCHEDULE
+    from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_STAGES
+    from mjlab_microban.tasks.microban_getup_runner import GETUP_REFINE_EXPLORATION_STAGE
+    from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+    from mjlab_microban.tasks.microban_velocity_env_cfg import WALK_STAGES
+
+    tables = {kind: {stage.name: stage.iteration for stage in stages}
+              for kind, stages in (("walk", WALK_STAGES), ("pico", TELEOP_STAGES), ("getup", GETUP_STAGES))}
+    tables["getup"][GETUP_REFINE_EXPLORATION_STAGE] = GETUP_SCHEDULE["refine"]
+    return tables
 
 
 def robot_contract_constants(source: Path) -> dict[str, Any]:

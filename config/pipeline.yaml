@@ -92,7 +92,10 @@ external_training_min_envs: 1024
 dry:
   # Every schedule (mjlab_microban/schedules.py) is scaled by this factor;
   # the checks run on the first two checkpoints only and are recorded (never
-  # stop or end a dry run).
+  # stop or end a dry run).  A stage applies at the first episode reset after
+  # its update (StagedCurriculum runs in _reset_idx), so the logged update can
+  # trail the table: by about one update with the real env counts (~100 resets
+  # per rollout), by a few with 64 envs; hence stage_tolerance 3 here.
   schedule_scale: 0.001
   walk: {envs: 64, save_interval: 1, check: {stage_tolerance: 3, max_checks: 2}}
   pico: {envs: 64, save_interval: 1, check: {stage_tolerance: 3, max_checks: 2}}

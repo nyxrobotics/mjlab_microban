@@ -39,6 +39,9 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_SCHEDULE,
 )
 
+# Log name of the refine switch's exploration reset (the pipeline monitor
+# expects it at GETUP_SCHEDULE["refine"]).
+GETUP_REFINE_EXPLORATION_STAGE = "refine exploration (std, Adam, learning rate, entropy)"
 # Checkpoint marker: the refine switch's exploration reset has been applied.
 GETUP_EXPLORATION_REFINED_INFO_KEY = "microban_getup_exploration_refined"
 
@@ -314,8 +317,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             group["lr"] = self.initial_learning_rate
         self.alg.entropy_coef = GETUP_REFINE_ENTROPY_COEF
         self.exploration_refined = True
-        print(stage_log_line(0, "refine exploration (std, Adam, learning rate, entropy)", counter, steps),
-              flush=True)
+        print(stage_log_line(0, GETUP_REFINE_EXPLORATION_STAGE, counter, steps), flush=True)
         return True
 
     def save(self, path: str, infos=None) -> None:
