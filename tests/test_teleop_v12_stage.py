@@ -11,7 +11,6 @@ from pathlib import Path
 
 import torch
 
-from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
     microban_reachable_hand_evaluation_offsets,
@@ -25,31 +24,21 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     DIRECTIONAL_RESPONSE_MINIMUM,
     EXPANDED_LOCOMOTION_PROFILE,
-    FINAL_COMPLETION_ALLOWANCE_PROFILE,
-    FINAL_DEPLOYED_ACCURACY_PROFILE,
     FINAL_PROFILE,
-    FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
     FOOT_ACTIVATION_CANARY_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_HAND_ACTIVATION_CANARY_PROFILE,
-    HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-    HMD_HAND_HAND_RMS_40MM_PROFILE,
-    FOOT_CANARY_HAND_RMS_40MM_PROFILE,
     HMD_HAND_PROFILE,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     PRE_ACTIVATION_EXPOSURE_PROFILE,
-    STRICT_PROFILE_BY_COMPLETION_ALLOWANCE_PROFILE,
-    STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
-    WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE,
     WHOLE_BODY_PROFILE,
     _acceptance,
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
     _scenarios,
-    accepted_tracking_profiles,
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
     hand_tracking_p95_max_m,
@@ -60,7 +49,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     required_tracking_scenario_names,
     target_column_ablated_observation,
     target_column_ablation_observation_columns,
-    tracking_profile_completion_allowance,
     tracking_profile_uses_perturbation,
 )
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
@@ -499,821 +487,115 @@ class TeleopV12StageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Final"):
             next_training_target(15_000)
 
-    def test_tracking_profiles_follow_trained_then_next_exposure_semantics(
-        self,
-    ) -> None:
+    def test_one_tracking_profile_per_clock(self) -> None:
+        expected = {
+            601: PRE_ACTIVATION_EXPOSURE_PROFILE,
+            3_000: PRE_ACTIVATION_EXPOSURE_PROFILE,
+            3_001: EXPANDED_LOCOMOTION_PROFILE,
+            7_000: EXPANDED_LOCOMOTION_PROFILE,
+            7_001: HMD_HAND_ACTIVATION_CANARY_PROFILE,
+            7_100: HMD_HAND_ACTIVATION_CANARY_PROFILE,
+            7_101: HMD_HAND_PROFILE,
+            10_000: HMD_HAND_PROFILE,
+            10_001: FOOT_ACTIVATION_CANARY_PROFILE,
+            10_100: FOOT_ACTIVATION_CANARY_PROFILE,
+            10_101: WHOLE_BODY_PROFILE,
+            14_999: WHOLE_BODY_PROFILE,
+            15_000: FINAL_PROFILE,
+        }
+        for completed, profile in expected.items():
+            with self.subTest(completed=completed):
+                self.assertEqual(required_tracking_profile(completed), profile)
+        self.assertEqual(set(TRACKING_PROFILES), set(expected.values()))
+        self.assertEqual(len(TRACKING_PROFILES), 7)
+        # The robot validator accepts this published final name.
         self.assertEqual(
-            required_tracking_profile(601), PRE_ACTIVATION_EXPOSURE_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(3_000), PRE_ACTIVATION_EXPOSURE_PROFILE
-        )
-        self.assertEqual(required_tracking_profile(3_001), EXPANDED_LOCOMOTION_PROFILE)
-        self.assertEqual(required_tracking_profile(7_000), EXPANDED_LOCOMOTION_PROFILE)
-        self.assertEqual(
-            required_tracking_profile(7_001), HMD_HAND_ACTIVATION_CANARY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(7_100), HMD_HAND_ACTIVATION_CANARY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(7_101), HMD_HAND_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(10_000), HMD_HAND_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(10_001),
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-        )
-        self.assertEqual(
-            required_tracking_profile(10_100),
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-        )
-        self.assertEqual(
-            required_tracking_profile(10_101), WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(14_999), WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(
-            required_tracking_profile(15_000), FINAL_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(accepted_tracking_profiles(7_100), (
-            HMD_HAND_ACTIVATION_CANARY_PROFILE,
-        ))
-        self.assertEqual(accepted_tracking_profiles(10_000), (
-            HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-            HMD_HAND_PROFILE,
-        ))
-        self.assertEqual(accepted_tracking_profiles(10_100), (
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-            FOOT_ACTIVATION_CANARY_PROFILE,
-        ))
-        self.assertEqual(accepted_tracking_profiles(15_000), (
-            FINAL_DEPLOYED_ACCURACY_PROFILE,
             FINAL_PROFILE,
-        ))
-
-    def test_deployed_accuracy_profiles_relax_only_accuracy_limits(self) -> None:
-        # User instruction (2026-10-04): judge with the deployed model's
-        # accuracy (hand 0.035 m, foot 0.05 m); every other check is unchanged.
-        # (The 10000/10100 profiles do not check feet; their reported foot
-        # limits are the deployed ones too.)
-        expected_limits = {
-            HMD_HAND_DEPLOYED_ACCURACY_PROFILE: (0.035, 0.05, 0.05, 0.08),
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE: (
-                0.035,
-                0.05,
-                0.05,
-                0.08,
-            ),
-            WHOLE_BODY_DEPLOYED_ACCURACY_PROFILE: (0.035, 0.07, 0.05, 0.08),
-            FINAL_DEPLOYED_ACCURACY_PROFILE: (0.035, 0.07, 0.05, 0.08),
-        }
-        self.assertEqual(
-            set(expected_limits), set(STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE)
-        )
-        for deployed, limits in expected_limits.items():
-            strict = STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE[deployed]
-            with self.subTest(profile=deployed):
-                self.assertEqual(deployed, f"{strict}_deployed_accuracy_v1")
-                self.assertIn(deployed, TRACKING_PROFILES)
-                self.assertIn(strict, TRACKING_PROFILES)
-                self.assertEqual(
-                    (
-                        hand_tracking_rms_max_m(deployed),
-                        hand_tracking_p95_max_m(deployed),
-                        foot_tracking_rms_max_m(deployed),
-                        foot_tracking_p95_max_m(deployed),
-                    ),
-                    limits,
-                )
-                self.assertEqual(
-                    (
-                        hand_tracking_rms_max_m(strict),
-                        hand_tracking_p95_max_m(strict),
-                        foot_tracking_rms_max_m(strict),
-                        foot_tracking_p95_max_m(strict),
-                    ),
-                    (0.03, 0.05, 0.015, 0.025),
-                )
-                self.assertEqual(
-                    required_tracking_scenario_names(deployed),
-                    required_tracking_scenario_names(strict),
-                )
-                self.assertEqual(_scenarios(deployed), _scenarios(strict))
-                self.assertEqual(
-                    required_tracking_check_names(deployed),
-                    required_tracking_check_names(strict),
-                )
-                self.assertEqual(
-                    required_target_column_ablation_targets(deployed),
-                    required_target_column_ablation_targets(strict),
-                )
-                self.assertEqual(
-                    tracking_profile_uses_perturbation(deployed),
-                    tracking_profile_uses_perturbation(strict),
-                )
-        self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
-        self.assertFalse(tracking_profile_uses_perturbation(WHOLE_BODY_PROFILE))
-
-    def test_stage_accepts_deployed_and_strict_canary_reports_only(self) -> None:
-        identity = {
-            "sha256": "a" * 64,
-            "iteration": 10_099,
-            "completed_updates": 10_100,
-        }
-        # model_10099 of the 2026-10-04 chain: hand RMS 0.0327 m.
-        deployed = _tracking_report(identity, hand_rms=0.0327)
-        self.assertEqual(
-            deployed["profile"], FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE
-        )
-        self.assertEqual(deployed["status"], "pass")
-        self.assertEqual(deployed["thresholds"]["hand_rms_m_max"], 0.035)
-        self.assertEqual(
-            _validate_tracking_report(deployed, identity),
-            FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE,
-        )
-        strict_fail = _tracking_report(
-            identity, profile=FOOT_ACTIVATION_CANARY_PROFILE, hand_rms=0.0327
-        )
-        self.assertEqual(strict_fail["status"], "fail")
-        self.assertEqual(
-            {name for name, value in strict_fail["checks"].items() if not value},
-            {"hand_tracking_rms"},
+            "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
         )
         with self.assertRaises(ValueError):
-            _validate_tracking_report(strict_fail, identity)
-        strict_pass = _tracking_report(identity, profile=FOOT_ACTIVATION_CANARY_PROFILE)
-        self.assertEqual(
-            _validate_tracking_report(strict_pass, identity),
-            FOOT_ACTIVATION_CANARY_PROFILE,
-        )
-        over = _tracking_report(identity, hand_rms=0.0351)
+            required_tracking_profile(15_001)
+
+    def test_accuracy_limits_are_one_table(self) -> None:
+        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.05 m at
+        # 10000/10100 and 0.07 m for whole body and final; foot 0.05/0.08 m.
+        for profile in TRACKING_PROFILES:
+            with self.subTest(profile=profile):
+                self.assertEqual(hand_tracking_rms_max_m(profile), 0.040)
+                self.assertEqual(foot_tracking_rms_max_m(profile), 0.05)
+                self.assertEqual(foot_tracking_p95_max_m(profile), 0.08)
+                self.assertEqual(
+                    hand_tracking_p95_max_m(profile),
+                    0.07 if profile in (WHOLE_BODY_PROFILE, FINAL_PROFILE) else 0.05,
+                )
+        self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
+        self.assertTrue(tracking_profile_uses_perturbation(EXPANDED_LOCOMOTION_PROFILE))
+        self.assertFalse(tracking_profile_uses_perturbation(WHOLE_BODY_PROFILE))
+        with self.assertRaises(ValueError):
+            hand_tracking_rms_max_m("full_body_reachable_performance_perturbation_v2")
+
+    def test_stage_judges_the_report_under_its_clock_profile_only(self) -> None:
+        identity = {"sha256": "a" * 64, "iteration": 9_999, "completed_updates": 10_000}
+        within = _tracking_report(identity, hand_rms=0.039)
+        self.assertEqual(within["status"], "pass")
+        self.assertEqual(_validate_tracking_report(within, identity), HMD_HAND_PROFILE)
+        over = _tracking_report(identity, hand_rms=0.041)
         self.assertEqual(over["status"], "fail")
         with self.assertRaises(ValueError):
             _validate_tracking_report(over, identity)
-        for profile in (WHOLE_BODY_PROFILE,):
-            with self.subTest(profile=profile), self.assertRaises(ValueError):
-                _validate_tracking_report(
-                    _tracking_report(identity, profile=profile), identity
-                )
-        relabelled = deepcopy(deployed)
+        relabelled = deepcopy(within)
         relabelled["profile"] = FOOT_ACTIVATION_CANARY_PROFILE
-        with self.assertRaisesRegex(ValueError, "thresholds drifted"):
+        with self.assertRaisesRegex(ValueError, "schema/profile/status drifted"):
             _validate_tracking_report(relabelled, identity)
 
-    def test_canary_gate_records_and_revalidates_either_accepted_profile(
-        self,
-    ) -> None:
+    def test_final_gate_records_the_final_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkpoint = root / "model_10099.pt"
+            checkpoint = root / "model_14999.pt"
             infos = {
                 "microban_teleop_training_contract_version": "12",
-                "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
+                "microban_teleop_recipe_revision": (
+                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                ),
                 BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
                 TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
                 "adapter_gradient_schedule_revision": (
                     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
                 ),
                 "active_actor_columns_at_save": list(
-                    teleop_v12_active_adapter_columns(10_100 * 24)
+                    teleop_v12_active_adapter_columns(15_000 * 24)
                 ),
-                "env_state": {"common_step_counter": 10_100 * 24},
+                "env_state": {"common_step_counter": 15_000 * 24},
             }
-            torch.save({"iter": 10_099, "infos": infos}, checkpoint)
+            torch.save({"iter": 14_999, "infos": infos}, checkpoint)
             identity = {
                 "sha256": sha256_file(checkpoint),
-                "iteration": 10_099,
-                "completed_updates": 10_100,
+                "iteration": 14_999,
+                "completed_updates": 15_000,
             }
-            locomotion_path = root / "locomotion.json"
-            onnx_report_path = root / "onnx.json"
+            paths = {
+                "locomotion_report": root / "locomotion.json",
+                "tracking_report": root / "tracking.json",
+                "onnx_report": root / "onnx.json",
+            }
             onnx_path = root / "policy.onnx"
             onnx_path.write_bytes(b"unit-test-onnx")
-            locomotion_path.write_text(json.dumps(_locomotion_report(identity)))
-            onnx_report_path.write_text(
-                json.dumps(_onnx_report(identity, onnx_path))
+            paths["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
+            paths["tracking_report"].write_text(
+                json.dumps(_tracking_report(identity, hand_rms=0.039))
             )
-            for profile, hand_rms in (
-                (FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE, 0.0327),
-                (FOOT_ACTIVATION_CANARY_PROFILE, 0.01),
-            ):
-                with self.subTest(profile=profile):
-                    tracking_path = root / f"tracking_{profile}.json"
-                    tracking_path.write_text(
-                        json.dumps(
-                            _tracking_report(
-                                identity, profile=profile, hand_rms=hand_rms
-                            )
-                        )
-                    )
-                    gate = create_gate(
-                        checkpoint=checkpoint,
-                        locomotion_report=locomotion_path,
-                        tracking_report=tracking_path,
-                        onnx_report=onnx_report_path,
-                    )
-                    self.assertEqual(gate["tracking_profile"], profile)
-                    self.assertEqual(gate["checkpoint_kind"], "activation_canary")
-                    gate_path = root / f"gate_{profile}.json"
-                    gate_path.write_text(json.dumps(gate))
-                    self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-                    other = next(
-                        name
-                        for name in accepted_tracking_profiles(10_100)
-                        if name != profile
-                    )
-                    tampered = deepcopy(gate)
-                    tampered["tracking_profile"] = other
-                    gate_path.write_text(json.dumps(tampered))
-                    with self.assertRaises(ValueError):
-                        validate_gate(gate_path, checkpoint)
-
-    def test_completion_allowance_is_the_pose_release_final_profile_only(
-        self,
-    ) -> None:
-        pose_release = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-        allowance = FINAL_COMPLETION_ALLOWANCE_PROFILE
-        self.assertEqual(
-            allowance,
-            "full_body_reachable_performance_perturbation_v2_completion_allowance_v1",
-        )
-        self.assertIn(allowance, TRACKING_PROFILES)
-        self.assertEqual(
-            required_tracking_profile(15_000, recipe_revision=pose_release),
-            allowance,
-        )
-        for recipe in (None, MICROBAN_TELEOP_V12_RECIPE_REVISION, "other"):
-            with self.subTest(recipe=recipe):
-                self.assertEqual(
-                    required_tracking_profile(15_000, recipe_revision=recipe),
-                    FINAL_DEPLOYED_ACCURACY_PROFILE,
-                )
-        # Every other clock except the 10000 boundary and the 10100 canary
-        # (hand-RMS allowances where the HOME has them, tested below) keeps
-        # its profile for the pose-release lineage.  At the centered HOME
-        # (no allowance) those two clocks keep theirs too, as on
-        # track-centered-home-clip.
-        clocks = (3_000, 7_000, 7_100, 9_999, 10_099, 14_999)
-        if not V12_HAND_RMS_40MM_BOUNDARY_PROFILES:
-            clocks += (10_000, 10_100)
-            self.assertNotIn(HMD_HAND_HAND_RMS_40MM_PROFILE, TRACKING_PROFILES)
-            self.assertNotIn(FOOT_CANARY_HAND_RMS_40MM_PROFILE, TRACKING_PROFILES)
-        for completed in clocks:
-            with self.subTest(completed=completed):
-                self.assertEqual(
-                    required_tracking_profile(completed, recipe_revision=pose_release),
-                    required_tracking_profile(completed),
-                )
-                self.assertEqual(
-                    accepted_tracking_profiles(
-                        completed, recipe_revision=pose_release
-                    ),
-                    accepted_tracking_profiles(completed),
-                )
-        self.assertEqual(
-            accepted_tracking_profiles(15_000, recipe_revision=pose_release),
-            (allowance, FINAL_DEPLOYED_ACCURACY_PROFILE, FINAL_PROFILE),
-        )
-        self.assertEqual(
-            (
-                hand_tracking_rms_max_m(allowance),
-                hand_tracking_p95_max_m(allowance),
-                foot_tracking_rms_max_m(allowance),
-                foot_tracking_p95_max_m(allowance),
-            ),
-            (0.045, 0.08, 0.055, 0.11),
-        )
-        # Only accuracy limits change: structure is the final profile's.
-        self.assertEqual(
-            STRICT_PROFILE_BY_COMPLETION_ALLOWANCE_PROFILE, {allowance: FINAL_PROFILE}
-        )
-        self.assertNotIn(allowance, STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE)
-        self.assertEqual(
-            required_tracking_scenario_names(allowance),
-            required_tracking_scenario_names(FINAL_PROFILE),
-        )
-        self.assertEqual(_scenarios(allowance), _scenarios(FINAL_PROFILE))
-        self.assertEqual(
-            required_tracking_check_names(allowance),
-            required_tracking_check_names(FINAL_PROFILE),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(allowance),
-            required_target_column_ablation_targets(FINAL_PROFILE),
-        )
-        self.assertTrue(tracking_profile_uses_perturbation(allowance))
-        record = tracking_profile_completion_allowance(allowance)
-        assert record is not None
-        self.assertEqual(record["structure_profile"], FINAL_PROFILE)
-        self.assertEqual(record["relaxes_profile"], FINAL_DEPLOYED_ACCURACY_PROFILE)
-        self.assertEqual(record["recipe_revisions"], [pose_release])
-        self.assertIn("near-fall", record["reason"])
-        for profile in TRACKING_PROFILES:
-            if profile not in (
-                allowance,
-                HMD_HAND_HAND_RMS_40MM_PROFILE,
-                FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-            ):
-                with self.subTest(profile=profile):
-                    self.assertIsNone(tracking_profile_completion_allowance(profile))
-
-    @unittest.skipUnless(
-        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
-        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
-        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
-    )
-    def test_hand_rms_40mm_is_the_pose_release_10000_profile_only(self) -> None:
-        pose_release = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-        allowance = HMD_HAND_HAND_RMS_40MM_PROFILE
-        self.assertEqual(
-            allowance,
-            "hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1_"
-            "hand_rms_40mm_v1",
-        )
-        self.assertIn(allowance, TRACKING_PROFILES)
-        self.assertEqual(
-            required_tracking_profile(10_000, recipe_revision=pose_release),
-            allowance,
-        )
-        self.assertEqual(
-            accepted_tracking_profiles(10_000, recipe_revision=pose_release),
-            (allowance, HMD_HAND_DEPLOYED_ACCURACY_PROFILE, HMD_HAND_PROFILE),
-        )
-        for recipe in (None, MICROBAN_TELEOP_V12_RECIPE_REVISION, "other"):
-            with self.subTest(recipe=recipe):
-                self.assertEqual(
-                    required_tracking_profile(10_000, recipe_revision=recipe),
-                    HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-                )
-        # Only the exact 10000 boundary (and its 10100 canary, below) move:
-        # interrupted 7101..9999 clocks and the 15000 final keep their profiles.
-        for completed in (7_101, 9_000, 9_999):
-            with self.subTest(completed=completed):
-                self.assertEqual(
-                    required_tracking_profile(completed, recipe_revision=pose_release),
-                    HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-                )
-        self.assertEqual(
-            required_tracking_profile(10_100, recipe_revision=pose_release),
-            FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-        )
-        self.assertEqual(
-            required_tracking_profile(15_000, recipe_revision=pose_release),
-            FINAL_COMPLETION_ALLOWANCE_PROFILE,
-        )
-        # Identical to the HMD/hand deployed-accuracy profile except hand RMS.
-        relaxed = HMD_HAND_DEPLOYED_ACCURACY_PROFILE
-        self.assertEqual(hand_tracking_rms_max_m(allowance), 0.040)
-        self.assertEqual(hand_tracking_rms_max_m(relaxed), 0.035)
-        for limit in (
-            hand_tracking_p95_max_m,
-            foot_tracking_rms_max_m,
-            foot_tracking_p95_max_m,
-        ):
-            with self.subTest(limit=limit.__name__):
-                self.assertEqual(limit(allowance), limit(relaxed))
-        self.assertEqual(
-            (
-                hand_tracking_p95_max_m(allowance),
-                foot_tracking_rms_max_m(allowance),
-                foot_tracking_p95_max_m(allowance),
-            ),
-            (0.05, 0.05, 0.08),
-        )
-        self.assertNotIn(allowance, STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE)
-        self.assertNotIn(allowance, STRICT_PROFILE_BY_COMPLETION_ALLOWANCE_PROFILE)
-        self.assertEqual(
-            required_tracking_scenario_names(allowance),
-            required_tracking_scenario_names(relaxed),
-        )
-        self.assertEqual(_scenarios(allowance), _scenarios(relaxed))
-        self.assertEqual(
-            required_tracking_check_names(allowance),
-            required_tracking_check_names(relaxed),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(allowance),
-            required_target_column_ablation_targets(relaxed),
-        )
-        self.assertEqual(
-            tracking_profile_uses_perturbation(allowance),
-            tracking_profile_uses_perturbation(relaxed),
-        )
-        record = tracking_profile_completion_allowance(allowance)
-        self.assertEqual(
-            record,
-            {
-                "revision": "hand_rms_40mm_v1",
-                "structure_profile": HMD_HAND_PROFILE,
-                "relaxes_profile": relaxed,
-                "boundary_completed_updates": 10_000,
-                "recipe_revisions": [pose_release],
-                "hand_rms_m_max": 0.040,
-                "hand_p95_m_max": 0.05,
-                "foot_rms_m_max": 0.05,
-                "foot_p95_m_max": 0.08,
-                "relaxed_profile_hand_rms_m_max": 0.035,
-                "reason": record["reason"] if record else None,
-            },
-        )
-        assert record is not None
-        self.assertIn("0.040 m", record["reason"])
-        # The 15000 completion allowance record is unchanged.
-        final_record = tracking_profile_completion_allowance(
-            FINAL_COMPLETION_ALLOWANCE_PROFILE
-        )
-        assert final_record is not None
-        self.assertEqual(final_record["revision"], "completion_allowance_v1")
-        self.assertNotIn("boundary_completed_updates", final_record)
-
-    @unittest.skipUnless(
-        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
-        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
-        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
-    )
-    def test_hand_rms_40mm_is_the_pose_release_10100_canary_profile_only(
-        self,
-    ) -> None:
-        pose_release = MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-        allowance = FOOT_CANARY_HAND_RMS_40MM_PROFILE
-        relaxed = FOOT_ACTIVATION_CANARY_DEPLOYED_ACCURACY_PROFILE
-        self.assertEqual(
-            allowance,
-            "whole_body_foot_activation_canary_reachable_safety_v1_"
-            "deployed_accuracy_v1_hand_rms_40mm_v1",
-        )
-        self.assertIn(allowance, TRACKING_PROFILES)
-        self.assertEqual(
-            required_tracking_profile(10_100, recipe_revision=pose_release),
-            allowance,
-        )
-        self.assertEqual(
-            accepted_tracking_profiles(10_100, recipe_revision=pose_release),
-            (allowance, relaxed, FOOT_ACTIVATION_CANARY_PROFILE),
-        )
-        for recipe in (None, MICROBAN_TELEOP_V12_RECIPE_REVISION, "other"):
-            with self.subTest(recipe=recipe):
-                self.assertEqual(
-                    required_tracking_profile(10_100, recipe_revision=recipe),
-                    relaxed,
-                )
-        # Interrupted 10001..10099 clocks keep the deployed-accuracy canary.
-        for completed in (10_001, 10_050, 10_099):
-            with self.subTest(completed=completed):
-                self.assertEqual(
-                    required_tracking_profile(completed, recipe_revision=pose_release),
-                    relaxed,
-                )
-        self.assertEqual(hand_tracking_rms_max_m(allowance), 0.040)
-        self.assertEqual(hand_tracking_rms_max_m(relaxed), 0.035)
-        for limit in (
-            hand_tracking_p95_max_m,
-            foot_tracking_rms_max_m,
-            foot_tracking_p95_max_m,
-        ):
-            with self.subTest(limit=limit.__name__):
-                self.assertEqual(limit(allowance), limit(relaxed))
-        self.assertEqual(
-            required_tracking_scenario_names(allowance),
-            required_tracking_scenario_names(relaxed),
-        )
-        self.assertEqual(_scenarios(allowance), _scenarios(relaxed))
-        self.assertEqual(
-            required_tracking_check_names(allowance),
-            required_tracking_check_names(relaxed),
-        )
-        self.assertEqual(
-            required_target_column_ablation_targets(allowance),
-            required_target_column_ablation_targets(relaxed),
-        )
-        self.assertEqual(
-            tracking_profile_uses_perturbation(allowance),
-            tracking_profile_uses_perturbation(relaxed),
-        )
-        record = tracking_profile_completion_allowance(allowance)
-        assert record is not None
-        self.assertEqual(record["revision"], "hand_rms_40mm_v1")
-        self.assertEqual(record["structure_profile"], FOOT_ACTIVATION_CANARY_PROFILE)
-        self.assertEqual(record["relaxes_profile"], relaxed)
-        self.assertEqual(record["boundary_completed_updates"], 10_100)
-        self.assertEqual(record["recipe_revisions"], [pose_release])
-        self.assertEqual(record["hand_rms_m_max"], 0.040)
-        self.assertEqual(record["relaxed_profile_hand_rms_m_max"], 0.035)
-        self.assertIn("10100-canary", record["reason"])
-
-    @unittest.skipUnless(
-        V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
-        "no 0.040 m hand-RMS allowance at this HOME (the centered HOME); "
-        "tests/test_home_pose_any_trunk.py runs this at the forward-lean HOME",
-    )
-    def test_pose_release_10000_gate_uses_and_records_the_hand_rms_allowance(
-        self,
-    ) -> None:
-        base_infos = {
-            "microban_teleop_training_contract_version": "12",
-            "microban_teleop_recipe_revision": (
-                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-            ),
-            BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
-            "adapter_gradient_schedule_revision": (
-                TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
-            ),
-            "active_actor_columns_at_save": list(
-                teleop_v12_active_adapter_columns(10_000 * 24)
-            ),
-            "env_state": {"common_step_counter": 10_000 * 24},
-        }
-        rescue_marker = corner_rescue_marker(
-            parent_checkpoint_sha256="a" * 64,
-            parent_strict_tracking_report_sha256="b" * 64,
-            hand_pose_release=True,
-            parent_strict_failed_checks=("hand_tracking_rms",),
-        )
-        allowance = HMD_HAND_HAND_RMS_40MM_PROFILE
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            onnx_path = root / "policy.onnx"
-            onnx_path.write_bytes(b"unit-test-onnx")
-
-            def evidence(name: str, infos: dict[str, object]) -> tuple:
-                checkpoint = root / name / "model_9999.pt"
-                checkpoint.parent.mkdir()
-                torch.save({"iter": 9_999, "infos": infos}, checkpoint)
-                identity = {
-                    "sha256": sha256_file(checkpoint),
-                    "iteration": 9_999,
-                    "completed_updates": 10_000,
-                }
-                locomotion = root / name / "locomotion.json"
-                locomotion.write_text(json.dumps(_locomotion_report(identity)))
-                onnx_report = root / name / "onnx.json"
-                onnx_report.write_text(
-                    json.dumps(_onnx_report(identity, onnx_path))
-                )
-                return checkpoint, identity, locomotion, onnx_report
-
-            for lineage, extra in (
-                ("fresh", {}),
-                (
-                    "corner_rescue",
-                    {MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: rescue_marker},
-                ),
-            ):
-                with self.subTest(lineage=lineage):
-                    checkpoint, identity, locomotion, onnx_report = evidence(
-                        lineage, {**base_infos, **extra}
-                    )
-                    # 0.0365 m hand RMS: over the deployed-accuracy 0.035 m
-                    # limit, inside the 0.040 m allowance.
-                    allowed = _tracking_report(
-                        identity, profile=allowance, hand_rms=0.0365
-                    )
-                    self.assertEqual(allowed["status"], "pass")
-                    self.assertEqual(allowed["thresholds"]["hand_rms_m_max"], 0.040)
-                    self.assertEqual(
-                        _tracking_report(
-                            identity,
-                            profile=HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-                            hand_rms=0.0365,
-                        )["status"],
-                        "fail",
-                    )
-                    over = _tracking_report(identity, profile=allowance, hand_rms=0.0401)
-                    self.assertEqual(over["status"], "fail")
-                    tracking = root / lineage / "tracking.json"
-                    tracking.write_text(json.dumps(allowed))
-                    gate = create_gate(
-                        checkpoint=checkpoint,
-                        locomotion_report=locomotion,
-                        tracking_report=tracking,
-                        onnx_report=onnx_report,
-                    )
-                    self.assertEqual(gate["tracking_profile"], allowance)
-                    self.assertEqual(gate["checkpoint_kind"], "canonical_boundary")
-                    self.assertEqual(
-                        gate["tracking_profile_completion_allowance"],
-                        tracking_profile_completion_allowance(allowance),
-                    )
-                    self.assertEqual(
-                        gate.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY),
-                        extra.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY),
-                    )
-                    gate_path = root / lineage / "gate.json"
-                    gate_path.write_text(json.dumps(gate))
-                    self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-                    for field in (
-                        "tracking_profile_completion_allowance",
-                        "tracking_profile",
-                    ):
-                        tampered = deepcopy(gate)
-                        if field == "tracking_profile":
-                            tampered[field] = HMD_HAND_DEPLOYED_ACCURACY_PROFILE
-                        else:
-                            del tampered[field]
-                        gate_path.write_text(json.dumps(tampered))
-                        with self.assertRaises(ValueError):
-                            validate_gate(gate_path, checkpoint)
-                    # A stricter deployed-accuracy report is still accepted.
-                    strict_tracking = root / lineage / "tracking_deployed.json"
-                    strict_tracking.write_text(
-                        json.dumps(
-                            _tracking_report(
-                                identity, profile=HMD_HAND_DEPLOYED_ACCURACY_PROFILE
-                            )
-                        )
-                    )
-                    strict_gate = create_gate(
-                        checkpoint=checkpoint,
-                        locomotion_report=locomotion,
-                        tracking_report=strict_tracking,
-                        onnx_report=onnx_report,
-                    )
-                    self.assertEqual(
-                        strict_gate["tracking_profile"],
-                        HMD_HAND_DEPLOYED_ACCURACY_PROFILE,
-                    )
-                    self.assertNotIn(
-                        "tracking_profile_completion_allowance", strict_gate
-                    )
-                    over_tracking = root / lineage / "tracking_over.json"
-                    over_tracking.write_text(json.dumps(over))
-                    with self.assertRaises(ValueError):
-                        create_gate(
-                            checkpoint=checkpoint,
-                            locomotion_report=locomotion,
-                            tracking_report=over_tracking,
-                            onnx_report=onnx_report,
-                        )
-
-            # The canonical v11 lineage cannot use the allowance at 10000.
-            v11_checkpoint, v11_identity, v11_locomotion, v11_onnx = evidence(
-                "canonical",
-                {
-                    **base_infos,
-                    "microban_teleop_recipe_revision": (
-                        MICROBAN_TELEOP_V12_RECIPE_REVISION
-                    ),
-                },
-            )
-            v11_tracking = root / "canonical" / "tracking.json"
-            v11_tracking.write_text(
-                json.dumps(
-                    _tracking_report(v11_identity, profile=allowance, hand_rms=0.0365)
-                )
-            )
-            with self.assertRaises(ValueError):
-                create_gate(
-                    checkpoint=v11_checkpoint,
-                    locomotion_report=v11_locomotion,
-                    tracking_report=v11_tracking,
-                    onnx_report=v11_onnx,
-                )
-
-    def test_pose_release_final_gate_uses_and_records_the_allowance(self) -> None:
-        base_infos = {
-            "microban_teleop_training_contract_version": "12",
-            "microban_teleop_recipe_revision": (
-                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-            ),
-            BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
-            TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
-            "adapter_gradient_schedule_revision": (
-                TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
-            ),
-            "active_actor_columns_at_save": list(
-                teleop_v12_active_adapter_columns(15_000 * 24)
-            ),
-            "env_state": {"common_step_counter": 15_000 * 24},
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            onnx_path = root / "policy.onnx"
-            onnx_path.write_bytes(b"unit-test-onnx")
-
-            def evidence(name: str, infos: dict[str, object]) -> tuple:
-                checkpoint = root / name / "model_14999.pt"
-                checkpoint.parent.mkdir()
-                torch.save({"iter": 14_999, "infos": infos}, checkpoint)
-                identity = {
-                    "sha256": sha256_file(checkpoint),
-                    "iteration": 14_999,
-                    "completed_updates": 15_000,
-                }
-                locomotion = root / name / "locomotion.json"
-                locomotion.write_text(json.dumps(_locomotion_report(identity)))
-                onnx_report = root / name / "onnx.json"
-                onnx_report.write_text(
-                    json.dumps(_onnx_report(identity, onnx_path))
-                )
-                return checkpoint, identity, locomotion, onnx_report
-
-            checkpoint, identity, locomotion, onnx_report = evidence(
-                "pose_release", base_infos
-            )
-            # 0.040 m hand RMS: over the deployed-accuracy 0.035 m limit, inside
-            # the 0.045 m allowance.
-            allowed = _tracking_report(
-                identity, profile=FINAL_COMPLETION_ALLOWANCE_PROFILE, hand_rms=0.040
-            )
-            self.assertEqual(allowed["status"], "pass")
-            self.assertEqual(
-                _tracking_report(
-                    identity, profile=FINAL_DEPLOYED_ACCURACY_PROFILE, hand_rms=0.040
-                )["status"],
-                "fail",
-            )
-            over = _tracking_report(
-                identity, profile=FINAL_COMPLETION_ALLOWANCE_PROFILE, hand_rms=0.0451
-            )
-            self.assertEqual(over["status"], "fail")
-            tracking = root / "pose_release" / "tracking.json"
-            tracking.write_text(json.dumps(allowed))
-            gate = create_gate(
-                checkpoint=checkpoint,
-                locomotion_report=locomotion,
-                tracking_report=tracking,
-                onnx_report=onnx_report,
-            )
-            self.assertEqual(gate["tracking_profile"], FINAL_COMPLETION_ALLOWANCE_PROFILE)
-            self.assertEqual(gate["checkpoint_kind"], "canonical_boundary")
-            self.assertEqual(
-                gate["tracking_profile_completion_allowance"],
-                tracking_profile_completion_allowance(
-                    FINAL_COMPLETION_ALLOWANCE_PROFILE
-                ),
-            )
-            gate_path = root / "pose_release" / "gate.json"
+            paths["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
+            gate = create_gate(checkpoint=checkpoint, **paths)
+            self.assertEqual(gate["tracking_profile"], FINAL_PROFILE)
+            self.assertNotIn("tracking_profile_completion_allowance", gate)
+            gate_path = root / "gate.json"
             gate_path.write_text(json.dumps(gate))
             self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-            for field in ("tracking_profile_completion_allowance", "tracking_profile"):
-                with self.subTest(tampered=field):
-                    tampered = deepcopy(gate)
-                    if field == "tracking_profile":
-                        tampered[field] = FINAL_DEPLOYED_ACCURACY_PROFILE
-                    else:
-                        del tampered[field]
-                    gate_path.write_text(json.dumps(tampered))
-                    with self.assertRaises(ValueError):
-                        validate_gate(gate_path, checkpoint)
-            # A stricter deployed-accuracy report is still accepted (no record).
-            strict_tracking = root / "pose_release" / "tracking_deployed.json"
-            strict_tracking.write_text(
-                json.dumps(
-                    _tracking_report(identity, profile=FINAL_DEPLOYED_ACCURACY_PROFILE)
-                )
-            )
-            strict_gate = create_gate(
-                checkpoint=checkpoint,
-                locomotion_report=locomotion,
-                tracking_report=strict_tracking,
-                onnx_report=onnx_report,
-            )
-            self.assertEqual(
-                strict_gate["tracking_profile"], FINAL_DEPLOYED_ACCURACY_PROFILE
-            )
-            self.assertNotIn("tracking_profile_completion_allowance", strict_gate)
-            over_tracking = root / "pose_release" / "tracking_over.json"
-            over_tracking.write_text(json.dumps(over))
+            tampered = deepcopy(gate)
+            tampered["tracking_profile"] = WHOLE_BODY_PROFILE
+            gate_path.write_text(json.dumps(tampered))
             with self.assertRaises(ValueError):
-                create_gate(
-                    checkpoint=checkpoint,
-                    locomotion_report=locomotion,
-                    tracking_report=over_tracking,
-                    onnx_report=onnx_report,
-                )
-
-            # The canonical v11 lineage cannot use the allowance at 15000.
-            v11_checkpoint, v11_identity, v11_locomotion, v11_onnx = evidence(
-                "canonical",
-                {
-                    **base_infos,
-                    "microban_teleop_recipe_revision": (
-                        MICROBAN_TELEOP_V12_RECIPE_REVISION
-                    ),
-                },
-            )
-            v11_tracking = root / "canonical" / "tracking.json"
-            v11_tracking.write_text(
-                json.dumps(
-                    _tracking_report(
-                        v11_identity,
-                        profile=FINAL_COMPLETION_ALLOWANCE_PROFILE,
-                        hand_rms=0.040,
-                    )
-                )
-            )
-            with self.assertRaises(ValueError):
-                create_gate(
-                    checkpoint=v11_checkpoint,
-                    locomotion_report=v11_locomotion,
-                    tracking_report=v11_tracking,
-                    onnx_report=v11_onnx,
-                )
+                validate_gate(gate_path, checkpoint)
 
     def test_pose_release_chain_gates_under_the_unchanged_profiles(self) -> None:
         infos = {

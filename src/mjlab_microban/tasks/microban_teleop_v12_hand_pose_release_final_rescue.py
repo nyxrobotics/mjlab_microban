@@ -296,15 +296,14 @@ def hand_pose_release_final_rescue_sampler_spec(
 
 
 def final_gate_profile() -> str:
-    """The unchanged final profile of the pose-release lineage at 15000."""
+    """The final profile at 15000 (the same for every lineage)."""
 
     from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
         required_tracking_profile,
     )
 
     return required_tracking_profile(
-        MICROBAN_TELEOP_V12_FINAL_RESCUE_TARGET_COMPLETED_UPDATES,
-        recipe_revision=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        MICROBAN_TELEOP_V12_FINAL_RESCUE_TARGET_COMPLETED_UPDATES
     )
 
 

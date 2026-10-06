@@ -151,13 +151,6 @@ UPRIGHT_FULLBODY_HOME_REVISION = _contract(
 
 # Walking checkpoints without the HOME stamp (saved before it existed).
 ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS = bool(HOME.override("accepts_unstamped_walk_checkpoints", False))
-# The pose-release 10000 boundary / 10100 canary hand-RMS 0.040 m profiles
-# (forward-lean-v2 e3271de / ec67f1e) and the packager's requirement that a
-# pose-release final records both gates by resume ancestry (7ceb280).  Every
-# HOME but the centered one, whose line judged them at 0.035 m.
-V12_HAND_RMS_40MM_BOUNDARY_PROFILES = bool(
-    HOME.override("v12_hand_rms_40mm_boundary_profiles", True)
-)
 
 
 def robot_contract_strings() -> dict[str, str]:

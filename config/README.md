@@ -39,7 +39,6 @@
 | 救済段階・upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
 | 固定値 | root z 0.170554885633559、足の横間隔 0.094 m（FK 0.0935） | root z 0.170430569776402、股・足首は前傾ブランチの全桁の値（yamlは12桁の正準値） | FK値 |
 | 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント | （なし） | （なし） |
-| pose-release の 10000 境界 / 10100 カナリア | 手先 RMS 0.035 m（中心ブランチのまま。0.040 m 許容プロファイルは存在しない）。パッケージの境界ゲートは渡したときだけ記録 | 手先 RMS 0.040 m 許容（e3271de / ec67f1e）。パッケージは 10000 と 10100 のゲートを resume 系譜（`params/agent.yaml`）でたどって必須（7ceb280） | 前傾HOMEと同じ |
 | HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 完全一致（同） | 1e-9 の許容（FK の最終桁の揺れ） |
 
 体幹ピッチ 0° のHOMEは中心ラインの仕組み（体幹座標系の目標、元の手先FK箱）、0° 以外は前傾ラインの仕組み
@@ -253,9 +252,9 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
   `forward-lean-v2`（7ceb280）のモジュール定数・HOME 由来の関数値・登録された全タスクの env/play/rl 設定と runner が
   一致すること（参照は `tests/fixtures/home_equivalence/*.json`、`tests/home_equivalence.py` で記録）。
   中心HOMEで許す差は、新しいコマンド設定フィールドの既定値（`trunk_pitch=0.0`、`lf_rb_probability=0.9`）と
-  HOMEスタンプを付ける歩行 runner だけ（追跡プロファイル表も中心ブランチと同じ）。前傾HOMEにしかない仕組み
-  （0.040 m 許容、必須の境界ゲート）のテストは中心 yaml では skip され、`ForwardLeanOnlyTestsTest` が前傾 yaml で
-  実行する。
+  HOMEスタンプを付ける歩行 runner、それに整理で意図して変えた値（`INTENDED_CHANGES`、理由つき）だけ。
+  ステージゲートの判定基準は全HOMEで1本の表（時刻ごとに1プロファイル、手先 RMS 0.040 m）で、
+  パッケージはどのHOMEでも 10000 と 10100 のゲートを resume 系譜（`params/agent.yaml`）でたどって記録する。
 - テスト一式はどのHOMEのチェックアウトでも通る（`tests/home_cases.py`）:
   - ツール（重心合わせ・yaml 編集・ロボット yaml）のテストは、チェックアウトの `config/home_pose.yaml` ではなく
     `tests/fixtures/home_pose_centered.yaml` / `home_pose_forward_lean.yaml` を入力にする。

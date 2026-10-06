@@ -19,9 +19,9 @@ last 99 PPO updates again with the failed evaluator scenarios replayed in a
 share of the episodes. It is the canonical final rescue
 (`microban_teleop_v12_final_rescue`) for the pose-release lineage. **No gate
 profile, threshold or check changes**: the rescue's `model_14999` is judged by
-the ordinary 14999 stage gate under
-`full_body_reachable_performance_perturbation_v2_completion_allowance_v1`
-(hand 0.045 / 0.08 m, foot 0.055 / 0.11 m, every safety, soft-limit,
+the ordinary 14999 stage gate under the one final profile
+`full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1`
+(hand 0.040 / 0.07 m, foot 0.05 / 0.08 m, every safety, soft-limit,
 twist-response, locomotion and ONNX check).
 
 ## Route
@@ -119,8 +119,8 @@ the checkpoint's, so an installed `pico_teleop.onnx` names its parent, the
 failed gate it replayed, the mix and the seed. An ordinary final has none of
 these fields.
 
-The package otherwise declares the pose-release recipe and the
-completion-allowance profile exactly like an ordinary pose-release final, so
+The package otherwise declares the pose-release recipe and the final
+profile exactly like an ordinary pose-release final, so
 the robot runtime (`microban_lean` `src/moves/pico_hybrid.py`,
 `tools/validate_pico_policy.py`) needs no new table entry; it reads no
 lineage fields and has no exact metadata key-set check.

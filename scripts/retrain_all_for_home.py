@@ -68,11 +68,10 @@ same command resumes after a crash, a stall or a fixed failure):
    commits config/home_pose.yaml on the training branch (the rescue launchers
    train only from a clean committed tree).  A passing rescue's model_9999
    (lineage fresh_chain_model9900_corner_rescue) or attempt is resumed as an
-   ordinary pose-release checkpoint; the 15000 gate of the pose-release
-   recipe is judged under its completion-allowance profile by the stage
-   evaluator.  At every HOME but the centered one the 10000 / 10100 gates are
-   judged with the 0.040 m hand-RMS allowance and the package must record
-   both (step 5 stops if either is missing).
+   ordinary pose-release checkpoint.  Every gate is judged under the one
+   profile of its clock (evaluate_teleop_v12_tracking; hand RMS 0.040 m at
+   every HOME), and the package must record the 10000 / 10100 gates (step 5
+   stops if either is missing).
 5. Export walk.onnx / getup.onnx, install them, the robot HOME yaml and the
    run pins (walking source / probe / walk.onnx SHA-256s, HOME literals of the
    robot tests) into --robot-repo, package PICO against that robot tree
@@ -227,15 +226,13 @@ V12_FINAL_RESCUE_MIXES = ("pr_v1", "pr_v2", "pr_v3", "pr_v4", "pr_v5", "pr_v6")
 # The stage trainer's default training seed (train_microban_teleop_v12.sh
 # --seed); retry k of a segment from the same parent trains with seed + k.
 V12_TRAIN_SEED = 42
-# evaluate_teleop_v12_tracking.HMD_HAND_PROFILE: the profile the pose-release
-# corner-rescue validator (validate_hand_pose_release_corner_rescue_parent_report)
-# requires of the model_9900 parent report.  Without --profile the evaluator
-# picks the deployed-accuracy profile for that clock, which the validator refuses.
-V12_RESCUE_PARENT_PROFILE = "hmd_hand_reachable_performance_foot_exposure_v2"
+# evaluate_teleop_v12_tracking.HMD_HAND_PROFILE / FINAL_PROFILE: the profile of
+# the model_9900 clock that the pose-release corner-rescue validator
+# (validate_hand_pose_release_corner_rescue_parent_report) requires of the
+# parent report, and the final profile.
+V12_RESCUE_PARENT_PROFILE = "hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1"
 V12_FINAL_PROFILES = {
-    "full_body_reachable_performance_perturbation_v2_completion_allowance_v1",
     "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
-    "full_body_reachable_performance_perturbation_v2",
 }
 
 STALL_S = {"train": 1200, "gate": 3600, "probe": 1800, "eval": 1800, "cpu": 1800}
@@ -1569,9 +1566,8 @@ class Pipeline:
         report = self.state_dir / "pico" / f"{parent.parent.name}_model_9900_strict_tracking.json"
         report.parent.mkdir(exist_ok=True)
         if report.exists() and report_profile(report) != V12_RESCUE_PARENT_PROFILE:
-            # A report cached by an older pipeline under the evaluator's
-            # default (deployed-accuracy) profile: the rescue validator only
-            # accepts the strict HMD/hand profile, so evaluate it again.
+            # A report cached by an older pipeline under another profile:
+            # evaluate it again under the one HMD/hand profile.
             self.log(f"corner rescue: re-evaluating {report.name} under {V12_RESCUE_PARENT_PROFILE} "
                      f"(cached profile {report_profile(report)})")
             report.unlink()
@@ -2124,18 +2120,16 @@ class Pipeline:
         return [(self.get("pico", "b9999", "passed", "run"), 9999), (canary, 10099)]
 
     def required_boundary_clocks(self) -> set[int]:
-        """Clocks a pose-release package must record at this HOME (none at the centered HOME)."""
+        """Clocks a pose-release package must record (the 10000 boundary and 10100 canary)."""
 
         return set(self.home.get("v12_required_boundary_gate_clocks", [10_000, 10_100]))
 
     def boundary_gate_args(self) -> list[str]:
         """--boundary-gate for the 10000 boundary and the 10100 canary of the final lineage.
 
-        The package records which tracking profile judged them (e.g. the 0.040 m
-        hand-RMS allowance of the pose-release 10000 boundary), so the robot sees it.
-        Where the HOME requires them (every HOME but the centered one: the
-        packager refuses a pose-release final without both), a missing or
-        non-validating gate stops the run here; elsewhere it is left out.
+        The package records which tracking profile judged them, so the robot
+        sees it.  The packager refuses a pose-release final without both, so a
+        missing or non-validating gate stops the run here.
         """
 
         required = self.required_boundary_clocks()

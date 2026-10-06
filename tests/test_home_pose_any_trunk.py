@@ -21,11 +21,9 @@ and tasks it deleted (never trained by the HOME pipeline), the values listed in
 INTENDED_CHANGES (each with its reason), and at the centered HOME the new
 command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
 ``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
-their HOME (a subclass of mjlab's).  The 0.040 m hand-RMS profiles of the
-pose-release 10000 boundary / 10100 canary (forward-lean-v2 e3271de, ec67f1e)
-and the packager's required 10000 / 10100 gates (7ceb280) exist at every HOME
-but the centered one, so the centered profile tables equal the reference too;
-ForwardLeanOnlyTestsTest runs their tests at the forward-lean HOME.
+their HOME (a subclass of mjlab's).  The stage-gate profile table is the same
+at every HOME (one profile per clock, hand RMS 0.040 m), so its values are
+listed in INTENDED_CHANGES.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
@@ -126,10 +124,31 @@ INTENDED_CHANGES = {
         for task in _V12_TASKS
     },
     "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES": (
-        "deadline-fallback profiles removed"
+        "one profile per clock (deadline, strict, allowance variants removed)"
     ),
     "const:mjlab_microban.scripts.teleop_v12_stage.TRACKING_PROFILES": (
-        "deadline-fallback profiles removed"
+        "one profile per clock (deadline, strict, allowance variants removed)"
+    ),
+    **{
+        f"const:mjlab_microban.scripts.{name}": "one profile per clock: the "
+        "accuracy-judging profiles are the published deployed-accuracy names"
+        for name in (
+            "evaluate_teleop_v12_tracking.HMD_HAND_PROFILE",
+            "evaluate_teleop_v12_tracking.FOOT_ACTIVATION_CANARY_PROFILE",
+            "evaluate_teleop_v12_tracking.WHOLE_BODY_PROFILE",
+            "evaluate_teleop_v12_tracking.FINAL_PROFILE",
+            "export_teleop_v12_deployment.FINAL_PROFILE",
+            "teleop_v12_corner_rescue.HMD_HAND_PROFILE",
+        )
+    },
+    **{
+        f"const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.{name}": (
+            "one accuracy table at every HOME (hand RMS 0.040 m, foot 0.05/0.08 m)"
+        )
+        for name in ("HAND_RMS_MAX_M", "FOOT_RMS_MAX_M", "FOOT_P95_MAX_M")
+    },
+    "const:mjlab_microban.scripts.export_teleop_v12_deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES": (
+        "every HOME's package records its 10000 / 10100 gates"
     ),
     "const:mjlab_microban.scripts.export_teleop_v12_deployment.SUPPORTED_FINAL_TRACKING_PROFILES": (
         "deadline-fallback final profile removed"
@@ -324,7 +343,7 @@ class RequiredBoundaryClocksTest(unittest.TestCase):
             "print(json.dumps([home_check.check(HOME.path)['v12_required_boundary_gate_clocks'],"
             " list(d.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES)]))"
         )
-        for yaml_path, expected in ((CENTERED_YAML, []), (LEAN_YAML, [10000, 10100])):
+        for yaml_path, expected in ((CENTERED_YAML, [10000, 10100]), (LEAN_YAML, [10000, 10100])):
             with self.subTest(yaml=yaml_path.name):
                 self.assertEqual(json.loads(_run_python(yaml_path, code)), [expected, expected])
 
@@ -379,42 +398,7 @@ class DerivedHomeStringsTest(unittest.TestCase):
 
 
 class ForwardLeanOnlyTestsTest(unittest.TestCase):
-    """Tests skipped at the centered HOME pass at the forward-lean HOME.
-
-    The 0.040 m hand-RMS boundary allowance and the required pose-release
-    10000 / 10100 boundary gates exist at every HOME but the centered one.
-    """
-
-    NODES = (
-        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
-        "test_hand_rms_40mm_is_the_pose_release_10000_profile_only",
-        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
-        "test_hand_rms_40mm_is_the_pose_release_10100_canary_profile_only",
-        "tests/test_teleop_v12_stage.py::TeleopV12StageTest::"
-        "test_pose_release_10000_gate_uses_and_records_the_hand_rms_allowance",
-        "tests/test_teleop_v12_deployment.py::"
-        "test_boundary_gates_record_the_10000_hand_rms_allowance",
-        "tests/test_teleop_v12_deployment.py::"
-        "test_boundary_gates_record_the_10100_canary_hand_rms_allowance",
-        "tests/test_teleop_v12_deployment.py::"
-        "test_boundary_gates_reject_foreign_or_nonboundary_gates[missing_canary]",
-        "tests/test_teleop_v12_deployment.py::"
-        "test_boundary_gate_controls_pass_on_the_exact_ancestry",
-    )
-
-    def test_forward_lean_only_tests_pass_at_the_forward_lean_home(self):
-        try:
-            import pytest  # noqa: F401
-        except ImportError:
-            self.skipTest("pytest is not installed")
-        completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs", *self.NODES],
-            env=_environment(LEAN_YAML), cwd=REPO_ROOT, capture_output=True, text=True,
-            timeout=1800, check=False,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-2000:])
-        self.assertIn(f"{len(self.NODES)} passed", completed.stdout)
-        self.assertNotIn("skipped", completed.stdout.splitlines()[-1])
+    """The pose-release final rescue keeps forward-lean-v2's published strings."""
 
     def test_pose_release_final_rescue_tests_pass_at_the_forward_lean_home(self):
         """forward-lean-v2's final rescue (fc1c313..cd0ea78) with its published strings."""

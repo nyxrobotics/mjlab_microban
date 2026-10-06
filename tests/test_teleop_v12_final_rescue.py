@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    FINAL_DEPLOYED_ACCURACY_PROFILE,
+    FINAL_PROFILE,
     _scenarios,
 )
 from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
@@ -56,7 +56,7 @@ def test_clock_constants_match_ppo_schedule():
 
 def test_scenario_commands_mirror_the_final_evaluator():
     commands = final_rescue_scenario_commands()
-    evaluator = {item.name: item for item in _scenarios(FINAL_DEPLOYED_ACCURACY_PROFILE)}
+    evaluator = {item.name: item for item in _scenarios(FINAL_PROFILE)}
     assert tuple(commands) == MICROBAN_TELEOP_V12_FINAL_RESCUE_SCENARIOS
     for name, command in commands.items():
         scenario = evaluator[name]

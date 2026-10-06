@@ -286,11 +286,6 @@ LEGACY_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
                 "contracts": MappingProxyType(_CENTERED_HOME_CONTRACTS),
                 "getup_near_home_reset": (0.2, 0.6),
                 "accepts_unstamped_walk_checkpoints": True,
-                # The centered line judged its 10000 boundary / 10100 canary
-                # with hand RMS <= 0.035 m (track-centered-home-clip 5b5a9d0);
-                # the 0.040 m allowance of forward-lean-v2 e3271de / ec67f1e
-                # does not exist at this HOME.
-                "v12_hand_rms_40mm_boundary_profiles": False,
             }
         ),
         # The forward-lean HOME (trunk +10 deg) as published on the

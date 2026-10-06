@@ -238,13 +238,13 @@ def evaluator_scenario_commands(
     # Lazy import: the evaluator imports the task package.
     from mjlab_microban.robot.microban_hand_fk import MICROBAN_ARM_HOME_JOINT_DEG
     from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FINAL_DEPLOYED_ACCURACY_PROFILE,
+        FINAL_PROFILE,
         _scenarios,
     )
 
     if not isinstance(names, tuple) or not names or len(set(names)) != len(names):
         raise ValueError("Final rescue scenarios must be distinct names")
-    by_name = {item.name: item for item in _scenarios(FINAL_DEPLOYED_ACCURACY_PROFILE)}
+    by_name = {item.name: item for item in _scenarios(FINAL_PROFILE)}
     poses = dict(MICROBAN_REACHABLE_HAND_EVALUATION_JOINTS_DEG)
     result: dict[str, dict[str, Any]] = {}
     for name in names:
@@ -622,7 +622,7 @@ def final_rescue_marker(
     """
 
     from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FINAL_DEPLOYED_ACCURACY_PROFILE,
+        FINAL_PROFILE,
         required_tracking_profile,
     )
 
@@ -657,7 +657,7 @@ def final_rescue_marker(
             "completed_updates": (
                 MICROBAN_TELEOP_V12_FINAL_RESCUE_TARGET_COMPLETED_UPDATES
             ),
-            "tracking_profile": FINAL_DEPLOYED_ACCURACY_PROFILE,
+            "tracking_profile": FINAL_PROFILE,
             "tracking_report_sha256": _require_sha256(
                 failed_gate_tracking_report_sha256, "Failed final gate report"
             ),

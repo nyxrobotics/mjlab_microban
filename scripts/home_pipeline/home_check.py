@@ -120,11 +120,8 @@ def check(path: Path) -> dict[str, object]:
         "loader_contact": loader,
         "ground_contact": ground,
         # Clocks whose stage gates a pose-release PICO package must record
-        # (home_contracts.V12_HAND_RMS_40MM_BOUNDARY_PROFILES; none at the
-        # centered HOME).
-        "v12_required_boundary_gate_clocks": (
-            [10_000, 10_100] if bool(hp.override("v12_hand_rms_40mm_boundary_profiles", True)) else []
-        ),
+        # (export_teleop_v12_deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES).
+        "v12_required_boundary_gate_clocks": [10_000, 10_100],
     }
 
 

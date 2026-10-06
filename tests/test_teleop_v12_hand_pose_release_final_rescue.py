@@ -13,7 +13,6 @@ import torch
 
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
-    FINAL_COMPLETION_ALLOWANCE_PROFILE,
     FINAL_PROFILE,
     _acceptance,
     _scenarios,
@@ -143,7 +142,7 @@ def test_replayed_commands_mirror_the_final_pose_release_evaluator():
     names = ("mixed_forward_left", "bounded_both_feet", "mixed_backward_right")
     commands = evaluator_scenario_commands(names)
     evaluator = {item.name: item for item in _scenarios(final_gate_profile())}
-    assert final_gate_profile() == FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert final_gate_profile() == FINAL_PROFILE
     for name in names:
         scenario = evaluator[name]
         assert commands[name]["twist"] == list(scenario.twist)
@@ -251,7 +250,7 @@ def test_marker_round_trip_and_tamper_detection():
     assert validate_hand_pose_release_final_rescue_marker(marker) == marker
     assert marker["parent_lineage"] == "fresh_chain"
     assert marker["failed_final_gate"]["tracking_profile"] == (
-        FINAL_COMPLETION_ALLOWANCE_PROFILE
+        FINAL_PROFILE
     )
     assert marker["source_recipe_revision"] == (
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
@@ -266,7 +265,9 @@ def test_marker_round_trip_and_tamper_detection():
         with pytest.raises(ValueError):
             validate_hand_pose_release_final_rescue_marker(tampered)
     tampered = deepcopy(marker)
-    tampered["failed_final_gate"]["tracking_profile"] = FINAL_PROFILE
+    tampered["failed_final_gate"]["tracking_profile"] = (
+        "full_body_reachable_performance_perturbation_v2"
+    )
     with pytest.raises(ValueError):
         validate_hand_pose_release_final_rescue_marker(tampered)
 
@@ -395,7 +396,7 @@ def _failed_final_report(*, soft=True, twist=True, fell=False):
         "iteration": 14_999,
         "completed_updates": 15_000,
     }
-    report = helpers._tracking_report(identity, profile=FINAL_COMPLETION_ALLOWANCE_PROFILE)
+    report = helpers._tracking_report(identity, profile=FINAL_PROFILE)
     for item in report["results"]:
         if soft and item["name"] in ("bounded_both_feet", "mixed_forward_left"):
             item["maximum_actual_soft_limit_violation_rad"] = 0.0921
@@ -406,7 +407,7 @@ def _failed_final_report(*, soft=True, twist=True, fell=False):
             item["twist_directional_response_passed"] = False
         if fell and item["name"] == "max_hands_left":
             item["fell"] = True
-    checks, status = _acceptance(report["results"], FINAL_COMPLETION_ALLOWANCE_PROFILE)
+    checks, status = _acceptance(report["results"], FINAL_PROFILE)
     report["checks"] = checks
     report["status"] = status
     return report
@@ -421,7 +422,7 @@ def test_gate_validator_still_refuses_soft_limit_and_twist_failures():
     assert 0.0921 > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
     with pytest.raises(ValueError):
         _validate_tracking_report(
-            report, identity, recipe_revision=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+            report, identity
         )
     for allowed in (
         frozenset(("actual_soft_limits",)),
@@ -432,25 +433,25 @@ def test_gate_validator_still_refuses_soft_limit_and_twist_failures():
             _validate_tracking_report(
                 report,
                 identity,
-                profile_override=FINAL_COMPLETION_ALLOWANCE_PROFILE,
+                profile_override=FINAL_PROFILE,
                 allowed_failed_checks=allowed,
             )
     assert (
         _validate_tracking_report(
             report,
             identity,
-            profile_override=FINAL_COMPLETION_ALLOWANCE_PROFILE,
+            profile_override=FINAL_PROFILE,
             allowed_failed_checks=frozenset(
                 ("actual_soft_limits", "twist_directional_response")
             ),
         )
-        == FINAL_COMPLETION_ALLOWANCE_PROFILE
+        == FINAL_PROFILE
     )
     # A passing report still validates as a gate.
     passing = _failed_final_report(soft=False, twist=False)
     assert passing["status"] == "pass"
     _validate_tracking_report(
-        passing, identity, recipe_revision=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        passing, identity
     )
     # A summary that disagrees with its per-axis evidence is refused.
     inconsistent = _failed_final_report(soft=False, twist=False)
@@ -461,7 +462,7 @@ def test_gate_validator_still_refuses_soft_limit_and_twist_failures():
         _validate_tracking_report(
             inconsistent,
             identity,
-            profile_override=FINAL_COMPLETION_ALLOWANCE_PROFILE,
+            profile_override=FINAL_PROFILE,
             allowed_failed_checks=frozenset(("twist_directional_response",)),
         )
 
@@ -487,7 +488,7 @@ def test_failed_gate_report_validator(tmp_path):
         with pytest.raises(ValueError):
             validate_hand_pose_release_failed_final_gate_report(path)
     other_profile = _failed_final_report()
-    other_profile["profile"] = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
+    other_profile["profile"] = "full_body_reachable_performance_perturbation_v2"
     path.write_text(json.dumps(other_profile), encoding="utf-8")
     with pytest.raises(ValueError):
         validate_hand_pose_release_failed_final_gate_report(path)
@@ -683,7 +684,7 @@ def _rescue_gate_fixture(root: Path, *, final: dict | None, corner: dict | None)
     )
     reports["tracking_report"].write_text(
         json.dumps(
-            helpers._tracking_report(identity, profile=FINAL_COMPLETION_ALLOWANCE_PROFILE)
+            helpers._tracking_report(identity, profile=FINAL_PROFILE)
         )
     )
     reports["onnx_report"].write_text(
@@ -702,7 +703,7 @@ def test_final_gate_records_and_requires_the_rescue_marker(tmp_path, with_corner
         tmp_path / "rescue", final=marker, corner=corner
     )
     gate = create_gate(checkpoint=checkpoint, **reports)
-    assert gate["tracking_profile"] == FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert gate["tracking_profile"] == FINAL_PROFILE
     assert gate[MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY] == marker
     assert gate.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY) == corner
     gate_path = tmp_path / "rescue_gate.json"
@@ -853,7 +854,7 @@ def test_build_deployment_metadata_writes_the_rescue_marker(tmp_path):
     )
     infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = corner
     gate["checkpoint_sha256"] = _sha(checkpoint)
-    gate["tracking_profile"] = FINAL_COMPLETION_ALLOWANCE_PROFILE
+    gate["tracking_profile"] = FINAL_PROFILE
 
     def build(gate_value: dict, infos_value: dict) -> dict:
         return deployment.build_v12_deployment_metadata(
@@ -883,7 +884,7 @@ def test_build_deployment_metadata_writes_the_rescue_marker(tmp_path):
     # An ordinary pose-release final ships none of the rescue fields.
     plain = build(deepcopy(gate), deepcopy(infos))
     assert not keys.intersection(plain)
-    assert plain["v12_tracking_profile"] == FINAL_COMPLETION_ALLOWANCE_PROFILE
+    assert plain["v12_tracking_profile"] == FINAL_PROFILE
 
     rescue_infos = {**deepcopy(infos), MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: marker}
     rescue_gate = {**deepcopy(gate), MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: marker}

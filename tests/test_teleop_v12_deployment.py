@@ -13,8 +13,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from home_cases import CENTERED_HOME_TAG, FORWARD_LEAN_HOME_TAG, home_tag  # noqa: E402
 
-from mjlab_microban.robot.home_contracts import V12_HAND_RMS_40MM_BOUNDARY_PROFILES
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
+from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    FOOT_ACTIVATION_CANARY_PROFILE,
+    HMD_HAND_PROFILE,
+)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
@@ -50,15 +53,6 @@ from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     COMMANDED_TARGET_SOFT_LIMIT_EXCESS_MAX_RAD,
 )
-
-# The 0.040 m hand-RMS boundary allowance and the pose-release boundary-gate
-# requirement exist at every HOME but the centered one; their tests run at the
-# forward-lean HOME through tests/test_home_pose_any_trunk.py.
-needs_hand_rms_40mm = pytest.mark.skipif(
-    not V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
-    reason="no 0.040 m hand-RMS allowance at this HOME (the centered HOME)",
-)
-
 
 # Synthetic identities: the velocity source is chosen per chain.
 LEGACY_VELOCITY_CHECKPOINT_SHA256 = "1" * 64
@@ -227,82 +221,21 @@ def test_final_gate_rejects_every_nonfinal_identity(
         )
 
 
-def test_pose_release_final_gate_profile_is_the_completion_allowance(
-    tmp_path: Path,
-) -> None:
+def test_final_gate_profile_is_the_one_final_profile(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model_14999.pt"
     gate, *_ = _evidence(tmp_path)
-    expected = deployment._expected_final_tracking_profile(
-        {
-            "microban_teleop_recipe_revision": (
-                MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-            )
-        }
+    deployment._require_final_gate(
+        gate, checkpoint=checkpoint, checkpoint_sha256="1" * 64
     )
-    assert expected == deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
-    assert expected in deployment.SUPPORTED_FINAL_TRACKING_PROFILES
-    for accepted in (
-        deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE,
-        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
-        deployment.FINAL_PROFILE,
+    for rejected in (
+        "full_body_reachable_performance_perturbation_v2",
+        "full_body_reachable_performance_perturbation_v2_completion_allowance_v1",
+        None,
     ):
-        gate["tracking_profile"] = accepted
-        deployment._require_final_gate(
-            gate,
-            checkpoint=checkpoint,
-            checkpoint_sha256="1" * 64,
-            expected_tracking_profile=expected,
-        )
-    gate["tracking_profile"] = "unknown_final_profile"
-    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
-        deployment._require_final_gate(
-            gate,
-            checkpoint=checkpoint,
-            checkpoint_sha256="1" * 64,
-            expected_tracking_profile=expected,
-        )
-    # The canonical v11 lineage keeps the deployed-accuracy final profile.
-    canonical = deployment._expected_final_tracking_profile(
-        {"microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION}
-    )
-    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
-    gate["tracking_profile"] = deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
-    with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
-        deployment._require_final_gate(
-            gate,
-            checkpoint=checkpoint,
-            checkpoint_sha256="1" * 64,
-            expected_tracking_profile=canonical,
-        )
-
-
-def test_canonical_final_gate_profile_is_deployed_accuracy(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "model_14999.pt"
-    gate, *_ = _evidence(tmp_path)
-    canonical_infos: dict[str, object] = {}
-    canonical = deployment._expected_final_tracking_profile(canonical_infos)
-    assert canonical == deployment.FINAL_DEPLOYED_ACCURACY_PROFILE
-    # The canonical final profile uses the deployed model's accuracy limits; a
-    # gate made under the stricter legacy final profile is still accepted.
-    for accepted in (
-        deployment.FINAL_DEPLOYED_ACCURACY_PROFILE,
-        deployment.FINAL_PROFILE,
-    ):
-        gate["tracking_profile"] = accepted
-        deployment._require_final_gate(
-            gate,
-            checkpoint=checkpoint,
-            checkpoint_sha256="1" * 64,
-            expected_tracking_profile=canonical,
-        )
-    for rejected in ("unknown_final_profile", None):
         gate["tracking_profile"] = rejected
         with pytest.raises(ValueError, match="exact accepted 15000-update gate"):
             deployment._require_final_gate(
-                gate,
-                checkpoint=checkpoint,
-                checkpoint_sha256="1" * 64,
-                expected_tracking_profile=canonical,
+                gate, checkpoint=checkpoint, checkpoint_sha256="1" * 64
             )
 
 
@@ -745,14 +678,10 @@ def _boundary_gate_fixture(
     infos: dict,
     completed: int = 10_000,
     kind: str = "canonical_boundary",
-    profile: str = deployment.HMD_HAND_HAND_RMS_40MM_PROFILE,
+    profile: str = HMD_HAND_PROFILE,
     parent: Path | None = None,
 ) -> Path:
     import torch
-
-    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        tracking_profile_completion_allowance,
-    )
 
     checkpoint = root / name / f"model_{completed - 1}.pt"
     checkpoint.parent.mkdir(parents=True)
@@ -770,16 +699,12 @@ def _boundary_gate_fixture(
         "checkpoint_kind": kind,
         "tracking_profile": profile,
     }
-    allowance = tracking_profile_completion_allowance(profile)
-    if allowance is not None:
-        gate["tracking_profile_completion_allowance"] = allowance
     gate_path = root / name / "gate.json"
     gate_path.write_text(json.dumps(gate), encoding="utf-8")
     return gate_path
 
 
-@needs_hand_rms_40mm
-def test_boundary_gates_record_the_10000_hand_rms_allowance(
+def test_boundary_gates_record_the_10000_boundary_and_its_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
@@ -808,9 +733,6 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
         parent_strict_failed_checks=("hand_tracking_rms",),
     )
     final_infos[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = marker
-    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-    )
 
     boundary_infos = deepcopy(final_infos)
     gate_path = _boundary_gate_fixture(
@@ -823,7 +745,7 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
         infos=deepcopy(final_infos),
         completed=10_100,
         kind="activation_canary",
-        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        profile=FOOT_ACTIVATION_CANARY_PROFILE,
         parent=gate_path.parent / "model_9999.pt",
     )
     final_checkpoint = _final_checkpoint_fixture(
@@ -839,13 +761,15 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     assert entry["checkpoint_kind"] == "canonical_boundary"
     assert entry["iteration"] == 9_999
     assert entry["stage_gate_sha256"] == _sha(gate_path)
-    assert entry["tracking_profile"] == deployment.HMD_HAND_HAND_RMS_40MM_PROFILE
-    allowance = entry["tracking_profile_completion_allowance"]
-    assert allowance["hand_rms_m_max"] == 0.040
-    assert allowance["hand_p95_m_max"] == 0.05
-    assert allowance["relaxes_profile"] == (
-        "hmd_hand_reachable_performance_foot_exposure_v2_deployed_accuracy_v1"
-    )
+    assert entry["tracking_profile"] == HMD_HAND_PROFILE
+    assert set(entry) == {
+        "completed_updates",
+        "checkpoint_kind",
+        "iteration",
+        "checkpoint_sha256",
+        "stage_gate_sha256",
+        "tracking_profile",
+    }
 
     # The package carries the per-boundary profile record.
     checkpoint = tmp_path / "model_14999.pt"
@@ -854,7 +778,6 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     final_gate_path.write_text("{}", encoding="utf-8")
     gate, locomotion, tracking, onnx_report, _ = _evidence(tmp_path)
     gate["checkpoint_sha256"] = _sha(checkpoint)
-    gate["tracking_profile"] = deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
     common = {
         "checkpoint": checkpoint,
         "checkpoint_sha256": _sha(checkpoint),
@@ -874,9 +797,7 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     metadata = deployment.build_v12_deployment_metadata(
         **common, boundary_stage_gates=entries
     )
-    assert metadata["v12_tracking_profile"] == (
-        deployment.FINAL_COMPLETION_ALLOWANCE_PROFILE
-    )
+    assert metadata["v12_tracking_profile"] == deployment.FINAL_PROFILE
     assert metadata["v12_boundary_stage_gates_semantics"] == (
         deployment.BOUNDARY_STAGE_GATES_SEMANTICS
     )
@@ -886,13 +807,9 @@ def test_boundary_gates_record_the_10000_hand_rms_allowance(
     assert "v12_boundary_stage_gates_semantics" not in plain
 
 
-@needs_hand_rms_40mm
-def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
+def test_boundary_gates_record_the_10100_canary_and_are_discovered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-    )
 
     monkeypatch.setattr(
         deployment,
@@ -911,7 +828,7 @@ def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
         infos=deepcopy(final_infos),
         completed=10_100,
         kind="activation_canary",
-        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        profile=FOOT_ACTIVATION_CANARY_PROFILE,
     )
     boundary = _boundary_gate_fixture(
         tmp_path, monkeypatch, name="boundary", infos=deepcopy(final_infos)
@@ -952,11 +869,7 @@ def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
         "canonical_boundary",
         "activation_canary",
     ]
-    allowance = entries[1]["tracking_profile_completion_allowance"]
-    assert entries[1]["tracking_profile"] == FOOT_CANARY_HAND_RMS_40MM_PROFILE
-    assert allowance["boundary_completed_updates"] == 10_100
-    assert allowance["hand_rms_m_max"] == 0.040
-    assert allowance["relaxed_profile_hand_rms_m_max"] == 0.035
+    assert entries[1]["tracking_profile"] == FOOT_ACTIVATION_CANARY_PROFILE
 
 
 @pytest.mark.parametrize(
@@ -968,7 +881,7 @@ def test_boundary_gates_record_the_10100_canary_hand_rms_allowance(
         "interrupted_recovery",
         "duplicate_clock",
         "sibling_not_ancestor",
-        pytest.param("missing_canary", marks=needs_hand_rms_40mm),
+        "missing_canary",
         "broken_resume_record",
     ],
 )
@@ -1013,9 +926,6 @@ def test_boundary_gates_reject_foreign_or_nonboundary_gates(
             "kind": "interrupted_recovery",
             "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
         }
-    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-    )
 
     gates = [
         _boundary_gate_fixture(
@@ -1029,7 +939,7 @@ def test_boundary_gates_reject_foreign_or_nonboundary_gates(
         infos=deepcopy(final_infos),
         completed=10_100,
         kind="activation_canary",
-        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        profile=FOOT_ACTIVATION_CANARY_PROFILE,
         parent=gates[0].parent / f"model_{fixture.get('completed', 10_000) - 1}.pt",
     )
     final_checkpoint = _final_checkpoint_fixture(
@@ -1063,9 +973,6 @@ def test_boundary_gate_controls_pass_on_the_exact_ancestry(
 ) -> None:
     """The rejection fixture above is valid except for each injected defect."""
 
-    from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-        FOOT_CANARY_HAND_RMS_40MM_PROFILE,
-    )
 
     monkeypatch.setattr(
         deployment,
@@ -1087,7 +994,7 @@ def test_boundary_gate_controls_pass_on_the_exact_ancestry(
         infos=deepcopy(final_infos),
         completed=10_100,
         kind="activation_canary",
-        profile=FOOT_CANARY_HAND_RMS_40MM_PROFILE,
+        profile=FOOT_ACTIVATION_CANARY_PROFILE,
         parent=boundary.parent / "model_9999.pt",
     )
     final_checkpoint = _final_checkpoint_fixture(
@@ -1107,37 +1014,6 @@ def test_boundary_gate_controls_pass_on_the_exact_ancestry(
         )
         == []
     )
-
-
-@pytest.mark.centered_home_pinned
-@pytest.mark.skipif(
-    V12_HAND_RMS_40MM_BOUNDARY_PROFILES,
-    reason="only the centered HOME has no required pose-release boundary gates",
-)
-def test_centered_pose_release_final_needs_no_boundary_gates(tmp_path: Path) -> None:
-    """track-centered-home-clip packaged its pose-release final without them."""
-
-    assert deployment.POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES == ()
-    *_, final_infos = _evidence(tmp_path)
-    final_infos["microban_teleop_recipe_revision"] = (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
-    )
-    final_checkpoint = tmp_path / "final_run" / "model_14999.pt"
-    # Its release archive keeps only the final run: the recorded resume parent
-    # is absent, which matters only once a boundary gate is listed.
-    (final_checkpoint.parent / "params").mkdir(parents=True)
-    (final_checkpoint.parent / "params" / "agent.yaml").write_text(
-        "resume: true\nload_run: ^absent_run$\nload_checkpoint: ^model_10099[.]pt$\n",
-        encoding="utf-8",
-    )
-    assert (
-        deployment._boundary_stage_gate_lineage(
-            (), final_infos=final_infos, final_checkpoint=final_checkpoint
-        )
-        == []
-    )
-    with pytest.raises(ValueError, match="Resume parent"):
-        deployment._resume_ancestry(final_checkpoint)
 
 
 def test_dry_run_evidence_is_refused_outside_dry_runs(

@@ -27,15 +27,14 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     TARGET_COLUMN_ABLATION_METHOD,
     TRACKING_PROFILES,
     _aggregate_action_envelopes,
-    accepted_tracking_profiles,
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
     hand_tracking_p95_max_m,
     hand_tracking_rms_max_m,
     required_tracking_check_names,
+    required_tracking_profile,
     required_tracking_scenario_names,
     target_column_ablation_observation_columns,
-    tracking_profile_completion_allowance,
     tracking_profile_uses_perturbation,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
@@ -350,30 +349,21 @@ def _validate_tracking_report(
     *,
     profile_override: str | None = None,
     allowed_failed_checks: frozenset[str] = frozenset(),
-    recipe_revision: object = None,
 ) -> str:
     """Validate one tracking report; return the profile it was judged under.
 
-    Without an override the canonical profile for this clock and training
-    recipe (deployed-accuracy, or for the pose-release lineage the 10000 /
-    10100 hand-RMS allowances / the final completion allowance) and its accepted
-    stricter profiles are accepted.
+    Without an override the profile of the report's clock is required (one
+    profile per clock, the same at every HOME).
     """
 
     completed = int(expected_identity["completed_updates"])
     if profile_override is not None and profile_override not in TRACKING_PROFILES:
         raise ValueError("Tracking report profile override is invalid")
-    if profile_override is None:
-        accepted = accepted_tracking_profiles(
-            completed, recipe_revision=recipe_revision
-        )
-        profile = (
-            report.get("profile")
-            if report.get("profile") in accepted
-            else accepted[0]
-        )
-    else:
-        profile = profile_override
+    profile = (
+        required_tracking_profile(completed)
+        if profile_override is None
+        else profile_override
+    )
     expected_statuses = {"pass"} if not allowed_failed_checks else {"pass", "fail"}
     if (
         report.get("schema_version") != 1
@@ -884,11 +874,7 @@ def create_gate(
         "completed_updates": completed,
     }
     _validate_locomotion_report(locomotion, expected_report_identity)
-    tracking_profile = _validate_tracking_report(
-        tracking,
-        expected_report_identity,
-        recipe_revision=infos.get("microban_teleop_recipe_revision"),
-    )
+    tracking_profile = _validate_tracking_report(tracking, expected_report_identity)
     onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
     canonical = completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES
     result = {
@@ -918,11 +904,6 @@ def create_gate(
             "sha256": onnx_sha,
         },
     }
-    allowance = tracking_profile_completion_allowance(tracking_profile)
-    if allowance is not None:
-        # The gate records why its accuracy limits are wider than canonical
-        # (15000 completion allowance or 10000 / 10100 hand-RMS allowance).
-        result["tracking_profile_completion_allowance"] = allowance
     for key, value in _lineage_markers(infos).items():
         result[key] = value
     return result
@@ -946,8 +927,6 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     gate = _load_json(gate_path)
     checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
-    recipe_revision = infos.get("microban_teleop_recipe_revision")
-    accepted = accepted_tracking_profiles(completed, recipe_revision=recipe_revision)
     exact = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
@@ -959,11 +938,7 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         "canonical_boundary": completed in MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
         "checkpoint_kind": _checkpoint_kind(completed),
         TELEOP_V12_HOME_POSE_INFO_KEY: deepcopy(infos[TELEOP_V12_HOME_POSE_INFO_KEY]),
-        "tracking_profile": (
-            gate.get("tracking_profile")
-            if gate.get("tracking_profile") in accepted
-            else accepted[0]
-        ),
+        "tracking_profile": required_tracking_profile(completed),
         **_lineage_markers(infos),
     }
     if any(gate.get(name) != value for name, value in exact.items()):

@@ -36,15 +36,7 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_fk_metadata,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
-from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    FINAL_COMPLETION_ALLOWANCE_PROFILE,
-    FINAL_DEPLOYED_ACCURACY_PROFILE,
-    FINAL_PROFILE,
-    HMD_HAND_HAND_RMS_40MM_PROFILE,  # noqa: F401  (re-exported for callers/tests)
-    STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE,
-    STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE,
-    required_tracking_profile,
-)
+from mjlab_microban.scripts.evaluate_teleop_v12_tracking import FINAL_PROFILE
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     _export_onnx_atomic,
@@ -97,16 +89,6 @@ from mjlab_microban.teleop_v12_safety import (
 
 FINAL_ITERATION = 14_999
 FINAL_COMPLETED_UPDATES = 15_000
-# FINAL_PROFILE is the stricter legacy final profile; a gate made under it
-# also satisfies the canonical deployed-accuracy profile.  The completion
-# allowance is the pose-release lineage's final profile (lineage-bound below).
-SUPPORTED_FINAL_TRACKING_PROFILES = frozenset(
-    (
-        FINAL_DEPLOYED_ACCURACY_PROFILE,
-        FINAL_PROFILE,
-        FINAL_COMPLETION_ALLOWANCE_PROFILE,
-    )
-)
 # HOME-bound (robot/home_contracts.py): v6 at the centered HOME, v7 at the
 # forward-lean HOME (HOME-levelled target frame), "<tag>" at any other.
 PACKAGER_REVISION = home_contracts.V12_PACKAGER_REVISION
@@ -389,19 +371,11 @@ def _canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _expected_final_tracking_profile(infos: Mapping[str, Any]) -> str:
-    return required_tracking_profile(
-        FINAL_COMPLETED_UPDATES,
-        recipe_revision=infos.get("microban_teleop_recipe_revision"),
-    )
-
-
 def _require_final_gate(
     gate: Mapping[str, Any],
     *,
     checkpoint: Path,
     checkpoint_sha256: str,
-    expected_tracking_profile: str | None = None,
 ) -> None:
     expected = {
         "schema_version": 2,
@@ -414,19 +388,7 @@ def _require_final_gate(
         "checkpoint_kind": "canonical_boundary",
     }
     mismatches = [name for name, value in expected.items() if gate.get(name) != value]
-    tracking_profile = gate.get("tracking_profile")
-    if expected_tracking_profile is None:
-        if tracking_profile not in SUPPORTED_FINAL_TRACKING_PROFILES:
-            mismatches.append("tracking_profile")
-    elif tracking_profile not in {
-        expected_tracking_profile,
-        STRICT_PROFILE_BY_DEPLOYED_ACCURACY_PROFILE.get(
-            expected_tracking_profile, expected_tracking_profile
-        ),
-        *STRICTER_PROFILES_BY_COMPLETION_ALLOWANCE_PROFILE.get(
-            expected_tracking_profile, ()
-        ),
-    }:
+    if gate.get("tracking_profile") != FINAL_PROFILE:
         mismatches.append("tracking_profile")
     if mismatches:
         raise ValueError(
@@ -441,16 +403,10 @@ BOUNDARY_STAGE_GATES_SEMANTICS = (
     "packager_validated_resume_ancestor_boundary_gates_sharing_the_final_"
     "checkpoint_carried_lineage_markers_v2"
 )
-# A pose-release final must record the gates (and so the tracking profiles)
-# of its 10000 boundary and 10100 canary: both clocks have a hand-RMS
-# allowance profile on that recipe, so the record cannot be left to the
-# operator.  Missing explicit gates are discovered through the resume chain.
-# None at the centered HOME (home_contracts.V12_HAND_RMS_40MM_BOUNDARY_PROFILES):
-# its line judged both clocks at the 0.035 m deployed-accuracy profiles, so its
-# package lists boundary gates only when they are passed explicitly.
-POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES = (
-    (10_000, 10_100) if home_contracts.V12_HAND_RMS_40MM_BOUNDARY_PROFILES else ()
-)
+# A pose-release final records the gates of its 10000 boundary and 10100
+# canary (where hand and then foot accuracy are first judged), at every HOME.
+# Missing explicit gates are discovered through the resume chain.
+POSE_RELEASE_REQUIRED_BOUNDARY_COMPLETED_UPDATES = (10_000, 10_100)
 _RESUME_LOAD_RUN_PATTERN = re.compile(r"\^([A-Za-z0-9][A-Za-z0-9_.-]*)\$")
 _RESUME_LOAD_CHECKPOINT_PATTERN = re.compile(r"\^(model_[0-9]+)\[\.\]pt\$")
 # Gate kinds (canonical_boundary flag, checkpoint_kind) the packager records:
@@ -644,9 +600,6 @@ def _boundary_stage_gate_lineage(
                 "checkpoint_sha256": gate["checkpoint_sha256"],
                 "stage_gate_sha256": gate_sha256,
                 "tracking_profile": gate["tracking_profile"],
-                "tracking_profile_completion_allowance": gate.get(
-                    "tracking_profile_completion_allowance"
-                ),
             }
         )
     if final_infos.get("microban_teleop_recipe_revision") == (
@@ -863,7 +816,6 @@ def build_v12_deployment_metadata(
         gate,
         checkpoint=checkpoint,
         checkpoint_sha256=checkpoint_sha256,
-        expected_tracking_profile=_expected_final_tracking_profile(infos),
     )
     home_pose = validate_teleop_v12_home_pose(infos)
     if gate.get(TELEOP_V12_HOME_POSE_INFO_KEY) != home_pose:
