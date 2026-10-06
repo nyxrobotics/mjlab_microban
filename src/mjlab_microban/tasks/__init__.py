@@ -96,6 +96,19 @@ register_mjlab_task(
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
+# VALIDATION EXPERIMENT ONLY: walking with the twist-ratio velocity reward.
+from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
+    make_microban_velocity_twist_ratio_env_cfg,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Velocity-TwistRatio-Microban",
+    env_cfg=make_microban_velocity_twist_ratio_env_cfg(),
+    play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True),
+    rl_cfg=MicrobanVelocityRlCfg,
+    runner_cls=MicrobanVelocityOnPolicyRunner,
+)
+
 register_mjlab_task(
     task_id=MICROBAN_SAFE_VELOCITY_TASK_ID,
     env_cfg=make_microban_safe_velocity_env_cfg(),

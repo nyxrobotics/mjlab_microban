@@ -487,6 +487,28 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
+# VALIDATION EXPERIMENT ONLY (branch exp/twist-ratio-validation, never
+# merged): the walking task with the ratio-keeping twist reward in place of
+# its two exp velocity tracking terms (weight 2 each), everything else equal.
+MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 4.0
+
+
+def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    from mjlab_microban.tasks.microban_twist_ratio_mdp import (
+        twist_ratio_velocity_reward,
+    )
+
+    cfg = make_microban_velocity_env_cfg(play=play)
+    del cfg.rewards["track_linear_velocity"]
+    del cfg.rewards["track_angular_velocity"]
+    cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
+        func=twist_ratio_velocity_reward,
+        weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
+    )
+    return cfg
+
+
 MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
