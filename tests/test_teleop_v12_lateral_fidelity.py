@@ -43,8 +43,12 @@ from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_INFO_KEY,
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME,
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_TASK_ID,
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON,
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME,
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHT_ENV,
     apply_lateral_fidelity,
+    hand_active_lateral_shortfall,
+    hand_active_lateral_shortfall_l1,
     installed_lateral_fidelity_weight,
     lateral_fidelity_marker,
     make_microban_teleop_v12_lateral_fidelity_env_cfg,
@@ -360,6 +364,127 @@ def _runner(weight: float | None, marker: dict | None):
     return SimpleNamespace(env=env, teleop_v12_lateral_fidelity=marker)
 
 
+def _shortfall(command, velocity, active, min_abs=0.05, cap=0.10):
+    return hand_active_lateral_shortfall(
+        torch.tensor(command, dtype=torch.float32),
+        torch.tensor(velocity, dtype=torch.float32),
+        torch.tensor(active),
+        min_abs,
+        cap,
+    )
+
+
+class HandActiveLateralShortfallTest(unittest.TestCase):
+    def test_forward_speed_never_changes_the_shortfall(self) -> None:
+        # The v1 escape: walking forward slower must not reduce the penalty.
+        values = _shortfall(
+            [[0.7, 0.3]] * 4,
+            [[0.30, 0.0], [0.10, 0.0], [0.0, 0.0], [-0.2, 0.0]],
+            [True] * 4,
+        )
+        self.assertTrue(torch.allclose(values, torch.full((4,), 0.10)))
+        self.assertAlmostEqual(float(_shortfall([[0.7, 0.3]], [[0.3, 0.04]], [True])[0]), 0.06, places=6)
+
+    def test_sign_mirror_cap_and_overshoot(self) -> None:
+        values = _shortfall(
+            [[0.7, 0.3], [0.7, -0.3], [0.7, 0.3], [0.7, 0.3], [0.0, 0.06], [0.0, -0.3]],
+            [[0.2, -0.05], [0.2, 0.05], [0.2, 0.12], [0.2, 0.5], [0.0, 0.0], [0.0, -0.08]],
+            [True] * 6,
+        )
+        expected = [0.15, 0.15, 0.0, 0.0, 0.06, 0.02]
+        for value, want in zip(values.tolist(), expected, strict=True):
+            self.assertAlmostEqual(value, want, places=6)
+
+    def test_inactive_hands_and_small_lateral_commands_are_free(self) -> None:
+        values = _shortfall(
+            [[0.7, 0.3], [0.7, 0.049], [0.7, 0.0], [0.0, 0.0]],
+            [[0.3, -0.2], [0.3, -0.2], [0.3, -0.2], [0.0, -0.2]],
+            [False, True, True, True],
+        )
+        self.assertTrue(torch.equal(values, torch.zeros(4)))
+
+    def test_env_term_reads_hand_activity_and_the_levelled_frame(self) -> None:
+        half = 0.5 * HOME_TRUNK_PITCH_RAD
+        quat = torch.tensor([[math.cos(half), 0.0, math.sin(half), 0.0]] * 2)
+        data = SimpleNamespace(
+            root_link_quat_w=quat,
+            root_link_lin_vel_w=torch.tensor([[0.27, 0.03, 0.0]] * 2),
+            root_link_lin_vel_b=None,
+        )
+        command = torch.tensor([[0.7, 0.3, 1.5]] * 2)
+        hand = SimpleNamespace(is_active=torch.tensor([[False, True], [False, False]]))
+        env = SimpleNamespace(
+            scene={"robot": SimpleNamespace(data=data)},
+            command_manager=SimpleNamespace(
+                get_command=lambda name: command,
+                get_term=lambda name: {"hand_target": hand}[name],
+            ),
+        )
+        value = hand_active_lateral_shortfall_l1(env)
+        self.assertAlmostEqual(float(value[0]), 0.07, places=5)
+        self.assertEqual(float(value[1]), 0.0)
+
+    def test_v2_labels_install_the_v2_term_only(self) -> None:
+        base = make_microban_teleop_v12_hand_pose_release_env_cfg()
+        for label, weight in (("s24", -24.0), ("s40", -40.0)):
+            cfg = make_microban_teleop_v12_lateral_fidelity_env_cfg(weight_label=label)
+            self.assertEqual(
+                set(cfg.rewards) - set(base.rewards),
+                {MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME},
+            )
+            term = cfg.rewards[MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME]
+            self.assertEqual(term.weight, weight)
+            self.assertIs(term.func, hand_active_lateral_shortfall_l1)
+            self.assertEqual(term.params["lateral_cap"], 0.10)
+            with self.assertRaises(ValueError):
+                apply_lateral_fidelity(cfg, "8")
+
+    def test_v2_marker_is_exact_and_type_strict(self) -> None:
+        marker = _marker(weight=-24.0)
+        self.assertEqual(marker["revision"], "hand_pose_release_lateral_fidelity_v2")
+        self.assertEqual(marker["schema_version"], 2)
+        self.assertEqual(marker["reward_term"], "hand_active_lateral_shortfall")
+        self.assertEqual(marker["lateral_cap_m_s"], 0.10)
+        self.assertIs(marker["requires_active_hand"], True)
+        self.assertEqual(marker["reason"], MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON)
+        self.assertEqual(validate_lateral_fidelity_marker(marker), marker)
+        for drift in (
+            {"revision": "hand_pose_release_lateral_fidelity_v1"},
+            {"reward_term": "mixed_command_lateral_deficit"},
+            {"lateral_cap_m_s": 0.2},
+            {"requires_active_hand": 1},
+            {"schema_version": 1},
+            {"extra": 1},
+        ):
+            with self.assertRaises(ValueError, msg=str(drift)):
+                validate_lateral_fidelity_marker({**marker, **drift})
+        v1 = _marker()
+        # bool for int is a drift even though True == 1 in Python.
+        with self.assertRaises(ValueError):
+            validate_lateral_fidelity_marker({**v1, "schema_version": True})
+        self.assertNotIn("lateral_cap_m_s", v1)
+
+    def test_runner_binds_the_v2_term_to_its_marker(self) -> None:
+        check = MicrobanTeleopV12HandPoseReleaseOnPolicyRunner._assert_lateral_fidelity_environment
+        cfg = make_microban_teleop_v12_lateral_fidelity_env_cfg(weight_label="s24")
+        term = cfg.rewards[MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME]
+
+        class Manager:
+            active_terms = [MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME]
+
+            def get_term_cfg(self, name):
+                assert name == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME
+                return term
+
+        env = SimpleNamespace(unwrapped=SimpleNamespace(reward_manager=Manager()))
+        check(SimpleNamespace(env=env, teleop_v12_lateral_fidelity=_marker(weight=-24.0)))
+        with self.assertRaisesRegex(RuntimeError, "differs"):
+            check(SimpleNamespace(env=env, teleop_v12_lateral_fidelity=_marker(weight=-40.0)))
+        term.weight = -8.0  # v1 weight on the v2 term name
+        with self.assertRaisesRegex(RuntimeError, "drifted"):
+            installed_lateral_fidelity_weight(env)
+
+
 class LateralFidelityRunnerEnvTest(unittest.TestCase):
     check = staticmethod(
         MicrobanTeleopV12HandPoseReleaseOnPolicyRunner._assert_lateral_fidelity_environment
@@ -399,7 +524,7 @@ class LateralFidelityLauncherTest(unittest.TestCase):
             "--lateral-fidelity-weight", "12",
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("must be 8 or 16", result.stderr)
+        self.assertIn("must be 8, 16, s24 or s40", result.stderr)
         help_text = self._run("--help").stdout
         self.assertIn("--lateral-fidelity", help_text)
 

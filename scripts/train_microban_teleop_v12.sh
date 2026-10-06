@@ -22,7 +22,7 @@ Usage:
       [--hand-pose-release]
   scripts/train_microban_teleop_v12.sh resume RUN_NAME [--canary] [--agent.run-name NAME]
       [--num-envs N] [--max-updates N] [--dry-run-skip-gate] [--hand-pose-release]
-      [--lateral-fidelity [--lateral-fidelity-weight 8|16]] [--seed N]
+      [--lateral-fidelity [--lateral-fidelity-weight 8|16|s24|s40]] [--seed N]
 
 Fresh start checks that the velocity checkpoint's run recorded the current
 (forward-lean) HOME, hashes it, runs the 9x300 raw
@@ -48,13 +48,14 @@ checkpoint is resumed with this option (it is refused without it).
 
 --lateral-fidelity (with --hand-pose-release) trains
 Mjlab-Teleop-V12-HandPoseRelease-LateralFidelity-Microban: the pose-release
-recipe plus the mixed-command lateral-deficit penalty
-(microban_teleop_v12_lateral_fidelity).  Resuming an unmarked fresh-chain
+recipe plus one lateral penalty (microban_teleop_v12_lateral_fidelity): the
+v1 mixed-command lateral deficit (labels 8, 16) or the v2 hand-active lateral
+shortfall that does not read forward speed (labels s24, s40).  Resuming an unmarked fresh-chain
 pose-release model_7099 starts the variant: its stage gate is passed to the
 runner, which records parent and gate in every save.  A marked checkpoint is
 resumed only with this option, at the weight its marker records.
 --lateral-fidelity-weight picks the registered weight label for the start
-(8 = -8, the default; 16 = -16, the declared fallback).
+(8 = -8, the default; 16 = -16; s24 = v2 at -24; s40 = v2 at -40).
 
 --seed N (default 42) sets --env.seed and --agent.seed of this training
 process only.  It is training randomness, not a gate: no checkpoint lineage
@@ -101,8 +102,8 @@ while (( $# > 0 )); do
             (( lateral_fidelity == 0 )) || fail "Duplicate --lateral-fidelity"
             lateral_fidelity=1; shift ;;
         --lateral-fidelity-weight)
-            (( $# >= 2 )) && [[ "$2" == 8 || "$2" == 16 ]] \
-                || fail "--lateral-fidelity-weight must be 8 or 16"
+            (( $# >= 2 )) && [[ "$2" == 8 || "$2" == 16 || "$2" == s24 || "$2" == s40 ]] \
+                || fail "--lateral-fidelity-weight must be 8, 16, s24 or s40"
             lateral_fidelity_weight="$2"; shift 2
             ;;
         --canary) (( canary == 0 )) || fail "Duplicate --canary"; canary=1; shift ;;

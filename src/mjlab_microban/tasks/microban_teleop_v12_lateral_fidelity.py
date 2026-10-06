@@ -35,8 +35,10 @@ the recorded weight, or to add the term to an unmarked descendant.
 from __future__ import annotations
 
 import os
+import json
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -56,11 +58,21 @@ MICROBAN_TELEOP_V12_LATERAL_FIDELITY_SCHEMA_VERSION = 1
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME = "mixed_command_lateral_deficit"
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S = 0.05
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_FRAME = "home_levelled_trunk_pitch_10deg"
-# Registered weights (V1 default; V2 is the declared fallback).
+# Revision v2: the vx-independent lateral shortfall while a hand is active.
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REVISION = "hand_pose_release_lateral_fidelity_v2"
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_SCHEMA_VERSION = 2
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME = "hand_active_lateral_shortfall"
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S = 0.10
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND = "hand_target"
+# Registered weights by label (V1 default, V2 its fallback; s24 is the v2
+# revision's first variant, s40 its fallback).  Every weight is unique.
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHTS: dict[str, float] = {
     "8": -8.0,
     "16": -16.0,
+    "s24": -24.0,
+    "s40": -40.0,
 }
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LABELS = frozenset(("s24", "s40"))
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_DEFAULT_WEIGHT = "8"
 # Read when the task package is imported (the launcher sets it).
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHT_ENV = "MICROBAN_V12_LATERAL_FIDELITY_WEIGHT"
@@ -75,7 +87,53 @@ MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REASON = (
     "lateral-deficit penalty on mixed commands"
 )
 
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON = (
+    "forward-lean pose-release chain loses lateral velocity on forward+lateral "
+    "commands once hands activate (held-out lean 7099 +0.07 m/s, 9999 about 0 "
+    "with full targets); the v1 deficit scaled with forward progress and failed "
+    "its 7500 probes at weights 8 and 16; a crossed probe tied the residual "
+    "left/right gap to the command direction, not the target layout or HMD; "
+    "restart from the gated model_7099 with a forward-speed-independent "
+    "lateral shortfall penalty while a hand is active"
+)
+
 _REPO_PREFIX = "repo://"
+
+
+@dataclass(frozen=True)
+class LateralFidelityVariant:
+    """One registered (revision, term, weight) of the lateral-fidelity recipe."""
+
+    label: str
+    revision: str
+    schema_version: int
+    reward_term: str
+    weight: float
+
+
+def lateral_fidelity_variant(label: str) -> LateralFidelityVariant:
+    weight = lateral_fidelity_weight(label)
+    if label in MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LABELS:
+        return LateralFidelityVariant(
+            label,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REVISION,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_SCHEMA_VERSION,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME,
+            weight,
+        )
+    return LateralFidelityVariant(
+        label,
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REVISION,
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_SCHEMA_VERSION,
+        MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME,
+        weight,
+    )
+
+
+def _canonical(value: object) -> str:
+    """Type-exact comparison form (True != 1, 1 != 1.0)."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _is_sha256(value: object) -> bool:
@@ -116,7 +174,77 @@ def mixed_command_lateral_deficit(
     return torch.where(active, deficit, torch.zeros_like(deficit))
 
 
+def hand_active_lateral_shortfall_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    hand_command_name: str = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND,
+    trunk_pitch: float = HOME_TRUNK_PITCH_RAD,
+    min_abs_command: float = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+    lateral_cap: float = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Commanded lateral speed missing while a hand is active (see module doc)."""
+
+    command = env.command_manager.get_command(command_name)
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    hand = env.command_manager.get_term(hand_command_name)
+    return hand_active_lateral_shortfall(
+        command[:, :2],
+        actual[:, :2],
+        hand.is_active.any(dim=-1),
+        min_abs_command,
+        lateral_cap,
+    )
+
+
+def hand_active_lateral_shortfall(
+    command_xy: torch.Tensor,
+    velocity_xy: torch.Tensor,
+    hand_active: torch.Tensor,
+    min_abs_command: float,
+    lateral_cap: float,
+) -> torch.Tensor:
+    """Pure tensor form (N, 2) x (N, 2) x (N,) -> (N,); never reads v_x or c_x."""
+
+    cy = command_xy[:, 1]
+    active = (cy.abs() >= min_abs_command) & hand_active.to(torch.bool)
+    target = torch.clamp(cy.abs(), max=lateral_cap)
+    progress_y = velocity_xy[:, 1] * torch.sign(cy)
+    shortfall = torch.clamp(target - progress_y, min=0.0)
+    return torch.where(active, shortfall, torch.zeros_like(shortfall))
+
+
+def _term_params(variant: LateralFidelityVariant) -> dict[str, Any]:
+    if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME:
+        return {
+            "command_name": "twist",
+            "hand_command_name": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND,
+            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+            "min_abs_command": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+            "lateral_cap": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S,
+        }
+    return {
+        "command_name": "twist",
+        "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+        "min_abs_command": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+    }
+
+
+def _term_func(variant: LateralFidelityVariant):
+    if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME:
+        return hand_active_lateral_shortfall_l1
+    return mixed_command_lateral_deficit_l1
+
+
+_TERM_NAMES = (
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME,
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME,
+)
+
+
 def lateral_fidelity_weight(label: str) -> float:
+    if not isinstance(label, str):
+        raise ValueError(f"Unregistered lateral-fidelity weight {label!r}")
     try:
         return MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHTS[label]
     except KeyError as exc:
@@ -124,6 +252,8 @@ def lateral_fidelity_weight(label: str) -> float:
 
 
 def lateral_fidelity_weight_label(weight: float) -> str:
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        raise ValueError(f"Unregistered lateral-fidelity weight {weight!r}")
     for label, value in MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHTS.items():
         if value == weight:
             return label
@@ -142,18 +272,20 @@ def selected_lateral_fidelity_weight_label() -> str:
 def apply_lateral_fidelity(cfg: ManagerBasedRlEnvCfg, weight_label: str) -> None:
     """Add the lateral-deficit term (every other term is left as it is)."""
 
-    if MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME in cfg.rewards:
+    variant = lateral_fidelity_variant(weight_label)
+    if any(name in cfg.rewards for name in _TERM_NAMES):
         raise ValueError("Lateral-fidelity term is already installed")
     if "twist" not in cfg.commands:
         raise KeyError("Lateral fidelity requires the twist command")
-    cfg.rewards[MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME] = RewardTermCfg(
-        func=mixed_command_lateral_deficit_l1,
-        weight=lateral_fidelity_weight(weight_label),
-        params={
-            "command_name": "twist",
-            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
-            "min_abs_command": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
-        },
+    if (
+        variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME
+        and MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND not in cfg.commands
+    ):
+        raise KeyError("Lateral fidelity v2 requires the hand_target command")
+    cfg.rewards[variant.reward_term] = RewardTermCfg(
+        func=_term_func(variant),
+        weight=variant.weight,
+        params=_term_params(variant),
     )
 
 
@@ -161,14 +293,21 @@ def installed_lateral_fidelity_weight(env: Any) -> float | None:
     """Weight of the live term in an env's reward manager, or None."""
 
     manager = env.unwrapped.reward_manager if hasattr(env, "unwrapped") else env.reward_manager
-    if MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME not in manager.active_terms:
+    names = [name for name in _TERM_NAMES if name in manager.active_terms]
+    if not names:
         return None
-    term = manager.get_term_cfg(MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME)
-    if term.func is not mixed_command_lateral_deficit_l1 or term.params != {
-        "command_name": "twist",
-        "trunk_pitch": HOME_TRUNK_PITCH_RAD,
-        "min_abs_command": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
-    }:
+    if len(names) != 1:
+        raise RuntimeError("More than one lateral-fidelity term is installed")
+    term = manager.get_term_cfg(names[0])
+    try:
+        variant = lateral_fidelity_variant(lateral_fidelity_weight_label(term.weight))
+    except ValueError as exc:
+        raise RuntimeError("Lateral-fidelity reward weight is unregistered") from exc
+    if (
+        variant.reward_term != names[0]
+        or term.func is not _term_func(variant)
+        or term.params != _term_params(variant)
+    ):
         raise RuntimeError("Lateral-fidelity reward term drifted")
     return float(term.weight)
 
@@ -206,7 +345,7 @@ def lateral_fidelity_marker(
         MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
     )
 
-    label = lateral_fidelity_weight_label(weight)
+    variant = lateral_fidelity_variant(lateral_fidelity_weight_label(weight))
     if not _is_sha256(parent_checkpoint_sha256) or not _is_sha256(
         parent_stage_gate_sha256
     ):
@@ -225,13 +364,19 @@ def lateral_fidelity_marker(
         f"/model_{MICROBAN_TELEOP_V12_LATERAL_FIDELITY_PARENT_ITERATION}.pt"
     ):
         raise ValueError("Lateral-fidelity parent must be a model_7099.pt")
-    return {
-        "schema_version": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_SCHEMA_VERSION,
-        "revision": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REVISION,
+    v2 = variant.revision == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REVISION
+    marker: dict[str, Any] = {
+        "schema_version": variant.schema_version,
+        "revision": variant.revision,
         "recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-        "reward_term": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME,
-        "reward_weight": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHTS[label],
+        "reward_term": variant.reward_term,
+        "reward_weight": variant.weight,
         "min_abs_command_m_s": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+    }
+    if v2:
+        marker["lateral_cap_m_s"] = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S
+        marker["requires_active_hand"] = True
+    marker.update({
         "velocity_frame": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_FRAME,
         "parent_lineage": "fresh_chain",
         "parent_checkpoint_path": parent_checkpoint_path,
@@ -242,8 +387,13 @@ def lateral_fidelity_marker(
         ),
         "parent_stage_gate_path": parent_stage_gate_path,
         "parent_stage_gate_sha256": parent_stage_gate_sha256,
-        "reason": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REASON,
-    }
+        "reason": (
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON
+            if v2
+            else MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REASON
+        ),
+    })
+    return marker
 
 
 def validate_lateral_fidelity_marker(value: object) -> dict[str, Any]:
@@ -261,7 +411,11 @@ def validate_lateral_fidelity_marker(value: object) -> dict[str, Any]:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("Lateral-fidelity marker drifted") from exc
-    if dict(value) != expected:
+    try:
+        same = _canonical(dict(value)) == _canonical(expected)
+    except (TypeError, ValueError):
+        same = False
+    if not same:
         raise ValueError("Lateral-fidelity marker drifted")
     return deepcopy(expected)
 
