@@ -21,7 +21,11 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_STAGES,
     make_microban_getup_env_cfg,
 )
-from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
+from mjlab_microban.tasks.mdp import reward_based_staged_curriculum
+from mjlab_microban.tasks.microban_getup_runner import (
+    GETUP_POSE_CURRICULUM_TERM,
+    MicrobanGetupOnPolicyRunner,
+)
 
 STEPS = 24
 CALM = ("standing_joint_vel", "raw_target_clip_excess", "roll_pose", "roll_pose_shoulder",
@@ -152,6 +156,62 @@ class RefineSwitchTest(unittest.TestCase):
     def test_a_run_resumed_past_the_switch_without_it_applies_it(self) -> None:
         runner = self._runner((GETUP_SCHEDULE["refine"] + 300) * STEPS)
         self.assertTrue(MicrobanGetupOnPolicyRunner.maybe_refine_exploration(runner))
+
+
+class ResumeStateTest(unittest.TestCase):
+    """A resumed get-up run continues its learning rate and reward-gated pose stages."""
+
+    POSE = ("standing_pose", "hip_pose", "home_stillness")
+
+    def _runner(self, *, play: bool = False):
+        cfg = make_microban_getup_env_cfg(play=play)
+        env = FakeEnv(cfg)
+        terms = {}
+        if GETUP_POSE_CURRICULUM_TERM in cfg.curriculum:
+            term_cfg = cfg.curriculum[GETUP_POSE_CURRICULUM_TERM]
+            terms[GETUP_POSE_CURRICULUM_TERM] = SimpleNamespace(
+                func=reward_based_staged_curriculum(term_cfg, env), params=term_cfg.params
+            )
+        env.curriculum_manager = SimpleNamespace(active_terms=list(terms), get_term_cfg=terms.__getitem__)
+        runner = object.__new__(MicrobanGetupOnPolicyRunner)
+        runner.env = SimpleNamespace(unwrapped=env)
+        runner.alg = FakeAlgorithm()
+        return runner
+
+    def _weights(self, runner) -> dict:
+        rewards = runner.env.unwrapped.cfg.rewards
+        return {name: rewards[name].weight for name in self.POSE}
+
+    def test_a_resumed_run_gets_back_its_rate_and_pose_stages(self) -> None:
+        for reached in (0, 1, 2):
+            with self.subTest(stages=reached):
+                trained = self._runner()
+                term = trained.env.unwrapped.curriculum_manager.get_term_cfg(GETUP_POSE_CURRICULUM_TERM)
+                for stage in term.params["stages"][:reached]:
+                    stage["apply"](trained.env.unwrapped)
+                term.func.current_stage, term.func.stage_first_step = reached, 4321 * reached
+                trained.alg.learning_rate = 2.5e-5
+                saved = trained.resume_state()
+
+                resumed = self._runner()
+                resumed.restore_resume_state(saved)
+                resumed_term = resumed.env.unwrapped.curriculum_manager.get_term_cfg(GETUP_POSE_CURRICULUM_TERM)
+                self.assertEqual(self._weights(resumed), self._weights(trained))
+                self.assertEqual(resumed_term.func.current_stage, reached)
+                self.assertEqual(resumed_term.func.stage_first_step, 4321 * reached)
+                self.assertEqual(resumed.alg.learning_rate, 2.5e-5)
+                self.assertEqual(resumed.alg.optimizer.param_groups[0]["lr"], 2.5e-5)
+                if reached:
+                    self.assertNotEqual(self._weights(resumed), self._weights(self._runner()))
+
+    def test_a_checkpoint_without_the_state_is_not_resumed_as_the_same_run(self) -> None:
+        with self.assertRaises(ValueError):
+            self._runner().restore_resume_state({})
+
+    def test_play_and_export_loads_ignore_it(self) -> None:
+        runner = self._runner(play=True)
+        runner.restore_resume_state({})
+        self.assertEqual(runner.alg.learning_rate, 3e-4)
 
 
 if __name__ == "__main__":

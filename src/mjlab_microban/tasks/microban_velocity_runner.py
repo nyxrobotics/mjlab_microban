@@ -49,6 +49,9 @@ def require_current_home_walk_checkpoint(path: str | Path) -> None:
     require_walk_home_pose(checkpoint.get("infos"))
 
 
+WALK_LEARNING_RATE_INFO_KEY = "microban_walk_learning_rate"
+
+
 class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
     """mjlab's velocity runner plus the HOME stamp on save and check on load."""
 
@@ -57,7 +60,16 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
         super().__init__(env, train_cfg, *args, **kwargs)
 
     def save(self, path: str, infos=None) -> None:
-        super().save(path, {**(infos or {}), WALK_HOME_POSE_INFO_KEY: getup_home_pose()})
+        super().save(
+            path,
+            {
+                **(infos or {}),
+                WALK_HOME_POSE_INFO_KEY: getup_home_pose(),
+                # The adaptive learning rate is not in the optimizer state
+                # rsl_rl restores; a resumed run continues from this value.
+                WALK_LEARNING_RATE_INFO_KEY: float(self.alg.learning_rate),
+            },
+        )
 
     def load(
         self,
@@ -71,6 +83,10 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
         if load_cfg is None or load_cfg.get("iteration", False):
             # Continue after the saved update (rsl_rl would repeat it).
             self.current_learning_iteration += 1
+            if WALK_LEARNING_RATE_INFO_KEY in (infos or {}):
+                self.alg.learning_rate = float(infos[WALK_LEARNING_RATE_INFO_KEY])
+                for group in self.alg.optimizer.param_groups:
+                    group["lr"] = self.alg.learning_rate
         return infos
 
 

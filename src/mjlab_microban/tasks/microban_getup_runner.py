@@ -44,6 +44,12 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
 GETUP_REFINE_EXPLORATION_STAGE = "refine exploration (std, Adam, learning rate, entropy)"
 # Checkpoint marker: the refine switch's exploration reset has been applied.
 GETUP_EXPLORATION_REFINED_INFO_KEY = "microban_getup_exploration_refined"
+# Training state that is neither in the network/optimizer state nor derived
+# from common_step_counter: the adaptive learning rate and the reward-gated
+# pose curriculum.  Saved so a resumed run continues where it stopped.
+GETUP_LEARNING_RATE_INFO_KEY = "microban_getup_learning_rate"
+GETUP_POSE_CURRICULUM_INFO_KEY = "microban_getup_pose_curriculum"
+GETUP_POSE_CURRICULUM_TERM = "pose_curriculum"
 
 
 # The contract string is HOME-bound (robot/home_contracts.py):
@@ -248,7 +254,10 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
     learning rate back to its configured start and lowers the entropy
     coefficient to GETUP_REFINE_ENTROPY_COEF -- once: the checkpoint records
     it, and a resumed run past the switch keeps its std and optimizer state
-    and only gets the entropy coefficient back.  The switch prints a
+    and only gets the entropy coefficient back.  A checkpoint also records the
+    adaptive learning rate and the reward-gated pose curriculum's progress, so
+    a run resumed after a crash continues with both instead of restarting
+    them (resume_state / restore_resume_state).  The switch prints a
     curriculum-format line for the pipeline monitor.
     """
 
@@ -327,8 +336,58 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
             "microban_getup_home_pose": getup_home_pose(),
             GETUP_EXPLORATION_REFINED_INFO_KEY: self.exploration_refined,
+            **self.resume_state(),
         }
         super().save(path, infos)
+
+    def _pose_curriculum(self):
+        """The pose curriculum's (instance, stages), or None when the env has none (play)."""
+
+        manager = self.env.unwrapped.curriculum_manager
+        if GETUP_POSE_CURRICULUM_TERM not in getattr(manager, "active_terms", ()):
+            return None
+        term_cfg = manager.get_term_cfg(GETUP_POSE_CURRICULUM_TERM)
+        return term_cfg.func, term_cfg.params["stages"]
+
+    def resume_state(self) -> dict:
+        """The learning rate and pose-curriculum progress a resumed run must get back."""
+
+        state = {GETUP_LEARNING_RATE_INFO_KEY: float(self.alg.learning_rate)}
+        pose = self._pose_curriculum()
+        if pose is not None:
+            term, _ = pose
+            state[GETUP_POSE_CURRICULUM_INFO_KEY] = {
+                "stage": int(term.current_stage),
+                "stage_first_step": int(term.stage_first_step),
+            }
+        return state
+
+    def restore_resume_state(self, infos: Mapping) -> None:
+        """Put back what resume_state saved: re-apply the reached pose stages, set the LR."""
+
+        pose = self._pose_curriculum()
+        if pose is None:
+            # Not a training env (play, export, evaluation): nothing to continue.
+            return
+        saved = infos.get(GETUP_POSE_CURRICULUM_INFO_KEY)
+        if GETUP_LEARNING_RATE_INFO_KEY not in infos or not isinstance(saved, Mapping):
+            raise ValueError(
+                "Checkpoint lacks the get-up learning rate or pose-curriculum progress; "
+                "it cannot be resumed as the same run, start a fresh run"
+            )
+        learning_rate = float(infos[GETUP_LEARNING_RATE_INFO_KEY])
+        self.alg.learning_rate = learning_rate
+        for group in self.alg.optimizer.param_groups:
+            group["lr"] = learning_rate
+        term, stages = pose
+        stage = int(saved["stage"])
+        if not 0 <= stage <= len(stages):
+            raise ValueError(f"Checkpoint pose-curriculum stage {stage} is outside 0..{len(stages)}")
+        for index in range(stage):
+            stages[index]["apply"](self.env.unwrapped)
+            print(f"Pose curriculum stage {index + 1} ({stages[index]['name']}) restored from the checkpoint", flush=True)
+        term.current_stage = stage
+        term.stage_first_step = int(saved["stage_first_step"])
 
     def load(self, path: str, load_cfg: dict | None = None, strict: bool = True, map_location: str | None = None) -> dict:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -343,4 +402,6 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         if (infos or {}).get(GETUP_EXPLORATION_REFINED_INFO_KEY):
             self.exploration_refined = True
             self.alg.entropy_coef = GETUP_REFINE_ENTROPY_COEF
+        if load_cfg is None or load_cfg.get("iteration", False):
+            self.restore_resume_state(infos or {})
         return infos
