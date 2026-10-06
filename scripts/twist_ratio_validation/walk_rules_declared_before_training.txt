@@ -63,3 +63,32 @@
 #   どの指令でも指令どおりなら最大値 2 になるようにする（0.2 ちょうどで両方の式は比の線上で一致）。他は同じ。基準 W1-W5 は変更なし。
 #   trw3A_s42 を止め、A2 のシード 42（trw4_s42）を開始。trw3A_s43 は 4000 回の途中確認まで続けて同じ現象かを確かめてから止め、
 #   A2 のシード 43（trw4_s43）を開始する。
+2026-10-06 14:24:05 trw3A_s42 stopped after model_4000; start trw4_s42 (A2, commit 68ab716)
+2026-10-06 14:33:00 trw3A_s43 model_4000: it 4000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 23/p30 21 deg; speed none 0.68/p30 0.68; falls none 0/90 p30 46/90 single 15; F +0.381 BK +0.240 LL +0.154 LR +0.147 YL +0.85 YR +0.87
+2026-10-06 14:33:44 trw3A_s43 model_4000: standing S 15/15 falls without push (same as s42) -> stopped; start trw4_s43 (A2, commit 68ab716)
+2026-10-06 15:08:48 trw4_s42 model_1000: it 1000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=NG] angle none 33/p30 28 deg; speed none 0.63/p30 0.60; falls none 0/90 p30 74/90 single 0; F +0.249 BK +0.001 LL +0.157 LR +0.161 YL +1.01 YR +1.02
+2026-10-06 15:12:54 trw4_s42 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.000 forward2=0.227 backward1=-0.001 backward2=0.001 lateral_left1=0.173 lateral_right1=0.168 yaw_left5=1.029 yaw_right5=0.959 below=['forward_0p1', 'backward_0p1', 'backward_0p2']
+2026-10-06 15:19:18 trw4_s43 model_1000: it 1000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 32/p30 28 deg; speed none 0.63/p30 0.61; falls none 0/90 p30 68/90 single 0; F +0.268 BK +0.066 LL +0.121 LR +0.122 YL +0.79 YR +0.96
+2026-10-06 15:23:21 trw4_s43 model_1000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.171 forward2=0.233 backward1=-0.000 backward2=0.065 lateral_left1=0.146 lateral_right1=0.133 yaw_left5=0.795 yaw_right5=0.936 below=['backward_0p1']
+2026-10-06 15:51:48 trw4_s42 model_2000: it 2000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 31/p30 32 deg; speed none 0.69/p30 0.67; falls none 2/90 p30 64/90 single 0; F +0.357 BK +0.182 LL +0.151 LR +0.168 YL +0.97 YR +1.00
+2026-10-06 15:55:52 trw4_s42 model_2000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.122 forward2=0.346 backward1=0.001 backward2=0.187 lateral_left1=0.163 lateral_right1=0.182 yaw_left5=0.893 yaw_right5=0.969 below=['backward_0p1']
+2026-10-06 16:02:19 trw4_s43 model_2000: it 2000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 29/p30 24 deg; speed none 0.69/p30 0.65; falls none 1/90 p30 63/90 single 0; F +0.361 BK +0.141 LL +0.168 LR +0.146 YL +0.85 YR +1.01
+2026-10-06 16:06:18 trw4_s43 model_2000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.145 forward2=0.339 backward1=0.000 backward2=0.125 lateral_left1=0.179 lateral_right1=0.150 yaw_left5=0.838 yaw_right5=0.983 below=['backward_0p1']
+2026-10-06 16:34:46 trw4_s42 model_3000: it 3000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 33/p30 27 deg; speed none 0.69/p30 0.68; falls none 0/90 p30 41/90 single 0; F +0.387 BK +0.232 LL +0.146 LR +0.173 YL +0.97 YR +0.95
+2026-10-06 16:38:48 trw4_s42 model_3000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.204 forward2=0.353 backward1=0.001 backward2=0.212 lateral_left1=0.154 lateral_right1=0.179 yaw_left5=0.964 yaw_right5=0.917 below=['backward_0p1']
+2026-10-06 16:44:10 trw4_s43 model_3000: it 3000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 28/p30 27 deg; speed none 0.73/p30 0.66; falls none 0/90 p30 40/90 single 0; F +0.330 BK +0.200 LL +0.155 LR +0.165 YL +0.85 YR +1.03
+2026-10-06 16:48:15 trw4_s43 model_3000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.154 forward2=0.308 backward1=0.001 backward2=0.178 lateral_left1=0.163 lateral_right1=0.174 yaw_left5=0.850 yaw_right5=1.026 below=['backward_0p1']
+2026-10-06 17:17:28 trw4_s42 model_4000: it 4000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 26/p30 26 deg; speed none 0.67/p30 0.64; falls none 0/90 p30 30/90 single 0; F +0.318 BK +0.140 LL +0.146 LR +0.157 YL +0.88 YR +0.94
+2026-10-06 17:21:34 trw4_s42 model_4000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.039 forward2=0.288 backward1=0.000 backward2=0.134 lateral_left1=0.138 lateral_right1=0.157 yaw_left5=0.877 yaw_right5=0.921 below=['forward_0p1', 'backward_0p1']
+2026-10-06 17:26:59 trw4_s43 model_4000: it 4000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 28/p30 23 deg; speed none 0.68/p30 0.64; falls none 0/90 p30 49/90 single 0; F +0.332 BK +0.121 LL +0.134 LR +0.144 YL +0.86 YR +0.92
+2026-10-06 17:31:08 trw4_s43 model_4000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.110 forward2=0.322 backward1=0.001 backward2=0.170 lateral_left1=0.141 lateral_right1=0.145 yaw_left5=0.881 yaw_right5=0.981 below=['backward_0p1']
+2026-10-06 18:00:32 trw4_s42 model_5000: it 5000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 27/p30 29 deg; speed none 0.70/p30 0.65; falls none 0/90 p30 37/90 single 0; F +0.366 BK +0.210 LL +0.119 LR +0.166 YL +0.92 YR +0.88
+2026-10-06 18:04:30 trw4_s42 model_5000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.200 forward2=0.333 backward1=0.110 backward2=0.196 lateral_left1=0.135 lateral_right1=0.168 yaw_left5=0.875 yaw_right5=0.867 below=[]
+2026-10-06 18:09:41 trw4_s43 model_5000: it 5000: FAIL [W1=NG W2=ok W3=ok W4=NG W5=ok] angle none 26/p30 24 deg; speed none 0.69/p30 0.65; falls none 0/90 p30 50/90 single 0; F +0.358 BK +0.191 LL +0.141 LR +0.147 YL +0.94 YR +0.95
+2026-10-06 18:14:07 trw4_s43 model_5000: reference 9x300 source probe (seed 42, not a criterion): FAIL falls=0 forward1=0.168 forward2=0.348 backward1=0.001 backward2=0.182 lateral_left1=0.156 lateral_right1=0.144 yaw_left5=0.969 yaw_right5=0.952 below=['backward_0p1']
+# 修正4（2026-10-06 18:15）: A2 の 5000 回で、押し p30 での斜め指令の転倒が 37/90（s42）・50/90（s43）。旧報酬の歩行は同じプローブで
+#   3000 回 25/90、5000 回 2/90。新しい形は押しに大幅に弱い。判断: A2 は誤差が大きいと 1 ステップの報酬が負になり（押された直後など）、
+#   転倒（罰なし）で終わらせる方が得になる。旧報酬の exp 項は常に 0 以上だった。
+#   対策候補 B2 = (1 + speed)/2 * exp(-error)（重み 8, speed は A2 の定義）。常に 0 以上で、どの指令も最大 1（×8）。
+#   同じシードで比べるため、trw4_s43（A2）を止めて trw5B2_s42（B2, シード 42）を始める。trw4_s42（A2）は 20000 回まで続ける。
+#   B2 にも同じ基準 W1-W5 を当て、5000 回の時点で押し p30 の転倒を A2 と比べる。
