@@ -29,12 +29,12 @@ schema_version: 1
 
 # Human-readable name, and the identifier used in HOME-bound contract strings
 # (a changed pose becomes "<label>_<10-digit joint hash>").
-name: "Centered upright HOME: trunk vertical, knees straight, COM over the sole centre"
-label: centered_home
+name: "Forward-lean HOME: trunk 10 deg forward, knees straight, COM over the sole centre"
+label: forward_lean_home
 
 # Root pitch at HOME (positive = trunk leans forward).  The soles must be level
 # at this pitch.
-trunk_pitch_deg: 0.0
+trunk_pitch_deg: 10.0
 
 joint_pos_deg:
   head: 0.0
@@ -50,13 +50,13 @@ joint_pos_deg:
   right_hip_roll: -5.0
   # Hip/ankle pitch: solved so the soles are flat and the whole-body COM is over
   # the fore-aft centre of the sole contact area (config/balance_home_pose.py).
-  left_hip_pitch: 1.198384259489
-  right_hip_pitch: 1.198384259489
+  left_hip_pitch: -14.166561199931
+  right_hip_pitch: -14.166561199931
   left_hip_yaw: 0.0
   right_hip_yaw: 0.0
   left_knee: 0.0
   right_knee: 0.0
   left_ankle_roll: -5.0
   right_ankle_roll: 5.0
-  left_ankle_pitch: -1.198384259489
-  right_ankle_pitch: -1.198384259489
+  left_ankle_pitch: 4.127976841869
+  right_ankle_pitch: 4.127976841869
