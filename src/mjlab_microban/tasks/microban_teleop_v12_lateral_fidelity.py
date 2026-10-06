@@ -64,15 +64,27 @@ MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_SCHEMA_VERSION = 2
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME = "hand_active_lateral_shortfall"
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S = 0.10
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND = "hand_target"
+# Revision v3: the v2 shortfall plus the forward progress beyond a cap on
+# mixed commands while a hand is active.
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REVISION = "hand_pose_release_lateral_fidelity_v3"
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_SCHEMA_VERSION = 3
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME = (
+    "hand_active_lateral_shortfall_forward_excess"
+)
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_FORWARD_CAP_M_S = 0.15
 # Registered weights by label (V1 default, V2 its fallback; s24 is the v2
-# revision's first variant, s40 its fallback).  Every weight is unique.
+# revision's first variant, s40 its fallback; x32 the v3 revision's first
+# variant, x48 its fallback).  Every weight is unique.
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHTS: dict[str, float] = {
     "8": -8.0,
     "16": -16.0,
     "s24": -24.0,
     "s40": -40.0,
+    "x32": -32.0,
+    "x48": -48.0,
 }
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LABELS = frozenset(("s24", "s40"))
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_LABELS = frozenset(("x32", "x48"))
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_DEFAULT_WEIGHT = "8"
 # Read when the task package is imported (the launcher sets it).
 MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHT_ENV = "MICROBAN_V12_LATERAL_FIDELITY_WEIGHT"
@@ -97,6 +109,16 @@ MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON = (
     "lateral shortfall penalty while a hand is active"
 )
 
+MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REASON = (
+    "forward-lean pose-release chain trades lateral for forward speed on "
+    "forward+lateral commands once hands activate and falls under pushes while "
+    "walking fast (gate mixed_forward_left vx 0.41 m/s vs centered 0.06 m/s); "
+    "the v2 shortfall alone failed its 8000 probe (vx rose to 0.23 m/s, left "
+    "pushed lateral 0.00 m/s); restart from the gated model_7099 with the v2 "
+    "shortfall plus the forward progress above 0.15 m/s on mixed commands "
+    "while a hand is active"
+)
+
 _REPO_PREFIX = "repo://"
 
 
@@ -113,6 +135,14 @@ class LateralFidelityVariant:
 
 def lateral_fidelity_variant(label: str) -> LateralFidelityVariant:
     weight = lateral_fidelity_weight(label)
+    if label in MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_LABELS:
+        return LateralFidelityVariant(
+            label,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REVISION,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_SCHEMA_VERSION,
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME,
+            weight,
+        )
     if label in MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LABELS:
         return LateralFidelityVariant(
             label,
@@ -214,7 +244,69 @@ def hand_active_lateral_shortfall(
     return torch.where(active, shortfall, torch.zeros_like(shortfall))
 
 
+def hand_active_lateral_shortfall_forward_excess_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    hand_command_name: str = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND,
+    trunk_pitch: float = HOME_TRUNK_PITCH_RAD,
+    min_abs_command: float = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+    lateral_cap: float = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S,
+    forward_cap: float = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_FORWARD_CAP_M_S,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """v2 shortfall plus mixed-command forward excess while a hand is active."""
+
+    command = env.command_manager.get_command(command_name)
+    actual = home_levelled_root_lin_vel_b(env, trunk_pitch, asset_cfg)
+    hand = env.command_manager.get_term(hand_command_name)
+    return hand_active_lateral_shortfall_forward_excess(
+        command[:, :2],
+        actual[:, :2],
+        hand.is_active.any(dim=-1),
+        min_abs_command,
+        lateral_cap,
+        forward_cap,
+    )
+
+
+def hand_active_lateral_shortfall_forward_excess(
+    command_xy: torch.Tensor,
+    velocity_xy: torch.Tensor,
+    hand_active: torch.Tensor,
+    min_abs_command: float,
+    lateral_cap: float,
+    forward_cap: float,
+) -> torch.Tensor:
+    """Shortfall (as v2) + max(0, v_x sgn(c_x) - forward_cap) on mixed commands.
+
+    The forward part applies only when ``|c_x|`` and ``|c_y|`` are both at least
+    ``min_abs_command`` and a hand is active: pure forward/backward commands and
+    hands-off walking keep their speed.
+    """
+
+    shortfall = hand_active_lateral_shortfall(
+        command_xy, velocity_xy, hand_active, min_abs_command, lateral_cap
+    )
+    cx, cy = command_xy[:, 0], command_xy[:, 1]
+    mixed = (
+        (cx.abs() >= min_abs_command)
+        & (cy.abs() >= min_abs_command)
+        & hand_active.to(torch.bool)
+    )
+    excess = torch.clamp(velocity_xy[:, 0] * torch.sign(cx) - forward_cap, min=0.0)
+    return shortfall + torch.where(mixed, excess, torch.zeros_like(excess))
+
+
 def _term_params(variant: LateralFidelityVariant) -> dict[str, Any]:
+    if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME:
+        return {
+            "command_name": "twist",
+            "hand_command_name": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND,
+            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
+            "min_abs_command": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_MIN_ABS_COMMAND_M_S,
+            "lateral_cap": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S,
+            "forward_cap": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_FORWARD_CAP_M_S,
+        }
     if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME:
         return {
             "command_name": "twist",
@@ -231,6 +323,8 @@ def _term_params(variant: LateralFidelityVariant) -> dict[str, Any]:
 
 
 def _term_func(variant: LateralFidelityVariant):
+    if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME:
+        return hand_active_lateral_shortfall_forward_excess_l1
     if variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME:
         return hand_active_lateral_shortfall_l1
     return mixed_command_lateral_deficit_l1
@@ -239,6 +333,7 @@ def _term_func(variant: LateralFidelityVariant):
 _TERM_NAMES = (
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME,
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME,
+    MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME,
 )
 
 
@@ -278,7 +373,7 @@ def apply_lateral_fidelity(cfg: ManagerBasedRlEnvCfg, weight_label: str) -> None
     if "twist" not in cfg.commands:
         raise KeyError("Lateral fidelity requires the twist command")
     if (
-        variant.reward_term == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REWARD_NAME
+        variant.reward_term != MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REWARD_NAME
         and MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_HAND_COMMAND not in cfg.commands
     ):
         raise KeyError("Lateral fidelity v2 requires the hand_target command")
@@ -364,7 +459,8 @@ def lateral_fidelity_marker(
         f"/model_{MICROBAN_TELEOP_V12_LATERAL_FIDELITY_PARENT_ITERATION}.pt"
     ):
         raise ValueError("Lateral-fidelity parent must be a model_7099.pt")
-    v2 = variant.revision == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REVISION
+    v3 = variant.revision == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REVISION
+    v2 = v3 or variant.revision == MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REVISION
     marker: dict[str, Any] = {
         "schema_version": variant.schema_version,
         "revision": variant.revision,
@@ -376,6 +472,8 @@ def lateral_fidelity_marker(
     if v2:
         marker["lateral_cap_m_s"] = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_LATERAL_CAP_M_S
         marker["requires_active_hand"] = True
+    if v3:
+        marker["forward_cap_m_s"] = MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_FORWARD_CAP_M_S
     marker.update({
         "velocity_frame": MICROBAN_TELEOP_V12_LATERAL_FIDELITY_FRAME,
         "parent_lineage": "fresh_chain",
@@ -388,7 +486,9 @@ def lateral_fidelity_marker(
         "parent_stage_gate_path": parent_stage_gate_path,
         "parent_stage_gate_sha256": parent_stage_gate_sha256,
         "reason": (
-            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REASON
+            if v3
+            else MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V2_REASON
             if v2
             else MICROBAN_TELEOP_V12_LATERAL_FIDELITY_REASON
         ),

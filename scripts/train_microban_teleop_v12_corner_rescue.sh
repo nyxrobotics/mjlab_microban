@@ -106,7 +106,7 @@ print("none" if marker is None else lateral_fidelity_weight_label(
     validate_lateral_fidelity_marker(marker)["reward_weight"]))' "${source_checkpoint}" | tail -n 1)"
     case "${lateral_fidelity}" in
         none) export MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY="" ;;
-        8|16|s24|s40)
+        8|16|s24|s40|x32|x48)
             export MICROBAN_V12_PR_CORNER_RESCUE_LATERAL_FIDELITY="${lateral_fidelity}"
             echo "[INFO] lateral-fidelity parent: weight label ${lateral_fidelity}"
             ;;

@@ -48,6 +48,8 @@ from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
     MICROBAN_TELEOP_V12_LATERAL_FIDELITY_WEIGHT_ENV,
     apply_lateral_fidelity,
     hand_active_lateral_shortfall,
+    hand_active_lateral_shortfall_forward_excess,
+    hand_active_lateral_shortfall_forward_excess_l1,
     hand_active_lateral_shortfall_l1,
     installed_lateral_fidelity_weight,
     lateral_fidelity_marker,
@@ -485,6 +487,64 @@ class HandActiveLateralShortfallTest(unittest.TestCase):
             installed_lateral_fidelity_weight(env)
 
 
+class LateralShortfallForwardExcessTest(unittest.TestCase):
+    @staticmethod
+    def _value(command, velocity, active):
+        return hand_active_lateral_shortfall_forward_excess(
+            torch.tensor(command, dtype=torch.float32),
+            torch.tensor(velocity, dtype=torch.float32),
+            torch.tensor(active),
+            0.05,
+            0.10,
+            0.15,
+        )
+
+    def test_forward_excess_applies_only_to_mixed_hand_active_commands(self) -> None:
+        values = self._value(
+            [[0.7, 0.3], [0.7, 0.3], [0.7, 0.0], [0.7, 0.3], [-0.5, -0.3], [0.0, 0.3]],
+            [[0.40, 0.10], [0.10, 0.10], [0.40, 0.0], [0.40, 0.0], [-0.30, -0.12], [0.40, 0.10]],
+            [True, True, True, False, True, True],
+        )
+        expected = [0.25, 0.0, 0.0, 0.0, 0.15, 0.0]
+        for value, want in zip(values.tolist(), expected, strict=True):
+            self.assertAlmostEqual(value, want, places=6)
+
+    def test_shortfall_and_excess_add(self) -> None:
+        value = self._value([[0.7, 0.3]], [[0.30, -0.02]], [True])
+        self.assertAlmostEqual(float(value[0]), 0.12 + 0.15, places=6)
+        # Walking backward against a forward command is never excess.
+        value = self._value([[0.7, 0.3]], [[-0.30, 0.10]], [True])
+        self.assertEqual(float(value[0]), 0.0)
+
+    def test_v3_labels_install_the_v3_term_and_marker(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_v12_lateral_fidelity import (
+            MICROBAN_TELEOP_V12_LATERAL_FIDELITY_V3_REWARD_NAME as NAME,
+        )
+
+        base = make_microban_teleop_v12_hand_pose_release_env_cfg()
+        for label, weight in (("x32", -32.0), ("x48", -48.0)):
+            cfg = make_microban_teleop_v12_lateral_fidelity_env_cfg(weight_label=label)
+            self.assertEqual(set(cfg.rewards) - set(base.rewards), {NAME})
+            term = cfg.rewards[NAME]
+            self.assertEqual(term.weight, weight)
+            self.assertIs(term.func, hand_active_lateral_shortfall_forward_excess_l1)
+            self.assertEqual(term.params["forward_cap"], 0.15)
+            marker = _marker(weight=weight)
+            self.assertEqual(marker["revision"], "hand_pose_release_lateral_fidelity_v3")
+            self.assertEqual(marker["schema_version"], 3)
+            self.assertEqual(marker["reward_term"], NAME)
+            self.assertEqual(marker["forward_cap_m_s"], 0.15)
+            self.assertEqual(marker["lateral_cap_m_s"], 0.10)
+            self.assertEqual(validate_lateral_fidelity_marker(marker), marker)
+            for drift in ({"forward_cap_m_s": 0.3}, {"schema_version": 2}):
+                with self.assertRaises(ValueError):
+                    validate_lateral_fidelity_marker({**marker, **drift})
+            no_cap = dict(marker)
+            no_cap.pop("forward_cap_m_s")
+            with self.assertRaises(ValueError):
+                validate_lateral_fidelity_marker(no_cap)
+
+
 class LateralFidelityRunnerEnvTest(unittest.TestCase):
     check = staticmethod(
         MicrobanTeleopV12HandPoseReleaseOnPolicyRunner._assert_lateral_fidelity_environment
@@ -524,7 +584,7 @@ class LateralFidelityLauncherTest(unittest.TestCase):
             "--lateral-fidelity-weight", "12",
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("must be 8, 16, s24 or s40", result.stderr)
+        self.assertIn("must be 8, 16, s24, s40, x32 or x48", result.stderr)
         help_text = self._run("--help").stdout
         self.assertIn("--lateral-fidelity", help_text)
 
