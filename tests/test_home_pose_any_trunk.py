@@ -23,7 +23,8 @@ are not compared.
 
 ``MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1`` also re-exports the walking and get-up
 checkpoints of both HOMEs (CPU, a few minutes) from the git objects of
-forward-lean-v2 and requires byte-identical ONNX files.
+forward-lean-v2 and requires ONNX files byte-identical to the published ones
+once the policy-contract keys (docs/policies.md) are removed.
 """
 
 from __future__ import annotations
@@ -389,7 +390,27 @@ class ExportEquivalenceTest(unittest.TestCase):
                     timeout=1800, check=False,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
-                self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), published_sha)
+                # The policy-contract keys (2026-10-07) are the only addition:
+                # without them the file is byte-identical to the published one.
+                self.assertEqual(hashlib.sha256(_without_contract_keys(output)).hexdigest(), published_sha)
+
+
+def _without_contract_keys(path: Path) -> bytes:
+    import onnx
+
+    from mjlab_microban.policy_contract import contract_metadata
+
+    model = onnx.load(str(path))
+    keys = set(contract_metadata())
+    kept = [prop for prop in model.metadata_props if prop.key not in keys]
+    if len(kept) != len(model.metadata_props) - len(keys):
+        raise AssertionError("the export lacks some policy-contract keys")
+    del model.metadata_props[:]
+    model.metadata_props.extend(kept)
+    with tempfile.TemporaryDirectory() as directory:
+        stripped = Path(directory) / "stripped.onnx"
+        onnx.save(model, str(stripped))
+        return stripped.read_bytes()
 
 
 if __name__ == "__main__":
