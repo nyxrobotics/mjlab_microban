@@ -13,20 +13,6 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
-from mjlab_microban.tasks.microban_getup_symmetry import with_getup_symmetry
-from mjlab_microban.tasks.microban_policy_export import MicrobanTeleopOnPolicyRunner
-from mjlab_microban.tasks.microban_safe_velocity_env_cfg import (
-    MICROBAN_SAFE_VELOCITY_TASK_ID,
-    MicrobanSafeVelocityRlCfg,
-    make_microban_safe_velocity_env_cfg,
-)
-from mjlab_microban.tasks.microban_safe_velocity_mdp import (
-    MicrobanSafeVelocityOnPolicyRunner,
-)
-from mjlab_microban.tasks.microban_teleop_env_cfg import (
-    MicrobanTeleopRlCfg,
-    make_microban_teleop_env_cfg,
-)
 from mjlab_microban.tasks.microban_teleop_v12_corner_rescue import (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_TASK_ID,
     MicrobanTeleopV12CornerRescueRlCfg,
@@ -45,10 +31,8 @@ from mjlab_microban.tasks.microban_teleop_v12_final_rescue_runner import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TASK_ID,
-    MicrobanTeleopV12PreviewRlCfg,
     MicrobanTeleopV12RlCfg,
     make_microban_teleop_v12_env_cfg,
-    make_microban_teleop_v12_preview_env_cfg,
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
@@ -58,28 +42,7 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_runner import (
     MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
 )
-from mjlab_microban.tasks.microban_teleop_v12_preview import (
-    MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
-)
-from mjlab_microban.tasks.microban_teleop_v12_runner import (
-    MicrobanTeleopV12OnPolicyRunner,
-    MicrobanTeleopV12PreviewOnPolicyRunner,
-)
-from mjlab_microban.tasks.microban_teleop_upright_fullbody_env_cfg import (
-    MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID,
-    MicrobanTeleopUprightFullbodyRlCfg,
-    make_microban_teleop_upright_fullbody_env_cfg,
-)
-from mjlab_microban.tasks.microban_teleop_upright_fullbody_runner import (
-    MicrobanTeleopUprightFullbodyOnPolicyRunner,
-)
-from mjlab_microban.tasks.microban_tracking_env_cfg import (
-    MicrobanTrackingRlCfg,
-    make_microban_tracking_env_cfg,
-)
-from mjlab_microban.tasks.microban_tracking_policy_export import (
-    MicrobanTrackingOnPolicyRunner,
-)
+from mjlab_microban.tasks.microban_teleop_v12_runner import MicrobanTeleopV12OnPolicyRunner
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     MicrobanVelocityRlCfg,
     make_microban_velocity_env_cfg,
@@ -93,14 +56,6 @@ register_mjlab_task(
     rl_cfg=MicrobanVelocityRlCfg,
     # Stamps checkpoints with the training HOME, refuses another HOME on load.
     runner_cls=MicrobanVelocityOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_SAFE_VELOCITY_TASK_ID,
-    env_cfg=make_microban_safe_velocity_env_cfg(),
-    play_env_cfg=make_microban_safe_velocity_env_cfg(play=True),
-    rl_cfg=MicrobanSafeVelocityRlCfg,
-    runner_cls=MicrobanSafeVelocityOnPolicyRunner,
 )
 
 # Get-up (v5 action contract at the centered HOME, v6 at the forward-lean
@@ -138,87 +93,21 @@ for _reward_set, _task_id in (
         rl_cfg=MicrobanGetupRlCfg,
         runner_cls=MicrobanGetupOnPolicyRunner,
     )
-# Reference variants of the same contract: the 09-25 recipe ("v42"), and the
-# first v4 set that stood, with a wide braced stance ("redesign").
-for _reward_set, _task_id in (
-    ("v42", "Mjlab-Getup-Microban-V42"),
-    ("redesign", "Mjlab-Getup-Microban-Redesign"),
-):
-    register_mjlab_task(
-        task_id=_task_id,
-        env_cfg=make_microban_getup_env_cfg(reward_set=_reward_set),
-        play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set=_reward_set),
-        rl_cfg=MicrobanGetupRlCfg,
-        runner_cls=MicrobanGetupOnPolicyRunner,
-    )
-# Stage 1 with left/right mirror data augmentation in PPO (HiFAR/HumanUP).
+# The first v4 set that stood, with a wide braced stance ("redesign"): the
+# scene scripts/home_pipeline/getup_eval.py evaluates every get-up stage in.
 register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Sym",
-    env_cfg=make_microban_getup_env_cfg(reward_set="posture"),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture"),
-    rl_cfg=with_getup_symmetry(MicrobanGetupRlCfg),
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-
-# Stage 1 with the near-home reset written out (10 %, +-5 deg), the default of
-# every HOME but the centered one (whose Mjlab-Getup-Microban keeps the wide
-# "tipping" reset; the 2026-10-03 centered servo-range stage-1 run was trained
-# under this id).
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-NearHome5deg",
-    env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.1, 0.09)),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.1, 0.09)),
+    task_id="Mjlab-Getup-Microban-Redesign",
+    env_cfg=make_microban_getup_env_cfg(reward_set="redesign"),
+    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="redesign"),
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-
-# Stage 1 with 957ab42's wide "tipping" near-home reset (20 %, +-34 deg).
-register_mjlab_task(
-    task_id="Mjlab-Getup-Microban-Tipping",
-    env_cfg=make_microban_getup_env_cfg(reward_set="posture", near_home_reset=(0.2, 0.6)),
-    play_env_cfg=make_microban_getup_env_cfg(play=True, reward_set="posture", near_home_reset=(0.2, 0.6)),
-    rl_cfg=MicrobanGetupRlCfg,
-    runner_cls=MicrobanGetupOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id="Mjlab-Tracking-Microban",
-    env_cfg=make_microban_tracking_env_cfg(),
-    play_env_cfg=make_microban_tracking_env_cfg(play=True),
-    rl_cfg=MicrobanTrackingRlCfg,
-    runner_cls=MicrobanTrackingOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id="Mjlab-Teleop-Microban",
-    env_cfg=make_microban_teleop_env_cfg(),
-    play_env_cfg=make_microban_teleop_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopRlCfg,
-    runner_cls=MicrobanTeleopOnPolicyRunner,
-)
-
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_TASK_ID,
     env_cfg=make_microban_teleop_v12_env_cfg(),
     play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV12RlCfg,
     runner_cls=MicrobanTeleopV12OnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_UPRIGHT_FULLBODY_TASK_ID,
-    env_cfg=make_microban_teleop_upright_fullbody_env_cfg(),
-    play_env_cfg=make_microban_teleop_upright_fullbody_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopUprightFullbodyRlCfg,
-    runner_cls=MicrobanTeleopUprightFullbodyOnPolicyRunner,
-)
-
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_PREVIEW_TASK_ID,
-    env_cfg=make_microban_teleop_v12_preview_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_preview_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopV12PreviewRlCfg,
-    runner_cls=MicrobanTeleopV12PreviewOnPolicyRunner,
 )
 
 # Successor recipe (active-hand arms leave the HOME pose reward).  Gates and the

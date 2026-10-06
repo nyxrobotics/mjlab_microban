@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
@@ -21,9 +20,6 @@ from mjlab_microban.tasks.microban_tracking_mdp import (
     MicrobanTrackingBoundedGaussianDistribution,
     motion_anchor_planar_position_error_l1,
     motion_anchor_planar_velocity_error_l1,
-)
-from mjlab_microban.tasks.microban_tracking_policy_export import (
-    MicrobanTrackingOnPolicyRunner,
 )
 
 
@@ -134,19 +130,6 @@ class TrackingConfigTest(unittest.TestCase):
 
         self.assertEqual(cfg.episode_length_s, int(1e9))
         self.assertEqual(cfg.commands["motion"].sampling_mode, "start")
-
-    def test_runner_disables_generic_random_episode_length(self) -> None:
-        runner = object.__new__(MicrobanTrackingOnPolicyRunner)
-        parent = MicrobanTrackingOnPolicyRunner.__mro__[1]
-
-        with patch.object(parent, "learn", autospec=True) as learn:
-            runner.learn(7, init_at_random_ep_len=True)
-
-        learn.assert_called_once_with(
-            runner,
-            num_learning_iterations=7,
-            init_at_random_ep_len=False,
-        )
 
 
 if __name__ == "__main__":

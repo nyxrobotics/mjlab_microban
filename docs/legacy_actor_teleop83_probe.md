@@ -2,7 +2,8 @@
 
 This probe answers one narrow deadline question: can the proven
 `model_14999.pt` locomotion actor keep its original gait while the simulator is
-the nominal `Mjlab-Teleop-Microban` task and exposes the 83-value PICO policy
+the nominal teleop env (`make_microban_teleop_env_cfg`, the environment of the
+former `Mjlab-Teleop-Microban` task) and exposes the 83-value PICO policy
 observation?
 
 The answer is **yes for neutral foot/hand targets and a HOME neck**. This is a

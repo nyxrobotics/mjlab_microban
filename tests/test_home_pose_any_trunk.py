@@ -90,7 +90,17 @@ def _run_python(yaml_path: Path, code: str) -> str:
 
 # Task ids of the reference branches that the HOME pipeline never trained and
 # this tree no longer registers (their env / play / RL / runner keys are absent).
-UNREGISTERED_TASKS: frozenset[str] = frozenset()
+UNREGISTERED_TASKS = frozenset({
+    "Mjlab-SafeVelocity-Microban",
+    "Mjlab-Getup-Microban-V42",
+    "Mjlab-Getup-Microban-Sym",
+    "Mjlab-Getup-Microban-NearHome5deg",
+    "Mjlab-Getup-Microban-Tipping",
+    "Mjlab-Tracking-Microban",
+    "Mjlab-Teleop-Microban",
+    "Mjlab-Teleop-Upright-Fullbody-Microban",
+    "Mjlab-Teleop-V12-Preview-Microban",
+})
 
 
 def _deleted_here(key: str) -> bool:

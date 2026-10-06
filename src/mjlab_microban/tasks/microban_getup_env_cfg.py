@@ -152,8 +152,7 @@ STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # with it, stage 1 learned to catch tips by moving a foot and kept that stance
 # (17.6 cm wide under the +-1.57 clip; 8.6 cm staggered fore-aft under the
 # servo range, feet_fore_aft reward 3.1 vs 13.9 and standing_pose 124 vs 176 at
-# iteration 2000), while (0.1, 0.09) reproduced the HOME-stance lineage. The
-# wide reset stays available as Mjlab-Getup-Microban-Tipping. The centered
+# iteration 2000), while (0.1, 0.09) reproduced the HOME-stance lineage. The centered
 # HOME's tasks keep the wide default they were registered with
 # (LEGACY_HOME_OVERRIDES "getup_near_home_reset"); every other HOME, the
 # forward-lean one included, defaults to NEAR_HOME_RESET.

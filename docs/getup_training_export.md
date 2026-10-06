@@ -150,10 +150,9 @@ rad/s; effort 0.46 Nm (no joint above 0.08 Nm, the shoulder stop no longer
 pressed); falls after a 0.3 m/s fore-aft kick 1/62, after 0.4 m/s fore-aft /
 lateral kicks 23/62 / 17/59.
 
-Other registered variants of the same contract: `Mjlab-Getup-Microban-V42`
-(the 2026-09-25 recipe), `Mjlab-Getup-Microban-Redesign` (stands, but in a
-wide braced stance), and `Mjlab-Getup-Microban-Sym` (stage 1 with left/right
-mirror data augmentation).
+`Mjlab-Getup-Microban-Redesign` (the first set that stood, in a wide braced
+stance) stays registered as the scene the pipeline evaluates every stage in
+(scripts/home_pipeline/getup_eval.py).
 
 The training episode lasts 20 seconds. The robot's automatic get-up attempt
 also allows up to 20 seconds. Once the upright gravity condition holds for 20
