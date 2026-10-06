@@ -76,10 +76,6 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_STAGE_BOUNDARIES,
 )
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
-    validate_hand_pose_release_recipe_switch_marker,
-)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     validate_teleop_v12_home_pose,
@@ -933,18 +929,12 @@ def create_gate(
 
 
 def _lineage_markers(infos: dict[str, Any]) -> dict[str, Any]:
-    """Rescue / recipe-switch markers a gate copies from its checkpoint."""
+    """Rescue markers a gate copies from its checkpoint."""
 
     result: dict[str, Any] = {}
     corner_rescue = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
     if corner_rescue is not None:
         result[MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY] = deepcopy(corner_rescue)
-    recipe_switch = infos.get(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY)
-    if recipe_switch is not None:
-        # Re-validated with its parent files by _checkpoint_identity above.
-        result[MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY] = (
-            validate_hand_pose_release_recipe_switch_marker(recipe_switch)
-        )
     pose_release_final_rescue = pose_release_final_rescue_gate_marker(infos)
     if pose_release_final_rescue is not None:
         result[pose_release_final_rescue[0]] = pose_release_final_rescue[1]

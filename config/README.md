@@ -38,7 +38,7 @@
 | パッケージャ | `..._packager_v6_centered_home_servo_range` | `..._packager_v7_forward_lean_home_servo_range` | `v6`/`v7` + `<tag>` |
 | 救済段階・upright full-body の revision | 中心ブランチのまま | 前傾ブランチのまま | `<tag>` 入り |
 | 固定値 | root z 0.170554885633559、足の横間隔 0.094 m（FK 0.0935） | root z 0.170430569776402、股・足首は前傾ブランチの全桁の値（yamlは12桁の正準値） | FK値 |
-| 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント、model_7099 からの pose-release 切替 | （なし。pose-release は新しいチェーンで学習） | （なし） |
+| 互換 | 起き上がりの near-HOME リセット既定 (0.2, 0.6)、HOMEスタンプのない歩行チェックポイント | （なし） | （なし） |
 | pose-release の 10000 境界 / 10100 カナリア | 手先 RMS 0.035 m（中心ブランチのまま。0.040 m 許容プロファイルは存在しない）。パッケージの境界ゲートは渡したときだけ記録 | 手先 RMS 0.040 m 許容（e3271de / ec67f1e）。パッケージは 10000 と 10100 のゲートを resume 系譜（`params/agent.yaml`）でたどって必須（7ceb280） | 前傾HOMEと同じ |
 | HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 完全一致（同） | 1e-9 の許容（FK の最終桁の揺れ） |
 
@@ -154,7 +154,7 @@ GPU を使う前に止まる（終了コード3）。ブランチはそのHOME�
    書き出せない（契約文字列と手先FKはその学習タスクのコードが作るため。`--force` はない）。
    `config/home_pose.yaml` を読まないロボットのチェックアウトも拒否する。失敗はどれも `error: ...` の1行。
 5. すべてを最初から学習し直す: 歩行（`Mjlab-Velocity-Microban` 15000回とその続き、プローブで選択）、
-   起き上がり5段階、PICO v12（`scripts/train_microban_teleop_v12.sh start --source ... --hand-pose-release`）。
+   起き上がり5段階、PICO v12（`scripts/train_microban_teleop_v12.sh start --source ...`）。
    歩行チェックポイントには `microban_walk_home_pose` が記録され、v12の開始時に現在のHOMEと照合される。
 6. 3つのポリシーをロボットの `src/agents/` に入れる。ロボット側では `tests/test_shared_home.py` の固定値と、
    ランごとに変わる値（`pico_hybrid.py` の歩行ソースSHA、`tools/validate_pico_policy.py` の `walk.onnx` SHA）

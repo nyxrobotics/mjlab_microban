@@ -97,10 +97,9 @@ only on accuracy: `mixed_forward_left` hand 0.0403/0.0727 m, foot
 mixed scenarios are near-fall states for the previous canonical model as well.
 The user approved completing the centered-HOME PICO this way ("全部許可するから
 一番良いと思う方法で作業完了まで進めて", "本来の基準ってのも別にそんなに意味ない").
-At every HOME but the centered one the release route is a fresh pose-release
-chain (`scripts/train_microban_teleop_v12.sh start --source WALK.pt
---hand-pose-release`): only the centered HOME pins a model_7099 as a
-recipe-switch parent. A HOME whose trunk leans forward labels its foot/hand
+Every HOME trains a fresh pose-release chain
+(`scripts/train_microban_teleop_v12.sh start --source WALK.pt`). A HOME whose
+trunk leans forward labels its foot/hand
 target columns `robot_home_levelled_trunk_xyz_forward_left_up` and is packaged
 by packager v7 (forward-lean) or a `<tag>` revision.
 Every other boundary and every other lineage keeps its profile (except the
@@ -177,7 +176,7 @@ activation-canary gates explicitly. Each gate is fully revalidated. Its
 checkpoint must lie on that resume chain, so a sibling with the same markers
 is refused. It must also share the final checkpoint's contract, recipe,
 bootstrap, HOME and site-order markers, and the final must carry its
-corner-rescue / recipe-switch markers unchanged. The packager
+corner-rescue markers unchanged. The packager
 records `v12_boundary_stage_gates_json` (clock, checkpoint kind, checkpoint
 and gate SHA-256, tracking profile, allowance record) with
 `v12_boundary_stage_gates_semantics`

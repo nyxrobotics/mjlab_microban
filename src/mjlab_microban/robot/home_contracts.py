@@ -149,11 +149,6 @@ UPRIGHT_FULLBODY_HOME_REVISION = _contract(
     f"{_TAG}_com_centered_shoulder_zero_v6",
 )
 
-# The pinned canonical model_7099 the release-eligible pose-release recipe
-# switch may resume (None: no switch; train the pose-release recipe fresh).
-V12_POSE_RELEASE_SWITCH_PARENT_SHA256: str | None = HOME.override(  # type: ignore[assignment]
-    "v12_pose_release_switch_parent_sha256"
-)
 # Walking checkpoints without the HOME stamp (saved before it existed).
 ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS = bool(HOME.override("accepts_unstamped_walk_checkpoints", False))
 # The pose-release 10000 boundary / 10100 canary hand-RMS 0.040 m profiles

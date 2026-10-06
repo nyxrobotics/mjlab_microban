@@ -330,7 +330,7 @@ def test_lineage_accepts_only_the_rescue_model14999():
     assert validate_corner_rescue_canonical_lineage(infos, iteration=14_999) == corner
     # Structural callers (HOME pose, packager recipe) pass no iteration.
     assert (
-        hand_pose_release_lineage(infos, verify_parent=False)
+        hand_pose_release_lineage(infos)
         == HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE
     )
     for iteration in (14_900, 14_949, 14_998, 15_000):
@@ -991,108 +991,15 @@ def test_runner_load_refuses_a_hand_made_seed_folder(tmp_path, monkeypatch):
 # --- lineage and parent refusals pinned to their own checks ------------------
 
 
-def _pinned_release_switch_marker(monkeypatch) -> dict:
-    from mjlab_microban.tasks import (
-        microban_teleop_v12_hand_pose_release_lineage as lineage_module,
-    )
-
-    monkeypatch.setattr(
-        lineage_module,
-        "HAND_POSE_RELEASE_RECIPE_SWITCH_PARENT_CHECKPOINT_SHA256",
-        "d" * 64,
-    )
-    return lineage_module.hand_pose_release_recipe_switch_marker(
-        parent_checkpoint_path="repo://logs/rsl_rl/v12/run_7000_to7100/model_7099.pt",
-        parent_checkpoint_sha256="d" * 64,
-        parent_stage_gate_path="repo://artifacts/teleop_v12_gates/run_model_7099_gate.json",
-        parent_stage_gate_sha256="b" * 64,
-    )
-
-
-_EXPERIMENTAL_SWITCH = {
-    "schema_version": 1,
-    "release_eligible": False,
-    "parent_recipe_revision": MICROBAN_TELEOP_V12_RECIPE_REVISION,
-    "recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
-    "parent_checkpoint_sha256": "0" * 64,
-    "parent_iteration": 7099,
-}
-
-
-def test_lineage_refuses_a_final_rescue_on_a_recipe_switch(monkeypatch):
-    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-        HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH,
-        HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH,
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
-    )
-
-    release = _pinned_release_switch_marker(monkeypatch)
-    release_infos = {
-        **_infos(corner=None, final=None),
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: release,
-    }
-    experimental_infos = {
-        **_infos(corner=None, final=None),
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY: deepcopy(
-            _EXPERIMENTAL_SWITCH
-        ),
-    }
-    # The switch lineages themselves classify as before.
-    assert (
-        hand_pose_release_lineage(release_infos, iteration=14_999, verify_parent=False)
-        == HAND_POSE_RELEASE_LINEAGE_RELEASE_SWITCH
-    )
-    assert (
-        hand_pose_release_lineage(
-            experimental_infos,
-            iteration=14_999,
-            allow_experimental=True,
-            verify_parent=False,
-        )
-        == HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
-    )
-    # A forged model_14999 adding the (otherwise valid) final-rescue marker.
-    for infos, allow_experimental in (
-        (release_infos, False),
-        (experimental_infos, True),
-    ):
-        forged = {**infos, MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker()}
-        for kwargs in (
-            {"iteration": 14_999, "verify_parent": False},
-            {"verify_parent": False},
-        ):
-            with pytest.raises(ValueError, match="apply only to a fresh"):
-                hand_pose_release_lineage(
-                    forged, allow_experimental=allow_experimental, **kwargs
-                )
-
-
-def test_parent_payload_refusals_are_pinned_to_their_checks(monkeypatch):
+def test_parent_payload_refusals_are_pinned_to_their_checks():
     from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_final_rescue_runner import (
         validate_hand_pose_release_final_rescue_parent_payload,
-    )
-    from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
     )
 
     with pytest.raises(ValueError, match="already carries a final rescue"):
         validate_hand_pose_release_final_rescue_parent_payload(
             _parent_payload(
                 **{MICROBAN_TELEOP_V12_FINAL_RESCUE_INFO_KEY: _marker(corner=_corner())}
-            ),
-            checkpoint_sha256=SHA_PARENT,
-        )
-    # A release-eligible recipe-switch model_14900 is a valid pose-release
-    # checkpoint, but not a fresh chain: the rescue refuses it.
-    release = _pinned_release_switch_marker(monkeypatch)
-    with pytest.raises(ValueError, match="must be a fresh pose-release chain"):
-        validate_hand_pose_release_final_rescue_parent_payload(
-            _parent_payload(
-                **{
-                    MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY: None,
-                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY: release,
-                }
             ),
             checkpoint_sha256=SHA_PARENT,
         )

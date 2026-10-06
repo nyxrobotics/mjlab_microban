@@ -32,7 +32,7 @@ same command resumes after a crash, a stall or a fixed failure):
    the get-up acceptance gate.  Runs in parallel with step 2 (GPU memory
    permitting).
 4. PICO v12: a fresh pose-release chain from the selected walker
-   (scripts/train_microban_teleop_v12.sh start --hand-pose-release), stage
+   (scripts/train_microban_teleop_v12.sh start), stage
    route 0 -> 3000 -> 3100 -> 7000 -> 7100 -> 10000 -> 10100 -> 15000 with
    the stage gate at every boundary (the three evaluators of
    scripts/evaluate_microban_teleop_v12_stage.sh, each run to the end so a
@@ -1271,7 +1271,7 @@ class Pipeline:
         if prev is None:
             source = self.get("walk", "selected")
             cmd = ["scripts/train_microban_teleop_v12.sh", "start", "--source", source["relative"],
-                   "--source-sha256", source["sha256"], "--hand-pose-release", "--agent.run-name", seg, *envs]
+                   "--source-sha256", source["sha256"], "--agent.run-name", seg, *envs]
             if self.dry:
                 cmd += ["--max-updates", "2"]
             probe = PROBE_ROOT / f"velocity_{source['sha256'][:16]}_teleop83_raw_9x300.json"
@@ -1337,7 +1337,7 @@ class Pipeline:
                                              "lift-clock", str(parent_dir / f"model_{last}.pt"),
                                              str(V12_EXP / lifted), str(lift_to)], "cpu")
             prev = lifted
-        cmd = ["scripts/train_microban_teleop_v12.sh", "resume", prev, "--hand-pose-release",
+        cmd = ["scripts/train_microban_teleop_v12.sh", "resume", prev,
                "--agent.run-name", seg, *envs]
         if seed is not None and seed != V12_TRAIN_SEED:
             cmd += ["--seed", str(seed)]

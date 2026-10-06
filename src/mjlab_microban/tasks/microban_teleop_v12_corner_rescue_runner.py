@@ -356,7 +356,6 @@ def validate_hand_pose_release_corner_rescue_parent_payload(
         hand_pose_release_lineage(
             infos,
             iteration=MICROBAN_TELEOP_V12_CORNER_RESCUE_PARENT_ITERATION,
-            verify_parent=False,
         )
         != HAND_POSE_RELEASE_LINEAGE_FRESH
     ):

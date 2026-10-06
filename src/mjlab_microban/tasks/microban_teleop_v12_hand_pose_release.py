@@ -1,4 +1,4 @@
-"""Opt-in v12 recipe: release the arms of active hands from the HOME pose reward.
+"""V12 PICO recipe: release the arms of active hands from the HOME pose reward.
 
 The inherited velocity ``pose`` term (weight 1.0, arm std 0.1 rad while
 standing) pulls every joint toward HOME.  Once hand targets activate (update
@@ -11,17 +11,14 @@ shoulder-pitch, shoulder-roll and elbow of each hand whose target is active are
 left out of the mean.  An inactive hand's arm and all other joints keep the v11
 term.  Before update 7000 no hand is active, so the term equals v11 bit for bit.
 
-It is a separate recipe revision with its own task.  Stage gates, evaluators
-and the exporter accept it when its lineage is release-eligible: a fresh chain,
-or the recorded switch at the gated canonical model_7099
-(``microban_teleop_v12_hand_pose_release_lineage``).  The experimental switch
-from any other v11 checkpoint stays evidence-only.
+It is the recipe every PICO chain trains (its own revision and task,
+``scripts/train_microban_teleop_v12.sh``); the canonical v11 task remains only
+as the base of this one and of the canonical rescues.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
@@ -35,17 +32,11 @@ from mjlab_microban.robot.microban_hand_fk import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MicrobanTeleopV12RlCfg,
-    MicrobanTeleopV12RunnerCfg,
     make_microban_teleop_v12_env_cfg,
 )
 
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID = (
     "Mjlab-Teleop-V12-HandPoseRelease-Microban"
-)
-# Checkpoint infos key written only when a run switched an existing v11
-# checkpoint to this recipe (an experiment); a fresh chain never carries it.
-MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_SWITCH_INFO_KEY = (
-    "microban_teleop_v12_experimental_recipe_switch"
 )
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_ARM_JOINT_NAMES = tuple(
     tuple(f"{side}_{joint}" for joint in MICROBAN_ARM_JOINT_ORDER)
@@ -157,27 +148,7 @@ def make_microban_teleop_v12_hand_pose_release_env_cfg(
     return cfg
 
 
-@dataclass
-class MicrobanTeleopV12HandPoseReleaseRunnerCfg(MicrobanTeleopV12RunnerCfg):
-    """Adds the explicit recipe-switch options for resuming a v11 checkpoint."""
-
-    # Resuming a v11 checkpoint into this recipe mixes two recipes in one
-    # lineage.  It is refused unless this flag is set, and every save of such a
-    # run records a not-for-release switch marker.  A fresh chain leaves it off.
-    experimental_recipe_switch: bool = False
-    # Release-eligible switch: the stage gate (path + SHA-256) of the pinned
-    # canonical model_7099 being resumed.  Every save records the parent and
-    # gate, re-validated by every consumer.  Exclusive with the experiment flag.
-    release_recipe_switch_gate: str = ""
-    release_recipe_switch_gate_sha256: str = ""
-
-
-MicrobanTeleopV12HandPoseReleaseRlCfg = MicrobanTeleopV12HandPoseReleaseRunnerCfg(
-    **{
-        name: deepcopy(getattr(MicrobanTeleopV12RlCfg, name))
-        for name in MicrobanTeleopV12RlCfg.__dataclass_fields__
-    }
-)
+MicrobanTeleopV12HandPoseReleaseRlCfg = deepcopy(MicrobanTeleopV12RlCfg)
 MicrobanTeleopV12HandPoseReleaseRlCfg.wandb_project = (
     "mjlab_microban_teleop_v12_hand_pose_release"
 )

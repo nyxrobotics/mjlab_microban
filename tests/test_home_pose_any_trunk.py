@@ -101,6 +101,7 @@ UNREGISTERED_TASKS = frozenset({
     "Mjlab-Teleop-Microban",
     "Mjlab-Teleop-Upright-Fullbody-Microban",
     "Mjlab-Teleop-V12-Preview-Microban",
+    "Mjlab-Teleop-V12-Microban",
 })
 
 
@@ -108,7 +109,6 @@ UNREGISTERED_TASKS = frozenset({
 # by diffing the full dumps (tests/home_equivalence.py dump) before and after
 # the change: an RL config entry differs only by the removed runner options.
 _V12_TASKS = (
-    "Mjlab-Teleop-V12-Microban",
     "Mjlab-Teleop-V12-HandPoseRelease-Microban",
     "Mjlab-Teleop-V12-Corner-Rescue-Microban",
     "Mjlab-Teleop-V12-HandPoseRelease-Corner-Rescue-Microban",
@@ -117,9 +117,12 @@ _V12_TASKS = (
 )
 INTENDED_CHANGES = {
     **{
-        f"task:{task}:rl": "runner options of the deleted consumer, preview and "
-        "deadline-fallback modes removed (checkpoint_consumer_mode, "
-        "simulation_preview_mode, deadline_fallback_resume*)"
+        f"task:{task}:rl": "runner options of the deleted consumer, preview, "
+        "deadline-fallback and recipe-switch modes removed "
+        "(checkpoint_consumer_mode, simulation_preview_mode, "
+        "deadline_fallback_resume*, experimental_recipe_switch, "
+        "release_recipe_switch_gate*; the pose-release tasks use the v12 runner "
+        "config class)"
         for task in _V12_TASKS
     },
     "const:mjlab_microban.scripts.evaluate_teleop_v12_tracking.TRACKING_PROFILES": (
@@ -132,7 +135,7 @@ INTENDED_CHANGES = {
         "deadline-fallback final profile removed"
     ),
     "const:mjlab_microban.scripts.export_teleop_v12_deployment._BOUNDARY_GATE_INHERITED_INFO_KEYS": (
-        "left/right-order migration marker removed (no checkpoint migration)"
+        "left/right-order migration and recipe-switch markers removed"
     ),
 }
 
@@ -241,7 +244,6 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                 " 'root': HOME.root_pos, 'quat': HOME.root_quat_wxyz, 'g': HOME.projected_gravity,"
                 " 'head': HOME.head_standing_height_m, 'feet': HOME.feet_lateral_m,"
                 " 'robot': c.robot_contract_strings(), 'getup_legacy': c.GETUP_LEGACY_STAMP,"
-                " 'switch': c.V12_POSE_RELEASE_SWITCH_PARENT_SHA256,"
                 " 'unstamped': c.ACCEPTS_UNSTAMPED_WALK_CHECKPOINTS}))",
             )
         )
@@ -287,7 +289,6 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
             },
         )
         self.assertIsNone(result["getup_legacy"])
-        self.assertIsNone(result["switch"])
         self.assertFalse(result["unstamped"])
 
     def test_fixture_is_the_balance_tool_output(self):
@@ -357,8 +358,7 @@ class DerivedHomeStringsTest(unittest.TestCase):
                         " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION,"
                         " 'corner': c.V12_CORNER_RESCUE_RECIPE_REVISION,"
                         " 'pr_final': [c.V12_PR_FINAL_RESCUE_MARKER_REVISION,"
-                        " c.V12_PR_FINAL_RESCUE_SAMPLER_REVISION],"
-                        " 'switch': c.V12_POSE_RELEASE_SWITCH_PARENT_SHA256}))",
+                        " c.V12_PR_FINAL_RESCUE_SAMPLER_REVISION]}))",
                     )
                 )
                 tag = result["tag"]
@@ -367,7 +367,6 @@ class DerivedHomeStringsTest(unittest.TestCase):
                 self.assertEqual(result["walk"], f"{version}_{tag}_servo_range")
                 self.assertEqual(result["getup"], f"{'v5' if pitch == 0.0 else 'v6'}_{tag}")
                 self.assertIsNone(result["legacy"])
-                self.assertIsNone(result["switch"])
                 self.assertTrue(result["recipe"].startswith(f"{tag}_velocity_source_"))
                 self.assertEqual(
                     result["recipe"].endswith("_v11"), pitch == 0.0, result["recipe"]

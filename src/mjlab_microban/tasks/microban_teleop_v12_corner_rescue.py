@@ -677,18 +677,15 @@ def validate_corner_rescue_canonical_lineage(
     infos: Mapping[str, Any],
     *,
     iteration: int,
-    allow_hand_pose_release_recipe: bool = False,
 ) -> dict[str, Any] | None:
     """Accept only the final rescue checkpoint or a marked canonical descendant.
 
     Intermediate rescue checkpoints are intentionally not consumable.  The first
     ordinary runner save after resuming model9999 returns to the canonical recipe
     while retaining the immutable historical marker.  A checkpoint of the
-    active-hand arm pose-release recipe is accepted when its lineage is
-    release-eligible (fresh chain, or the recorded model_7099 switch whose
-    parent checkpoint and stage gate are re-validated here); with
-    ``allow_hand_pose_release_recipe`` the experimental switch is accepted too.
-    It never carries a rescue, so the result is ``None``.
+    active-hand arm pose-release recipe is accepted when its pose-release
+    lineage is valid; it returns the pose-release corner marker it carries, if
+    any.
     """
 
     if not isinstance(infos, Mapping):
@@ -733,11 +730,7 @@ def validate_corner_rescue_canonical_lineage(
             hand_pose_release_lineage,
         )
 
-        hand_pose_release_lineage(
-            infos,
-            iteration=iteration,
-            allow_experimental=allow_hand_pose_release_recipe,
-        )
+        hand_pose_release_lineage(infos, iteration=iteration)
         # A pose-release corner rescue (its model_9999 or a descendant) carries
         # the validated pose-release marker forward; a plain chain has none.
         return None if marker is None else validate_corner_rescue_lineage_marker(marker)

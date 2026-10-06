@@ -1231,7 +1231,6 @@ def run_evaluation(
     steps: int,
     settle_steps: int,
     allow_corner_rescue: bool = False,
-    allow_hand_pose_release_recipe: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -1245,7 +1244,6 @@ def run_evaluation(
         checkpoint,
         device=device,
         allow_corner_rescue=allow_corner_rescue,
-        allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
     )
     completed = iteration + 1
     if allow_corner_rescue:
@@ -1322,9 +1320,7 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
             "reachable_hand_target_fk": microban_hand_fk_metadata(),
-            **hand_pose_release_report_settings(
-                infos, allow_experimental=allow_hand_pose_release_recipe
-            ),
+            **hand_pose_release_report_settings(infos),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -1369,15 +1365,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="require the authenticated final model9999 corner-rescue checkpoint",
     )
-    parser.add_argument(
-        "--allow-hand-pose-release-recipe",
-        action="store_true",
-        help=(
-            "require a hand pose-release checkpoint and also accept its "
-            "experimental (not release-eligible) recipe switch; release-eligible "
-            "pose-release lineages need no flag (same clock profiles)"
-        ),
-    )
     return parser
 
 
@@ -1392,7 +1379,6 @@ def main(argv: list[str] | None = None) -> int:
         steps=args.steps,
         settle_steps=args.settle_steps,
         allow_corner_rescue=args.allow_corner_rescue,
-        allow_hand_pose_release_recipe=args.allow_hand_pose_release_recipe,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

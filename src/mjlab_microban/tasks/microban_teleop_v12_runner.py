@@ -447,10 +447,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
         ):
             raise ValueError("Checkpoint is not contract-v12")
-        validate_teleop_v12_home_pose(
-            infos,
-            allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
-        )
+        validate_teleop_v12_home_pose(infos)
         if (
             infos.get("microban_teleop_recipe_revision")
             == MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
@@ -462,9 +459,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 "(Mjlab-Teleop-V12-HandPoseRelease-Microban)"
             )
         corner_rescue = validate_corner_rescue_canonical_lineage(
-            infos,
-            iteration=iteration,
-            allow_hand_pose_release_recipe=self.accepts_hand_pose_release_recipe,
+            infos, iteration=iteration
         )
         if infos.get("microban_teleop_recipe_revision") == (
             MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION

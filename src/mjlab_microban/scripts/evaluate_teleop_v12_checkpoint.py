@@ -92,9 +92,7 @@ def _actor(device: str) -> LegacyAdapterTeleopActor:
     ).to(device)
 
 
-def hand_pose_release_report_settings(
-    infos: dict[str, Any], *, allow_experimental: bool = False
-) -> dict[str, Any]:
+def hand_pose_release_report_settings(infos: dict[str, Any]) -> dict[str, Any]:
     """Report fields that label a pose-release checkpoint's evidence (or none)."""
 
     if infos.get("microban_teleop_recipe_revision") != (
@@ -102,28 +100,12 @@ def hand_pose_release_report_settings(
     ):
         return {}
     from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-        HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH,
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY,
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
         hand_pose_release_lineage,
     )
 
-    # The loader already re-validated the lineage including the parent files.
-    lineage = hand_pose_release_lineage(
-        infos, allow_experimental=allow_experimental, verify_parent=False
-    )
     return {
         "recipe_revision": infos.get("microban_teleop_recipe_revision"),
-        "hand_pose_release_lineage": lineage,
-        "experimental_recipe_switch": infos.get(
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_EXPERIMENTAL_SWITCH_INFO_KEY
-        ),
-        "release_recipe_switch": infos.get(
-            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY
-        ),
-        "canonical_stage_gate_accepts_recipe": (
-            lineage != HAND_POSE_RELEASE_LINEAGE_EXPERIMENTAL_SWITCH
-        ),
+        "hand_pose_release_lineage": hand_pose_release_lineage(infos),
     }
 
 
@@ -132,7 +114,6 @@ def _load_actor(
     *,
     device: str,
     allow_corner_rescue: bool = False,
-    allow_hand_pose_release_recipe: bool = False,
 ) -> tuple[LegacyAdapterTeleopActor, int, dict[str, Any]]:
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
@@ -142,24 +123,12 @@ def _load_actor(
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
         raise ValueError("Checkpoint iteration is invalid")
     expected_step = 0 if iteration == -1 else (iteration + 1) * 24
-    if allow_corner_rescue and allow_hand_pose_release_recipe:
-        raise ValueError("Corner rescue and hand pose release are exclusive")
-    if allow_hand_pose_release_recipe and infos.get(
-        "microban_teleop_recipe_revision"
-    ) != (MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION):
-        raise ValueError(
-            "--allow-hand-pose-release-recipe requires a hand pose-release checkpoint"
-        )
     if infos.get("microban_teleop_training_contract_version") != "12":
         raise ValueError("Checkpoint is not contract-v12")
-    validate_teleop_v12_home_pose(
-        infos, allow_hand_pose_release_recipe=allow_hand_pose_release_recipe
-    )
+    validate_teleop_v12_home_pose(infos)
     require_bilateral_site_order(infos)
     corner_lineage = validate_corner_rescue_canonical_lineage(
-        infos,
-        iteration=iteration,
-        allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
+        infos, iteration=iteration
     )
     is_final_corner_rescue = infos.get("microban_teleop_recipe_revision") == (
         MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
@@ -253,7 +222,6 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
-    allow_hand_pose_release_recipe: bool = False,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -263,11 +231,7 @@ def run_evaluation(
         raise ValueError("Canonical v12 gate requires seed42, 300 steps, settle50")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
-    policy, iteration, _infos = _load_actor(
-        checkpoint,
-        device=device,
-        allow_hand_pose_release_recipe=allow_hand_pose_release_recipe,
-    )
+    policy, iteration, _infos = _load_actor(checkpoint, device=device)
 
     source_env = ManagerBasedRlEnv(
         cfg=_source_cfg(seed=seed, steps=steps), device=device
@@ -364,9 +328,7 @@ def run_evaluation(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "policy_observation_width": 83,
-            **hand_pose_release_report_settings(
-                _infos, allow_experimental=allow_hand_pose_release_recipe
-            ),
+            **hand_pose_release_report_settings(_infos),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -412,15 +374,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--allow-hand-pose-release-recipe",
-        action="store_true",
-        help=(
-            "require a hand pose-release checkpoint and also accept its "
-            "experimental (not release-eligible) recipe switch; release-eligible "
-            "pose-release lineages need no flag"
-        ),
-    )
     return parser
 
 
@@ -433,7 +386,6 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
-        allow_hand_pose_release_recipe=args.allow_hand_pose_release_recipe,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

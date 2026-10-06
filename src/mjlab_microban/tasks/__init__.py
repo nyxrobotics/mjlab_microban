@@ -29,11 +29,6 @@ from mjlab_microban.tasks.microban_teleop_v12_final_rescue import (
 from mjlab_microban.tasks.microban_teleop_v12_final_rescue_runner import (
     MicrobanTeleopV12FinalRescueOnPolicyRunner,
 )
-from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-    MICROBAN_TELEOP_V12_TASK_ID,
-    MicrobanTeleopV12RlCfg,
-    make_microban_teleop_v12_env_cfg,
-)
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     MicrobanTeleopV12HandPoseReleaseRlCfg,
@@ -42,7 +37,6 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_runner import (
     MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
 )
-from mjlab_microban.tasks.microban_teleop_v12_runner import MicrobanTeleopV12OnPolicyRunner
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     MicrobanVelocityRlCfg,
     make_microban_velocity_env_cfg,
@@ -102,16 +96,8 @@ register_mjlab_task(
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_TASK_ID,
-    env_cfg=make_microban_teleop_v12_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopV12RlCfg,
-    runner_cls=MicrobanTeleopV12OnPolicyRunner,
-)
-
-# Successor recipe (active-hand arms leave the HOME pose reward).  Gates and the
-# exporter accept its release-eligible lineages; see the module docstring.
+# PICO v12: the active-hand arm pose-release recipe (every chain trains it;
+# scripts/train_microban_teleop_v12.sh).
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(),

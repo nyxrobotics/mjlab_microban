@@ -145,14 +145,11 @@ FEET_LATERAL_DECIMALS = 4
 #   on that branch (the centered line kept the wide (0.2, 0.6) default; the
 #   forward-lean line, and any new HOME, use NEAR_HOME_RESET (0.1, 0.09));
 # * ``accepts_unstamped_walk_checkpoints``: walking checkpoints saved before
-#   the HOME stamp existed (centered line only);
-# * ``v12_pose_release_switch_parent_sha256``: the pinned canonical model_7099
-#   of the release-eligible pose-release recipe switch (centered line only;
-#   every other HOME trains the pose-release recipe as a fresh chain).
+#   the HOME stamp existed (centered line only).
 #
 # Any edit of the HOME changes the hash and drops all of this: strings then
-# carry "<label>_<hash>", targets are the FK values, no unstamped or switched
-# checkpoint is accepted.
+# carry "<label>_<hash>", targets are the FK values, no unstamped checkpoint is
+# accepted.
 JOINT_PIN_TOLERANCE_DEG = 1.0e-9
 
 CENTERED_HOME_HASH = "bbef07cab8"
@@ -294,12 +291,6 @@ LEGACY_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
                 # the 0.040 m allowance of forward-lean-v2 e3271de / ec67f1e
                 # does not exist at this HOME.
                 "v12_hand_rms_40mm_boundary_profiles": False,
-                "v12_pose_release_switch_parent_sha256": (
-                    # The gated canonical centered-HOME v12 model_7099 (run
-                    # 2026-10-04_10-18-35_c20k_v12_7000_to7100, source walking
-                    # model_20000).
-                    "366763f233f30947554c2f66c5619a8b8c1230ac8529f17740fb1d27cfe0d224"
-                ),
             }
         ),
         # The forward-lean HOME (trunk +10 deg) as published on the

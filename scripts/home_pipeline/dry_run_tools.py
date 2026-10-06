@@ -299,7 +299,7 @@ def corner_rescue_infos(infos: dict, *, parent_sha256: str, report_sha256: str, 
         hand_pose_release_lineage,
     )
 
-    if hand_pose_release_lineage(infos, iteration=9999, verify_parent=False) != (
+    if hand_pose_release_lineage(infos, iteration=9999) != (
             HAND_POSE_RELEASE_LINEAGE_FRESH):
         raise ValueError("stamp-corner-rescue needs a fresh pose-release chain's model_9999")
     out = dict(infos)
@@ -311,7 +311,7 @@ def corner_rescue_infos(infos: dict, *, parent_sha256: str, report_sha256: str, 
         pose_release_mix=mix,
     )
     out["dry_run_synthetic_corner_rescue"] = {**provenance, "mix": mix, "not_deployable": True}
-    if hand_pose_release_lineage(out, iteration=9999, verify_parent=False) != (
+    if hand_pose_release_lineage(out, iteration=9999) != (
             HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE):
         raise AssertionError("stamped lineage is not the pose-release corner rescue")
     return out
@@ -367,7 +367,7 @@ def final_rescue_infos(infos: dict, *, parent_sha256: str, failed_sha256: str, r
         hand_pose_release_lineage,
     )
 
-    before = hand_pose_release_lineage(infos, iteration=14999, verify_parent=False)
+    before = hand_pose_release_lineage(infos, iteration=14999)
     if before not in (HAND_POSE_RELEASE_LINEAGE_FRESH, HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_RESCUE):
         raise ValueError("stamp-final-rescue needs a fresh pose-release chain's model_14999")
     corner = infos.get(MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY)
@@ -386,7 +386,7 @@ def final_rescue_infos(infos: dict, *, parent_sha256: str, failed_sha256: str, r
     out["dry_run_synthetic_final_rescue"] = {**provenance, "mix": mix, "seed": seed, "not_deployable": True}
     expected = (HAND_POSE_RELEASE_LINEAGE_FRESH_FINAL_RESCUE if corner is None
                 else HAND_POSE_RELEASE_LINEAGE_FRESH_CORNER_FINAL_RESCUE)
-    if hand_pose_release_lineage(out, iteration=14999, verify_parent=False) != expected:
+    if hand_pose_release_lineage(out, iteration=14999) != expected:
         raise AssertionError("stamped lineage is not the pose-release final rescue")
     return out
 

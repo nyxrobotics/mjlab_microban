@@ -61,17 +61,11 @@ def teleop_v12_home_pose_marker() -> dict[str, Any]:
     }
 
 
-def validate_teleop_v12_home_pose(
-    infos: Mapping[str, Any], *, allow_hand_pose_release_recipe: bool = False
-) -> dict[str, Any]:
+def validate_teleop_v12_home_pose(infos: Mapping[str, Any]) -> dict[str, Any]:
     """Reject old or relabeled checkpoints before loading actor or optimizer state.
 
-    The active-hand arm pose-release recipe is accepted when its lineage is
-    release-eligible (a fresh pose-release chain, or the recorded switch at the
-    gated canonical model_7099; checked structurally here, with the parent files
-    re-validated by the lineage validators).  ``allow_hand_pose_release_recipe``
-    additionally accepts the evidence-only experimental switch; only its own
-    runner and explicitly flagged evaluators pass it.
+    A checkpoint of the active-hand arm pose-release recipe must have a valid
+    pose-release lineage (microban_teleop_v12_hand_pose_release_lineage).
     """
 
     if not isinstance(infos, Mapping):
@@ -105,11 +99,7 @@ def validate_teleop_v12_home_pose(
             hand_pose_release_lineage,
         )
 
-        hand_pose_release_lineage(
-            infos,
-            allow_experimental=allow_hand_pose_release_recipe,
-            verify_parent=False,
-        )
+        hand_pose_release_lineage(infos)
     elif recipe != MICROBAN_TELEOP_V12_RECIPE_REVISION and not (
         recipe == MICROBAN_TELEOP_V12_CORNER_RESCUE_RECIPE_REVISION
         and isinstance(rescue, Mapping)

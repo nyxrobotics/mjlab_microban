@@ -96,7 +96,6 @@ def validate_hand_pose_release_final_rescue_parent_payload(
     lineage = hand_pose_release_lineage(
         infos,
         iteration=MICROBAN_TELEOP_V12_FINAL_RESCUE_PARENT_ITERATION,
-        verify_parent=False,
     )
     if lineage not in (
         HAND_POSE_RELEASE_LINEAGE_FRESH,
@@ -284,8 +283,6 @@ class MicrobanTeleopV12HandPoseReleaseFinalRescueOnPolicyRunner(
             raise ValueError("Final rescue parent or its report changed while loading")
         if self.teleop_v12_corner_rescue != corner:
             raise RuntimeError("Final rescue inherited corner lineage drifted on load")
-        if self.teleop_v12_hand_pose_release_switch is not None:
-            raise RuntimeError("Pose-release final rescue parent carried a recipe switch")
         self._final_rescue_marker = hand_pose_release_final_rescue_marker(
             parent_checkpoint_sha256=before,
             failed_gate_checkpoint_sha256=failed["checkpoint_sha256"],

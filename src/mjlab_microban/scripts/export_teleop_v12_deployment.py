@@ -79,9 +79,6 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_lineage import (
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
-)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
@@ -474,7 +471,6 @@ _BOUNDARY_GATE_SHARED_INFO_KEYS = (
 # Markers a boundary checkpoint may carry; a descendant carries them unchanged.
 _BOUNDARY_GATE_INHERITED_INFO_KEYS = (
     MICROBAN_TELEOP_V12_CORNER_RESCUE_INFO_KEY,
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_SWITCH_INFO_KEY,
 )
 
 
@@ -682,7 +678,7 @@ def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
         )
 
         # Refuses the experimental switch (no allow flag here).
-        hand_pose_release_lineage(infos, verify_parent=False)
+        hand_pose_release_lineage(infos)
         return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
     return MICROBAN_TELEOP_V12_RECIPE_REVISION
 
