@@ -60,6 +60,19 @@ from mjlab_microban.scripts.teleop_v12_stage import (
     pose_release_final_rescue_gate_marker,
     validate_gate,
 )
+from mjlab_microban.scripts.teleop_v12_user_waiver import (
+    USER_WAIVER_CHECKPOINT_SHA256,
+    USER_WAIVER_GATE_STATUS,
+    USER_WAIVER_MAXIMUM_EXPECTED_OUTPUT,
+    USER_WAIVER_ONNX_BOUND_RATIO,
+    USER_WAIVER_ONNX_SAMPLE_INDEX,
+    USER_WAIVER_REVISION,
+    USER_WAIVER_TRACKING_PROFILE,
+    is_user_waiver_gate,
+    recorded_corpus_parity,
+    user_waiver_record,
+    validate_user_waiver_gate,
+)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -490,10 +503,13 @@ def _require_final_gate(
     checkpoint_sha256: str,
     expected_tracking_profile: str | None = None,
 ) -> None:
+    # The one provisional user-waiver gate (teleop_v12_user_waiver) is not a
+    # pass; it is accepted only with its exact record, profile and checkpoint.
+    waiver = is_user_waiver_gate(gate)
     expected = {
         "schema_version": 2,
         "gate": "microban_teleop_v12_stage",
-        "status": "pass",
+        "status": USER_WAIVER_GATE_STATUS if waiver else "pass",
         "checkpoint_sha256": checkpoint_sha256,
         "iteration": FINAL_ITERATION,
         "completed_updates": FINAL_COMPLETED_UPDATES,
@@ -502,7 +518,20 @@ def _require_final_gate(
     }
     mismatches = [name for name, value in expected.items() if gate.get(name) != value]
     tracking_profile = gate.get("tracking_profile")
-    if expected_tracking_profile is None:
+    if waiver:
+        if (
+            tracking_profile != USER_WAIVER_TRACKING_PROFILE
+            or gate.get("user_waiver") != user_waiver_record()
+            or gate.get("user_waiver_sha256")
+            != _canonical_json_sha256(user_waiver_record())
+            or checkpoint_sha256 != USER_WAIVER_CHECKPOINT_SHA256
+            or expected_tracking_profile
+            not in (None, user_waiver_record()["base_tracking_profile"])
+        ):
+            mismatches.append("user_waiver")
+    elif any(name.startswith("user_waiver") for name in gate):
+        mismatches.append("user_waiver")
+    elif expected_tracking_profile is None:
         if tracking_profile not in SUPPORTED_FINAL_TRACKING_PROFILES:
             mismatches.append("tracking_profile")
     elif tracking_profile not in {
@@ -761,7 +790,9 @@ def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
     return MICROBAN_TELEOP_V12_RECIPE_REVISION
 
 
-def _onnx_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, str]:
+def _onnx_parity_rule_metadata(
+    onnx_evidence: Mapping[str, Any], *, user_waiver: bool = False
+) -> dict[str, str]:
     """Ship the gate's norm-wise ONNX parity rule (already gate-validated).
 
     The full-83 parity bound is per sample ``atol + rtol * max|expected|``
@@ -794,13 +825,30 @@ def _onnx_parity_rule_metadata(onnx_evidence: Mapping[str, Any]) -> dict[str, st
             "onnxruntime_cpu_maximum_bound_ratio"
         ),
     }
+    # The user waiver ships exactly its two recorded random-corpus values (the
+    # gate already validated them); everything else keeps the normal limits.
+    waived = (
+        {
+            "v12_onnxruntime_cpu_max_bound_ratio": USER_WAIVER_ONNX_BOUND_RATIO,
+            "v12_onnx_parity_max_abs_expected_output": (
+                USER_WAIVER_MAXIMUM_EXPECTED_OUTPUT
+            ),
+        }
+        if user_waiver
+        else {}
+    )
     for name, value in values.items():
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(float(value))
             or float(value) < 0.0
-            or (name.endswith("_bound_ratio") and float(value) > 1.0)
+            or (name in waived and float(value) != waived[name])
+            or (
+                name.endswith("_bound_ratio")
+                and name not in waived
+                and float(value) > 1.0
+            )
         ):
             raise ValueError(f"V12 ONNX parity rule evidence is invalid: {name}")
     return {
@@ -951,6 +999,35 @@ def _lateral_fidelity_metadata(
     }
 
 
+def _user_waiver_metadata(
+    gate: Mapping[str, Any],
+    recorded_parity: Mapping[str, Any] | None,
+    *,
+    smoke_corpus_sha256: str,
+) -> dict[str, str]:
+    """Name the provisional user waiver in the package (exact record)."""
+
+    record = user_waiver_record()
+    if (
+        gate.get("user_waiver") != record
+        or recorded_parity is None
+        or dict(recorded_parity) != gate.get("user_waiver_recorded_corpus_parity")
+        or recorded_parity.get("status") != "pass"
+        or recorded_parity.get("corpus_sha256") != smoke_corpus_sha256
+    ):
+        raise ValueError(
+            "Provisional user-waiver package needs the gate's exact record and a "
+            "matching passing recorded-corpus parity"
+        )
+    return {
+        "v12_provisional_install": "true",
+        "v12_user_waiver_revision": USER_WAIVER_REVISION,
+        "v12_user_waiver_json": _json(record),
+        "v12_user_waiver_sha256": _canonical_json_sha256(record),
+        "v12_user_waiver_recorded_corpus_parity_json": _json(dict(recorded_parity)),
+    }
+
+
 def build_v12_deployment_metadata(
     *,
     checkpoint: Path,
@@ -965,11 +1042,15 @@ def build_v12_deployment_metadata(
     packager_parity: Mapping[str, float],
     microban_source_identity: Mapping[str, str],
     boundary_stage_gates: list[Mapping[str, Any]] | None = None,
+    user_waiver_recorded_corpus_parity: Mapping[str, Any] | None = None,
 ) -> dict[str, list | str | float]:
     """Translate only already-validated gate evidence to the robot wire contract.
 
     ``boundary_stage_gates`` (from ``_boundary_stage_gate_lineage``) adds the
-    profile that judged each listed earlier boundary of the lineage.
+    profile that judged each listed earlier boundary of the lineage.  A
+    provisional user-waiver gate additionally ships its exact record and the
+    packager's recorded-corpus parity (``user_waiver_recorded_corpus_parity``),
+    which must equal the gate's.
     """
 
     _require_final_gate(
@@ -1016,7 +1097,10 @@ def build_v12_deployment_metadata(
     ):
         raise TypeError("Validated v12 gate evidence is incomplete")
 
-    onnx_parity_rule_metadata = _onnx_parity_rule_metadata(onnx_evidence)
+    user_waiver = is_user_waiver_gate(gate)
+    onnx_parity_rule_metadata = _onnx_parity_rule_metadata(
+        onnx_evidence, user_waiver=user_waiver
+    )
 
     defaults = HOME_FRAME.joint_pos
     if not isinstance(defaults, Mapping):
@@ -1331,6 +1415,18 @@ def build_v12_deployment_metadata(
         metadata["v12_boundary_stage_gates_json"] = _json(
             [dict(entry) for entry in boundary_stage_gates]
         )
+    if user_waiver:
+        metadata.update(
+            _user_waiver_metadata(
+                gate,
+                user_waiver_recorded_corpus_parity,
+                smoke_corpus_sha256=str(
+                    metadata["v12_runtime_smoke_observations_sha256"]
+                ),
+            )
+        )
+    elif user_waiver_recorded_corpus_parity is not None:
+        raise ValueError("Recorded-corpus waiver parity given for an ordinary gate")
     missing = REQUIRED_V12_RUNTIME_METADATA_KEYS.difference(metadata)
     if missing:
         raise RuntimeError(
@@ -1360,7 +1456,7 @@ def _validate_graph_contract(path: Path) -> None:
 
 
 def _validate_final_parity(
-    actor: torch.nn.Module, path: Path, *, tolerance: float
+    actor: torch.nn.Module, path: Path, *, tolerance: float, user_waiver: bool = False
 ) -> dict[str, float]:
     try:
         import onnxruntime as ort
@@ -1391,8 +1487,12 @@ def _validate_final_parity(
     reference_max = 0.0
     runtime_max = 0.0
     bound_ratio = 0.0
+    # The provisional user waiver exempts only ONNX Runtime CPU on its one
+    # recorded random sample, and only up to its recorded bound ratio.
+    waived_index = USER_WAIVER_ONNX_SAMPLE_INDEX if user_waiver else None
+    waived_ratio = 0.0
     with torch.inference_mode():
-        for observation in observations:
+        for index, observation in enumerate(observations):
             batch = observation.unsqueeze(0)
             expected = export_model(batch).detach().cpu().numpy()
             (reference_actual,) = reference.run(None, {"obs": batch.numpy()})
@@ -1401,10 +1501,14 @@ def _validate_final_parity(
             runtime_error = float(np.max(np.abs(runtime_actual - expected)))
             reference_max = max(reference_max, reference_error)
             runtime_max = max(runtime_max, runtime_error)
+            runtime_ratio = parity_bound_ratio(runtime_actual, expected, atol=tolerance)
+            if index == waived_index:
+                waived_ratio = runtime_ratio
+                runtime_ratio = 0.0
             bound_ratio = max(
                 bound_ratio,
                 parity_bound_ratio(reference_actual, expected, atol=tolerance),
-                parity_bound_ratio(runtime_actual, expected, atol=tolerance),
+                runtime_ratio,
             )
     # Same per-sample atol + rtol*max|expected| rule as teleop_v12_onnx_gate.
     if (
@@ -1412,6 +1516,8 @@ def _validate_final_parity(
         or not math.isfinite(runtime_max)
         or not math.isfinite(bound_ratio)
         or bound_ratio > 1.0
+        or not math.isfinite(waived_ratio)
+        or waived_ratio > USER_WAIVER_ONNX_BOUND_RATIO
     ):
         raise ValueError(
             "Final metadata-bearing ONNX parity failed: "
@@ -1603,6 +1709,14 @@ def _reject_protected_output(output: Path, protected: Mapping[str, Path]) -> Non
         )
 
 
+def _validate_final_stage_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
+    """Full stage-gate validation, or the provisional user-waiver gate's."""
+
+    if is_user_waiver_gate(_load_json(gate_path)):
+        return validate_user_waiver_gate(gate_path, checkpoint)
+    return validate_gate(gate_path, checkpoint)
+
+
 def package_v12_deployment(
     *,
     checkpoint: Path,
@@ -1632,9 +1746,10 @@ def package_v12_deployment(
 
     gate_snapshot = _load_json(gate_path)
     gate_sha256 = sha256_file(gate_path)
-    gate = validate_gate(gate_path, checkpoint)
+    gate = _validate_final_stage_gate(gate_path, checkpoint)
     if gate != gate_snapshot or sha256_file(gate_path) != gate_sha256:
         raise RuntimeError("V12 stage gate changed while it was validated")
+    user_waiver = is_user_waiver_gate(gate)
     checkpoint_sha256 = sha256_file(checkpoint)
     _require_final_gate(
         gate, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256
@@ -1737,7 +1852,10 @@ def package_v12_deployment(
         _export_onnx_atomic(actor, temporary)
         _validate_graph_contract(temporary)
         initial_parity = _validate_final_parity(
-            actor, temporary, tolerance=parity_tolerance
+            actor, temporary, tolerance=parity_tolerance, user_waiver=user_waiver
+        )
+        waiver_recorded_parity = (
+            recorded_corpus_parity(actor, temporary, tracking) if user_waiver else None
         )
         metadata = build_v12_deployment_metadata(
             checkpoint=checkpoint,
@@ -1752,6 +1870,7 @@ def package_v12_deployment(
             packager_parity=initial_parity,
             microban_source_identity=microban_source_identity,
             boundary_stage_gates=boundary_stage_gates,
+            user_waiver_recorded_corpus_parity=waiver_recorded_parity,
         )
         existing = _read_onnx_metadata(temporary)
         overlap = set(existing).intersection(metadata)
@@ -1771,8 +1890,12 @@ def package_v12_deployment(
                 )
         _validate_graph_contract(temporary)
         final_parity = _validate_final_parity(
-            actor, temporary, tolerance=parity_tolerance
+            actor, temporary, tolerance=parity_tolerance, user_waiver=user_waiver
         )
+        if user_waiver and (
+            recorded_corpus_parity(actor, temporary, tracking) != waiver_recorded_parity
+        ):
+            raise RuntimeError("Recorded-corpus parity changed with the metadata")
         runtime_report = _run_microban_runtime_validator(
             temporary, microban_repo=microban_repo
         )
@@ -1782,7 +1905,7 @@ def package_v12_deployment(
             raise RuntimeError("Checkpoint changed while deployment was packaged")
         if sha256_file(gate_path) != gate_sha256:
             raise RuntimeError("V12 stage gate changed while deployment was packaged")
-        if validate_gate(gate_path, checkpoint) != gate:
+        if _validate_final_stage_gate(gate_path, checkpoint) != gate:
             raise RuntimeError("V12 gate/report lineage changed before publication")
         if (
             _boundary_stage_gate_lineage(
@@ -1819,6 +1942,16 @@ def package_v12_deployment(
             "stage_gate_sha256": gate_sha256,
             "completed_updates": FINAL_COMPLETED_UPDATES,
             "boundary_stage_gates": boundary_stage_gates,
+            "stage_gate_status": gate["status"],
+            "tracking_profile": gate["tracking_profile"],
+            **(
+                {
+                    "user_waiver": gate["user_waiver"],
+                    "user_waiver_recorded_corpus_parity": waiver_recorded_parity,
+                }
+                if user_waiver
+                else {}
+            ),
             "parity": final_parity,
             "microban_runtime_source_identity": microban_source_identity,
             "microban_runtime_validator": runtime_report,

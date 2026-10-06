@@ -50,6 +50,8 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
 # float32 ulps, far below any real export defect (O(1e-3) and above).
 ONNX_PARITY_RELATIVE_TOLERANCE = 1.0e-6
 ONNX_PARITY_RULE = "max_abs_error_le_atol_plus_rtol_times_max_abs_expected_per_sample_v1"
+ONNX_REFERENCE_PARITY_CHECK = "reference_evaluator_full83_parity"
+ONNX_RUNTIME_CPU_PARITY_CHECK = "onnxruntime_cpu_full83_parity"
 
 
 def parity_bound_ratio(
@@ -67,7 +69,17 @@ def run_gate(
     expected_sha256: str | None,
     onnx_path: Path,
     allow_deadline_fallback: bool = False,
+    record_parity_failure: bool = False,
 ) -> dict[str, object]:
+    """Run the gate; raise on any failure.
+
+    ``record_parity_failure`` (user-waiver evidence only, never a stage gate:
+    ``teleop_v12_stage`` accepts only ``status == "pass"``) returns a
+    ``status: "fail"`` report naming the failed full-83 parity check, with the
+    per-sample errors, bound ratios and output magnitudes, instead of raising
+    when a finite parity ratio exceeds 1.  Neutral legacy parity, export and
+    non-finite results still raise.
+    """
     try:
         import onnxruntime as ort
     except ImportError as exc:
@@ -169,20 +181,29 @@ def run_gate(
     reference_ratio = max(reference_ratios)
     runtime_ratio = max(runtime_ratios)
     expected_max = max(expected_magnitudes)
-    if not all(
+    finite = all(
         np.isfinite(value)
         for value in (reference_max, runtime_max, reference_ratio, runtime_ratio)
-    ) or (reference_ratio > 1.0 or runtime_ratio > 1.0):
+    )
+    failed_checks = [
+        name
+        for name, ratio in (
+            (ONNX_REFERENCE_PARITY_CHECK, reference_ratio),
+            (ONNX_RUNTIME_CPU_PARITY_CHECK, runtime_ratio),
+        )
+        if ratio > 1.0
+    ]
+    if not finite or (failed_checks and not record_parity_failure):
         raise ValueError(
             "ONNX parity failed: "
             f"reference={reference_max} (bound ratio {reference_ratio}), "
             f"onnxruntime_cpu={runtime_max} (bound ratio {runtime_ratio}), "
             f"max |expected|={expected_max}"
         )
-    return {
+    report: dict[str, object] = {
         "schema_version": 1,
         "gate": "microban_teleop_v12_checkpoint_onnx",
-        "status": "pass",
+        "status": "fail" if failed_checks else "pass",
         "checkpoint": {
             "path": str(checkpoint),
             "sha256": checkpoint_digest,
@@ -216,6 +237,17 @@ def run_gate(
             "onnxruntime_cpu_maximum_bound_ratio": runtime_ratio,
         },
     }
+    if record_parity_failure:
+        report["parity_failure_recording"] = True
+        report["failed_checks"] = failed_checks
+        report["onnx"]["per_sample"] = {  # type: ignore[index]
+            "reference_evaluator_absolute_errors": reference_errors,
+            "onnxruntime_cpu_absolute_errors": runtime_errors,
+            "reference_evaluator_bound_ratios": reference_ratios,
+            "onnxruntime_cpu_bound_ratios": runtime_ratios,
+            "maximum_absolute_expected_outputs": expected_magnitudes,
+        }
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -229,6 +261,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--deadline-fallback",
         action="store_true",
         help="accept only a corner-rescue model9999 deadline-fallback checkpoint",
+    )
+    parser.add_argument(
+        "--record-parity-failure",
+        action="store_true",
+        help=(
+            "write a status=fail report with per-sample parity evidence instead "
+            "of raising on a full-83 parity miss (user-waiver evidence only; "
+            "never accepted by a stage gate)"
+        ),
     )
     return parser
 
@@ -245,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_sha256=args.expected_sha256,
         onnx_path=args.onnx.expanduser().resolve(),
         allow_deadline_fallback=args.deadline_fallback,
+        record_parity_failure=args.record_parity_failure,
     )
     if args.output is not None:
         publish_json_atomic(args.output, report)
