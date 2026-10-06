@@ -228,6 +228,96 @@ class HomeYamlGuardTest(unittest.TestCase):
             finally:
                 pipeline.HOME_YAML = original
 
+    def test_an_edit_while_a_job_runs_stops_at_its_end(self):
+        """Verifier round 3: a job loads the YAML seconds after it starts."""
+
+        with tempfile.TemporaryDirectory() as d:
+            yaml_path = Path(d) / "home_pose.yaml"
+            yaml_path.write_text("a: 1\n")
+            original = pipeline.HOME_YAML
+            pipeline.HOME_YAML = yaml_path
+            try:
+                p = make_pipeline(Path(d))
+                p.yaml_sha256 = pipeline.sha256(yaml_path)
+                with self.assertRaises(pipeline.HomeYamlChanged) as raised:
+                    p.run("job", ["sh", "-c", f"echo 'a: 2' > {yaml_path}"], "cpu")
+                self.assertGreater(raised.exception.edit_time, 0)
+                self.assertIsNotNone(p.job_log[-1]["ended"])
+            finally:
+                pipeline.HOME_YAML = original
+
+    def test_output_of_jobs_that_may_have_loaded_the_edit_is_quarantined(self):
+        import os
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            saved = (pipeline.LOG_ROOT, pipeline.GATE_ROOT, pipeline.PROBE_ROOT)
+            pipeline.LOG_ROOT = root / "logs" / "rsl_rl"
+            pipeline.GATE_ROOT = root / "artifacts" / "teleop_v12_gates"
+            pipeline.PROBE_ROOT = root / "artifacts" / "legacy_teleop_probe"
+            try:
+                state = root / "state"
+                (state / "pico").mkdir(parents=True)
+                p = make_pipeline(state)
+                now = time.time()
+                exp = pipeline.LOG_ROOT / "mjlab_microban_teleop_v12"
+                for name, t in (("old_run", now - 7200), ("long_run", now - 3600), ("new_run", now - 20)):
+                    (exp / name).mkdir(parents=True)
+                    (exp / name / "params.yaml").write_text("x")
+                    os.utime(exp / name / "params.yaml", (t, t))
+                (exp / "long_run" / "model_5.pt").write_text("x")  # still written after the edit
+                pipeline.GATE_ROOT.mkdir(parents=True)
+                (pipeline.GATE_ROOT / "old_gate.json").write_text("{}")
+                os.utime(pipeline.GATE_ROOT / "old_gate.json", (now - 7200, now - 7200))
+                (pipeline.GATE_ROOT / "new_gate.json").write_text("{}")
+                (state / "pico" / "new_report.json").write_text("{}")
+                p.job_log = [
+                    {"name": "done_before", "started": now - 7300, "ended": now - 7000},
+                    {"name": "long", "started": now - 3600, "ended": None},  # loaded the HOME long ago
+                    {"name": "racer", "started": now - 25, "ended": now - 5},  # loaded the edit
+                ]
+                p.quarantine_after_yaml_change(now - 22)
+                left = sorted(x.name for x in exp.iterdir())
+                self.assertEqual(left, ["long_run", "old_run"])
+                self.assertEqual(sorted(x.name for x in pipeline.GATE_ROOT.iterdir()), ["old_gate.json"])
+                self.assertFalse((state / "pico" / "new_report.json").exists())
+                record = next(iter(p.get("quarantined").values()))
+                self.assertEqual(record["jobs"], ["racer"])
+                self.assertEqual(len(record["moved"]), 3)
+                quarantine = next((state / "quarantine").iterdir())
+                self.assertTrue((quarantine / "rsl_rl" / "mjlab_microban_teleop_v12" / "new_run").is_dir())
+                # No job in the load window: nothing is moved.
+                p.job_log = [{"name": "long", "started": now - 3600, "ended": None}]
+                p.quarantine_after_yaml_change(now)
+                self.assertEqual(sorted(x.name for x in exp.iterdir()), ["long_run", "old_run"])
+            finally:
+                pipeline.LOG_ROOT, pipeline.GATE_ROOT, pipeline.PROBE_ROOT = saved
+
+
+class StaleStopTest(unittest.TestCase):
+    def test_a_resumed_run_moves_the_old_stop_to_history(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "state"
+            state.mkdir()
+            (state / "state.json").write_text(json.dumps({
+                "stopped": {"at": "x", "code": 1, "reason": "old"}, "dry_run": False, "prefix": "home_x",
+                "home_identity": {"joint_hash": "h", "label": "l", "tag": "t"}}))
+            yaml_path = Path(d) / "home_pose.yaml"
+            yaml_path.write_text("a: 1\n")
+            original = pipeline.HOME_YAML
+            pipeline.HOME_YAML = yaml_path
+            try:
+                p = make_pipeline(None, "--state-dir", str(state))
+                p.capture = lambda cmd, **kw: unittest.mock.Mock(
+                    returncode=0, stdout=json.dumps({"tag": "t", "joint_hash": "h", "label": "l"}), stderr="")
+                p.open_state()
+            finally:
+                pipeline.HOME_YAML = original
+            saved = json.loads((state / "state.json").read_text())
+            self.assertNotIn("stopped", saved)
+            self.assertEqual(saved["previous_stops"], [{"at": "x", "code": 1, "reason": "old"}])
+
 
 class PreflightTest(unittest.TestCase):
     def robot(self, d: Path, *, reads_yaml: bool) -> Path:
@@ -441,7 +531,8 @@ class CornerRescueMixesTest(unittest.TestCase):
         (self.v12 / "first" / "model_9900.pt").write_bytes(b"parent")
         (self.v12 / "first" / "model_9999.pt").write_bytes(b"first")
         (root / "state" / "pico").mkdir()
-        (root / "state" / "pico" / "first_model_9900_strict_tracking.json").write_text("{}")
+        (root / "state" / "pico" / "first_model_9900_strict_tracking.json").write_text(
+            json.dumps({"profile": pipeline.V12_RESCUE_PARENT_PROFILE}))
         self.p.check_recipe = lambda run, end: None
         self.p.ensure_committed_tree = lambda: self.trained.append("commit")
         self.trained: list = []
@@ -498,6 +589,34 @@ class CornerRescueMixesTest(unittest.TestCase):
     def test_no_model_9900(self):
         (self.v12 / "first" / "model_9900.pt").unlink()
         self.assertIsNone(self.p.corner_rescues("first", 1))
+
+    def test_parent_report_uses_the_strict_profile_the_validator_requires(self):
+        """Without --profile the evaluator writes the deployed-accuracy profile at 9901, which
+        validate_hand_pose_release_corner_rescue_parent_report refuses (verifier round 3)."""
+
+        from mjlab_microban.scripts.evaluate_teleop_v12_tracking import HMD_HAND_PROFILE
+
+        self.assertEqual(pipeline.V12_RESCUE_PARENT_PROFILE, HMD_HAND_PROFILE)
+        report = Path(self.tmp.name) / "state" / "pico" / "first_model_9900_strict_tracking.json"
+        # A report cached under the evaluator's default profile is evaluated again.
+        report.write_text(json.dumps({"profile": f"{HMD_HAND_PROFILE}_deployed_accuracy_v1"}))
+        evaluated = []
+
+        def gpu_job(need, name, cmd, kind, **kwargs):
+            evaluated.append(cmd)
+            out = Path(cmd[cmd.index("--output") + 1])
+            out.write_text(json.dumps({"profile": cmd[cmd.index("--profile") + 1]}))
+            return 1
+
+        self.p.gpu_job = gpu_job
+        self.validator(1)
+        self.assertIsNone(self.p.corner_rescues("first", 1))
+        self.assertEqual(len(evaluated), 1)
+        self.assertEqual(evaluated[0][evaluated[0].index("--profile") + 1], HMD_HAND_PROFILE)
+        self.assertEqual(pipeline.report_profile(report), HMD_HAND_PROFILE)
+        # A strict report already cached is reused.
+        self.p.corner_rescues("first", 1)
+        self.assertEqual(len(evaluated), 1)
 
 
 class CommittedTreeTest(unittest.TestCase):
@@ -754,6 +873,38 @@ class CanaryRetryResumeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not modelled"):
             p.step_pico()  # the retry ran and passed; the chain went on to 3100->7000
         self.assertIn(("gate", "2026-01-01_00-00-02_home_x_v12_3000_to3100"), calls)
+
+    def test_resume_after_the_retry_created_its_run_dir_keeps_the_retry_seed(self):
+        """Verifier round 3: the retry is usually interrupted after its run dir exists."""
+
+        p, calls = self.run_pico(interrupt=True)
+        with self.assertRaises(SystemExit):
+            p.step_pico()
+        partial = pipeline.V12_EXP / "2026-01-01_00-00-02_home_x_v12_3000_to3100"
+        (partial / "params").mkdir(parents=True)  # created by the launcher, no model_3099 yet
+        p = make_pipeline(self.state)
+        p.state = json.loads((self.state / "state.json").read_text())
+        p.prefix = "home_x"
+        p.check_recipe = lambda run, end: None
+        seeds, gates = [], []
+
+        def v12_train(seg, prev, lift_to=None, seed=None):
+            seeds.append((seg, seed))
+            if seg.endswith("3000_to3100"):
+                self.mk("2026-01-01_00-00-03_home_x_v12_3000_to3100", 3099)
+                return
+            raise RuntimeError("later segments are not modelled")
+
+        def judged_gate(run, end, key):
+            gates.append(run)
+            bad = run.endswith("00-00-01_home_x_v12_3000_to3100")
+            return (not bad), (["hand_tracking_rms"] if bad else []), []
+
+        p.judged_gate, p.v12_train = judged_gate, v12_train
+        with self.assertRaisesRegex(RuntimeError, "not modelled"):
+            p.step_pico()
+        self.assertEqual(seeds[0], ("home_x_v12_3000_to3100", pipeline.V12_TRAIN_SEED + 1))
+        self.assertIn("2026-01-01_00-00-03_home_x_v12_3000_to3100", gates)
 
     def test_a_failed_retry_still_stops(self):
         p, calls = self.run_pico(interrupt=False, retry_fails=True)
@@ -1228,3 +1379,64 @@ class FinalRescueRegistrationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):  # a rescue of a rescue
                     dry_run_tools.final_rescue_infos(out, parent_sha256="c" * 64, failed_sha256="d" * 64,
                                                      report_sha256="e" * 64, mix=mix, seed=43, provenance={})
+
+
+class TrainingSuiteStepTest(unittest.TestCase):
+    """Verifier round 3: a HOME branch's own training suite must pass at its HOME."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.p = make_pipeline(Path(self.tmp.name))
+        self.p.yaml_sha256 = "y" * 64
+        self.p.git = lambda repo, *args, check=True: "c" * 40
+        self.runs = []
+        self.known = pipeline.known_test_failures()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fake_run(self, text: str, rc: int = 1):
+        def run(name, cmd, kind, *, env=None, allow_fail=False, stdout_path=None, **kwargs):
+            self.runs.append((cmd, env))
+            stdout_path.write_text(text)
+            return rc
+
+        self.p.run = run
+
+    def test_known_failures_pass_and_the_verdict_is_cached(self):
+        self.assertIn("tests/test_teleop_v12_deployment.py::test_runtime_validator_requires_cpu_only_pass",
+                      self.known)
+        lines = [f"FAILED {node} - AssertionError" for node in self.known[:3]]
+        self.fake_run("..F\n" + "\n".join(lines) + "\n=== 3 failed, 700 passed in 120.0s ===\n")
+        self.p.step_training_suite()
+        record = self.p.get("training_suite")
+        self.assertTrue(record["passed"])
+        self.assertEqual(record["new_failures"], [])
+        cmd, env = self.runs[0]
+        self.assertEqual(cmd[-1], "tests")
+        self.assertEqual(env, {"CUDA_VISIBLE_DEVICES": ""})
+        self.p.step_training_suite()  # same commit and YAML: not run again
+        self.assertEqual(len(self.runs), 1)
+
+    def test_a_new_failure_stops_the_run(self):
+        self.fake_run("F\nFAILED tests/test_walk_export_contract.py::T::test_x - boom\n"
+                      "=== 1 failed, 700 passed in 120.0s ===\n")
+        with self.assertRaisesRegex(pipeline.PipelineError, "test_walk_export_contract.py::T::test_x") as raised:
+            self.p.step_training_suite()
+        self.assertEqual(raised.exception.code, pipeline.EXIT_INPUT)
+        self.assertFalse(self.p.get("training_suite", "passed"))
+        self.fake_run("=== 700 passed in 120.0s ===\n", rc=0)
+        self.p.step_training_suite()  # fixed: run again and passes
+        self.assertEqual(len(self.runs), 2)
+
+    def test_an_incomplete_run_stops(self):
+        self.fake_run("Traceback: collection crashed\n", rc=2)
+        with self.assertRaisesRegex(pipeline.PipelineError, "did not complete"):
+            self.p.step_training_suite()
+
+    def test_skip_is_a_dry_run_option(self):
+        with self.assertRaises(SystemExit):
+            pipeline.parse_args(["--robot-repo", "/x", "--robot-branch", "x", "--skip-training-suite"])
+        p = make_pipeline(Path(self.tmp.name), "--dry-run", "--dry-run-plumbing", "--skip-training-suite")
+        p.run = lambda *a, **k: self.fail("skipped")
+        p.step_training_suite()

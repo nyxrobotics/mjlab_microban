@@ -135,6 +135,11 @@ pose-release 最終シナリオ救済を mix pr_v1〜pr_v6 の順に（pr_v5/pr_
 `--dry-run` で数十分（そのHOMEの歩行があれば `--dry-run-walk-init`、編集したばかりのHOMEなら
 `--dry-run-plumbing`）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md) の「ドライラン」。
 
+コマンドは学習を始める前に、そのHOMEで学習側のテスト一式を CPU で実行する（約2分）。既知の失敗
+（`scripts/home_pipeline/known_test_failures.txt`、どのHOMEでも同じ既存の失敗）以外が1つでも落ちたら、
+GPU を使う前に止まる（終了コード3）。ブランチはそのHOMEで緑でなければならないため（下の「テスト」）。
+結果は state とリリース記録（`config/releases/<tag>.json` の `training_suite`）に残る。
+
 以下はそのコマンドが行う内容（手で行う場合の手順）。
 
 1. `home_pose.yaml` を編集する（膝など。変えられる値は上の表）。
@@ -154,7 +159,8 @@ pose-release 最終シナリオ救済を mix pr_v1〜pr_v6 の順に（pr_v5/pr_
 6. 3つのポリシーをロボットの `src/agents/` に入れる。ロボット側では `tests/test_shared_home.py` の固定値と、
    ランごとに変わる値（`pico_hybrid.py` の歩行ソースSHA、`tools/validate_pico_policy.py` の `walk.onnx` SHA）
    も更新する。PICOのパッケージは、そのロボット側ツリーに対して作る（`--microban-repo`）。
-7. 両方のリポジトリでテストを通し、コミットする。
+7. 両方のリポジトリでテストを通し（学習側は `uv run --with pytest python -m pytest tests`。失敗は
+   `scripts/home_pipeline/known_test_failures.txt` のものだけ）、コミットする。
 
 ## 重心合わせツール（`balance_home_pose.py`）
 
@@ -238,7 +244,8 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
   学習側の前傾チェックポイントはそのまま再エクスポートでき（バイト単位で同じ ONNX になる）、PICO はこのコードで
   新しく学習・パッケージする。新しく学習し直すなら上の「HOMEを変える手順」（`retrain_all_for_home.py`）でよい。
 
-切り替えは `git checkout <branch>` だけ（ロボット側も同様）。
+切り替えは `git checkout <branch>` だけ（ロボット側も同様）。どのブランチでも学習側のテスト一式は
+そのブランチの yaml のまま通る（失敗は既知のものだけ。下の「テスト」）。
 
 ## 等価性の確認（テスト）
 
@@ -249,6 +256,23 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
   HOMEスタンプを付ける歩行 runner だけ（追跡プロファイル表も中心ブランチと同じ）。前傾HOMEにしかない仕組み
   （0.040 m 許容、必須の境界ゲート）のテストは中心 yaml では skip され、`ForwardLeanOnlyTestsTest` が前傾 yaml で
   実行する。
+- テスト一式はどのHOMEのチェックアウトでも通る（`tests/home_cases.py`）:
+  - ツール（重心合わせ・yaml 編集・ロボット yaml）のテストは、チェックアウトの `config/home_pose.yaml` ではなく
+    `tests/fixtures/home_pose_centered.yaml` / `home_pose_forward_lean.yaml` を入力にする。
+  - 公開済みの1つのHOMEの値（契約文字列、手先FKの箱、切り替え親、記録済み成果物）を固定するテストは
+    `centered_home_only` / `forward_lean_home_only`（体幹が傾いたHOMEにしかない仕組みは `pitched_home_only`）で
+    そのHOMEでだけ実行し、pytest マーカー（`centered_home_pinned` / `forward_lean_home_pinned`）を付ける。
+    `HomePinnedTestsTest` がもう一方の公開HOMEのマーカー付きテストをその fixture yaml の子プロセスで実行するので、
+    中心ブランチでも前傾の仕組みを、前傾ブランチでも中心の値を毎回確認する。それ以外のHOMEは両方を子プロセスで確認する。
+  - 残りは HOME から期待値を計算する（公開HOMEでは文字通りの値と照合、それ以外は `<label>_<hash>` の規則）。
+  - 前傾ブランチ（forward-lean-v2 cd0ea78）だけにあったテスト（`test_forward_lean_home.py`、
+    `test_pico_home_levelled_targets.py`、`test_teleop_v12_hand_pose_release_corner_rescue.py`、前傾の手先FK
+    `test_microban_hand_fk_forward_lean.py`）も入っている。
+  - 2026-10-06 時点で、中心・前傾（`balance --trunk-pitch-deg 10 --write`）・膝15°体幹5° のどの yaml でも、
+    失敗は既知の 21 failed / 16 errors（`known_test_failures.txt`）と同じ集合。
+- 設定・定数の外での前傾ブランチとの違いは1つだけ: v12 の追従評価器は、指令した足先シナリオに測定値が1つも
+  無い（rms/p95 が None）とき、forward-lean-v2 cd0ea78 では `float(None)` で異常終了したが、ここでは
+  `foot_tracking_rms` / `foot_tracking_p95` の不合格として判定する（`_measured_within`）。合格になるものは変わらない。
 - `MJLAB_MICROBAN_EXPORT_EQUIVALENCE=1` で、両HOMEの歩行・起き上がりチェックポイントを CPU で再エクスポートし、
   公開済み ONNX（前傾 b33cd9ea / ce6cdc04、中心 c9cdd852 / 80cd7ddb）とバイト単位で一致することを確認する。
 - `MJLAB_MICROBAN_HOME_POSE_YAML=<yaml>` で、そのプロセスの HOME を別の yaml にできる（テスト・比較用。

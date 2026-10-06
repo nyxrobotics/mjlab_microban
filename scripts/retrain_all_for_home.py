@@ -227,6 +227,11 @@ V12_FINAL_RESCUE_MIXES = ("pr_v1", "pr_v2", "pr_v3", "pr_v4", "pr_v5", "pr_v6")
 # The stage trainer's default training seed (train_microban_teleop_v12.sh
 # --seed); retry k of a segment from the same parent trains with seed + k.
 V12_TRAIN_SEED = 42
+# evaluate_teleop_v12_tracking.HMD_HAND_PROFILE: the profile the pose-release
+# corner-rescue validator (validate_hand_pose_release_corner_rescue_parent_report)
+# requires of the model_9900 parent report.  Without --profile the evaluator
+# picks the deployed-accuracy profile for that clock, which the validator refuses.
+V12_RESCUE_PARENT_PROFILE = "hmd_hand_reachable_performance_foot_exposure_v2"
 V12_FINAL_PROFILES = {
     "full_body_reachable_performance_perturbation_v2_completion_allowance_v1",
     "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
@@ -235,6 +240,8 @@ V12_FINAL_PROFILES = {
 
 STALL_S = {"train": 1200, "gate": 3600, "probe": 1800, "eval": 1800, "cpu": 1800}
 GPU_RESERVATION_S = 120  # a started job has this long to allocate its memory
+# A job has imported config/home_pose.yaml within this long after it started.
+YAML_LOAD_WINDOW_S = 600
 GPU_POLL_S = 60
 # Dry run: v12 start attempts before stopping.  Its walkers are 3-iteration
 # continuations whose probe margin is within the probe's repeat noise, so a
@@ -248,6 +255,14 @@ class PipelineError(Exception):
         super().__init__(message)
         self.code = code
         self.secondary = secondary  # stopped only because another parallel step failed
+
+
+class HomeYamlChanged(PipelineError):
+    """config/home_pose.yaml changed during the run (at ``edit_time``, its mtime)."""
+
+    def __init__(self, message: str, edit_time: float) -> None:
+        super().__init__(message, EXIT_INPUT)
+        self.edit_time = edit_time
 
 
 class SourceProbeFailed(PipelineError):
@@ -294,6 +309,26 @@ def resume_parent(run_dir: Path) -> Path | None:
         return None
     parent = run_dir.parent / run[1] / f"{ckpt[1]}.pt"
     return parent if parent.is_file() else None
+
+
+KNOWN_TEST_FAILURES = REPO / "scripts" / "home_pipeline" / "known_test_failures.txt"
+
+
+def known_test_failures() -> list[str]:
+    """The training suite's pre-existing failures (pytest node ids)."""
+
+    lines = KNOWN_TEST_FAILURES.read_text().splitlines() if KNOWN_TEST_FAILURES.is_file() else []
+    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
+def report_profile(path: Path) -> str | None:
+    """The ``profile`` of a v12 tracking report, or None if it is unreadable."""
+
+    try:
+        profile = json.loads(path.read_text()).get("profile")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return profile if isinstance(profile, str) else None
 
 
 def probe_verdict(path: Path) -> dict:
@@ -365,7 +400,9 @@ class Pipeline:
         self.yaml_sha256: str | None = None
         self.abort = threading.Event()
         self.children: dict[int, str] = {}
-        self.robot = Path(args.robot_repo).resolve() if args.robot_repo else None
+        # Every job of this command: {"name", "started", "ended" (None while running)}.
+        self.job_log: list[dict] = []
+        self.robot =Path(args.robot_repo).resolve() if args.robot_repo else None
         self.state_dir = Path(args.state_dir).resolve() if args.state_dir else None
         self.state: dict = {}
         self.home: dict = {}
@@ -422,6 +459,9 @@ class Pipeline:
         merged_env = dict(os.environ, **(env or {}))
         out_file = open(stdout_path, "w") if stdout_path else None
         with open(path, "w") as f:
+            job = {"name": name, "started": started, "ended": None}
+            with self.lock:
+                self.job_log.append(job)
             proc = subprocess.Popen(cmd, cwd=cwd, env=merged_env, stdout=out_file or f,
                                     stderr=f if out_file else subprocess.STDOUT, start_new_session=True)
             with self.lock:
@@ -454,9 +494,16 @@ class Pipeline:
                 if out_file:
                     out_file.close()
                 with self.lock:
+                    if proc.poll() is not None:
+                        job["ended"] = time.time()
                     self.children.pop(proc.pid, None)
                     self.state.get("children", {}).pop(str(proc.pid), None)
                     self.save()
+        # The job imports the YAML some seconds after it starts (uv / torch
+        # start-up), so the check before it started is not enough: an edit in
+        # that window means it ran at the edited HOME.  Stop before anything
+        # of its output is used; main() quarantines that output.
+        self.verify_home_yaml()
         minutes = (time.time() - started) / 60
         if proc.returncode != 0 and not allow_fail:
             tail = path.read_text(errors="replace")[-1500:].strip()
@@ -480,10 +527,72 @@ class Pipeline:
         except OSError:
             current = None
         if current != self.yaml_sha256:
-            raise PipelineError(
+            try:
+                edit_time = HOME_YAML.stat().st_mtime
+            except OSError:
+                edit_time = time.time()
+            raise HomeYamlChanged(
                 f"{HOME_YAML} changed during the run (sha256 {self.yaml_sha256[:12]} at step 1, now "
                 f"{(current or 'missing')[:12]}); restore it (git -C {REPO} diff config/home_pose.yaml) and "
-                "rerun, or use another worktree for the next HOME", EXIT_INPUT)
+                "rerun, or use another worktree for the next HOME (the output of every job that ran "
+                "after the edit is moved to <state-dir>/quarantine/ and is not reused)", edit_time)
+
+    def quarantine_after_yaml_change(self, edit_time: float) -> None:
+        """Move aside the output of every job that may have loaded the edited YAML.
+
+        A job still running at ``edit_time`` that started less than
+        YAML_LOAD_WINDOW_S before it may have imported the edited HOME (jobs
+        load it during start-up), so nothing it wrote may be reused by a
+        rerun: run directories created, and gates, probe receipts and this
+        state's evaluation reports written, since the earliest such job
+        started are moved to ``<state-dir>/quarantine/<time>/`` (kept for
+        inspection).  Older jobs had loaded the HOME before the edit.
+        """
+
+        with self.lock:
+            affected = [j for j in self.job_log if (j["ended"] is None or j["ended"] >= edit_time)
+                        and j["started"] >= edit_time - YAML_LOAD_WINDOW_S]
+        if not affected or self.state_dir is None:
+            return
+        cutoff = min(j["started"] for j in affected) - 1.0
+        candidates: list[Path] = []
+        if LOG_ROOT.is_dir():
+            candidates += [run for exp in LOG_ROOT.iterdir() if exp.is_dir() for run in exp.iterdir()]
+        for root in (GATE_ROOT, PROBE_ROOT, *(self.state_dir / d for d in
+                                              ("walk_probe", "getup_eval", "pico", "export"))):
+            if root.is_dir():
+                candidates += list(root.iterdir())
+
+        def written(path: Path) -> float:
+            """A file's mtime; a directory's creation, approximated by its oldest file."""
+
+            try:
+                if not path.is_dir() or path.is_symlink():
+                    return path.lstat().st_mtime
+                times = [os.lstat(os.path.join(base, f)).st_mtime
+                         for base, _dirs, files in os.walk(path) for f in files]
+                return min(times) if times else path.lstat().st_mtime
+            except OSError:
+                return 0.0
+
+        target = self.state_dir / "quarantine" / f"{datetime.now():%Y%m%d-%H%M%S}"
+        moved = []
+        for path in candidates:
+            if written(path) < cutoff:
+                continue
+            for base in (LOG_ROOT, GATE_ROOT.parent, PROBE_ROOT.parent, self.state_dir):
+                if path.is_relative_to(base):
+                    rel = path.relative_to(base)
+                    break
+            else:
+                base, rel = path.parent, Path(path.name)
+            dest = target / base.name / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(dest))
+            moved.append(str(path))
+            self.log(f"quarantined {path} -> {dest} (written after the HOME YAML edit window opened)")
+        self.put("quarantined", target.name, {"edit_time": edit_time, "cutoff": cutoff,
+                                              "jobs": [j["name"] for j in affected], "moved": moved})
 
     def kill(self, proc: subprocess.Popen, name: str) -> None:
         """Stop one of this command's own jobs (its process group only)."""
@@ -664,7 +773,11 @@ class Pipeline:
                 raise PipelineError(f"job {child['name']} (pid {pid}) of an earlier run is still running; "
                                     "wait for it or stop it, then rerun", EXIT_BUSY)
         self.state["children"] = {}
-        identity = {"joint_hash": home["joint_hash"], "label": home["label"], "tag": home["tag"]}
+        # A resumed run is no longer stopped: keep the old stop as history
+        # so --status does not show it as the current state.
+        if self.state.get("stopped"):
+            self.state.setdefault("previous_stops", []).append(self.state.pop("stopped"))
+        identity ={"joint_hash": home["joint_hash"], "label": home["label"], "tag": home["tag"]}
         if self.state.get("home_identity") and self.state["home_identity"] != identity:
             raise PipelineError(
                 f"{self.state_dir} belongs to HOME {self.state['home_identity']}, but "
@@ -720,6 +833,50 @@ class Pipeline:
         self.put("robot", "branch", a.robot_branch)
 
     # ----------------------------------------------------------- step 1
+    def step_training_suite(self) -> None:
+        """Run the training test suite at this HOME (CPU) before any GPU time.
+
+        A HOME branch is this code plus its config/home_pose.yaml, and its
+        suite must pass at that HOME: a failure that is not one of the code's
+        pre-existing ones (KNOWN_TEST_FAILURES, the same at every HOME) stops
+        the run before days of training.  The verdict is cached per code
+        commit and YAML, and recorded in the release record.
+        """
+
+        if self.args.skip_training_suite:
+            self.log("training suite: skipped (--skip-training-suite, dry run only)")
+            return
+        key = {"head": self.git(REPO, "rev-parse", "HEAD"), "yaml_sha256": self.yaml_sha256}
+        done = self.get("training_suite")
+        if done and done.get("key") == key and done.get("passed"):
+            self.log(f"training suite: passed earlier at this commit and HOME ({done.get('summary')})")
+            return
+        self.log("training suite: running tests/ at this HOME on the CPU (a few minutes)")
+        output = self.state_dir / "training_suite.out"
+        rc = self.run("training_suite", [*UV, "--with", "pytest", "python", "-m", "pytest", "-q",
+                                         "-p", "no:cacheprovider", "tests"], "cpu",
+                      env={"CUDA_VISIBLE_DEVICES": ""}, allow_fail=True, stdout_path=output)
+        text = output.read_text(errors="replace") if output.is_file() else ""
+        failed = sorted({m[1] for m in re.finditer(r"^(?:FAILED|ERROR) (\S+)", text, re.M)})
+        summary = next((line.strip("= ") for line in reversed(text.splitlines())
+                        if re.search(r"\d+ (passed|failed)", line)), None)
+        known = set(known_test_failures())
+        new = [node for node in failed if node not in known]
+        record = {"key": key, "rc": rc, "summary": summary, "failed": failed, "new_failures": new,
+                  "passed": bool(summary) and not new and rc in (0, 1)}
+        self.put("training_suite", record)
+        if summary is None or rc not in (0, 1):
+            raise PipelineError(f"the training suite did not complete (rc={rc}, see {output})")
+        if new:
+            raise PipelineError(
+                f"the training suite fails at this HOME beyond the known failures ({summary}): "
+                + ", ".join(new[:20]) + (" ..." if len(new) > 20 else "")
+                + f" (see {output}); fix them before retraining (the branch must be green at its HOME)",
+                EXIT_INPUT)
+        fixed = sorted(known - set(failed))
+        self.log(f"training suite: {summary}; no failure outside the {len(known)} known ones"
+                 + (f" ({len(fixed)} known failures now pass)" if fixed else ""))
+
     def step_home(self) -> None:
         self.log("[1/6] HOME check")
         home = self.home
@@ -1411,10 +1568,18 @@ class Pipeline:
             return None
         report = self.state_dir / "pico" / f"{parent.parent.name}_model_9900_strict_tracking.json"
         report.parent.mkdir(exist_ok=True)
+        if report.exists() and report_profile(report) != V12_RESCUE_PARENT_PROFILE:
+            # A report cached by an older pipeline under the evaluator's
+            # default (deployed-accuracy) profile: the rescue validator only
+            # accepts the strict HMD/hand profile, so evaluate it again.
+            self.log(f"corner rescue: re-evaluating {report.name} under {V12_RESCUE_PARENT_PROFILE} "
+                     f"(cached profile {report_profile(report)})")
+            report.unlink()
         if not report.exists():
             rc = self.gpu_job(self.args.probe_gpu_mib, f"rescue_parent_report_a{attempt}", [
                 *UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking", str(parent),
-                "--expected-sha256", sha256(parent), "--output", str(report), "--force"], "gate",
+                "--expected-sha256", sha256(parent), "--profile", V12_RESCUE_PARENT_PROFILE,
+                "--output", str(report), "--force"], "gate",
                 allow_fail=True)
             if not report.exists() and not self.dry:
                 # The evaluator died without a report (not a verdict on the
@@ -1693,15 +1858,24 @@ class Pipeline:
             if current and (V12_EXP / current / f"model_{end}.pt").is_file():
                 self.log(f"skip training {seg}: {current}/model_{end}.pt exists")
             else:
+                # A recorded canary retry means the failed first run is
+                # complete and this segment's newest run is the retry, which
+                # was interrupted after it created its run directory: train
+                # the retry again with the retry's seed, not the default one.
+                retry_of = self.get("pico", "canary_retry", suffix) if canary else None
+                seed = V12_TRAIN_SEED + 1 if retry_of else None
+                if retry_of:
+                    self.log(f"canary {end}: resuming the interrupted retry of {retry_of} with training seed "
+                             f"{seed} (partial run {current} kept)")
                 if self.dry and index == 0:
                     start_seg = f"{self.prefix}_v12_start"
                     if not self.latest_v12(start_seg):
                         self.v12_train(start_seg, None)
-                    self.v12_train(seg, self.latest_v12(start_seg), lift_to=end - 3)
+                    self.v12_train(seg, self.latest_v12(start_seg), lift_to=end - 3, seed=seed)
                 elif self.dry:
-                    self.v12_train(seg, prev, lift_to=end - 3)
+                    self.v12_train(seg, prev, lift_to=end - 3, seed=seed)
                 else:
-                    self.v12_train(seg, prev)
+                    self.v12_train(seg, prev, seed=seed)
                 current = self.latest_v12(seg)
             ckpt = V12_EXP / current / f"model_{end}.pt"
             if not ckpt.is_file():
@@ -2082,7 +2256,8 @@ class Pipeline:
             "pico_15000_boundary": self.get("pico", "b15000"),
             "pico_forced_probe": self.get("pico", "forced_probe"), "exports": exp,
             "robot": {"repo": str(self.robot), "branch": self.args.robot_branch, "commit": robot_commit},
-            "training": self.get("training"), "finished": f"{datetime.now():%F %T}",
+            "training": self.get("training"), "training_suite": self.get("training_suite"),
+            "finished": f"{datetime.now():%F %T}",
         }
         if self.dry:
             archive = self.release_archive()
@@ -2178,6 +2353,7 @@ class Pipeline:
         self.open_state()
         self.prepare_branches()
         self.step_home()
+        self.step_training_suite()
         if self.dry and self.args.dry_run_walk_init:
             self.check_walk_init()
         errors: list = []
@@ -2222,7 +2398,10 @@ def print_status(state_dir: Path) -> int:
         return 1
     state = json.loads(state_path.read_text())
     print(json.dumps({k: state.get(k) for k in ("home_identity", "prefix", "dry_run", "created", "commit",
-                                                "stopped")}, indent=1))
+                                                "stopped", "quarantined")}, indent=1))
+    if state.get("previous_stops"):
+        print(f"earlier stops (resumed since): {len(state['previous_stops'])}, last: "
+              f"{state['previous_stops'][-1].get('at')} code {state['previous_stops'][-1].get('code')}")
     walk = state.get("walk", {})
     if walk.get("selected"):
         print("walk selected:", walk["selected"]["path"], "fallback" if walk["selected"]["fallback"] else "")
@@ -2274,6 +2453,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    "robot tests are run and recorded but do not stop the run (a failed source probe is forced "
                    "to pass in a DRYRUN_FORCED_PASS_ copy)")
     p.add_argument("--dry-run-gates", choices=("all", "final"), default="all")
+    p.add_argument("--skip-training-suite", action="store_true",
+                   help="--dry-run only: do not run the training test suite at this HOME first (a real run "
+                   "always runs it and stops on a failure outside scripts/home_pipeline/known_test_failures.txt)")
     p.add_argument("--dry-run-simulate-failures", action="store_true",
                    help="dry run: treat the first gate of each canary and the 9999 gate as failed to exercise "
                    "the canary retry and the 9999 escalation")
@@ -2323,7 +2505,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.serial_gpu:
         args.sequential = True
     if not args.dry_run and (args.dry_run_walk_init or args.dry_run_simulate_failures or args.dry_run_plumbing
-                             or args.dry_run_simulate_15000 != "pass"):
+                             or args.dry_run_simulate_15000 != "pass" or args.skip_training_suite):
         p.error("--dry-run-* options need --dry-run")
     return args
 
@@ -2366,6 +2548,15 @@ def main(argv: list[str] | None = None) -> int:
             reason = f"unexpected {type(error).__name__}: {error}\n" + "".join(
                 traceback.format_exception(error)).rstrip()
         pipeline.log(f"STOPPED: {reason}")
+        if isinstance(error, HomeYamlChanged) and pipeline.owns_state:
+            # Let the stopped jobs exit before their output is moved aside.
+            deadline = time.time() + 120
+            while time.time() < deadline and any(Path(f"/proc/{pid}").exists() for pid in list(pipeline.children)):
+                time.sleep(2)
+            try:
+                pipeline.quarantine_after_yaml_change(error.edit_time)
+            except Exception as quarantine_error:  # noqa: BLE001 - the stop is still reported
+                pipeline.log(f"quarantine failed: {quarantine_error!r}; remove the newest runs by hand")
         if pipeline.owns_state:  # a refused second instance never touches the live run's state
             pipeline.put("stopped", {"at": f"{datetime.now():%F %T}", "reason": reason, "code": code})
         return code
