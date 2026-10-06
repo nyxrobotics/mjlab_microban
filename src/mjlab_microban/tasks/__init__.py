@@ -103,11 +103,16 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (  # noqa: E402
     make_microban_velocity_twist_ratio_env_cfg,
 )
 
-for _task_id in ("Mjlab-Velocity-TwistRatio-Microban", "Mjlab-Velocity-TwistRatioB2-Microban"):
+# B2 = instantaneous bounded form (trw5B2_*); B3 = the filtered class term.
+for _task_id, _filtered in (
+    ("Mjlab-Velocity-TwistRatio-Microban", True),
+    ("Mjlab-Velocity-TwistRatioB2-Microban", False),
+    ("Mjlab-Velocity-TwistRatioB3-Microban", True),
+):
     register_mjlab_task(
         task_id=_task_id,
-        env_cfg=make_microban_velocity_twist_ratio_env_cfg(),
-        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True),
+        env_cfg=make_microban_velocity_twist_ratio_env_cfg(filtered=_filtered),
+        play_env_cfg=make_microban_velocity_twist_ratio_env_cfg(play=True, filtered=_filtered),
         rl_cfg=MicrobanVelocityRlCfg,
         runner_cls=MicrobanVelocityOnPolicyRunner,
     )

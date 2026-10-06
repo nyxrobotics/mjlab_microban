@@ -349,5 +349,109 @@ class RewardTermTest(unittest.TestCase):
         self.assertTrue(torch.equal(twist[:, 2], angular[:, 2]))
 
 
+class _FilterEnv:
+    """Minimal env for the filtered term: untilted root, settable motion."""
+
+    def __init__(self, commands) -> None:
+        self.num_envs = len(commands)
+        self.device = "cpu"
+        self.step_dt = 0.02
+        self.extras = {"log": {}}
+        self.command = torch.tensor(commands, dtype=torch.float32)
+        self.data = SimpleNamespace(
+            root_link_lin_vel_b=torch.zeros(self.num_envs, 3),
+            root_link_ang_vel_b=torch.zeros(self.num_envs, 3),
+        )
+        self.scene = {"robot": SimpleNamespace(data=self.data)}
+        self.command_manager = SimpleNamespace(get_command=lambda name: self.command)
+
+    def move(self, twist, uncommanded=None) -> None:
+        twist = torch.tensor(twist, dtype=torch.float32)
+        unc = torch.zeros_like(twist) if uncommanded is None else torch.tensor(uncommanded, dtype=torch.float32)
+        self.data.root_link_lin_vel_b = torch.stack((twist[:, 0], twist[:, 1], unc[:, 0]), dim=-1)
+        self.data.root_link_ang_vel_b = torch.stack((unc[:, 1], unc[:, 2], twist[:, 2]), dim=-1)
+
+
+class FilteredTermTest(unittest.TestCase):
+    @staticmethod
+    def make(env, tau=0.5):
+        from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
+
+        term = twist_ratio_velocity(SimpleNamespace(params={}), env)
+        return lambda: term(env, filter_time_constant=tau), term
+
+    def test_first_step_uses_the_current_values(self) -> None:
+        env = _FilterEnv([list(G), [0.3, 0.0, 0.0]])
+        env.move([scaled(G, 0.4), [0.3, 0.0, 0.0]])
+        call, _term = self.make(env)
+        expected = twist_ratio_reward(env.command, torch.tensor([scaled(G, 0.4), [0.3, 0.0, 0.0]]))
+        self.assertTrue(torch.allclose(call(), expected, atol=1e-6))
+
+    def test_zero_time_constant_is_the_instantaneous_reward(self) -> None:
+        env = _FilterEnv([list(G)] * 3)
+        call, _term = self.make(env, tau=0.0)
+        torch.manual_seed(0)
+        for _ in range(5):
+            twist = (torch.randn(3, 3) * torch.tensor([0.3, 0.2, 1.0])).tolist()
+            env.move(twist)
+            self.assertTrue(
+                torch.allclose(call(), twist_ratio_reward(env.command, torch.tensor(twist)), atol=1e-6)
+            )
+
+    def test_stride_sway_averages_out(self) -> None:
+        # Walking forward at 0.2 m/s with +-0.15 m/s lateral sway at 1.6 Hz
+        # (the command's own direction) and +-0.1 m/s vertical bob at 3.2 Hz.
+        env = _FilterEnv([[0.2, 0.0, 0.0]] * 2)
+        call, _term = self.make(env)
+        instant, _ = self.make(env, tau=0.0)
+        filtered_values, instant_values = [], []
+        for step in range(300):
+            t = step * env.step_dt
+            sway = 0.15 * math.sin(2 * math.pi * 1.6 * t)
+            bob = 0.1 * math.sin(2 * math.pi * 3.2 * t)
+            env.move([[0.2, sway, 0.0], [0.0, 0.0, 0.0]], [[bob, 0.0, 0.0], [0.0, 0.0, 0.0]])
+            filtered_values.append(call())
+            instant_values.append(instant())
+        filtered = torch.stack(filtered_values[100:]).mean(dim=0)
+        instant = torch.stack(instant_values[100:]).mean(dim=0)
+        # Walking with sway earns clearly more than standing still (1/2).
+        self.assertGreater(float(filtered[0]), 0.85)
+        self.assertGreater(float(filtered[0]), float(instant[0]) + 0.1)
+        self.assertAlmostEqual(float(filtered[1]), 0.5, places=5)
+
+    def test_sustained_drift_is_not_averaged_out(self) -> None:
+        env = _FilterEnv([[0.2, 0.0, 0.0]])
+        call, _term = self.make(env)
+        for _ in range(200):
+            env.move([[0.2, 0.1, 0.0]])
+            value = call()
+        expected = twist_ratio_reward(env.command, torch.tensor([[0.2, 0.1, 0.0]]))
+        self.assertAlmostEqual(float(value[0]), float(expected[0]), places=4)
+        self.assertLess(float(value[0]), 0.75)
+
+    def test_a_robot_that_follows_a_new_command_at_once_stays_on_target(self) -> None:
+        env = _FilterEnv([[0.3, 0.0, 0.0]])
+        call, _term = self.make(env)
+        env.move([[0.3, 0.0, 0.0]])
+        for _ in range(100):
+            call()
+        env.command = torch.tensor([[0.0, 0.2, 0.0]])
+        env.move([[0.0, 0.2, 0.0]])
+        values = [float(call()[0]) for _ in range(100)]
+        self.assertGreater(min(values), 0.999)
+
+    def test_reset_restarts_the_filters_of_those_envs_only(self) -> None:
+        env = _FilterEnv([[0.3, 0.0, 0.0]] * 2)
+        call, term = self.make(env)
+        env.move([[0.3, 0.0, 0.0]] * 2)
+        for _ in range(50):
+            call()
+        env.move([[0.0, 0.0, 0.0]] * 2)
+        term.reset(env_ids=torch.tensor([1]))
+        value = call()
+        self.assertAlmostEqual(float(value[1]), 0.5, places=5)  # restarted: standing now
+        self.assertGreater(float(value[0]), 0.9)  # filter still near the walk
+
+
 if __name__ == "__main__":
     unittest.main()

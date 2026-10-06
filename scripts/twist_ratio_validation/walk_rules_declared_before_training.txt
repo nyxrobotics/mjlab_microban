@@ -108,3 +108,12 @@
 #   A2 は 8000 回でも押し p30 の転倒 40/90、単軸で指令の約 2 倍の速さ（F 0.2 指令に 0.41 m/s）。A2 の押しへの弱さは解消していない。
 #   B2 の 2 本目のシードを得るため、trw4_s42（A2）を 8000 回の途中確認後に止め、trw5B2_s43（B2, シード 43）を始める。基準は同じ。
 2026-10-06 20:23:58 trw4_s42 stopped after model_8000; start trw5B2_s43 (B2, commit 2cddf0c)
+2026-10-06 20:24:31 watch_walk DONE: all trainers exited and their checkpoints are probed
+2026-10-06 20:27:09 trw5B2_s42 model_3000: reference 9x300 source probe (seed 42, not a criterion): PASS falls=0 forward1=0.099 forward2=0.195 backward1=0.074 backward2=0.098 lateral_left1=0.086 lateral_right1=0.090 yaw_left5=0.746 yaw_right5=0.659 below=[]
+2026-10-06 21:04:31 trw5B2_s42 model_4000: it 4000: FAIL [W1=NG W2=ok W3=ok W4=ok W5=NG] angle none 25/p30 28 deg; speed none 0.46/p30 0.43; falls none 0/90 p30 3/90 single 0; F +0.000 BK +0.000 LL +0.000 LR +0.055 YL +0.04 YR +0.02
+# 修正6（2026-10-06 21:20）: B2 の trw5B2_s42 は 4000 回で、単軸の小さな指令（前後 0.2 m/s, 横 0.1 m/s, 旋回 0.5 rad/s）に全く動かなくなった
+#   （速度ほぼ 0、W5 不合格）。斜めの大きな指令では歩く。判断: 1 ステップごとの横揺れ・上下動・横転/前転の角速度（歩行に普通にある揺れ）が
+#   誤差に入り（学習中の平均誤差 0.75）、exp(-誤差) で歩くこと自体が減点されるため、小さな指令では立ち止まり（0.5）の方が得になった。
+#   対策 B3: 指令と実際の動きを同じ一次遅れフィルタ（時定数 0.5 s）でならしてから、同じ有界な式を当てる（クラス形式の報酬項
+#   twist_ratio_velocity, 重み 8）。歩幅ごとの揺れは平均で消え、持続するずれ・向きの違い・転倒は残る。基準 W1-W5 は変更なし。
+#   B2 の 2 本（trw5B2_s42 は 4000 回で W5 不合格、trw5B2_s43 は約 1500 回）を止め、B3 のシード 42/43（trw6B3_s42, trw6B3_s43）を始める。

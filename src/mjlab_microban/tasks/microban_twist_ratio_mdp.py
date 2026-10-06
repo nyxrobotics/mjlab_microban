@@ -91,6 +91,7 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_MIN_COMMAND_NORM = 0.2
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
+TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -224,6 +225,78 @@ def home_levelled_twist(
     return torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
 
 
+class twist_ratio_velocity:
+    """Reward term: the bounded twist-ratio reward on time-filtered motion.
+
+    The command and the measured motion are both low-pass filtered with the
+    same first-order filter (time constant ``filter_time_constant``, 0.5 s by
+    default; 0 uses the instantaneous values), and the reward of the module doc
+    is evaluated on the filtered values.  The reward is about the direction and
+    speed the robot walks at, not about the swaying within a stride: the
+    per-step lateral sway, vertical bob and roll/pitch rates of a normal gait
+    average out, while a sustained drift, a turn of the walking direction or a
+    fall do not.  Filtering the command the same way keeps a robot that follows
+    a new command at once on target while both settle.  Both filters start at
+    the current values on the first step of an episode.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        num_envs, device = env.num_envs, env.device
+        self.step_dt = float(env.step_dt)
+        self.command = torch.zeros(num_envs, 3, device=device)
+        self.twist = torch.zeros(num_envs, 3, device=device)
+        self.uncommanded = torch.zeros(num_envs, 3, device=device)
+        self.fresh = torch.ones(num_envs, dtype=torch.bool, device=device)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        self.fresh[slice(None) if env_ids is None else env_ids] = True
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        command_name: str = "twist",
+        trunk_pitch: float = 0.0,
+        axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
+        min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
+        direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
+        uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
+        filter_time_constant: float = TWIST_RATIO_FILTER_TIME_CONSTANT_S,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        if not filter_time_constant >= 0.0:
+            raise ValueError("filter_time_constant must be non-negative")
+        command = env.command_manager.get_command(command_name)[:, :3]
+        linear, angular = home_levelled_velocities(env, trunk_pitch, asset_cfg)
+        twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
+        uncommanded = torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
+        gain = (
+            1.0
+            if filter_time_constant == 0.0
+            else 1.0 - math.exp(-self.step_dt / filter_time_constant)
+        )
+        fresh = self.fresh.unsqueeze(-1)
+        self.command = torch.where(fresh, command, self.command + gain * (command - self.command))
+        self.twist = torch.where(fresh, twist, self.twist + gain * (twist - self.twist))
+        self.uncommanded = torch.where(
+            fresh, uncommanded, self.uncommanded + gain * (uncommanded - self.uncommanded)
+        )
+        self.fresh[:] = False
+        parts = twist_ratio(
+            self.command,
+            self.twist,
+            axis_scale,
+            min_command_norm,
+            None if uncommanded_scale is None else self.uncommanded,
+            uncommanded_scale,
+        )
+        extras = getattr(env, "extras", None)
+        if isinstance(extras, dict):
+            log = extras.setdefault("log", {})
+            log["Metrics/twist_ratio_speed"] = parts.speed.mean()
+            log["Metrics/twist_ratio_error"] = parts.error.mean()
+        return _bounded(parts, direction_penalty)
+
+
 def twist_ratio_velocity_reward(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
@@ -234,7 +307,13 @@ def twist_ratio_velocity_reward(
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward term: the ratio-keeping velocity reward of the module doc."""
+    """The bounded reward on the instantaneous motion (no filter).
+
+    Kept for reference: from scratch, the per-step gait sway made walking cost
+    more than standing still on small commands (the B2 walker stopped
+    answering single-axis commands at update 4000); train with the filtered
+    ``twist_ratio_velocity`` term.
+    """
 
     command = env.command_manager.get_command(command_name)[:, :3]
     linear, angular = home_levelled_velocities(env, trunk_pitch, asset_cfg)

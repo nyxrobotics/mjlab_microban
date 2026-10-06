@@ -85,7 +85,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
 )
-from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity_reward
+from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 from mjlab_microban.tasks.microban_tracking_env_cfg import (
     MICROBAN_BODY_JOINT_SOFT_LIMITS,
 )
@@ -682,7 +682,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # PICO: the 7099 validation run trained the first form at weight 16 and
     # was stopped before its first probe.
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=twist_ratio_velocity_reward,
+        func=twist_ratio_velocity,
         weight=32.0,
         params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )

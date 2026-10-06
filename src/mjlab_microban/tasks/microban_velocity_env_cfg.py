@@ -497,8 +497,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT = 8.0
 
 
-def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microban_velocity_twist_ratio_env_cfg(
+    play: bool = False, filtered: bool = True
+) -> ManagerBasedRlEnvCfg:
+    """filtered=True: the twist_ratio_velocity class term (B3, time-filtered);
+    False: the instantaneous function (B2, trw5B2_* runs)."""
+
     from mjlab_microban.tasks.microban_twist_ratio_mdp import (
+        twist_ratio_velocity,
         twist_ratio_velocity_reward,
     )
 
@@ -506,7 +512,7 @@ def make_microban_velocity_twist_ratio_env_cfg(play: bool = False) -> ManagerBas
     del cfg.rewards["track_linear_velocity"]
     del cfg.rewards["track_angular_velocity"]
     cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=twist_ratio_velocity_reward,
+        func=twist_ratio_velocity if filtered else twist_ratio_velocity_reward,
         weight=MICROBAN_VELOCITY_TWIST_RATIO_WEIGHT,
         params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
