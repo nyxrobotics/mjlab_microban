@@ -88,7 +88,9 @@ def dump(root: Path) -> dict[str, str | None]:
         ("mjlab_microban.robot.microban_hand_fk", "microban_hand_fk_metadata"),
         ("mjlab_microban.robot.microban_hand_fk", "microban_reachable_hand_evaluation_offsets"),
         ("mjlab_microban.tasks.microban_getup_runner", "getup_home_pose"),
-        ("mjlab_microban.scripts.export_walk_onnx", "walk_home_pose"),
+        # The walking export's HOME stamp (export_walk_onnx.walk_home_pose on the
+        # reference branches; every policy's stamp since microban-policy-1).
+        ("mjlab_microban.policy_contract", "home_pose_stamp"),
         ("mjlab_microban.tasks.microban_teleop_v12_home_pose", "teleop_v12_home_pose_marker"),
     )
     for module_name, function_name in calls:

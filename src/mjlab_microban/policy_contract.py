@@ -136,9 +136,9 @@ def home_pose_stamp() -> dict[str, Any]:
     """The HOME every policy is stamped with (full precision)."""
 
     return {
-        "joint_pos_rad": {name: float(value) for name, value in sorted(HOME.joint_pos_rad.items())},
         "root_pos_m": [float(value) for value in HOME.root_pos],
         "root_quat_wxyz": [float(value) for value in HOME.root_quat_wxyz],
+        "joint_pos_rad": {name: float(value) for name, value in sorted(HOME.joint_pos_rad.items())},
     }
 
 

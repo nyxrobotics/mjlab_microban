@@ -85,6 +85,13 @@ def _run_python(yaml_path: Path, code: str) -> str:
     return completed.stdout.strip().splitlines()[-1]
 
 
+# Reference keys whose function moved (same value under the new name).
+RENAMED_CALLS = {
+    "call:mjlab_microban.scripts.export_walk_onnx.walk_home_pose()":
+        "call:mjlab_microban.policy_contract.home_pose_stamp()",
+}
+
+
 def _deleted_here(key: str) -> bool:
     """A reference key whose module or constant this tree deleted (not a regression).
 
@@ -146,7 +153,7 @@ class HomeEquivalenceTest(unittest.TestCase):
         self.assertEqual(import_errors, [], "modules that failed to import")
         current = home_equivalence.digest(values)
         expected = {
-            key: digest
+            RENAMED_CALLS.get(key, key): digest
             for key, digest in json.loads(reference.read_text()).items()
             if key.startswith(("const:mjlab_microban.robot.", "call:", "import:mjlab_microban.robot"))
         }
