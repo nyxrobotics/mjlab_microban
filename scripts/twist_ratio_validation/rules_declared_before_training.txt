@@ -1,0 +1,40 @@
+# Twist-ratio reward validation (PICO v12, forward-lean HOME) -- rules fixed BEFORE training
+# Written 2026-10-06 (before any twist-ratio training update).  Diagnostic experiment only:
+#   throwaway branch exp/twist-ratio-validation (worktree scratchpad/twist_ratio/wt), never merged,
+#   never gated, never packaged, never deployed.
+#
+# Reward under test: src/mjlab_microban/tasks/microban_twist_ratio_mdp.py, one term
+#   twist_ratio_velocity (weight 16, direction_penalty 1.0, axis scale (0.7 m/s, 0.3 m/s, 1.5 rad/s),
+#   min_command_norm 0.2, HOME-levelled frame) REPLACING track_linear_velocity, track_angular_velocity,
+#   commanded_planar_velocity_progress, linear_velocity_error_l1, yaw_velocity_error_l1.
+#   reward = speed - 1.0 * error;  speed = clamp(p,0,n)/max(n,0.2) (along-command component only),
+#   error = |v^ - clamp(p,0,n) u| + max(0,-p)  (perpendicular + overshoot + backward, backward counted twice).
+# Run: resume the gated pose-release 2026-10-05_14-02-37_lean_v12_pr_7000_to7100/model_7099 (sha ee7ac215...)
+#   with Mjlab-Teleop-V12-HandPoseRelease-Microban (pose-release recipe otherwise unchanged), 2048 envs,
+#   seed 42, 7100 -> 9500 (2401 updates), run name trv1_7100_to9500.
+# Reference (old reward, same parent and seed): 2026-10-05_14-06-41_lean_v12_pr_7100_to10000 model_8000/9500.
+#
+# Probe: twist_ratio/vprobe_tr.py, seeds 101-105 (never 42-44, never the gate scenario), 3 reps, 300 steps,
+#   window 50..299 while up, HOME-levelled twist (v_x, v_y, w_z).  Pushes none and p30_15 (x +0.30 m/s,
+#   lateral 0.15 m/s against the commanded lateral sign, every 1 s).
+#   Diagonal commands A (0.6,0.3,1.2) M (0.6,-0.3,-1.2) B (0.7,0.3,1.0) MB (0.7,-0.3,-1.0)
+#     K (-0.4,0.25,0.9) MK (-0.4,-0.25,-0.9); targets full (mixed_forward_left foot+hand, mirrored for
+#     right-lateral commands) and hands_off -> 90 rollouts per (push, targets) cell, 15 per command.
+#   Single-axis (targets off, no push): F (0.2,0,0) BK (-0.2,0,0) LL (0,0.1,0) LR (0,-0.1,0)
+#     YL (0,0,0.5) YR (0,0,-0.5) S (0,0,0) -> 15 rollouts each.
+#   Ratio metric: angle between the command-pooled mean normalized twist and the normalized command.
+#   Speed metric: per-rollout clamp(p,0,n)/n of the mean twist, pooled.
+# Rules (twist_ratio/rules_tr.py; same file applied to every probe):
+#   V1 ratio      none/full: every diagonal command angle <= 20 deg;  p30/full: every command <= 30 deg
+#   V2 sign       none/full and p30/full: every diagonal command, every axis moves the commanded way:
+#                 signed mean v_x >= 0.03 m/s, v_y >= 0.02 m/s, w_z >= 0.15 rad/s
+#   V3 speed      none/full pooled speed fraction >= 0.20 (>= 0.12 at 8000); p30/full >= 0.15
+#   V4 falls      none/full <= 2/90, none/hands_off <= 2/90, p30/full <= 9/90
+#   V5 single-axis (none, off): F v_x >= 0.08, BK -v_x >= 0.04, LL v_y >= 0.02, LR -v_y >= 0.02,
+#                 YL w_z >= 0.2, YR -w_z >= 0.2 (the 9x300 minimums), S |v_x|,|v_y| <= 0.05, |w_z| <= 0.2, no falls
+# 8000 = early warning: V3 (>= 0.12), V4, V5 must hold (V1/V2 reported only).
+#   8000 fail -> stop trv1, run ONE fallback trv2 from 7099 with direction_penalty 0.5 (else identical),
+#   same rules at its 8000/9500; trv2 failing too -> stop and report.
+# 9500 = validation: V1-V5 all must hold -> "design validated".  V1/V2 failing with V3-V5 holding ->
+#   "partial" (ratio direction improved?) reported with the per-command angles vs the reference; no more runs.
+# Baselines probed with the same script (reported only): 7099 (parent), reference model_8000/9500, lean 14999.

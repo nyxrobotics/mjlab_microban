@@ -85,6 +85,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     raw_action_l2,
     yaw_velocity_tracking_error_l1,
 )
+from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity_reward
 from mjlab_microban.tasks.microban_tracking_env_cfg import (
     MICROBAN_BODY_JOINT_SOFT_LIMITS,
 )
@@ -376,12 +377,15 @@ def _set_teleop_locomotion_stage(
     )
     command.signed_axis_ranges = deepcopy(signed_axis_ranges)
     command.signed_axis_probabilities = deepcopy(signed_axis_probabilities)
-    env.reward_manager.get_term_cfg("track_linear_velocity").params["std"] = (
-        linear_tracking_std
-    )
-    env.reward_manager.get_term_cfg("track_angular_velocity").params["std"] = (
-        angular_tracking_std
-    )
+    # The twist-ratio validation experiment has no exp tracking terms.
+    if "track_linear_velocity" in env.reward_manager.active_terms:
+        env.reward_manager.get_term_cfg("track_linear_velocity").params["std"] = (
+            linear_tracking_std
+        )
+    if "track_angular_velocity" in env.reward_manager.active_terms:
+        env.reward_manager.get_term_cfg("track_angular_velocity").params["std"] = (
+            angular_tracking_std
+        )
 
 
 def _set_push_velocity_range(
@@ -660,6 +664,22 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
         func=yaw_velocity_tracking_error_l1,
         weight=-1.0,
+        params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
+    )
+    # VALIDATION EXPERIMENT ONLY (branch exp/twist-ratio-validation, never
+    # merged): the ratio-keeping twist reward replaces every velocity
+    # tracking term above (exp kernels, L1 errors, xy projection progress).
+    for name in (
+        "track_linear_velocity",
+        "track_angular_velocity",
+        "commanded_planar_velocity_progress",
+        "linear_velocity_error_l1",
+        "yaw_velocity_error_l1",
+    ):
+        del cfg.rewards[name]
+    cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
+        func=twist_ratio_velocity_reward,
+        weight=16.0,
         params={"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD},
     )
 
