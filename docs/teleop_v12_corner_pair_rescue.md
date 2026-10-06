@@ -51,17 +51,9 @@ and their hash-bound report validation. Only that full gate may authorize the
 normal 10000-to-10100 foot activation canary. Thresholds must not be relaxed;
 retain a failing result for diagnosis rather than extending this recipe.
 
-The dedicated wrapper runs that complete gate and creates a second receipt
-which binds the fixed rescue lineage, exact optimizer/foot state, tracking
-report, schema-v2 gate, all three report hashes, and ONNX artifact:
-
-```bash
-scripts/evaluate_microban_teleop_v12_corner_rescue.sh \
-  v12_corner_rescue_v2_9901_to10000
-```
-
-It exits before ONNX/gate/receipt promotion if strict locomotion or tracking
-fails. On success, the gate is written to the canonical
+The stage gate (`scripts/evaluate_microban_teleop_v12_stage.sh RUN 9999`) exits
+before ONNX/gate promotion if strict locomotion or tracking fails. On success,
+the gate is written to the canonical
 `artifacts/teleop_v12_gates` location expected by the ordinary resume driver:
 
 ```bash

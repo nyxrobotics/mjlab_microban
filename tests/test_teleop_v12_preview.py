@@ -3,17 +3,9 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
 
-import torch
 
-from mjlab_microban.scripts.evaluate_teleop_v12_preview import (
-    run_preview_evaluation,
-)
-from mjlab_microban.scripts.evaluate_teleop_v12_tracking import FINAL_PROFILE
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_NUM_STEPS_PER_ENV,
 )
@@ -255,55 +247,6 @@ class TeleopV12PreviewTest(unittest.TestCase):
                 "rnd": False,
             },
         )
-
-    def test_dedicated_evaluator_rejects_shallow_child_reports(self) -> None:
-        with TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "model_10100.pt"
-            marker = staged_preview_info(
-                phase=TELEOP_V12_PREVIEW_PHASE_FULL_BODY,
-                phase_source_checkpoint_sha256="a" * 64,
-                phase1_acceptance_receipt_sha256="b" * 64,
-                phase1_quality_class=TELEOP_V12_PREVIEW_PHASE1_VISUAL_QUALITY,
-            )
-            torch.save(
-                {
-                    "iter": 10_100,
-                    "infos": {
-                        "preview_non_deployable": True,
-                        "teleop_v12_preview": marker,
-                    },
-                },
-                checkpoint,
-            )
-            locomotion = {"status": "pass", "checks": {"finite": True}}
-            tracking = {
-                "status": "pass",
-                "profile": FINAL_PROFILE,
-                "checks": {"finite": True},
-            }
-            with (
-                patch(
-                    "mjlab_microban.scripts.evaluate_teleop_v12_preview."
-                    "validate_embedded_phase1_acceptance",
-                    return_value={},
-                ),
-                patch(
-                    "mjlab_microban.scripts.evaluate_teleop_v12_preview."
-                    "run_locomotion_evaluation",
-                    return_value=locomotion,
-                ),
-                patch(
-                    "mjlab_microban.scripts.evaluate_teleop_v12_preview."
-                    "run_tracking_evaluation",
-                    return_value=tracking,
-                ),
-                self.assertRaisesRegex(ValueError, "check set"),
-            ):
-                run_preview_evaluation(
-                    checkpoint=checkpoint,
-                    expected_sha256=None,
-                    device="cpu",
-                )
 
     def test_live_candidate_requires_trained_fullbody_phase(self) -> None:
         marker = staged_preview_info(

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 import tempfile
 import unittest
 from copy import deepcopy
@@ -18,11 +16,7 @@ from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
 from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
-from mjlab_microban.scripts import (
-    evaluate_teleop_checkpoint,
-    export_teleop_onnx,
-    live_pico_teleop_sim,
-)
+from mjlab_microban.scripts import evaluate_teleop_checkpoint
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_TRAINING_CONTRACT_VERSION,
     MicrobanTeleopOnPolicyRunner,
@@ -419,12 +413,7 @@ class TeleopV11ConfigurationTest(unittest.TestCase):
 
     def test_all_checkpoint_consumers_select_actor_load_only_mode(self) -> None:
         factories = (
-            (export_teleop_onnx._construct_checkpoint_consumer_runner, {}),
             (evaluate_teleop_checkpoint._construct_checkpoint_consumer_runner, {}),
-            (
-                live_pico_teleop_sim._construct_checkpoint_consumer_runner,
-                {"runtime_task": live_pico_teleop_sim.TASK},
-            ),
         )
         for factory, kwargs in factories:
 
@@ -476,47 +465,6 @@ class TeleopV11ConfigurationTest(unittest.TestCase):
             runner.learn(1)
         with self.assertRaisesRegex(RuntimeError, "cannot save"):
             runner.save("/missing/model_7.pt")
-
-    def test_wrapper_requires_explicit_source_and_has_valid_shell_syntax(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        wrapper = root / "scripts" / "train_microban_teleop_v9.sh"
-        subprocess.run(["bash", "-n", str(wrapper)], check=True)
-        help_result = subprocess.run(
-            [str(wrapper), "--help"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self.assertIn("SAFE_MODEL_PT SAFE_SHA256 PASS_RECEIPT_JSON", help_result.stdout)
-        missing = subprocess.run(
-            [str(wrapper), "start"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(missing.returncode, 2)
-        oversized = subprocess.run(
-            [str(wrapper), "start", "/missing/model_0.pt", "0" * 64, "/missing.json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "MICROBAN_TELEOP_NUM_ENVS": "4096",
-            },
-        )
-        self.assertEqual(oversized.returncode, 2)
-        self.assertIn("requires MICROBAN_TELEOP_NUM_ENVS=2048", oversized.stderr)
-        script = wrapper.read_text(encoding="utf-8")
-        self.assertIn("target_boundary=1500", script)
-        self.assertIn("18000 20000", script)
-        self.assertIn("MICROBAN_TELEOP_PROVENANCE_MODE=canonical_v9_stage", script)
-        self.assertIn("MICROBAN_TELEOP_STAGE_START_BOUNDARY", script)
-        self.assertIn("MICROBAN_TELEOP_PARENT_GATE_SHA256", script)
-        self.assertIn("MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_PATH", script)
-        self.assertIn("MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_SHA256", script)
-        self.assertIn("MICROBAN_TELEOP_RESUME_SOURCE_CHECKPOINT_ITERATION", script)
-        self.assertIn("evaluate_microban_teleop_v9_stage.sh", script)
 
 
 if __name__ == "__main__":

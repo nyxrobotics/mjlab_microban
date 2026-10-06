@@ -2175,7 +2175,7 @@ class Pipeline:
         return args
 
     def check_receipt(self, receipt: Path, ckpt: Path, onnx: Path) -> None:
-        """The binding finalize_microban_teleop_v12.sh applies to the packager report."""
+        """Bind the packager report to this checkpoint, this ONNX and the robot validator."""
 
         text = receipt.read_text()
         try:

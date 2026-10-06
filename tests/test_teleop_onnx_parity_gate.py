@@ -15,8 +15,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
 import onnx
@@ -26,7 +24,6 @@ from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
 from mjlab_microban.scripts import evaluate_teleop_checkpoint as teleop_evaluator
-from mjlab_microban.scripts import export_teleop_onnx as teleop_exporter
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_WIDTH,
     MICROBAN_TELEOP_ACTOR_INITIALIZATION,
@@ -126,34 +123,6 @@ def _write_zero_policy(path: Path) -> None:
         [weight],
     )
     onnx.save(helper.make_model(graph), path)
-
-
-class ExportMetadataWiringTest(unittest.TestCase):
-    def test_only_acceptance_backed_export_materializes_final_stage_bounds(
-        self,
-    ) -> None:
-        raw_env = object()
-        checkpoint = Path("/logs/canonical_run/model_14999.pt")
-        for acceptance, expected in ((None, False), (object(), True)):
-            with (
-                self.subTest(acceptance=acceptance is not None),
-                patch.object(
-                    teleop_exporter,
-                    "get_microban_teleop_metadata",
-                    return_value={"marker": expected},
-                ) as collect,
-            ):
-                result = teleop_exporter._collect_export_metadata(
-                    raw_env,
-                    checkpoint,
-                    SimpleNamespace(acceptance=acceptance),
-                )
-                self.assertEqual(result, {"marker": expected})
-                collect.assert_called_once_with(
-                    raw_env,
-                    run_path="canonical_run",
-                    canonical_final_stage=expected,
-                )
 
 
 def _write_accepted_safe_source(root: Path) -> dict[str, object]:

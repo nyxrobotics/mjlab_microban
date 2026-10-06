@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +14,6 @@ from mjlab_microban.scripts.teleop_v12_lr_recovery import (
     EXPECTED_ACTIVE_ACTOR_COLUMNS,
     PINNED_SOURCE_COMMON_STEP_COUNTER,
     PINNED_SOURCE_ITERATION,
-    RECOVERY_PROCESS_UPDATES,
     create_recovery_receipt,
     validate_recovery_receipt,
     validate_recovery_seed,
@@ -27,9 +25,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "scripts/train_microban_teleop_v12_lr_recovery.sh"
 
 
 def _normalizer(width: int) -> dict[str, torch.Tensor]:
@@ -202,28 +197,6 @@ class TeleopV12LrRecoveryTest(unittest.TestCase):
                     migration_receipt=migration,
                     expected_source_sha256=digest,
                 )
-
-    def test_launcher_is_syntax_checked_and_route_is_fixed(self) -> None:
-        subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
-        help_text = subprocess.run(
-            ["bash", str(LAUNCHER), "--help"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        self.assertIn("exactly 799 updates", help_text)
-        launcher = LAUNCHER.read_text(encoding="utf-8")
-        for exact_argument in (
-            "--env.scene.num-envs 2048",
-            "--env.seed 42",
-            "--agent.seed 42",
-            "--agent.num-steps-per-env 24",
-            "--agent.save-interval 100",
-            "--agent.resume True",
-            '--agent.load-checkpoint "^model_${SOURCE_ITERATION}[.]pt$"',
-        ):
-            self.assertIn(exact_argument, launcher)
-        self.assertEqual(RECOVERY_PROCESS_UPDATES, 799)
 
 
 if __name__ == "__main__":

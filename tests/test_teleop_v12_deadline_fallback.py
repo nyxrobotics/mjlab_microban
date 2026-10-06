@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,11 +15,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     _acceptance,
     target_column_ablation_observation_columns,
-)
-from mjlab_microban.scripts.teleop_v12_deadline_fallback import (
-    DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION,
-    DEADLINE_POST_CANARY_RECEIPT_GATE,
-    validate_deadline_post_canary_receipt_payload,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
@@ -40,7 +33,6 @@ from mjlab_microban.tasks.microban_teleop_v12_deadline_fallback import (
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_ITERATION,
     MICROBAN_TELEOP_V12_DEADLINE_CANARY_OPTIMIZER_STEP,
     MICROBAN_TELEOP_V12_DEADLINE_FALLBACK_INFO_KEY,
-    MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
     MICROBAN_TELEOP_V12_DEADLINE_RESUME_SOURCE_INFO_KEY,
     deadline_fallback_marker,
     deadline_fallback_resume_source,
@@ -59,11 +51,6 @@ from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_fallback.sh"
-CANARY_EVALUATOR = ROOT / "scripts/evaluate_microban_teleop_v12_deadline_canary.sh"
-TRAINER = ROOT / "scripts/train_microban_teleop_v12.sh"
 SELECTED_SHA = "1" * 64
 CANARY_SHA = "2" * 64
 STRICT_SHA = "3" * 64
@@ -343,138 +330,6 @@ def test_canary_fallback_keeps_foot_causality_and_relaxes_only_hand_rms() -> Non
     assert checks["target_column_ablation_response"] is False
 
 
-def test_post_canary_receipt_payload_is_exact_and_fail_closed() -> None:
-    checks = {
-        name: True
-        for name in (
-            "actual_soft_limits",
-            "all_scenarios_completed",
-            "finite",
-            "forced_hmd_motion",
-            "hand_tracking_p95",
-            "hand_tracking_rms",
-            "no_falls",
-            "nonzero_observation_coverage",
-            "raw_action_recurrence",
-            "target_column_ablation_response",
-            "twist_directional_response",
-        )
-    }
-    report_hashes = {
-        "locomotion": "a" * 64,
-        "tracking": "b" * 64,
-        "onnx": "c" * 64,
-    }
-    receipt = {
-        "schema_version": DEADLINE_FALLBACK_RECEIPT_SCHEMA_VERSION,
-        "gate": DEADLINE_POST_CANARY_RECEIPT_GATE,
-        "status": "pass",
-        "revision": _post_canary_marker()["revision"],
-        "checkpoint": {
-            "path": "/portable/model_10099.pt",
-            "sha256": CANARY_SHA,
-            "iteration": 10_099,
-            "completed_updates": 10_100,
-        },
-        "lineage": _marker(),
-        "post_canary_authorization": _post_canary_marker(),
-        "strict_failure_report": {
-            "path": "/portable/strict.json",
-            "sha256": CANARY_STRICT_SHA,
-            "profile": "whole_body_foot_activation_canary_reachable_safety_v1",
-            "status": "fail",
-            "failed_checks": ["hand_tracking_rms"],
-        },
-        "fallback_tracking_report": {
-            "path": "/portable/fallback.json",
-            "sha256": report_hashes["tracking"],
-            "profile": DEADLINE_CANARY_FALLBACK_PROFILE,
-            "status": "pass",
-            "checks": checks,
-        },
-        "full_stage_gate": {
-            "path": "/portable/gate.json",
-            "sha256": "d" * 64,
-            "schema_version": 2,
-            "status": "pass",
-            "checkpoint_sha256": CANARY_SHA,
-            "tracking_profile": DEADLINE_CANARY_FALLBACK_PROFILE,
-            "report_sha256": report_hashes,
-        },
-        "promotion": {
-            "eligible": True,
-            "completed_updates": 10_100,
-            "next_completed_updates": 15_000,
-            "only_threshold_change": "hand_rms_m_max_0.030_to_0.035",
-            "hand_p95_m_max": 0.05,
-            "foot_activation_checks_changed": False,
-            "safety_thresholds_changed": False,
-            "locomotion_gate_changed": False,
-            "onnx_gate_changed": False,
-            "requires_schema_v2_full_stage_gate": True,
-        },
-    }
-    assert validate_deadline_post_canary_receipt_payload(
-        receipt,
-        checkpoint_sha256=CANARY_SHA,
-        receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
-    ) == dict(receipt)
-    with pytest.raises(ValueError, match="receipt SHA-256"):
-        validate_deadline_post_canary_receipt_payload(
-            receipt,
-            checkpoint_sha256=CANARY_SHA,
-            receipt_sha256="0" * 64,
-        )
-    drifted = copy.deepcopy(receipt)
-    drifted["strict_failure_report"]["sha256"] = STRICT_SHA
-    with pytest.raises(ValueError, match="strict evidence"):
-        validate_deadline_post_canary_receipt_payload(
-            drifted,
-            checkpoint_sha256=CANARY_SHA,
-            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
-        )
-    with pytest.raises(ValueError, match="identity drifted"):
-        validate_deadline_post_canary_receipt_payload(
-            receipt,
-            checkpoint_sha256=SELECTED_SHA,
-            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
-        )
-    drifted = copy.deepcopy(receipt)
-    drifted["fallback_tracking_report"]["checks"]["hand_tracking_p95"] = False
-    with pytest.raises(ValueError, match="fallback evidence"):
-        validate_deadline_post_canary_receipt_payload(
-            drifted,
-            checkpoint_sha256=CANARY_SHA,
-            receipt_sha256=MICROBAN_TELEOP_V12_DEADLINE_POST_CANARY_RECEIPT_SHA256,
-        )
-
-
-def test_validate_receipt_cli_rebuilds_10000_receipt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    import mjlab_microban.scripts.teleop_v12_deadline_fallback as fallback
-
-    receipt = tmp_path / "receipt.json"
-    expected = {
-        "gate": fallback.DEADLINE_FALLBACK_RECEIPT_GATE,
-        "checkpoint": {"iteration": 9_999, "completed_updates": 10_000},
-    }
-    receipt.write_text(json.dumps(expected), encoding="utf-8")
-    monkeypatch.setattr(fallback, "build_receipt", lambda **_kwargs: expected)
-
-    assert fallback.main(
-        [
-            "validate-receipt",
-            str(receipt),
-            "model_9999.pt",
-            "strict.json",
-            "fallback.json",
-            "gate.json",
-        ]
-    ) == 0
-    assert json.loads(capsys.readouterr().out) == expected
-
-
 def test_canary_is_exact_one_hop_and_bound_to_selected_parent() -> None:
     payload = _canary_payload(
         checkpoint_path="repo://parent.pt",
@@ -591,38 +446,3 @@ def test_training_and_save_endpoints_are_exact() -> None:
             common_step_counter=240_024,
             filename="model_10000.pt",
         )
-
-
-def test_shell_launchers_route_through_explicit_deadline_mode() -> None:
-    subprocess.run(
-        ["bash", "-n", str(EVALUATOR), str(CANARY_EVALUATOR), str(TRAINER)],
-        check=True,
-    )
-    evaluator = EVALUATOR.read_text(encoding="utf-8")
-    trainer = TRAINER.read_text(encoding="utf-8")
-    canary_evaluator = CANARY_EVALUATOR.read_text(encoding="utf-8")
-    for required in (
-        "create-deadline-fallback",
-        "--deadline-fallback",
-        "SELECTED_SHA=",
-        "realpath --",
-        "create-receipt",
-        "validate-receipt",
-    ):
-        assert required in evaluator
-    for required in (
-        "resume-mode",
-        "--agent.deadline-fallback-resume True",
-        "save_interval=15000",
-        "deadline_fallback_canary_complete",
-        "deadline_fallback_post_canary",
-    ):
-        assert required in trainer
-    for required in (
-        "create-deadline-canary-fallback",
-        "--deadline-canary-fallback",
-        "CANARY_SHA=",
-        "create-canary-receipt",
-        "validate-canary-receipt",
-    ):
-        assert required in canary_evaluator

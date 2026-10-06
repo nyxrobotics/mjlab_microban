@@ -13,10 +13,6 @@ from rsl_rl.models import MLPModel
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
-from mjlab_microban.scripts.evaluate_safe_velocity_checkpoint import (
-    _make_evaluation_env_cfg,
-    _TerminalStateRecorder,
-)
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
@@ -344,25 +340,6 @@ class SafeVelocityConfigurationTest(unittest.TestCase):
         fake_env.command_manager.get_command = lambda _name: bad_commands
         with self.assertRaisesRegex(ValueError, "finite"):
             commanded_planar_velocity_progress(fake_env)
-
-    def test_gate_uses_pre_reset_terminal_recorder_without_partial_resets(
-        self,
-    ) -> None:
-        cfg = _make_evaluation_env_cfg(
-            num_envs=4,
-            steps=200,
-            command_vx_m_s=0.08,
-            seed=42,
-        )
-        self.assertTrue(cfg.auto_reset)
-        self.assertEqual(set(cfg.recorders), {"safe_velocity_terminal_state"})
-        self.assertIs(
-            cfg.recorders["safe_velocity_terminal_state"].func,
-            _TerminalStateRecorder,
-        )
-        command = cfg.commands["twist"]
-        self.assertEqual(command.ranges.lin_vel_x, (0.08, 0.08))
-        self.assertEqual(command.rel_forward_envs, 0.0)
 
     def test_actor_is_raw_input_bounded_and_critic_remains_normalized(self) -> None:
         self.assertFalse(MicrobanSafeVelocityRlCfg.actor.obs_normalization)

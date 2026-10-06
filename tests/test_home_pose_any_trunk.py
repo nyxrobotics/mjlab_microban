@@ -16,7 +16,8 @@ on exactly:
 and the repr of every registered task's env / play / RL config and runner of
 the reference branch (tests/fixtures/home_equivalence/*.json, sha256 per key,
 recorded with tests/home_equivalence.py) is equal here.  The only allowed
-differences are new names this tree adds, and at the centered HOME the new
+differences are new names this tree adds, the names of the modules and tasks
+it deleted (never trained by the HOME pipeline), and at the centered HOME the new
 command-config fields left at their no-op defaults (``trunk_pitch=0.0``,
 ``lf_rb_probability=0.9``) and the walking runner that stamps checkpoints with
 their HOME (a subclass of mjlab's).  The 0.040 m hand-RMS profiles of the
@@ -87,6 +88,34 @@ def _run_python(yaml_path: Path, code: str) -> str:
     return completed.stdout.strip().splitlines()[-1]
 
 
+# Task ids of the reference branches that the HOME pipeline never trained and
+# this tree no longer registers (their env / play / RL / runner keys are absent).
+UNREGISTERED_TASKS: frozenset[str] = frozenset()
+
+
+def _deleted_here(key: str) -> bool:
+    """A reference key whose module or task this tree deleted (it is not a regression).
+
+    Keys of modules that still exist, and of tasks that are still registered,
+    must be present and equal; only names of deleted files may be missing.
+    """
+
+    kind, _, rest = key.partition(":")
+    if kind == "task":
+        return rest.rsplit(":", 1)[0] in UNREGISTERED_TASKS
+    if kind == "import":
+        module = rest
+    elif kind == "const":
+        module = rest.rsplit(".", 1)[0]
+    elif kind == "call" and rest.startswith("mjlab_microban."):
+        module = rest.rsplit(".", 1)[0]
+    else:
+        return False
+    relative = Path(*module.split("."))
+    source = REPO_ROOT / "src"
+    return not (source / relative.with_suffix(".py")).is_file() and not (source / relative).is_dir()
+
+
 class HomeEquivalenceTest(unittest.TestCase):
     """Side-by-side with the reference branches (subprocess per HOME, ~40 s each)."""
 
@@ -122,7 +151,7 @@ class HomeEquivalenceTest(unittest.TestCase):
             self.assertEqual(values.get(key), value)
         current = home_equivalence.digest(values)
         expected = json.loads(reference.read_text())
-        missing = sorted(set(expected) - set(current))
+        missing = sorted(key for key in set(expected) - set(current) if not _deleted_here(key))
         different = sorted(
             key
             for key in expected
@@ -131,10 +160,10 @@ class HomeEquivalenceTest(unittest.TestCase):
         self.assertEqual(missing, [], "names of the reference branch missing here")
         self.assertEqual(different, [], "values that differ from the reference branch")
         # Every registered task of the reference exists and matches (checked
-        # above); the task count is at least the reference's.
+        # above), except the ones this tree no longer registers.
         self.assertGreaterEqual(
             sum(key.startswith("task:") for key in current),
-            sum(key.startswith("task:") for key in expected),
+            sum(key.startswith("task:") and not _deleted_here(key) for key in expected),
         )
 
     def test_centered_home_reproduces_track_centered_home_clip(self):
