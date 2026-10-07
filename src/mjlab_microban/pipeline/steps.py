@@ -404,11 +404,18 @@ class Pipeline:
             return {"passed": bool(probe["passed"] and nine["ok"]), "probe": probe, "nine_by_300": nine,
                     "summary": {"W": probe["checks"], "worst_value": [round(v, 3) for v in probe["worst_value"]],
                                 "still_value": round(probe["still_value"], 3),
+                                # mean twist (v_x m/s, v_y m/s, w_z rad/s) on the standing command
+                                "still_twist": [round(v, 3) for v in probe["still"]],
                                 "angle": [round(v, 1) for v in probe["angle_deg"]],
                                 "speed": [round(v, 3) for v in probe["speed"]],
                                 "falls": probe["falls"], "9x300": nine["ok"],
-                                "9x300_worst": [nine["worst"], round(nine["worst_margin"], 4)],
+                                # reward of the mean twist minus standing still on it (not a velocity)
+                                "9x300_worst_reward_minus_standing": [nine["worst"], round(nine["worst_margin"], 4)],
+                                # signed response along the command (m/s or rad/s)
                                 "9x300_signed": {k: round(v, 4) for k, v in nine["responses"].items()},
+                                "9x300_twist": {k: [round(x, 4) for x in nine["twists"][k]]
+                                                for k in ("neutral", "backward_0p1", "backward_0p2")
+                                                if k in nine["twists"]},
                                 "9x300_soft_limit_rad": round(nine["soft_limit_overshoot_rad"], 3)}}
 
         return self.start_check(f"check_walk_{checkpoint.stem}", commands, verdict, sequential=False)
@@ -924,32 +931,35 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
     """Pass/fail and worst margin of one 9x300 walker probe receipt.
 
     Each moving scenario passes when the walking reward of its mean body twist
-    beats standing still (mjlab_microban/twist_pass_line.py; the margin is the
-    reward above 1/2); the measured joints may overshoot the soft limits by
+    beats standing still on it (mjlab_microban/twist_pass_line.py; the margin
+    is the reward minus that of standing still, not a velocity); the measured
+    joints may overshoot the soft limits by
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.  The neutral scenario is
     checked for completion only, as the PICO source gate does.
     """
 
     from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-    from mjlab_microban.twist_pass_line import STANDING_STILL_VALUE, twist_passes, twist_value
+    from mjlab_microban.twist_pass_line import twist_passes, twist_value
 
     summary = receipt["summary"]
-    responses, values, below = {}, {}, []
+    responses, values, twists, command_of, below = {}, {}, {}, {}, []
     for result in receipt["results"]:
         name = result.get("scenario", result.get("name"))
         command = [float(result["command"][axis]) for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")]
-        if all(x == 0.0 for x in command):
-            continue
         measured = result.get("measured_velocity_body", {})
         means = [measured.get(axis, {}).get("mean") for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")]
         twist = [float("nan") if m is None else float(m) for m in means]
+        twists[name] = twist
+        if all(x == 0.0 for x in command):
+            continue
+        command_of[name] = command
         values[name] = twist_value(command, twist)
         response = result.get("directional_response") or {}
         if response.get("signed_response") is not None:
             responses[name] = float(response["signed_response"])
         if not twist_passes(command, twist):
             below.append(name)
-    margins = {key: value - STANDING_STILL_VALUE for key, value in values.items()}
+    margins = {key: value - twist_value(command_of[key], (0.0, 0.0, 0.0)) for key, value in values.items()}
     worst = min(margins, key=lambda key: margins[key] if margins[key] == margins[key] else float("-inf"))
     overshoot = float(summary.get("maximum_actual_soft_limit_violation_rad", float("inf")))
     ok = (
@@ -962,6 +972,7 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
     )
     return {"ok": ok, "worst_margin": margins[worst], "worst": worst, "below": below,
             "falls": summary.get("fall_scenario_count"), "responses": responses, "values": values,
+            "twists": twists,
             "soft_limit_overshoot_rad": overshoot}
 
 
