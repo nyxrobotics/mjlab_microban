@@ -11,7 +11,9 @@ Early stop (pipeline monitor): a run may stop once two checks 1000 updates
 apart pass, at the earliest at its ``*_MIN_FINAL_UPDATES``: get-up and PICO
 once their last stage has lasted half its planned length; walking (no planned
 end, ``WALK_MAX_UPDATES`` is a cap) once both checks saw at least 1000 updates
-of its only stage.
+of its only stage.  A walking run that never passes two checks in a row ends
+at ``WALK_MAX_UPDATES`` with its best checked checkpoint (the pipeline's rule
+in config/pipeline.yaml ``walk.check``).
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ def scaled(iteration: int) -> int:
 
 # Walking: one stage (wider forward/yaw commands, no-stepping penalty).
 WALK_WIDEN_UPDATE = scaled(3000)
-WALK_MAX_UPDATES = scaled(20000)
+WALK_MAX_UPDATES = scaled(8000)
 WALK_MIN_FINAL_UPDATES = WALK_WIDEN_UPDATE + scaled(2000)
 
 # Get-up: IMU latency, calm refinement, low effort with pushes.

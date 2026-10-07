@@ -1,7 +1,9 @@
 # scripts/retrain_all_for_home.py: every number of one release run that is not
 # a training schedule (those are in src/mjlab_microban/schedules.py).  Editing
-# a policy's section retrains that policy (and what depends on it) on the next
-# run; the other steps are kept.  `dry:` overrides apply to --dry-run only.
+# a policy's training keys (task, envs, save_interval; pipeline/steps.py
+# TRAINING_KEYS) retrains that policy (and what depends on it) on the next
+# run; editing its checks or judgment re-judges, never retrains.  `dry:`
+# overrides apply to --dry-run only.
 
 seed: 42
 

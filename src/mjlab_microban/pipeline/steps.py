@@ -62,6 +62,9 @@ PROBE_ROOT = REPO / "artifacts" / "legacy_teleop_probe"
 BOOTSTRAP_ROOT = REPO / "artifacts" / "teleop_v12_bootstrap"
 DRY_RUN_POLICY_ALLOW_ENV = "MICROBAN_ALLOW_DRYRUN_POLICY"
 
+# The keys of a step's config/pipeline.yaml section the training reads (the
+# rest configures its checks and judgment and is not a training input).
+TRAINING_KEYS = ("task", "envs", "save_interval")
 # Files whose content a step's training depends on (repo-relative globs).
 # Evaluation code is not listed: changing an evaluator re-judges nothing that
 # was already accepted, and never retrains.
@@ -145,7 +148,11 @@ class Pipeline:
                                 "worktree for another HOME", EXIT_INPUT)
 
     def inputs(self, step: str, *upstream: str) -> str:
-        section = {key: self.cfg.get(key) for key in ("seed", step)}
+        # Only what the training reads: the checks and judgments (``check``,
+        # ``gate``, ``evals``, pass lines) judge a run, they never retrain it.
+        section = {"seed": self.cfg.get("seed"),
+                   step: {key: value for key, value in (self.cfg.get(step) or {}).items()
+                          if key in TRAINING_KEYS}}
         extra = {"dry": self.dry, "cfg": section, "schedules": self.sched,
                  "upstream": {name: self.state.step(name).get("outputs") for name in upstream}}
         return hash_inputs(STEP_INPUTS.get(step, []), extra)

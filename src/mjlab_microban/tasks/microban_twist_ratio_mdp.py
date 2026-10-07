@@ -59,8 +59,10 @@ backward is the limit and yaw or lateral is commanded too (c = (-0.3, 0,
 0.75): best (-0.11, 0, 0.80), reward 0.705 against 0.683 on the ray); the
 diagonal commands of the walk check W1 have it about 15 deg off.  The user's
 own form ``1 + speed - error`` has the same property (70 commands, at most
-28.5 deg); this form only weakens it, and W1 (angle to the command ray)
-judges the walker that results.  For a zero
+28.5 deg); this form only weakens it.  The walking checks therefore judge
+the direction by this reward itself (mjlab_microban/twist_pass_line.py: a
+moving command passes when its mean twist beats standing still), not by an
+angle to the command ray.  For a zero
 command ``error = sqrt(|v^|^2 + |w^|^2)``.
 
 Why this form (walker trained from scratch at the forward-lean HOME,

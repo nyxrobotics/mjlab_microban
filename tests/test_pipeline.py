@@ -59,6 +59,18 @@ class StateTest(unittest.TestCase):
                 again.begin("getup", "a" * 64)
             self.assertTrue(again.begin("getup", "c" * 64))
 
+    def test_inputs_cover_the_training_keys_not_the_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.cfg = {"seed": 42, "walk": {"task": "T", "envs": 4096, "save_interval": 500,
+                                                 "check": {"seeds": "101"}}}
+            before = pipeline.inputs("walk")
+            pipeline.cfg["walk"]["check"] = {"seeds": "101,102", "line": 0.5}
+            pipeline.cfg["walk"]["gate"] = {"x": 1}
+            self.assertEqual(pipeline.inputs("walk"), before)
+            pipeline.cfg["walk"]["envs"] = 2048
+            self.assertNotEqual(pipeline.inputs("walk"), before)
+
     def test_running_steps_continue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
