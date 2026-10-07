@@ -49,7 +49,6 @@ from mjlab_microban.tasks.mdp import (
     reset_root_state_uniform_world_yaw,
     upright as local_upright,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import target_beyond_joint_limit_l1_sum
 from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 
 SCENE_CFG = SceneCfg(
@@ -100,10 +99,6 @@ TWIST_AXIS_SCALE = tuple(
 # replaces (exp/twist-ratio-validation AB_result.md, recommendation of
 # 2026-10-07 01:15: the bounded time-filtered form, direction penalty 1).
 WALK_TWIST_RATIO_WEIGHT = 8.0
-# Per radian of arm target past the joint's stop, summed over the arm joints.
-WALK_ARM_JOINTS = (r".*shoulder_pitch", r".*shoulder_roll", r".*elbow")
-WALK_ARM_TARGET_BEYOND_STOP_WEIGHT = -1.0
-WALK_DOF_POS_LIMITS_WEIGHT = -10.0
 WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
@@ -324,30 +319,6 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["foot_slip"].weight = -1.0
 
     cfg.rewards["action_rate_l2"].weight = -0.1
-
-    # Arm targets past the joints' stops: there the target moves no joint, so
-    # no position-based term has a gradient and a drifted output stays.  The
-    # 2026-10-07 release walkers parked a standing arm on its stop (elbows and
-    # shoulder pitches, 0.2 rad past the soft limit in the 9x300 probe at
-    # updates 5000-12000) although holding the arms at HOME scored more
-    # (+2.1 per step in the standing env).  A servo-range (+-pi) barrier at
-    # -1 per half-range (0.32 per radian) neither brought a parked shoulder
-    # pitch back (its stop is at pi) nor covered the elbows between their
-    # stop (2.18) and pi; a soft-limit barrier on every joint charged
-    # the exploration noise of the leg roll joints (HOME within 0.4 rad of
-    # their limits) and the walker stood still.  The legs are held by
-    # dof_pos_limits below.
-    cfg.rewards["arm_target_beyond_stop"] = RewardTermCfg(
-        func=target_beyond_joint_limit_l1_sum,
-        weight=WALK_ARM_TARGET_BEYOND_STOP_WEIGHT,
-        params={"action_name": "joint_pos", "joint_names": WALK_ARM_JOINTS},
-    )
-    # Joint positions past the soft limits, at the weight PICO uses for the
-    # same robot and the same acceptance (the 9x300 probe allows 0.0873 rad).
-    # At mjlab's -1 the standing walker still drove one elbow (update 5000,
-    # 0.22 rad) or one knee (update 4000, 0.14 rad) onto its stop: entering the
-    # stop cost less than the balance it bought while standing without steps.
-    cfg.rewards["dof_pos_limits"].weight = WALK_DOF_POS_LIMITS_WEIGHT
 
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,

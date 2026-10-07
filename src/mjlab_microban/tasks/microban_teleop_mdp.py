@@ -18,7 +18,6 @@ them at the same bounded rate as the robot runtime.
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -124,38 +123,6 @@ def normalized_target_clip_excess_l1_sum(
     half_range = 0.5 * (upper - lower)
     normalized_excess = (target - clipped_target) / half_range
     return torch.abs(normalized_excess).sum(dim=-1)
-
-
-def target_beyond_joint_limit_l1_sum(
-    env: ManagerBasedRlEnv,
-    joint_names: Sequence[str],
-    action_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Radians by which the unclipped targets of ``joint_names`` lie past the joints' stops.
-
-    A target past a joint's mechanical range (MJCF limit) leaves the joint on
-    its stop wherever the target is, so every position-based term is flat in
-    that action and a policy mean that drifts there gets no gradient back.
-    Linear in the excess, zero inside the range; ``joint_names`` are regexes
-    over the action's joints.
-    """
-
-    action = env.action_manager.get_term(action_name)
-    if not isinstance(action, JointPositionAction):
-        raise TypeError(f"{action_name!r} must be a JointPositionAction")
-    entity = action._entity
-    ids = torch.as_tensor(action.target_ids, device=env.device).reshape(-1)
-    names = [entity.joint_names[int(i)] for i in ids]
-    selected = [k for k, name in enumerate(names) if any(re.fullmatch(p, name) for p in joint_names)]
-    if not selected:
-        raise ValueError(f"no action joint matches {list(joint_names)}")
-    raw = action.raw_action
-    scale = torch.as_tensor(action.scale, dtype=raw.dtype, device=raw.device)
-    offset = torch.as_tensor(action.offset, dtype=raw.dtype, device=raw.device)
-    target = torch.broadcast_to(raw * scale + offset, raw.shape)[:, selected]
-    limits = entity.data.joint_pos_limits[:, ids][:, selected]
-    excess = torch.clamp(limits[..., 0] - target, min=0.0) + torch.clamp(target - limits[..., 1], min=0.0)
-    return excess.sum(dim=-1)
 
 
 def normalized_joint_soft_limit_guard_l1_sum(
