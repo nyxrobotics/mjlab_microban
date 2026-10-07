@@ -104,13 +104,16 @@ TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 # Scale of the uncommanded motion (v_z m/s, w_x rad/s, w_y rad/s).
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 # Below this command norm the speed is the precision branch (see the module
-# doc).  0.1, not 0.2: at 0.2 the 0.1 m/s forward and backward commands
+# doc).  0.04, not 0.2: at 0.2 the 0.1 m/s forward and backward commands
 # (n = 0.14) were in the precision branch, where standing still (0.64) beats
-# walking at twice the command (0.53); the 2026-10-07 release walker, whose
-# gait sped up with the update-3000 command widening, stood still on them
-# from update 4000 (9x300 forward_0p1 and backward_0p1 at 0.000).  In the
-# along-command branch any progress beats standing (2x: 0.83 against 0.5).
-TWIST_RATIO_MIN_COMMAND_NORM = 0.1
+# walking at twice the command (0.53); the 2026-10-07 release walker stood
+# still on them.  0.1 m/s is an ordinary speed for this robot (forward reach
+# about 0.2 m/s), so every command the robot is asked to walk at uses the
+# user's along-command speed, where any progress beats standing (2x: 0.83
+# against 0.5).  The precision branch only covers standing and near-standing
+# commands (below 0.028 m/s forward, 0.012 m/s lateral, 0.06 rad/s yaw); it is
+# not 0 because a/n then swings with tiny velocity noise.
+TWIST_RATIO_MIN_COMMAND_NORM = 0.04
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
 TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
 

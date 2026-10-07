@@ -145,10 +145,10 @@ class DecompositionTest(unittest.TestCase):
         # command; any motion lowers it on the scale of min_command_norm.
         standing = parts(
             [[0.0, 0.0, 0.0]] * 3,
-            [[0.0, 0.0, 0.0], [0.014, -0.006, 0.06], [0.07, -0.03, 0.3]],
+            [[0.0, 0.0, 0.0], [0.007, -0.003, 0.03], [0.07, -0.03, 0.3]],
         )
         self.assertAlmostEqual(float(standing.speed[0]), 1.0)
-        moved = math.sqrt(0.02**2 + 0.02**2 + 0.04**2)
+        moved = math.sqrt(0.01**2 + 0.01**2 + 0.02**2)
         self.assertAlmostEqual(
             float(standing.speed[1]), 1.0 - moved / TWIST_RATIO_MIN_COMMAND_NORM, places=5
         )
@@ -156,9 +156,9 @@ class DecompositionTest(unittest.TestCase):
         self.assertAlmostEqual(float(standing.error[0]), 0.0)
         self.assertAlmostEqual(float(standing.error[1]), moved, places=5)
         self.assertAlmostEqual(float(standing.error[2]), math.sqrt(0.01 + 0.01 + 0.04), places=5)
-        # A small command (n = 0.05) tracked exactly earns speed 1, standing
+        # A small command (n = 0.02) tracked exactly earns speed 1, standing
         # still on it 1 - n / min_command_norm = 0.5.
-        small = [0.035, 0.0, 0.0]
+        small = [0.014, 0.0, 0.0]
         result = parts([small] * 2, [small, [0.0, 0.0, 0.0]])
         self.assertAlmostEqual(float(result.speed[0]), 1.0, places=5)
         self.assertAlmostEqual(float(result.speed[1]), 0.5, places=5)
@@ -458,7 +458,7 @@ def _golden_sequence():
 
 class GoldenTest(unittest.TestCase):
     def test_reproduces_the_implementation_the_comparison_trained_with(self) -> None:
-        # The comparison ran with min_command_norm 0.2 (the release uses 0.1).
+        # The comparison ran with min_command_norm 0.2 (the release uses 0.04).
         commands, steps = _golden_sequence()
         env = _FilterEnv(commands.tolist())
         term = twist_ratio_velocity(SimpleNamespace(params={}), env)
