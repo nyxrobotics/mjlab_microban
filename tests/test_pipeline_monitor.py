@@ -66,19 +66,26 @@ class MonitorTest(unittest.TestCase):
             monitor.start_due()
 
     def test_two_consecutive_passes_end_the_run(self) -> None:
-        save(self.root, 1000, 2000, 3000)
+        save(self.root, 1000, 2000)
         monitor = make_monitor(self.root, checks=[1000, 2000, 3000, 4000], min_final=0,
                                verdicts={2000: True, 3000: True, 4000: True})
-        monitor.start_due()  # only the newest due checkpoint runs; older ones are skipped
-        for update in ("1000", "2000"):
-            self.assertEqual(monitor.record["checks"][update]["skipped"], "the previous check still ran")
-        self.run_checks(monitor)  # 3000 passes, but 2000 was not checked: no pair yet
-        self.assertTrue(monitor.record["checks"]["3000"]["passed"])
-        save(self.root, 4000)
+        monitor.start_due()  # the oldest due checkpoint first; every one is checked
+        self.run_checks(monitor)
+        self.assertEqual(set(monitor.record["checks"]), {"1000", "2000"})
+        self.assertFalse(monitor.record["checks"]["1000"]["passed"])
+        save(self.root, 3000)
         with self.assertRaises(m.EarlyStop) as stop:
             self.run_checks(monitor)
-        self.assertEqual(stop.exception.checkpoint.name, "model_4000.pt")
-        self.assertTrue(monitor.record["adopted"].endswith("model_4000.pt"))
+        self.assertEqual(stop.exception.checkpoint.name, "model_3000.pt")
+        self.assertTrue(monitor.record["adopted"].endswith("model_3000.pt"))
+
+    def test_finish_checks_every_checkpoint_left(self) -> None:
+        save(self.root, 1000, 2000, 3000, 3999)
+        monitor = make_monitor(self.root, checks=[1000, 2000, 3000, 3999], min_final=0,
+                               verdicts={2000: True, 3999: True})
+        monitor.finish()  # the training ended before any check ran (or it was not watched)
+        self.assertEqual(set(monitor.record["checks"]), {"1000", "2000", "3000", "3999"})
+        self.assertNotIn("adopted", monitor.record)
 
     def test_a_failed_check_restarts_the_pair(self) -> None:
         monitor = make_monitor(self.root, checks=[1000, 2000, 3000, 4000], min_final=0,
@@ -266,45 +273,6 @@ class MonitorTest(unittest.TestCase):
         monitor.record["checks"] = {str(u): {"passed": True} for u in range(1000, WALK_MIN_FINAL_UPDATES, 1000)}
         monitor.decide_early_stop()  # 1000+2000 ... 3000+4000 pass but end too early
         self.assertNotIn("adopted", monitor.record)
-
-    def test_metrics_are_read_per_update(self) -> None:
-        log = self.root / "train.log"
-        log.write_text("Learning iteration 499/16500\n    Mean episode length: 88.50\n"
-                       "Episode_Reward/standing_bonus: 2.9000\nLearning iteration 500/16500\n"
-                       "Mean episode length: 120.00\n")
-        monitor = make_monitor(self.root, checks=[], min_final=0)
-        monitor.log_path = log
-        monitor.read_log()
-        self.assertEqual(monitor._metrics["Mean episode length"], [(499, 88.5), (500, 120.0)])
-        self.assertEqual(monitor._metrics["Episode_Reward/standing_bonus"], [(499, 2.9)])
-
-
-class RuleTest(unittest.TestCase):
-    def test_walk_episode_length_floors(self) -> None:
-        rules = m.walk_abort_rules(CFG["walk"]["check"])
-        self.assertIsNone(rules(400, {"Mean episode length": [(400, 50.0)]}))
-        self.assertIn("< 100", rules(500, {"Mean episode length": [(500, 90.0)]}))
-        self.assertIsNone(rules(2000, {"Mean episode length": [(500, 150.0), (2000, 350.0)]}))
-        self.assertIn("< 300", rules(2100, {"Mean episode length": [(500, 150.0), (2000, 250.0)]}))
-
-    def test_walk_hopeless_at_12000(self) -> None:
-        check = m.walk_check_abort(CFG["walk"]["check"])
-        probe = {"checks": {"W1": False, "W4": True}, "angle_deg": [50.0, 50.0], "speed": [0.1, 0.1]}
-        self.assertIsNone(check(12000, {"probe": probe}))
-        self.assertIsNone(check(11000, {"probe": {**probe, "checks": {"W4": False}}}))
-        self.assertIn("W4", check(12000, {"probe": {**probe, "checks": {"W4": False}}}))
-
-    def test_getup_standing_bonus(self) -> None:
-        c = CFG["getup"]["check"]
-        rules = m.getup_abort_rules(c, [2500, 4000, 10000])
-        name = "Episode_Reward/standing_bonus"
-        self.assertIsNone(rules(2499, {name: [(2499, 4.4)]}))
-        self.assertIn("< 3.0", rules(2499, {name: [(2499, 2.0)]}))
-        self.assertIn("< 3.5", rules(4500, {name: [(2499, 4.4), (4500, 3.0)]}))
-        dip = [(u, 2.5) for u in range(4000, 4400)]  # inside the 500-update grace after refine
-        self.assertIsNone(rules(4400, {name: [(2499, 4.4), *dip]}))
-        long_dip = [(u, 2.5) for u in range(5000, 5200)]
-        self.assertIn("for 200 updates", rules(5200, {name: [(2499, 4.4), (4500, 4.4), *long_dip]}))
 
 
 class WalkRulesTest(unittest.TestCase):

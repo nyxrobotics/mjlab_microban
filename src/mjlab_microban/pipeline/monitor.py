@@ -9,24 +9,24 @@ it ends).  It
   GETUP_STAGES, read by the pipeline) and come within a tolerance of its
   update; once the run ends (``require_stages``) every stage due by its last
   checkpoint must have been seen;
-* applies the policy's stop rules to the metrics (``abort`` -> the run stops
-  with a report: no point in training on);
-* starts one check at a time on saved checkpoints (a separate process,
-  in parallel with training; a check that comes due while another runs is
-  skipped and recorded), and records its verdict in state.json;
+* starts one check at a time on saved checkpoints, oldest first (a separate
+  process, in parallel with training; every due checkpoint is checked, also
+  after the training ended), and records its verdict in state.json;
 * stops the training early once two consecutive checks (N and N+1000) pass
   and N+1000 is at or after the earliest end of the run: the run then ends
   with checkpoint N+1000 (``EarlyStop``), which is judged once.
 
-Rules and intervals: config/pipeline.yaml (``<step>.check``); docs in
-docs/home_pose_workflow.md.
+A failing check never stops a run: the run trains its planned updates and
+the pipeline goes on with its best checkpoint (user, 2026-10-07: no stop on
+a failed test, only on a broken program).  Intervals: config/pipeline.yaml
+(``<step>.check``); docs in docs/home_pose_workflow.md.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,7 +34,6 @@ from mjlab_microban.pipeline.core import PipelineError, find_checkpoint
 
 STAGE_LINE = re.compile(r"Curriculum stage (\d+) (.+?) at step (\d+) \(update (\d+)\)")
 ITERATION_LINE = re.compile(r"Learning iteration (\d+)/(\d+)")
-METRIC_LINE = re.compile(r"^\s*([A-Za-z_/ ]+[A-Za-z_]):\s*(-?[0-9.]+(?:e-?\d+)?)\s*$")
 
 
 class EarlyStop(Exception):
@@ -69,14 +68,11 @@ class Monitor:
     check_updates: list[int]  # checkpoints (model_<update>) to check, in order
     min_final_update: int  # earliest model_<update> a run may end with
     start_check: Callable[[Path], Check] | None = None
-    abort_rules: Callable[[int, dict[str, list[tuple[int, float]]]], str | None] | None = None
-    check_abort: Callable[[int, dict[str, Any]], str | None] | None = None
     early_stop: bool = True
     log_path: Path | None = None
     resumed_from: int = 0  # the update a continued run started from (stages re-applied there)
     _offset: int = 0
     _iteration: int = -1
-    _metrics: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
     _running: Check | None = None
 
     def __post_init__(self) -> None:
@@ -100,11 +96,6 @@ class Monitor:
             match = STAGE_LINE.search(line)
             if match:
                 self.stage_seen(match.group(2), int(match.group(4)))
-                continue
-            match = METRIC_LINE.match(line)
-            if match and self._iteration >= 0:
-                self._metrics.setdefault(match.group(1).strip(), []).append(
-                    (self._iteration, float(match.group(2))))
 
     def stage_seen(self, name: str, update: int) -> None:
         if name in self.record["stages_seen"]:
@@ -149,11 +140,7 @@ class Monitor:
         self.record["checks"][str(running.update)] = verdict
         self.state.save()
         self.state.log(f"check model_{running.update}: {'PASS' if verdict.get('passed') else 'FAIL'} "
-                       f"{json.dumps(verdict.get('summary', verdict.get('error', '')), default=str)[:400]}")
-        if self.check_abort is not None:
-            reason = self.check_abort(running.update, verdict)
-            if reason:
-                raise PipelineError(f"stopped at the check of model_{running.update}: {reason}")
+                       f"{json.dumps(verdict.get('summary', verdict.get('error', '')), default=str)[:600]}")
         self.decide_early_stop()
 
     def decide_early_stop(self) -> None:
@@ -179,12 +166,7 @@ class Monitor:
         due = self.due_checks()
         if not due:
             return
-        # The newest due checkpoint; older ones that were not reached in time
-        # are skipped (one check at a time, never queued behind training).
-        for update in due[:-1]:
-            self.record["checks"][str(update)] = {"passed": False, "skipped": "the previous check still ran"}
-            self.state.log(f"check model_{update}: skipped (the previous check still ran)")
-        update = due[-1]
+        update = due[0]  # oldest first: every checkpoint is checked (the best one is chosen from them)
         checkpoint = find_checkpoint(self.experiment, self.label, update)
         self._running = self.start_check(checkpoint)
         self._running.update = update
@@ -192,29 +174,22 @@ class Monitor:
 
     def poll(self) -> None:
         self.read_log()
-        if self.abort_rules is not None:
-            reason = self.abort_rules(self._iteration, self._metrics)
-            if reason:
-                raise PipelineError(f"stopped at update {self._iteration}: {reason}")
         self.collect()
         self.start_due()
 
     def finish(self) -> None:
-        """After training ended: wait for the running check and decide once more."""
+        """After training ended: run every check still due, one at a time, deciding after each."""
 
-        while self._running is not None:
-            try:
-                self._running.process.wait(timeout=30)
-            except Exception:  # noqa: BLE001 - subprocess.TimeoutExpired
-                pass
-            self.collect()
-        self.start_due()
-        while self._running is not None:
-            try:
-                self._running.process.wait(timeout=30)
-            except Exception:  # noqa: BLE001
-                pass
-            self.collect()
+        while True:
+            while self._running is not None:
+                try:
+                    self._running.process.wait(timeout=30)
+                except Exception:  # noqa: BLE001 - subprocess.TimeoutExpired
+                    pass
+                self.collect()
+            self.start_due()
+            if self._running is None:
+                return
 
     def stop(self) -> None:
         if self._running is not None:
@@ -222,62 +197,3 @@ class Monitor:
             self.jobs.children.pop(self._running.process.pid, None)
             self._running = None
 
-
-def last_value_at(metrics: dict[str, list[tuple[int, float]]], name: str, update: int) -> float | None:
-    """The metric's value logged at ``update`` (or the last one before it)."""
-
-    values = [value for it, value in metrics.get(name, []) if it <= update]
-    return values[-1] if values else None
-
-
-def walk_abort_rules(rules: dict[str, Any]) -> Callable[[int, dict], str | None]:
-    """Episode-length floors early in training (falling over to cash in speed)."""
-
-    def check(iteration: int, metrics: dict) -> str | None:
-        for update, floor in rules["episode_length_floor"]:
-            if iteration >= update:
-                value = last_value_at(metrics, "Mean episode length", update)
-                if value is not None and value < floor:
-                    return (f"mean episode length {value:.0f} < {floor} at update {update} (old reward: "
-                            "about twice that): the walker is not learning to stay up")
-        return None
-
-    return check
-
-
-def walk_check_abort(rules: dict[str, Any]) -> Callable[[int, dict], str | None]:
-    """At the hopeless point: still falling (W4)."""
-
-    def check(update: int, verdict: dict) -> str | None:
-        if update != rules["hopeless_update"] or "probe" not in verdict:
-            return None
-        if not verdict["probe"]["checks"]["W4"]:
-            return f"W4 (falls) fails at update {update}"
-        return None
-
-    return check
-
-
-def getup_abort_rules(rules: dict[str, Any], switches: list[int]) -> Callable[[int, dict], str | None]:
-    """standing_bonus floors (the policy stopped standing)."""
-
-    name = "Episode_Reward/standing_bonus"
-
-    def check(iteration: int, metrics: dict) -> str | None:
-        for update, floor in rules["standing_bonus_floor"]:
-            if iteration >= update:
-                value = last_value_at(metrics, name, update)
-                if value is not None and value < floor:
-                    return f"standing_bonus {value:.2f} < {floor} at update {update}"
-        first = rules["sustained_after"]
-        run, needed = 0, rules["sustained_updates"]
-        for update, value in metrics.get(name, []):
-            if update < first or any(s <= update < s + rules["switch_grace"] for s in switches):
-                run = 0
-                continue
-            run = run + 1 if value < rules["sustained_floor"] else 0
-            if run >= needed:
-                return f"standing_bonus below {rules['sustained_floor']} for {needed} updates (to {update})"
-        return None
-
-    return check

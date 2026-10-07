@@ -21,17 +21,21 @@ walk:
   # the measured joints 0.25 rad beyond the soft limits
   # (teleop_v12_safety.py).  Two consecutive passes (N, N+1000) end the run
   # with model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000: both checks
-  # saw 1000+ updates of the only stage); no stop by WALK_MAX_UPDATES fails
-  # the step.
+  # saw 1000+ updates of the only stage).
+  # best: with no such pair by WALK_MAX_UPDATES (8000), the run ends with the
+  # best checkpoint checked at or after WALK_MIN_FINAL_UPDATES (5000, 6000,
+  # 7000 and the last, 7999): most passed items (W1-W5, 9x300), then the
+  # largest worst reward margin over standing of every moving command, then
+  # the later one (pipeline/steps.py best_walk_check; written down before the
+  # forward-lean release walk).  If that one fails an item, the step fails:
+  # the test is questioned first (a wrong test is fixed and the rerun
+  # re-judges without retraining); a valid failing test stops the release.
+  # No check stops a training before its last update.
   check:
     stage_tolerance: 1
     seeds: "101,102,103,104,105"
     probe_seed: 101
     w4_falls: [1, 5]                # diagonal falls of 90, no push / pushed; single-axis 0
-    # Stop: the episode length of the old reward's walker was about twice
-    # these (falling over to cash in speed); at 12000 no hope.
-    episode_length_floor: [[500, 100], [2000, 300]]
-    hopeless_update: 12000          # still falling (W4) here: stop
 
 pico:
   task: Mjlab-Teleop-V12-HandPoseRelease-Microban
@@ -55,16 +59,11 @@ getup:
     - [posture_s11, posture, 11, []]
   # Checks: recorded at record_at (before refine, before effort), then every
   # 1000 updates after effort_push; the judgment's evaluations with held-out
-  # seeds.  Stop when standing_bonus drops (the policy stopped standing).
+  # seeds.
   check:
     stage_tolerance: 1
     record_at: [3500, 9500]
     seeds: {stand_s11: 21, stand_s5: 22, push_s11: 21, posture_s11: 21}
-    standing_bonus_floor: [[2499, 3.0], [4500, 3.5], [10500, 3.5]]
-    sustained_after: 2500
-    sustained_floor: 3.0
-    sustained_updates: 200
-    switch_grace: 500
   gate:
     min_fallen_standing_fraction: 0.85
     max_push_fall_fraction: 0.10

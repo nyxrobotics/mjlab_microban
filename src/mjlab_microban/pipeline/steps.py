@@ -1,13 +1,19 @@
 """The steps of one release run: home -> walk -> pico -> getup -> export -> install -> commit.
 
 Each policy is one training process from scratch (mjlab_microban/schedules.py)
-and is judged once, on the checkpoint its run ends with.  A failed judgment
-stops the run with exit code 1 and a report; the fix is a recipe change
-(committed) and a rerun, which skips every step whose inputs did not change.
-Nothing is rescued, retrained with another seed or judged against a relaxed
-threshold.  Training that stopped without a verdict (its process crashed or
-stalled, Ctrl-C: ``core.JobStopped``) leaves the step running and continues
-from its last checkpoint on the rerun.
+and is judged once, on the checkpoint its run ends with (walking: its best
+checked checkpoint when no two checks in a row passed by its last update).
+A failed judgment stops the run with exit code 1 and a report.  The test is
+questioned first (user, 2026-10-07): a test found wrong is fixed by a
+committed change of the evaluation code or the check config, which never
+retrains -- the rerun re-judges the trained policy (``begin``: a failed step
+runs again only when its judgment inputs changed).  A valid test that fails
+is the model's problem and stops the release; the reward is not changed to
+pass a test.  Nothing is rescued or retrained with another seed.  Training
+that stopped without a verdict (its process crashed or stalled, Ctrl-C:
+``core.JobStopped``) leaves the step running and continues from its last
+checkpoint on the rerun; a training of the step's run name that is already
+running (started by hand with the same command) is watched, not restarted.
 """
 
 from __future__ import annotations
@@ -26,9 +32,6 @@ from mjlab_microban.pipeline.monitor import (
     Check,
     EarlyStop,
     Monitor,
-    getup_abort_rules,
-    walk_abort_rules,
-    walk_check_abort,
 )
 from mjlab_microban.pipeline.core import (
     EXIT_INPUT,
@@ -49,6 +52,7 @@ from mjlab_microban.pipeline.core import (
     latest_checkpoint,
     load_config,
     record_files,
+    running_training,
     sha256,
 )
 
@@ -110,7 +114,9 @@ class Pipeline:
         directory = state_dir or (REPO / "artifacts" / "home_pipeline" / f"{prefix}_{self.home['tag']}")
         self.state = State(directory.resolve())
         self.jobs = Jobs(self.state, stall_minutes=self.cfg["stall_minutes"], wait_for_gpu=not dry,
-                         external_min_envs=int(self.cfg["external_training_min_envs"]))
+                         external_min_envs=int(self.cfg["external_training_min_envs"]), own_prefix=prefix)
+        # What a judgment reads besides the trained policy: a change re-judges a failed step.
+        self.judge_inputs = hash_inputs(["src", "config/pipeline.yaml"], {"dry": dry})
         self.yaml_sha256 = sha256(HOME_YAML)
 
     # -- helpers ---------------------------------------------------------------
@@ -165,12 +171,22 @@ class Pipeline:
                 self.state.outputs_intact(step):
             self.log(f"[{step}] done earlier with the same inputs: skipped")
             return False
+        judge = getattr(self, "judge_inputs", None)
         if record.get("status") == "failed" and record.get("inputs") == inputs:
-            raise PipelineError(f"[{step}] failed earlier with the same inputs: {record.get('error')}\n"
-                                "Fix the cause (a committed recipe or code change), then rerun.")
+            if record.get("judge_inputs") == judge:
+                raise PipelineError(f"[{step}] failed earlier with the same inputs: {record.get('error')}\n"
+                                    "Question the test first: fix a wrong test (evaluation code or check "
+                                    "config, committed) and rerun to re-judge; a valid failing test is the "
+                                    "model's problem.")
+            # The judgment changed (a committed fix of a test): judge the
+            # trained policy again, its training is kept.
+            self.log(f"[{step}] failed earlier ({str(record.get('error'))[:200]}); the judgment changed: "
+                     "re-judging without retraining")
+            for key in ("checks", "adopted", "adopted_by", "walker_probe", "error", "ended"):
+                record.pop(key, None)
         if record.get("inputs") != inputs:
             record.clear()
-        record.update(status="running", inputs=inputs, started=f"{datetime.now():%F %T}")
+        record.update(status="running", inputs=inputs, judge_inputs=judge, started=f"{datetime.now():%F %T}")
         self.state.save()
         self.log(f"[{step}] start")
         return True
@@ -196,11 +212,20 @@ class Pipeline:
 
         adopted = self.state.step(step).get("adopted")
         if adopted and Path(adopted).is_file():
-            self.log(f"[{step}] the run ended early with {adopted}")
+            self.log(f"[{step}] the run ended with {adopted}")
             return Path(adopted)
         final = find_checkpoint(experiment, label, total - 1)
         try:
-            if final is None:
+            running = running_training(label) if final is None else None
+            if running is not None:
+                # Started by hand with this step's command (same run name): watch it.
+                log = self.training_log(step, label)
+                if monitor is not None:
+                    monitor.log_path = log
+                self.check_home_yaml()
+                self.jobs.watch(f"train_{step}", running, log, poll=None if monitor is None else monitor.poll)
+                self.check_home_yaml()
+            elif final is None:
                 seed = str(self.cfg["seed"])
                 cmd = [*UV, "train", task, "--env.scene.num-envs", str(envs), "--env.seed", seed,
                        "--agent.seed", seed, "--agent.logger", "tensorboard", "--agent.run-name", label,
@@ -224,6 +249,9 @@ class Pipeline:
                 self.check_home_yaml()
             else:
                 self.log(f"[{step}] {final.parent.name}/{final.name} exists")
+                if monitor is not None and monitor.log_path is None:
+                    monitor.log_path = self.training_log(step, label)
+                    monitor.read_log()
             if monitor is not None:
                 monitor.finish()
         except EarlyStop as stop:
@@ -237,24 +265,33 @@ class Pipeline:
             raise
         final = find_checkpoint(experiment, label, total - 1)
         if final is None:
-            raise PipelineError(f"[{step}] model_{total - 1}.pt missing after training {label}")
+            raise JobStopped(f"[{step}] model_{total - 1}.pt missing after training {label}: the training "
+                             "stopped early; rerun to continue")
         if monitor is not None:
             monitor.require_stages(total - 1)
         return final
 
+    def training_log(self, step: str, label: str) -> Path:
+        """The newest ``*_train_<step>.log`` of run ``label`` in the state's logs."""
+
+        for log in sorted((self.state.dir / "logs").glob(f"*_train_{step}.log"), reverse=True):
+            with open(log, errors="replace") as stream:
+                if label in stream.read(1 << 20):
+                    return log
+        raise PipelineError(f"[{step}] no training log of {label} in {self.state.dir / 'logs'} (a training "
+                            "started by hand must write its output there, named <time>_train_<step>.log)")
+
     def monitor(self, step: str, experiment: str, label: str, *, stages: dict[str, int],
-                check_updates: list[int], min_final: int, start_check, abort_rules=None,
-                check_abort=None) -> Monitor:
+                check_updates: list[int], min_final: int, start_check) -> Monitor:
         c = self.cfg[step]["check"]
         if self.dry:
             # A few-update dry policy: exercise the checks on its first
-            # checkpoints, record them, never stop early or abort on them.
+            # checkpoints, record them, never stop early on them.
             check_updates = check_updates[: int(c.get("max_checks", 2))]
-            abort_rules = check_abort = None
         return Monitor(state=self.state, jobs=self.jobs, record=self.state.step(step), experiment=experiment,
                        label=label, expected_stages=stages, stage_tolerance=int(c["stage_tolerance"]),
                        check_updates=check_updates, min_final_update=min_final, start_check=start_check,
-                       abort_rules=abort_rules, check_abort=check_abort, early_stop=not self.dry)
+                       early_stop=not self.dry)
 
     def start_check(self, name: str, commands: list[list[str]], verdict, *, sequential: bool = True) -> Check:
         """One check: ``commands`` run one after another in one process group.
@@ -316,17 +353,32 @@ class Pipeline:
         monitor = self.monitor(
             "walk", WALK_EXP, label,
             stages=self.sched["stages"]["walk"],
-            check_updates=list(range(every, total, every)), min_final=self.sched["walk_min_final"],
-            start_check=self.walk_check, abort_rules=walk_abort_rules(c["check"]),
-            check_abort=walk_check_abort(c["check"]))
+            # Every 1000 updates and the last checkpoint (one the best may be).
+            check_updates=[*range(every, total, every), total - 1], min_final=self.sched["walk_min_final"],
+            start_check=self.walk_check)
         final = self.train("walk", WALK_EXP, label, c["task"], total, c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])], monitor=monitor)
-        if "adopted" not in self.state.step("walk") and not self.dry:
-            raise PipelineError(f"walking reached {total} updates without two consecutive passing checks "
-                                f"({self.state.step('walk')['checks']}): the recipe does not walk as wanted")
+        record = self.state.step("walk")
+        if "adopted_by" not in record:
+            record["adopted_by"] = "two_consecutive_passes" if "adopted" in record else "best_checked"
+        if record["adopted_by"] == "best_checked":
+            best = best_walk_check(record.get("checks", {}), self.sched["walk_min_final"])
+            if best is not None:
+                final = find_checkpoint(WALK_EXP, label, best) or final
+            record["adopted"] = str(final)
+            self.state.save()
+            self.log(f"walking: no two consecutive passing checks by {total} updates; the best checked "
+                     f"checkpoint is {final.name} (config/pipeline.yaml walk.check.best)")
+        verdict = record.get("checks", {}).get(final.stem.split("_")[1], {})
+        failures = [] if record["adopted_by"] == "two_consecutive_passes" else walk_check_failures(verdict)
+        if failures and not self.dry:
+            raise PipelineError(f"walking: the adopted {final.parent.name}/{final.name} fails {failures}: "
+                                f"{json.dumps(verdict.get('summary', verdict.get('error')), default=str)[:1200]}")
         walker = self.install_walker(final)
         self.finish("walk", {"checkpoint": str(walker), "sha256": sha256(walker), "run": final.parent.name,
-                             "iteration": int(final.stem.split("_")[1])}, [walker])
+                             "iteration": int(final.stem.split("_")[1]), "adopted_by": record["adopted_by"],
+                             "passed": not failures, "failures": failures, "check": verdict.get("summary")},
+                    [walker])
 
     def walk_check(self, checkpoint: Path) -> Check:
         """Held-out W1-W5 (seeds 101-105) and the 9x300 source probe with a held-out seed."""
@@ -395,8 +447,10 @@ class Pipeline:
         if verdict["ok"]:
             return receipt
         if not self.dry:
-            raise PipelineError(f"the walker fails the PICO source probe: {verdict} (receipt {receipt}); "
-                                "fix the walking recipe and rerun")
+            raise PipelineError(f"the walker fails the PICO source probe: {verdict['below']} (worst "
+                                f"{verdict['worst']} {verdict['worst_margin']:+.4f}, soft-limit overshoot "
+                                f"{verdict['soft_limit_overshoot_rad']:.3f} rad, falls {verdict['falls']}; "
+                                f"receipt {receipt})")
         forced = PROBE_ROOT / f"DRYRUN_FORCED_PASS_{receipt.name}"
         capture([*UV, "python", "-m", "mjlab_microban.pipeline.dry", "force-probe", str(receipt), str(forced)],
                 env=self.env, check=True, timeout=900)
@@ -525,14 +579,14 @@ class Pipeline:
             # Recorded before refine and before effort, then the early-stop checks.
             check_updates=sorted({*[u for u in self.scaled_list(c["check"]["record_at"]) if u < total],
                                   *range(g["effort_push"] + every, total, every)}),
-            min_final=self.sched["getup_min_final"] - 1, start_check=self.getup_check,
-            abort_rules=getup_abort_rules(c["check"], [g["imu_delay"], g["refine"], g["effort_push"]]))
+            min_final=self.sched["getup_min_final"] - 1, start_check=self.getup_check)
         final = self.train("getup", GETUP_EXP, label, c["task"], total, c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])], monitor=monitor)
         summary = self.getup_judgment(final, "judgment")
         failures = getup_gate_failures(summary, c["gate"])
         if failures and not self.dry:
-            raise PipelineError(f"get-up judgment failed for {final.parent.name}/{final.name}: {failures}")
+            raise PipelineError(f"get-up judgment failed for {final.parent.name}/{final.name}: {failures} "
+                                f"({summary})")
         if failures:
             self.log(f"dry run: get-up judgment failed ({failures}); recorded, not enforced")
         self.finish("getup", {"checkpoint": str(final), "sha256": sha256(final), "summary": summary,
@@ -626,7 +680,7 @@ class Pipeline:
         steps = self.state.data["steps"]
         walk_probe = steps["pico"].get("walker_probe") or {}
         evidence = {
-            "walk": {"passed": "adopted" in steps["walk"] and bool(walk_probe.get("ok")),
+            "walk": {"passed": bool(steps["walk"]["outputs"].get("passed")) and bool(walk_probe.get("ok")),
                      "checks": steps["walk"].get("checks"), "adopted": steps["walk"].get("adopted"),
                      "source_probe_9x300": walk_probe},
             "getup": {"passed": bool(steps["getup"]["outputs"]["passed"]),
@@ -909,6 +963,48 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
     return {"ok": ok, "worst_margin": margins[worst], "worst": worst, "below": below,
             "falls": summary.get("fall_scenario_count"), "responses": responses, "values": values,
             "soft_limit_overshoot_rad": overshoot}
+
+
+def walk_check_items(verdict: dict[str, Any]) -> dict[str, bool]:
+    """The six items of one walking check: W1-W5 and the 9x300 probe."""
+
+    probe, nine = verdict.get("probe") or {}, verdict.get("nine_by_300") or {}
+    items = {name: bool((probe.get("checks") or {}).get(name)) for name in ("W1", "W2", "W3", "W4", "W5")}
+    items["9x300"] = bool(nine.get("ok"))
+    return items
+
+
+def walk_check_failures(verdict: dict[str, Any]) -> list[str]:
+    if "error" in verdict:
+        return [f"check error: {verdict['error']}"]
+    return [name for name, ok in walk_check_items(verdict).items() if not ok]
+
+
+def walk_check_score(verdict: dict[str, Any]) -> tuple[int, float]:
+    """(passed items, the worst reward margin over standing of every moving command).
+
+    The margin is the twist-ratio reward of the measured mean twist minus 1/2
+    (standing still), the lowest over W1-W3's commands and the 9x300's.
+    """
+
+    probe, nine = verdict.get("probe") or {}, verdict.get("nine_by_300") or {}
+    values = [*(probe.get("worst_value") or []), *(nine.get("values") or {}).values()]
+    finite = [float(v) for v in values if isinstance(v, (int, float)) and v == v]
+    margin = min(finite) - 0.5 if finite and len(finite) == len(values) else float("-inf")
+    return sum(walk_check_items(verdict).values()), margin
+
+
+def best_walk_check(checks: dict[str, dict[str, Any]], min_update: int) -> int | None:
+    """The best checked walking checkpoint at or after ``min_update`` (None: none was checked).
+
+    Most passed items, then the largest worst margin, then the later one
+    (rule written down before the release walk, config/pipeline.yaml
+    ``walk.check.best``).
+    """
+
+    candidates = [(walk_check_score(verdict), int(update)) for update, verdict in checks.items()
+                  if int(update) >= min_update]
+    return max(candidates)[1] if candidates else None
 
 
 def getup_summary(results: dict[str, dict[str, Any]]) -> dict[str, float]:

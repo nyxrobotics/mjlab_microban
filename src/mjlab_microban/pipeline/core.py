@@ -202,8 +202,11 @@ class Jobs:
     """Runs the pipeline's subprocesses, each in its own process group."""
 
     def __init__(self, state: State, *, stall_minutes: dict[str, float], wait_for_gpu: bool,
-                 external_min_envs: int) -> None:
+                 external_min_envs: int, own_prefix: str | None = None) -> None:
         self.state = state
+        # Trainings whose run name starts with this are this release's own
+        # (e.g. one started by hand with the pipeline's command), not another's.
+        self.own_marker = None if own_prefix is None else f"--agent.run-name {own_prefix}_"
         self.stall_s = {kind: 60.0 * minutes for kind, minutes in stall_minutes.items()}
         self.wait_for_gpu = wait_for_gpu
         self.external_min_envs = external_min_envs
@@ -231,6 +234,8 @@ class Jobs:
             except (OSError, ProcessLookupError):
                 continue
             if group in self.children or pid == os.getpid():
+                continue
+            if self.own_marker is not None and self.own_marker in cmdline:
                 continue
             if is_training_command(cmdline, self.external_min_envs):
                 found.append(f"{pid}: {cmdline[:160]}")
@@ -310,6 +315,32 @@ class Jobs:
         self.state.log(f"done {name} rc={proc.returncode} in {minutes:.1f} min")
         return proc.returncode, log
 
+    def watch(self, name: str, pgid: int, log: Path, *, poll: Callable[[], None] | None = None) -> None:
+        """Watch a training that is already running (process group ``pgid``, output ``log``) to its end.
+
+        Stall detection and ``poll`` as in ``run``; an exception stops the
+        group and propagates.  Its exit code is not ours to read: the caller
+        checks the checkpoint it must have written.
+        """
+
+        self.state.log(f"watch {name}: process group {pgid} (log {log.name})")
+        started = time.time()
+        try:
+            while group_alive(pgid):
+                time.sleep(30)
+                if time.time() - log.stat().st_mtime > self.stall_s["train"]:
+                    kill_group(pgid)
+                    raise JobStopped(f"STALL {name}: no output for {self.stall_s['train'] / 60:.0f} min, "
+                                     f"stopped (log {log})")
+                if poll is not None:
+                    poll()
+            if poll is not None:
+                poll()
+        except BaseException:
+            kill_group(pgid)
+            raise
+        self.state.log(f"done {name} (watched) in {(time.time() - started) / 60:.1f} min")
+
     def kill(self, proc: subprocess.Popen) -> None:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
@@ -328,6 +359,48 @@ class Jobs:
                 os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_group(pgid: int) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + 60
+        while time.time() < deadline and group_alive(pgid):
+            time.sleep(1)
+        if not group_alive(pgid):
+            return
+
+
+def running_training(label: str) -> int | None:
+    """The process group of a running ``train`` process with run name ``label`` (None: none runs)."""
+
+    marker = f"--agent.run-name {label} "
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if marker in cmdline + " " and is_training_command(cmdline, 1 << 30):
+            try:
+                return os.getpgid(int(entry.name))
+            except ProcessLookupError:
+                continue
+    return None
 
 
 def is_training_command(cmdline: str, min_envs: int) -> bool:

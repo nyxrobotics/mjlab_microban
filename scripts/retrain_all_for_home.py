@@ -21,12 +21,17 @@ Steps (src/mjlab_microban/pipeline/steps.py; docs/home_pose_workflow.md):
 7. commit   commit the robot branch, then config/releases/<tag>/ on the
             training branch, and push both (not with --no-push).
 
-GPU jobs run one at a time; a real run waits while another training uses the
-GPU.  A failed check stops the run with exit code 1 and a report; nothing is
-rescued.  Fix the cause (a committed recipe or code change) and run the same
-command again: steps whose inputs are unchanged are skipped, and a training
-that stopped without a verdict (crash, stall, Ctrl-C) continues from its last
-checkpoint.  State: <state dir>/
+GPU jobs run one at a time; a real run waits while another training (not one
+of this release's run names) uses the GPU.  A failed judgment stops the run
+with exit code 1 and a report; nothing is rescued.  Question the test first:
+a wrong test is fixed (a committed change of the evaluation code or the check
+config) and the same command re-judges the trained policy without retraining;
+a valid test that fails is the model's problem.  On a rerun, steps whose
+inputs are unchanged are skipped, a training that stopped without a verdict
+(crash, stall, Ctrl-C) continues from its last checkpoint, and a training of
+a step's run name started by hand with the step's command (output in
+<state dir>/logs/<time>_train_<step>.log) is watched, not restarted.
+State: <state dir>/
 state.json and STATUS.log (default artifacts/home_pipeline/<prefix>_<tag>/);
 --status prints it.
 

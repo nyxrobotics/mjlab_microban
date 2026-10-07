@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +73,66 @@ class StateTest(unittest.TestCase):
             self.assertEqual(pipeline.inputs("walk"), before)
             pipeline.cfg["walk"]["envs"] = 2048
             self.assertNotEqual(pipeline.inputs("walk"), before)
+
+    def test_the_best_walking_check(self) -> None:
+        def verdict(failed=(), worst=0.6, nine=0.7):
+            checks = {name: name not in failed for name in ("W1", "W2", "W3", "W4", "W5")}
+            return {"passed": not failed, "probe": {"checks": checks, "worst_value": [worst, worst, worst]},
+                    "nine_by_300": {"ok": "9x300" not in failed, "values": {"forward_0p1": nine}}}
+
+        checks = {"4000": verdict(), "5000": verdict(("W1", "9x300")), "6000": verdict(("W2",), worst=0.55),
+                  "7000": verdict(("W1",), worst=0.58), "7999": verdict(("W1",), nine=0.52)}
+        # 4000 is too early; 6000, 7000, 7999 fail one item; 7000 has the largest worst margin.
+        self.assertEqual(steps.best_walk_check(checks, 5000), 7000)
+        self.assertEqual(steps.walk_check_failures(checks["7000"]), ["W1"])
+        checks["7999"] = verdict(("W1",), worst=0.58)
+        self.assertEqual(steps.best_walk_check(checks, 5000), 7999)  # a tie: the later one
+        checks["6000"] = {"passed": False, "error": "RuntimeError: boom"}
+        self.assertEqual(steps.walk_check_score(checks["6000"]), (0, float("-inf")))
+        self.assertIsNone(steps.best_walk_check({"4000": verdict()}, 5000))
+
+    def test_a_failed_step_is_judged_again_only_when_its_judgment_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.judge_inputs = "j1"
+            self.assertTrue(pipeline.begin("walk", "a" * 64))
+            pipeline.state.step("walk").update(checks={"5000": {"passed": False}}, adopted="m.pt",
+                                               adopted_by="best_checked")
+            pipeline.fail("walk", "W1 fails")
+            again = fake_pipeline(Path(directory) / "state")
+            again.judge_inputs = "j1"  # the same test: a valid failing test stays failed
+            with self.assertRaisesRegex(PipelineError, "Question the test first"):
+                again.begin("walk", "a" * 64)
+            again.judge_inputs = "j2"  # the test was fixed: re-judge, keep the training
+            self.assertTrue(again.begin("walk", "a" * 64))
+            record = again.state.step("walk")
+            self.assertEqual((record["status"], record["inputs"], record["judge_inputs"]),
+                             ("running", "a" * 64, "j2"))
+            for key in ("checks", "adopted", "adopted_by", "error"):
+                self.assertNotIn(key, record)
+
+    def test_a_training_started_by_hand_is_found_and_watched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = State(Path(directory) / "state")
+            log = state.dir / "logs" / "1007-000000_train_walk.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("run lbl_x\n")
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)", "train", "--agent.run-name",
+                                     "lbl_x", "end"], start_new_session=True)
+            try:
+                self.assertEqual(core.running_training("lbl_x"), os.getpgid(proc.pid))
+                self.assertIsNone(core.running_training("lbl"))
+                jobs = core.Jobs(state, stall_minutes={"train": 20, "eval": 30}, wait_for_gpu=False,
+                                 external_min_envs=1024, own_prefix="lbl")
+                self.assertIn("--agent.run-name lbl_", jobs.own_marker)
+                polls = []
+                with mock.patch.object(core.time, "sleep", lambda _s: proc.wait()):
+                    jobs.watch("train_walk", os.getpgid(proc.pid), log, poll=lambda: polls.append(1))
+                self.assertTrue(polls)
+                self.assertFalse(core.group_alive(proc.pid))
+            finally:
+                proc.kill()
+                proc.wait()
 
     def test_running_steps_continue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
