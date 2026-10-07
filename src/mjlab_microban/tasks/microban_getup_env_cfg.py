@@ -54,9 +54,16 @@ curriculum (tasks/curriculum.py) then switches on, in one process:
   standing, roll joints near HOME, wider-stance penalty x3, a light
   raw-target clip barrier); the runner resets the action std to 0.5, the
   Adam moments, the learning rate and sets entropy 0.001 at the same update;
-* update 10000 ("effort_push"): shoulder roll joins the roll pose term, the
-  target-vs-measured effort penalty, a 10x clip barrier and +-0.3 m/s pushes
-  every 3-6 s.
+* update 10000 ("effort"): shoulder roll joins the roll pose term, the
+  target-vs-measured effort penalty and a 10x clip barrier;
+* update 15000 ("push"): +-0.3 m/s pushes every 3-6 s, to the end (18000).
+
+The pushes come after the effort stage, as in the 2026-10 chain (its stage 4
+"effort" without pushes, then stage 5 "push").  With both from update 10000
+(the 2026-10-07 release run) the right arm stayed pressed into its 0-deg
+shoulder_roll stop (target on the +-pi clip 99.9 % of the standing time,
+0.67 Nm) for all 6500 updates while the left one let go after 3000; the
+chain's push-free effort stage let both go 3000-4500 updates in.
 
 The reward-based pose curriculum (standing_bonus >= 2 raises the pose
 weights to 240/120, standing_pose >= 15 enables the HOME stillness term) is
@@ -226,15 +233,19 @@ GETUP_STAGES = (
         ),
     ),
     Stage(
-        "effort_push",
-        GETUP_SCHEDULE["effort_push"],
+        "effort",
+        GETUP_SCHEDULE["effort"],
         (
             Setting("reward", "roll_pose", "weight", 0.0),
             Setting("reward", "roll_pose_shoulder", "weight", 60.0),
             Setting("reward", "standing_target_error", "weight", -2.0),
             Setting("reward", "raw_target_clip_excess", "weight", -2.0),
-            Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),
         ),
+    ),
+    Stage(
+        "push",
+        GETUP_SCHEDULE["push"],
+        (Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),),
     ),
 )
 
@@ -411,7 +422,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     # Modest horizontal kicks every 3-6 s, off (zero range) until the
-    # effort_push switch.  Ankle-only balance absorbs about 0.2 m/s; the
+    # push switch.  Ankle-only balance absorbs about 0.2 m/s; the
     # walking task's +-0.5 m/s pushes (tried in 0e33eb3) knocked every stand
     # over and broke learning from scratch.
     cfg.events["push_robot"] = EventTermCfg(
@@ -715,7 +726,7 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
 def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     """The calm (refine) and effort terms, registered at weight 0.
 
-    GETUP_STAGES sets their weights: refine at update 4000, effort_push at
+    GETUP_STAGES sets their weights: refine at update 4000, effort at
     10000 (mjlab skips a zero-weight term, so they cost nothing before).
 
     refine (the 2026-10 chain's stage 3, calm_roll). The standing policy
@@ -728,7 +739,8 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     joints near HOME with a tight (8.6 deg) roll_pose. Plus a light barrier
     on raw output beyond the flat clip. Measured: tremble 0.77 -> 0.07 rad/s.
 
-    effort_push (stages 4 and 5, calm_effort_strong and calm_push). The calm
+    effort (stage 4, calm_effort_strong; the pushes of stage 5 follow at
+    the push switch). The calm
     policy presses its right arm into the 0-deg shoulder_roll stop at
     0.44 Nm while standing. Its target sits on the clip and its measured
     angle cannot move, so a pose term has no gradient. So: shoulder_roll

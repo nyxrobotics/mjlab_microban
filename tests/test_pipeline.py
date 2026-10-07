@@ -91,6 +91,35 @@ class StateTest(unittest.TestCase):
         self.assertEqual(steps.walk_check_score(checks["6000"]), (0, float("-inf")))
         self.assertIsNone(steps.best_walk_check({"4000": verdict()}, 5000))
 
+    def test_a_step_hashes_only_its_own_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.cfg = {"seed": 42, "walk": {"task": "W"}, "getup": {"task": "G"}}
+            pipeline.sched = {"walk_max": 8000, "walk_min_final": 5000, "getup": {"effort": 10000},
+                              "getup_total": 18000, "stages": {"walk": {"widen": 3000}, "getup": {"effort": 10000}}}
+            walk, getup = pipeline.inputs("walk"), pipeline.inputs("getup")
+            pipeline.sched["getup"] = {"effort": 10000, "push": 15000}
+            pipeline.sched["stages"]["getup"] = {"effort": 10000, "push": 15000}
+            pipeline.sched["walk_min_final"] = 4000  # an early-stop rule, not a training input
+            self.assertEqual(pipeline.inputs("walk"), walk)
+            self.assertNotEqual(pipeline.inputs("getup"), getup)
+            pipeline.sched["walk_max"] = 9000
+            self.assertNotEqual(pipeline.inputs("walk"), walk)
+            self.assertNotIn("src/mjlab_microban/schedules.py", steps.STEP_INPUTS["walk"])
+
+    def test_the_run_label_is_kept_by_the_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.prefix = "home_h"
+            pipeline.begin("pico", "a" * 64)
+            self.assertEqual(pipeline.state.step("pico")["label"], "home_h_pico_aaaaaaaa")
+            pipeline.state.step("pico")["label"] = "home_h_pico_kept"
+            pipeline.state.save()
+            again = fake_pipeline(Path(directory) / "state")
+            again.prefix = "home_h"
+            again.begin("pico", "a" * 64)
+            self.assertEqual(again.state.step("pico")["label"], "home_h_pico_kept")
+
     def test_a_failed_step_is_judged_again_only_when_its_judgment_changed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")

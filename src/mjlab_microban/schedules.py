@@ -49,15 +49,19 @@ WALK_WIDEN_UPDATE = scaled(3000)
 WALK_MAX_UPDATES = scaled(8000)
 WALK_MIN_FINAL_UPDATES = WALK_WIDEN_UPDATE + scaled(2000)
 
-# Get-up: IMU latency, calm refinement, low effort with pushes.
+# Get-up: IMU latency, calm refinement, low effort, then pushes.  The pushes
+# start after the low-effort stage has released the arms from their stops
+# (5000 updates; the 2026-10 chain released them 3000-4500 updates into its
+# push-free effort stage) and last as long as that chain's push stage (3000).
 GETUP_SCHEDULE = {
     "imu_delay": scaled(2500),
     "refine": scaled(4000),
-    "effort_push": scaled(10000),
+    "effort": scaled(10000),
+    "push": scaled(15000),
 }
-GETUP_TOTAL_UPDATES = scaled(16500)
-GETUP_MIN_FINAL_UPDATES = GETUP_SCHEDULE["effort_push"] + (
-    GETUP_TOTAL_UPDATES - GETUP_SCHEDULE["effort_push"]
+GETUP_TOTAL_UPDATES = scaled(18000)
+GETUP_MIN_FINAL_UPDATES = GETUP_SCHEDULE["push"] + (
+    GETUP_TOTAL_UPDATES - GETUP_SCHEDULE["push"]
 ) // 2
 
 # PICO: the critic of the frozen walker's adapter warms up for

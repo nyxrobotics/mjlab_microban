@@ -64,7 +64,7 @@ trains get-up as one process:
 
 ```bash
 uv run --locked train Mjlab-Getup-Microban --env.scene.num-envs 4096 --env.seed 42 \
-  --agent.seed 42 --agent.logger tensorboard --agent.max-iterations 16500
+  --agent.seed 42 --agent.logger tensorboard --agent.max-iterations 18000
 ```
 
 The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
@@ -76,7 +76,8 @@ The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
 | 0-2499 | HOME-stance rewards, pose curriculum (reward-driven), no IMU latency, entropy 0.01 | stands by ~1750 at the latest; the delay from scratch kept standing_bonus at ~0.2 for 1400 iterations |
 | 2500-3999 | + 0-3 tick IMU latency (the actor's delay buffers are allocated for 3 ticks and held at 0 before) | stage 2: 47/62 -> 61/62 fallen starts standing under delay |
 | 4000-9999 | refine: action std 0.5, fresh Adam moments, learning rate back to 1e-3, entropy 0.001 (runner); calm terms: standing joint velocity -4, roll pose (hip/ankle roll, 8.6 deg std) 60, feet width x3, clip barrier -0.2 | stage 3: tremble 0.77 -> 0.08 rad/s; bang-bang targets under std ~10 otherwise |
-| 10000-16499 | effort_push: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0, +-0.3 m/s kicks every 3-6 s | stages 4-5: shoulder 0.44 -> 0.10 Nm, 0.3 m/s kick falls 1/62; clip excess and target error level off ~4000-5000 after the switch |
+| 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0 (no pushes) | stage 4: both arms let go of the shoulder_roll stops 3000-4500 updates in (0.67 Nm on the +-pi clip before); clip excess and target error level off ~4000-5000 after the switch |
+| 15000-17999 | push: +-0.3 m/s kicks every 3-6 s | stage 5: 0.3 m/s kick falls 1/62.  Pushes from the effort switch on (2026-10-07 release run) kept the right arm pressed into its stop for all 6500 updates |
 
 The evaluation / play config keeps the 0-3 tick latency and no schedule.
 Each switch was a separate resumed run before (std reset by a checkpoint

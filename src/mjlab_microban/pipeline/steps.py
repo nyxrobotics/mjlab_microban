@@ -69,10 +69,20 @@ DRY_RUN_POLICY_ALLOW_ENV = "MICROBAN_ALLOW_DRYRUN_POLICY"
 # The keys of a step's config/pipeline.yaml section the training reads (the
 # rest configures its checks and judgment and is not a training input).
 TRAINING_KEYS = ("task", "envs", "save_interval")
+# The schedule entries (Pipeline._schedules) a step's training reads, besides
+# its stage table; early-stop minimums and check intervals judge, not train.
+STEP_SCHEDULE_KEYS = {
+    "walk": ("walk_max",),
+    "pico": ("pico", "pico_total"),
+    "getup": ("getup", "getup_total"),
+    "export": ("contract", "recipes"),
+}
 # Files whose content a step's training depends on (repo-relative globs).
 # Evaluation code is not listed: changing an evaluator re-judges nothing that
 # was already accepted, and never retrains.
-_COMMON = ["config/home_pose.yaml", "src/mjlab_microban/robot", "src/mjlab_microban/schedules.py",
+# The schedule constants are not a file input: each step hashes only its own
+# (STEP_SCHEDULE_KEYS), so a get-up schedule change does not retrain walking.
+_COMMON = ["config/home_pose.yaml", "src/mjlab_microban/robot",
            "src/mjlab_microban/tasks/curriculum.py", "src/mjlab_microban/tasks/mdp.py", "uv.lock"]
 STEP_INPUTS = {
     "walk": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_*.py",
@@ -159,7 +169,10 @@ class Pipeline:
         section = {"seed": self.cfg.get("seed"),
                    step: {key: value for key, value in (self.cfg.get(step) or {}).items()
                           if key in TRAINING_KEYS}}
-        extra = {"dry": self.dry, "cfg": section, "schedules": self.sched,
+        schedule = {key: self.sched[key] for key in STEP_SCHEDULE_KEYS.get(step, ())}
+        if step in self.sched.get("stages", {}):
+            schedule["stages"] = self.sched["stages"][step]
+        extra = {"dry": self.dry, "cfg": section, "schedules": schedule,
                  "upstream": {name: self.state.step(name).get("outputs") for name in upstream}}
         return hash_inputs(STEP_INPUTS.get(step, []), extra)
 
@@ -187,6 +200,8 @@ class Pipeline:
         if record.get("inputs") != inputs:
             record.clear()
         record.update(status="running", inputs=inputs, judge_inputs=judge, started=f"{datetime.now():%F %T}")
+        # The training run of these inputs (kept by a rerun that continues it).
+        record.setdefault("label", f"{getattr(self, 'prefix', 'run')}_{step}_{inputs[:8]}")
         self.state.save()
         self.log(f"[{step}] start")
         return True
@@ -348,7 +363,7 @@ class Pipeline:
         if not self.begin("walk", inputs):
             return
         c = self.cfg["walk"]
-        label = f"{self.prefix}_walk_{inputs[:8]}"
+        label = self.state.step("walk")["label"]
         every, total = self.sched["check_every"], self.sched["walk_max"]
         monitor = self.monitor(
             "walk", WALK_EXP, label,
@@ -470,7 +485,7 @@ class Pipeline:
             return
         c = self.cfg["pico"]
         walker = Path(self.state.step("walk")["outputs"]["checkpoint"])
-        label = f"{self.prefix}_pico_{inputs[:8]}"
+        label = self.state.step("pico")["label"]
         fresh: list[str] = []
         if latest_checkpoint(PICO_EXP, label) is None:
             capture([*UV, "python", "-c", "import sys; from mjlab_microban.scripts.export_walk_onnx import "
@@ -578,14 +593,14 @@ class Pipeline:
         if not self.begin("getup", inputs):
             return
         c = self.cfg["getup"]
-        label = f"{self.prefix}_getup_{inputs[:8]}"
+        label = self.state.step("getup")["label"]
         g, every, total = self.sched["getup"], self.sched["check_every"], self.sched["getup_total"]
         monitor = self.monitor(
             "getup", GETUP_EXP, label,
             stages=self.sched["stages"]["getup"],
             # Recorded before refine and before effort, then the early-stop checks.
             check_updates=sorted({*[u for u in self.scaled_list(c["check"]["record_at"]) if u < total],
-                                  *range(g["effort_push"] + every, total, every)}),
+                                  *range(g["effort"] + every, total, every)}),
             min_final=self.sched["getup_min_final"] - 1, start_check=self.getup_check)
         final = self.train("getup", GETUP_EXP, label, c["task"], total, c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])], monitor=monitor)

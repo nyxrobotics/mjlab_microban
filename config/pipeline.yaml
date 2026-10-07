@@ -58,7 +58,7 @@ getup:
     - [push_s11, stand, 11, [--imu-delay, "3", --noise, --push, "x:0.3"]]
     - [posture_s11, posture, 11, []]
   # Checks: recorded at record_at (before refine, before effort), then every
-  # 1000 updates after effort_push; the judgment's evaluations with held-out
+  # 1000 updates after effort; the judgment's evaluations with held-out
   # seeds.
   check:
     stage_tolerance: 1

@@ -41,9 +41,10 @@ def expected(update: int) -> dict:
     if update >= GETUP_SCHEDULE["refine"]:
         weights.update(standing_joint_vel=-4.0, raw_target_clip_excess=-0.2, roll_pose=60.0)
         feet_lateral = 30.0
-    if update >= GETUP_SCHEDULE["effort_push"]:
+    if update >= GETUP_SCHEDULE["effort"]:
         weights.update(roll_pose=0.0, roll_pose_shoulder=60.0, standing_target_error=-2.0,
                        raw_target_clip_excess=-2.0)
+    if update >= GETUP_SCHEDULE["push"]:
         push = (-0.3, 0.3)
     return {"delay": delay, "weights": weights, "feet_lateral": feet_lateral, "push": push}
 
@@ -107,7 +108,9 @@ class GetupScheduleTest(unittest.TestCase):
         from mjlab_microban.tasks.microban_getup_env_cfg import MicrobanGetupRlCfg
 
         self.assertEqual(MicrobanGetupRlCfg.max_iterations, GETUP_MAX_ITERATIONS)
-        self.assertEqual(GETUP_MAX_ITERATIONS - GETUP_SCHEDULE["effort_push"], 6500)
+        # Effort without pushes for 5000 updates, then 3000 with pushes.
+        self.assertEqual(GETUP_SCHEDULE["push"] - GETUP_SCHEDULE["effort"], 5000)
+        self.assertEqual(GETUP_MAX_ITERATIONS - GETUP_SCHEDULE["push"], 3000)
 
 
 class FakeAlgorithm:
