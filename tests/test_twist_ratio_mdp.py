@@ -12,7 +12,7 @@ import torch
 from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     TWIST_RATIO_AXIS_SCALE,
     TWIST_RATIO_DIRECTION_PENALTY,
-    TWIST_RATIO_MIN_COMMAND_NORM,
+    TWIST_RATIO_EPS,
     twist_ratio,
     twist_ratio_reward,
     twist_ratio_velocity,
@@ -140,44 +140,121 @@ class DecompositionTest(unittest.TestCase):
             self.assertEqual(int(torch.argmax(values)), 0, command)
             self.assertAlmostEqual(float(values[0]), 1.0, places=5)  # the best value
 
-    def test_standing_and_small_commands(self) -> None:
-        # Standing still earns the same speed 1 as exact tracking of a moving
-        # command; any motion lowers it on the scale of min_command_norm.
+    def test_standing_command_is_best_answered_by_standing_still(self) -> None:
+        # n = 0: u = 0, p = 0, speed 0; all motion is off-command motion.
         standing = parts(
             [[0.0, 0.0, 0.0]] * 3,
             [[0.0, 0.0, 0.0], [0.007, -0.003, 0.03], [0.07, -0.03, 0.3]],
         )
-        self.assertAlmostEqual(float(standing.speed[0]), 1.0)
-        moved = math.sqrt(0.01**2 + 0.01**2 + 0.02**2)
-        self.assertAlmostEqual(
-            float(standing.speed[1]), 1.0 - moved / TWIST_RATIO_MIN_COMMAND_NORM, places=5
-        )
-        self.assertEqual(float(standing.speed[2]), 0.0)  # clamped at 0
+        self.assertTrue(torch.equal(standing.speed, torch.zeros(3)))
+        self.assertTrue(torch.equal(standing.along, torch.zeros(3)))
         self.assertAlmostEqual(float(standing.error[0]), 0.0)
+        moved = math.sqrt(0.01**2 + 0.01**2 + 0.02**2)
         self.assertAlmostEqual(float(standing.error[1]), moved, places=5)
         self.assertAlmostEqual(float(standing.error[2]), math.sqrt(0.01 + 0.01 + 0.04), places=5)
-        # A small command (n = 0.02) tracked exactly earns speed 1, standing
-        # still on it 1 - n / min_command_norm = 0.5.
-        small = [0.014, 0.0, 0.0]
-        result = parts([small] * 2, [small, [0.0, 0.0, 0.0]])
-        self.assertAlmostEqual(float(result.speed[0]), 1.0, places=5)
-        self.assertAlmostEqual(float(result.speed[1]), 0.5, places=5)
-        self.assertAlmostEqual(float(result.error[0]), 0.0, places=6)
+        torch.manual_seed(1)
+        moves = torch.randn(256, 3) * torch.tensor([0.2, 0.1, 0.5])
+        values = twist_ratio_reward(torch.zeros(257, 3), torch.cat((torch.zeros(1, 3), moves)))
+        self.assertAlmostEqual(float(values[0]), 0.5, places=6)
+        self.assertTrue(bool((values[1:] < values[0]).all()))
 
-    def test_every_command_has_the_same_best_value(self) -> None:
-        commands = [[0.0, 0.0, 0.0], [0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0]]
+    def test_one_speed_formula_for_every_command(self) -> None:
+        # speed = clamp(p, 0, n) / max(n, eps) with u = c^ / max(n, eps), also
+        # for the 0.1 m/s commands and below eps.
+        torch.manual_seed(2)
+        for norm in (0.002, 0.009, TWIST_RATIO_EPS, 0.03, 0.1 / 0.7, 0.5, 1.2):
+            direction = torch.randn(64, 3)
+            c_hat = direction / direction.norm(dim=-1, keepdim=True) * norm
+            v_hat = c_hat * torch.rand(64, 1) * 2.0 + 0.05 * torch.randn(64, 3)
+            result = twist_ratio(c_hat * SCALE, v_hat * SCALE)
+            floor = max(norm, TWIST_RATIO_EPS)
+            along = (v_hat * c_hat).sum(dim=-1) / floor
+            speed = torch.clamp(along, min=0.0).clamp(max=norm) / floor
+            self.assertTrue(torch.allclose(result.along, along, atol=1e-5), norm)
+            self.assertTrue(torch.allclose(result.speed, speed, atol=1e-5), norm)
+
+    def test_no_nan_or_infinity_for_any_command_size(self) -> None:
+        torch.manual_seed(3)
+        sizes = (0.0, 1e-30, 1e-12, 1e-6, 1e-3, TWIST_RATIO_EPS, 0.1, 1.0, 1e3)
+        direction = torch.randn(len(sizes) * 32, 3)
+        direction = direction / direction.norm(dim=-1, keepdim=True)
+        norms = torch.tensor(sizes).repeat_interleave(32).unsqueeze(-1)
+        commands = direction * norms * SCALE
+        for twists in (torch.zeros_like(commands), commands, torch.randn_like(commands) * 3.0):
+            result = twist_ratio(commands, twists, uncommanded=torch.randn_like(commands))
+            for field in result:
+                self.assertTrue(bool(torch.isfinite(field).all()))
+            values = twist_ratio_reward(commands, twists)
+            self.assertTrue(bool(torch.isfinite(values).all()))
+            self.assertGreaterEqual(float(values.min()), 0.0)
+            self.assertLessEqual(float(values.max()), 1.0)
+
+    def test_reward_is_continuous_where_the_command_crosses_eps_and_zero(self) -> None:
+        torch.manual_seed(4)
+        direction = torch.randn(128, 3)
+        direction = direction / direction.norm(dim=-1, keepdim=True)
+        twists = torch.randn(128, 3) * 0.02 * SCALE
+        for norm in (TWIST_RATIO_EPS, 0.0):
+            below = twist_ratio_reward(direction * max(norm * (1 - 1e-5), 1e-9) * SCALE, twists)
+            at = twist_ratio_reward(direction * norm * SCALE, twists)
+            above = twist_ratio_reward(direction * (norm * (1 + 1e-5) + 1e-9) * SCALE, twists)
+            self.assertLess(float((below - at).abs().max()), 1e-5, norm)
+            self.assertLess(float((above - at).abs().max()), 1e-5, norm)
+        # The command 0.1 m/s forward scored by the one formula.
+        command = [[0.1, 0.0, 0.0]] * 4
+        values = reward(command, [[0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]])
+        expected = [0.5, 0.75, 1.0, math.exp(-0.1 / 0.7)]
+        for value, want in zip(values.tolist(), expected, strict=True):
+            self.assertAlmostEqual(value, want, places=5)
+
+    def test_any_progress_along_a_moving_command_beats_standing_still(self) -> None:
+        # Every command from 0.1 eps up, at half, exactly and twice the command
+        # and along it at the robot's slowest gait (0.02 normalized).  Below
+        # about 0.01 eps (0.07 mm/s forward) standing still is as good.
+        torch.manual_seed(5)
+        for norm in (0.1 * TWIST_RATIO_EPS, 0.5 * TWIST_RATIO_EPS, 0.999 * TWIST_RATIO_EPS,
+                     TWIST_RATIO_EPS, 0.05, 0.1 / 0.7, 0.2 / 0.7, 0.6, 1.5):
+            direction = torch.randn(32, 3)
+            c_hat = direction / direction.norm(dim=-1, keepdim=True) * norm
+            commands = c_hat * SCALE
+            still = twist_ratio_reward(commands, torch.zeros_like(commands))
+            self.assertTrue(torch.allclose(still, torch.full((32,), 0.5)))
+            for k in (0.5, 1.0, 2.0):
+                moving = twist_ratio_reward(commands, commands * k)
+                # The overshoot costs (k - 1) n: twice the command beats
+                # standing for n < ln 2 (0.48 m/s forward, beyond the reach).
+                wins = (k - 1.0) * norm < math.log(2.0)
+                self.assertEqual(bool((moving > still).all()), wins, (norm, k))
+            slow = twist_ratio_reward(commands, c_hat / c_hat.norm(dim=-1, keepdim=True) * 0.02 * SCALE)
+            self.assertTrue(bool((slow > still).all()), norm)
+
+    def test_moving_against_a_command_is_worse_than_standing_still(self) -> None:
+        torch.manual_seed(6)
+        for norm in (0.5 * TWIST_RATIO_EPS, TWIST_RATIO_EPS, 0.1 / 0.7, 0.8):
+            direction = torch.randn(32, 3)
+            commands = direction / direction.norm(dim=-1, keepdim=True) * norm * SCALE
+            for k in (0.5, 1.0, 2.0):
+                values = twist_ratio_reward(commands, -k * commands)
+                self.assertTrue(bool((values < 0.5).all()), (norm, k))
+
+    def test_moving_commands_are_best_tracked_exactly(self) -> None:
+        # 0.1 and 0.2 m/s forward and backward, 0.1 m/s lateral, 0.5 rad/s yaw:
+        # the best over a fine grid of single-axis answers is the command.
+        for axis, value in ((0, 0.1), (0, 0.2), (0, -0.1), (0, -0.2), (1, 0.1), (1, -0.1), (2, 0.5), (2, -0.5)):
+            command = [0.0, 0.0, 0.0]
+            command[axis] = value
+            grid = torch.zeros(401, 3)
+            grid[:, axis] = torch.linspace(-2.0 * abs(value), 3.0 * abs(value), 401)
+            grid = torch.cat((grid, grid + torch.tensor([0.0, 0.01, 0.05])), dim=0)
+            values = twist_ratio_reward(torch.tensor([command]).expand(len(grid), 3), grid)
+            best = grid[int(torch.argmax(values))]
+            self.assertTrue(torch.allclose(best, torch.tensor(command), atol=abs(value) * 0.01), (command, best))
+            self.assertAlmostEqual(float(values.max()), 1.0, places=5)
+
+    def test_every_moving_command_has_the_same_best_value(self) -> None:
+        commands = [[0.07, 0.0, 0.0], [0.0, 0.03, 0.1], [0.3, 0.1, 0.6], list(G), [0.0, 0.0, -3.0], [0.007, 0.0, 0.0]]
         values = twist_ratio_reward(torch.tensor(commands), torch.tensor(commands))
         self.assertTrue(torch.allclose(values, torch.ones(len(commands)), atol=1e-5))
-
-    def test_the_speed_branches_meet_on_the_ray(self) -> None:
-        # n exactly at min_command_norm: both branches give s on the ray.
-        unit = torch.tensor([1.0, 1.0, 0.0]) / math.sqrt(2.0)
-        command = (unit * TWIST_RATIO_MIN_COMMAND_NORM * SCALE).tolist()
-        for k in (0.0, 0.3, 0.7, 1.0):
-            below = parts([[x * 0.999999 for x in command]], [scaled(command, k)])
-            above = parts([command], [scaled(command, k)])
-            self.assertAlmostEqual(float(below.speed[0]), k, places=4)
-            self.assertAlmostEqual(float(above.speed[0]), k, places=4)
 
     def test_yaw_is_part_of_the_ratio(self) -> None:
         command = [0.5, 0.0, 1.0]
@@ -191,8 +268,8 @@ class DecompositionTest(unittest.TestCase):
         def mirror(t):
             return [t[0], -t[1], -t[2]]
 
-        commands = [list(G), [0.6, 0.3, 1.2], [-0.4, 0.25, 0.9], [0.0, 0.0, 0.0], [0.0, 0.2, 0.0]]
-        twists = [[0.289, -0.017, 0.94], [0.2, 0.05, 0.3], [-0.1, -0.2, 0.4], [0.05, 0.02, 0.1], [0.0, 0.1, -0.2]]
+        commands = [list(G), [0.6, 0.3, 1.2], [-0.4, 0.25, 0.9], [0.0, 0.0, 0.0], [0.0, 0.2, 0.0], [0.003, 0.001, 0.004]]
+        twists = [[0.289, -0.017, 0.94], [0.2, 0.05, 0.3], [-0.1, -0.2, 0.4], [0.05, 0.02, 0.1], [0.0, 0.1, -0.2], [0.004, 0.0, 0.01]]
         base = reward(commands, twists)
         mirrored = reward([mirror(c) for c in commands], [mirror(t) for t in twists])
         self.assertTrue(torch.allclose(base, mirrored, atol=1e-6))
@@ -252,7 +329,7 @@ class DecompositionTest(unittest.TestCase):
 
     def test_reward_is_bounded_and_never_negative(self) -> None:
         # Falling can never pay: every value is in [0, 1].  Standing still
-        # is worth 1 on a standing command and 1/2 on a moving one.
+        # is worth 1/2 on every command.
         torch.manual_seed(0)
         commands = torch.randn(4096, 3) * torch.tensor([0.5, 0.25, 1.2])
         commands[:256] = 0.0
@@ -264,7 +341,7 @@ class DecompositionTest(unittest.TestCase):
         still = twist_ratio_reward(
             torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], list(G)]), torch.zeros(3, 3)
         )
-        for value, want in zip(still.tolist(), [1.0, 0.5, 0.5], strict=True):
+        for value, want in zip(still.tolist(), [0.5, 0.5, 0.5], strict=True):
             self.assertAlmostEqual(value, want, places=6)
         half = twist_ratio_reward(torch.tensor([list(G)]), torch.tensor([scaled(G, 0.3)]))
         self.assertAlmostEqual(float(half[0]), 0.65, places=5)
@@ -458,16 +535,19 @@ def _golden_sequence():
 
 class GoldenTest(unittest.TestCase):
     def test_reproduces_the_implementation_the_comparison_trained_with(self) -> None:
-        # The comparison ran with min_command_norm 0.2 (the release uses 0.04).
+        # The comparison's small-command branch (below n = 0.2) is gone; the
+        # commands at or above 0.2 (columns 0, 1, 3, 5) score as they did.
+        kept = [0, 1, 3, 5]
         commands, steps = _golden_sequence()
         env = _FilterEnv(commands.tolist())
         term = twist_ratio_velocity(SimpleNamespace(params={}), env)
         for (twist, unc), expected in zip(steps, GOLDEN_B3["filtered"], strict=True):
             env.data.root_link_lin_vel_b = torch.stack((twist[:, 0], twist[:, 1], unc[:, 0]), -1)
             env.data.root_link_ang_vel_b = torch.stack((unc[:, 1], unc[:, 2], twist[:, 2]), -1)
-            self.assertTrue(torch.allclose(term(env, min_command_norm=0.2), torch.tensor(expected), atol=2e-6))
-        last = twist_ratio_reward(commands, steps[-1][0], min_command_norm=0.2, uncommanded=steps[-1][1])
-        self.assertTrue(torch.allclose(last, torch.tensor(GOLDEN_B3["instantaneous_last"]), atol=2e-6))
+            value = term(env)[kept]
+            self.assertTrue(torch.allclose(value, torch.tensor(expected)[kept], atol=2e-6))
+        last = twist_ratio_reward(commands, steps[-1][0], uncommanded=steps[-1][1])[kept]
+        self.assertTrue(torch.allclose(last, torch.tensor(GOLDEN_B3["instantaneous_last"])[kept], atol=2e-6))
 
 
 if __name__ == "__main__":

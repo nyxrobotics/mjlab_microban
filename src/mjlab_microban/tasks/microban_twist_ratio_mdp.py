@@ -15,17 +15,18 @@ The commanded twist is (v_x, v_y, w_z) in the HOME-levelled trunk frame.  Each
 axis is divided by the command envelope's maximum (default 0.7 m/s, 0.3 m/s,
 1.5 rad/s, the robot's moving ``scale_velocity`` limits) so metres per second
 and radians per second are comparable.  With ``c^ = c / scale``,
-``v^ = v / scale``, ``n = |c^|``, ``u = c^ / n`` and ``p = v^ . u``:
+``v^ = v / scale``, ``n = |c^|``, ``u = c^ / max(n, eps)`` and ``p = v^ . u``:
 
 ``a = clamp(p, 0, n)``
     progress along the command, capped at the command;
-``speed = a / n`` when ``n >= min_command_norm``
-    the along-command speed fraction, in [0, 1];
-``speed = clamp(1 - |v^ - c^| / min_command_norm, 0, 1)`` for a smaller command
-    (standing included): a small command is tracked for precision, on the
-    scale of ``min_command_norm``.  Both branches agree on the commanded ray
-    at ``n = min_command_norm``, and every command, standing included, has
-    the same best value (speed 1 at exact tracking);
+``speed = a / max(n, eps)``
+    the along-command speed fraction, in [0, 1], for every command: one
+    formula, no separate small-command branch.  ``eps`` (0.01 in normalized
+    units, ``TWIST_RATIO_EPS``) only keeps the division finite: the direction
+    is ``u = c^ / max(n, eps)`` too, so for ``n >= eps`` it is the unit
+    command direction and below it shrinks continuously to 0.  A standing
+    command (``n = 0``) has ``u = 0``, ``p = 0`` and speed 0, and all its
+    motion is off-command motion, so standing still is its best;
 ``error = sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)``
     the norm of everything that is not capped forward progress along the
     command -- the perpendicular part, the overshoot beyond the command, any
@@ -36,9 +37,17 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     monotonically with the angle to the command.
 
 The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
-[0, 1]: 1 at exact tracking of any command (standing still on a standing
-command included), 1/2 for standing still on a moving command, less for
-anything off the command, and never negative.  For a feasible command its
+[0, 1]: 1 at exact tracking of a moving command (``n >= eps``), 1/2 for
+standing still (the best on a standing command, where any motion costs),
+less for anything off the command, and never negative.  On every moving
+command any progress along it beats standing still, also at twice the
+command (the overshoot only costs error ``(k - 1) n``), and moving against
+it is worse than standing; the reward is continuous in the command, also
+where ``n`` crosses ``eps`` and at 0.  It replaces a small-command branch
+(``speed = clamp(1 - |v^ - c^| / min_command_norm, 0, 1)`` below the norm
+``min_command_norm`` 0.2) that scored the 0.1 m/s commands like standing
+ones, where standing still beat walking at twice the command: the
+2026-10-07 release walker stood still on them.  For a feasible command its
 maximum is exact tracking.  For an infeasible one it is near the commanded
 ray but not exactly on it: when only some axes are limited (typically
 forward/backward), over-producing the easier axes buys a little speed for a
@@ -64,8 +73,7 @@ Why this form (walker trained from scratch at the forward-lean HOME,
 * ``1 + speed - error`` with ``speed = a / max(n, min_command_norm)``: a
   standing command could earn at most 1 against 2 for a moving one, and
   falling ends an episode without a penalty and draws a new command; at update
-  4000 the walker fell within one second in every standing rollout.  The
-  small-command branch of ``speed`` gives every command the same best value.
+  4000 the walker fell within one second in every standing rollout.
 * ``1 + speed - error`` with that ``speed``: the reward goes negative after a
   push, so falling can pay; 36-43 of 90 pushed diagonal rollouts fell from
   update 5000 to 8000 (old reward 2 of 90 at 5000), and single-axis commands
@@ -103,17 +111,10 @@ from mjlab.utils.lab_api.math import quat_apply_inverse, quat_mul
 TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 # Scale of the uncommanded motion (v_z m/s, w_x rad/s, w_y rad/s).
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
-# Below this command norm the speed is the precision branch (see the module
-# doc).  0.04, not 0.2: at 0.2 the 0.1 m/s forward and backward commands
-# (n = 0.14) were in the precision branch, where standing still (0.64) beats
-# walking at twice the command (0.53); the 2026-10-07 release walker stood
-# still on them.  0.1 m/s is an ordinary speed for this robot (forward reach
-# about 0.2 m/s), so every command the robot is asked to walk at uses the
-# user's along-command speed, where any progress beats standing (2x: 0.83
-# against 0.5).  The precision branch only covers standing and near-standing
-# commands (below 0.028 m/s forward, 0.012 m/s lateral, 0.06 rad/s yaw); it is
-# not 0 because a/n then swings with tiny velocity noise.
-TWIST_RATIO_MIN_COMMAND_NORM = 0.04
+# Floor of the command norm in the divisions (normalized units).  It only
+# keeps speed = a / max(n, eps) and u = c^ / max(n, eps) finite near a
+# standing command (see the module doc).
+TWIST_RATIO_EPS = 0.01
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
 TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
 
@@ -124,8 +125,8 @@ class TwistRatio(NamedTuple):
     """Per-env decomposition in envelope-normalized units (see module doc)."""
 
     command_norm: torch.Tensor  # (N,) n = |c^|
-    along: torch.Tensor  # (N,) p = v^ . u (0 for a zero command)
-    speed: torch.Tensor  # (N,) along-command speed fraction in [0, 1] (see doc)
+    along: torch.Tensor  # (N,) p = v^ . u with u = c^ / max(n, eps)
+    speed: torch.Tensor  # (N,) a / max(n, eps), in [0, 1]
     error: torch.Tensor  # (N,) sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)
 
 
@@ -142,7 +143,6 @@ def twist_ratio(
     command: torch.Tensor,
     twist: torch.Tensor,
     axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
-    min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
 ) -> TwistRatio:
@@ -154,24 +154,15 @@ def twist_ratio(
 
     if command.ndim != 2 or command.shape[-1] != 3 or twist.shape != command.shape:
         raise ValueError("twist_ratio needs (N, 3) command and twist tensors")
-    if not min_command_norm > 0.0:
-        raise ValueError("min_command_norm must be positive")
     scale = _scale_tensor(axis_scale, command, 3)
     c = command / scale
     v = twist.to(command.dtype) / scale
     norm = torch.linalg.vector_norm(c, dim=-1)
-    moving = norm > 0.0
-    unit = c / torch.where(moving, norm, torch.ones_like(norm)).unsqueeze(-1)
+    floor = torch.clamp(norm, min=TWIST_RATIO_EPS)
+    unit = c / floor.unsqueeze(-1)
     along = (v * unit).sum(dim=-1)
     progress = torch.minimum(torch.clamp(along, min=0.0), norm)
-    large = norm >= min_command_norm
-    speed = torch.where(
-        large,
-        progress / torch.where(large, norm, torch.ones_like(norm)),
-        torch.clamp(
-            1.0 - torch.linalg.vector_norm(v - c, dim=-1) / min_command_norm, min=0.0
-        ),
-    )
+    speed = progress / floor
     off = v - progress.unsqueeze(-1) * unit
     if uncommanded is not None:
         if uncommanded_scale is None:
@@ -190,7 +181,6 @@ def twist_ratio_reward(
     command: torch.Tensor,
     twist: torch.Tensor,
     axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
-    min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
     direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
@@ -200,7 +190,7 @@ def twist_ratio_reward(
     if not direction_penalty > 0.0:
         raise ValueError("direction_penalty must be positive")
     parts = twist_ratio(
-        command, twist, axis_scale, min_command_norm, uncommanded, uncommanded_scale
+        command, twist, axis_scale, uncommanded, uncommanded_scale
     )
     return _bounded(parts, direction_penalty)
 
@@ -281,7 +271,6 @@ class twist_ratio_velocity:
         command_name: str = "twist",
         trunk_pitch: float = 0.0,
         axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
-        min_command_norm: float = TWIST_RATIO_MIN_COMMAND_NORM,
         direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
         uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
         filter_time_constant: float = TWIST_RATIO_FILTER_TIME_CONSTANT_S,
@@ -309,7 +298,6 @@ class twist_ratio_velocity:
             self.command,
             self.twist,
             axis_scale,
-            min_command_norm,
             None if uncommanded_scale is None else self.uncommanded,
             uncommanded_scale,
         )
