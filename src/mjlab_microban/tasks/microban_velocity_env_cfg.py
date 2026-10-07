@@ -103,6 +103,7 @@ WALK_TWIST_RATIO_WEIGHT = 8.0
 # Per half-range (pi) of target excess beyond the servo's +-pi goal range,
 # summed over the joints (the get-up task's raw_target_clip_excess term).
 WALK_RAW_TARGET_CLIP_EXCESS_WEIGHT = -1.0
+WALK_DOF_POS_LIMITS_WEIGHT = -10.0
 WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
@@ -340,6 +341,12 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         weight=WALK_RAW_TARGET_CLIP_EXCESS_WEIGHT,
         params={"action_name": "joint_pos"},
     )
+    # Joint positions past the soft limits, at the weight PICO uses for the
+    # same robot and the same acceptance (the 9x300 probe allows 0.0873 rad).
+    # At mjlab's -1 the standing walker still drove one elbow (update 5000,
+    # 0.22 rad) or one knee (update 4000, 0.14 rad) onto its stop: entering the
+    # stop cost less than the balance it bought while standing without steps.
+    cfg.rewards["dof_pos_limits"].weight = WALK_DOF_POS_LIMITS_WEIGHT
 
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,

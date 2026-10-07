@@ -35,7 +35,7 @@ ROBOT_MOVING_COMMAND_LIMITS = (0.7, 0.3, 1.5)
 
 WALK_REWARD_WEIGHTS = {
     "action_rate_l2": -0.1, "air_time": 3.0, "angular_momentum": -0.02, "body_ang_vel": -0.05,
-    "dof_pos_limits": -1.0, "feet_distance": -1000.0, "foot_clearance": -2.0, "foot_slip": -1.0,
+    "dof_pos_limits": -10.0, "feet_distance": -1000.0, "foot_clearance": -2.0, "foot_slip": -1.0,
     "foot_swing_height": -0.25, "no_stepping": 0.0, "pose": 1.0, "self_collisions": -1.0,
     "raw_target_clip_excess": -1.0, "twist_ratio_velocity": 8.0, "upright": 1.0,
 }
