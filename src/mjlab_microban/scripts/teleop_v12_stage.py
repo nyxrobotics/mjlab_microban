@@ -21,13 +21,13 @@ import torch
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
-    MINIMUM_SIGNED_RESPONSE,
+    LOCOMOTION_MOVING_SCENARIOS,
+    locomotion_twist_judgments,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    DIRECTIONAL_RESPONSE_MINIMUM,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
@@ -49,6 +49,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _scenarios as _tracking_scenarios,
 )
+from mjlab_microban.twist_pass_line import twist_judgment, twist_pass_line_record
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     PRISTINE_PARITY_TOLERANCE,
@@ -188,11 +189,11 @@ def _validate_locomotion_report(
         "actual_soft_limit_violation_rad_max": (
             ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
         ),
-        "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+        "twist_pass_line": twist_pass_line_record(),
     }:
         raise ValueError("Locomotion report thresholds drifted")
     results = report.get("results")
-    expected_names = ("neutral", *MINIMUM_SIGNED_RESPONSE)
+    expected_names = ("neutral", *LOCOMOTION_MOVING_SCENARIOS)
     if (
         not isinstance(results, list)
         or tuple(
@@ -248,13 +249,15 @@ def _validate_locomotion_report(
             or response.get("measured_mean") != mean
             or response.get("signed_response") != signed
             or response.get("sign_matches") is not (signed > 0.0)
-            or signed < MINIMUM_SIGNED_RESPONSE[name]
         ):
             raise ValueError("Locomotion directional evidence is inconsistent")
     try:
         recomputed, status = _locomotion_acceptance(results)
+        judgments = locomotion_twist_judgments(results)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Locomotion result evidence is malformed") from exc
+    if report.get("twist_judgment") != judgments:
+        raise ValueError("Locomotion twist judgment does not match result evidence")
     checks = _require_exact_true_checks(
         report,
         {
@@ -265,7 +268,7 @@ def _validate_locomotion_report(
             "raw_action_recurrence",
             "neutral_targets",
             "directional_signs",
-            "minimum_directional_response",
+            "twist_beats_standing",
         },
         "Locomotion",
     )
@@ -387,7 +390,7 @@ def _validate_tracking_report(
         "hand_p95_m_max": hand_tracking_p95_max_m(profile),
         "foot_rms_m_max": foot_tracking_rms_max_m(profile),
         "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-        "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+        "twist_pass_line": twist_pass_line_record(),
         "target_column_ablation_action_delta_min": (
             TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
         ),
@@ -432,7 +435,7 @@ def _validate_tracking_report(
             or float(result["maximum_actual_soft_limit_violation_rad"])
             > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             or result.get("hmd_motion_evidence_passed") is not True
-            or result.get("twist_directional_response_passed") is not True
+            or result.get("twist_beats_standing_passed") is not True
             or not isinstance(coverage, dict)
             or coverage.get("passed") is not True
             or coverage.get("foot_target_expected") is not expects_foot
@@ -587,17 +590,20 @@ def _validate_tracking_report(
                 or item.get("command") != command
                 or item.get("measured_mean") != mean
                 or item.get("signed_response") != signed
-                or item.get("minimum_signed_response")
-                != DIRECTIONAL_RESPONSE_MINIMUM[axis]
-                or item.get("passed")
-                is not (signed >= DIRECTIONAL_RESPONSE_MINIMUM[axis])
-                or signed < DIRECTIONAL_RESPONSE_MINIMUM[axis]
             ):
-                raise ValueError("Tracking directional response failed")
-        if result.get("twist_directional_response_passed") is not all(
-            response[axis].get("passed") is True for axis in expected_axes
-        ):
-            raise ValueError("Tracking directional response summary is inconsistent")
+                raise ValueError("Tracking directional response is inconsistent")
+        expected_judgment = (
+            None
+            if all(command == 0.0 for command in scenario.twist)
+            else twist_judgment(
+                scenario.twist,
+                [float(measured[axis]["mean"]) for axis in _VELOCITY_AXES],
+            )
+        )
+        if result.get("twist_judgment") != expected_judgment or result.get(
+            "twist_beats_standing_passed"
+        ) is not (expected_judgment is None or expected_judgment["passed"] is True):
+            raise ValueError("Tracking twist judgment is inconsistent")
         _require_action_envelope(
             result.get("raw_action_envelope"),
             label=f"Tracking/{scenario.name}",

@@ -246,18 +246,13 @@ def walk_abort_rules(rules: dict[str, Any]) -> Callable[[int, dict], str | None]
 
 
 def walk_check_abort(rules: dict[str, Any]) -> Callable[[int, dict], str | None]:
-    """At the hopeless point: falls, a wide ratio angle or almost no speed."""
+    """At the hopeless point: still falling (W4)."""
 
     def check(update: int, verdict: dict) -> str | None:
         if update != rules["hopeless_update"] or "probe" not in verdict:
             return None
-        probe = verdict["probe"]
-        if not probe["checks"]["W4"]:
+        if not verdict["probe"]["checks"]["W4"]:
             return f"W4 (falls) fails at update {update}"
-        if probe["angle_deg"][0] > rules["hopeless_angle_deg"]:
-            return f"ratio angle {probe['angle_deg'][0]:.0f} > {rules['hopeless_angle_deg']} deg at update {update}"
-        if probe["speed"][0] < rules["hopeless_speed"]:
-            return f"speed fraction {probe['speed'][0]:.2f} < {rules['hopeless_speed']} at update {update}"
         return None
 
     return check

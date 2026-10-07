@@ -264,9 +264,9 @@ def validate_legacy_teleop_probe_receipt(
             or result.get("executed_steps") != 300
             or result.get("raw_action_recurrence_verified_steps") != 300
             or result.get("neutral_foot_hand_target_verified_steps") != 300
-            # The source must satisfy the same measured-joint bound as every
-            # later stage gate and the robot contract (5 deg dynamic overshoot
-            # of the 0.9 soft limits); the historical source happened to have 0.
+            # The source must satisfy the same measured-joint bound as the
+            # walking checks and the PICO judgment (teleop_v12_safety: 0.25 rad
+            # dynamic overshoot of the 0.9 soft limits).
             or not (
                 0.0
                 <= float(

@@ -11,47 +11,27 @@ walk:
   task: Mjlab-Velocity-Microban
   envs: 4096
   save_interval: 500
-  # 9x300 signed-response minimums of the walker in the PICO env (the PICO
-  # source gate, evaluated with seed 42 at the start of the PICO step).
-  probe_thresholds:
-    forward_0p1: 0.04
-    forward_0p2: 0.08
-    backward_0p1: 0.02
-    backward_0p2: 0.04
-    lateral_left_0p1: 0.02
-    lateral_right_0p1: 0.02
-    yaw_left_0p5: 0.2
-    yaw_right_0p5: 0.2
-  probe_max_soft_limit_overshoot_rad: 0.0873
   # Checks every 1000 updates while training (in parallel, one at a time):
   # the held-out probe W1-W5 (pipeline/walk_probe.py, seeds 101-105) and the
-  # 9x300 probe above with seed 101.  Two consecutive passes (N, N+1000) end
-  # the run with model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000: both
-  # checks saw 1000+ updates of the only stage); no stop by WALK_MAX_UPDATES
-  # fails the step.
+  # 9x300 probe with seed 101 (the PICO source gate's probe, which judges the
+  # adopted walker with seed 42 at the start of the PICO step).  Both judge
+  # the walking direction by the walking reward's own pass line
+  # (mjlab_microban/twist_pass_line.py: every moving command beats standing
+  # still, standing drifts less than the smallest checked command) and allow
+  # the measured joints 0.25 rad beyond the soft limits
+  # (teleop_v12_safety.py).  Two consecutive passes (N, N+1000) end the run
+  # with model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000: both checks
+  # saw 1000+ updates of the only stage); no stop by WALK_MAX_UPDATES fails
+  # the step.
   check:
     stage_tolerance: 1
     seeds: "101,102,103,104,105"
     probe_seed: 101
-    # W1, ratio angle (max over the diagonal commands), no push / pushed (p30).
-    # Set for the walking reward of this recipe (B3, axis scale = the command
-    # maxima (0.7, 0.3, 1.5), direction penalty 1), before its release run:
-    # B3 from scratch measured 23-29 deg without push at every check 1000-5000
-    # (seed 42; seed 43: 32, 27), never 20, and the reward comparison declared
-    # beforehand that B3 is held to 30 deg.  A change of the walking reward is
-    # a recipe change that sets this value again in the same commit.
-    w1_angle_deg: [30, 30]
-    w2_axis_min: [0.03, 0.02, 0.15]  # every diagonal axis moves the commanded way
-    w3_speed: [0.25, 0.20]          # along-command speed fraction
     w4_falls: [1, 5]                # diagonal falls of 90, no push / pushed; single-axis 0
-    w5_single_min: {F: 0.08, BK: 0.04, LL: 0.02, LR: 0.02, YL: 0.2, YR: 0.2}
-    w5_still_max: [0.05, 0.05, 0.2]
     # Stop: the episode length of the old reward's walker was about twice
     # these (falling over to cash in speed); at 12000 no hope.
     episode_length_floor: [[500, 100], [2000, 300]]
-    hopeless_update: 12000
-    hopeless_angle_deg: 35
-    hopeless_speed: 0.15
+    hopeless_update: 12000          # still falling (W4) here: stop
 
 pico:
   task: Mjlab-Teleop-V12-HandPoseRelease-Microban

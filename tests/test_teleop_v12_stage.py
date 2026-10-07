@@ -16,13 +16,13 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_reachable_hand_evaluation_offsets,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
-    MINIMUM_SIGNED_RESPONSE,
+    LOCOMOTION_MOVING_SCENARIOS,
+    locomotion_twist_judgments,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    DIRECTIONAL_RESPONSE_MINIMUM,
     FINAL_PROFILE,
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
@@ -44,6 +44,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     target_column_ablation_observation_columns,
     tracking_profile_uses_perturbation,
 )
+from mjlab_microban.twist_pass_line import twist_judgment, twist_pass_line_record
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     PRISTINE_PARITY_TOLERANCE,
@@ -112,7 +113,7 @@ def _result(**overrides):
         "executed_steps": 300,
         "hmd_motion_evidence_passed": True,
         "observation_coverage": {"passed": True},
-        "twist_directional_response_passed": True,
+        "twist_beats_standing_passed": True,
         "target_error": {
             "active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
             "foot": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
@@ -144,24 +145,21 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
     }
     axis_names = ("vx_m_s", "vy_m_s", "yaw_rad_s")
     results = []
-    for name in ("neutral", *MINIMUM_SIGNED_RESPONSE):
+    for name in ("neutral", *LOCOMOTION_MOVING_SCENARIOS):
         twist = commands[name]
         measured = {axis: 0.0 for axis in axis_names}
         response = None
         if name != "neutral":
+            # Half the command along it: the reward 0.75 beats standing (0.5).
             index = next(index for index, value in enumerate(twist) if value != 0.0)
             axis = axis_names[index]
-            measured[axis] = (
-                MINIMUM_SIGNED_RESPONSE[name]
-                if twist[index] > 0.0
-                else -MINIMUM_SIGNED_RESPONSE[name]
-            )
+            measured[axis] = 0.5 * twist[index]
             response = {
                 "axis": axis,
                 "command": twist[index],
                 "measured_mean": measured[axis],
                 "sign_matches": True,
-                "signed_response": MINIMUM_SIGNED_RESPONSE[name],
+                "signed_response": abs(measured[axis]),
             }
         results.append(
             {
@@ -201,9 +199,10 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
             "actual_soft_limit_violation_rad_max": (
                 ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             ),
-            "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+            "twist_pass_line": twist_pass_line_record(),
         },
         "checks": checks,
+        "twist_judgment": locomotion_twist_judgments(results),
         "results": results,
         "summary": {
             "scenario_count": 9,
@@ -212,7 +211,7 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
             "nonfinite_scenario_count": 0,
             "directionally_correct_scenario_count": 8,
             "directional_scenario_count": 8,
-            "minimum_signed_response": min(MINIMUM_SIGNED_RESPONSE.values()),
+            "minimum_signed_response": 0.025,
             "maximum_actual_soft_limit_violation_rad": 0.0,
         },
     }
@@ -253,13 +252,11 @@ def _tracking_report(
         ):
             if command == 0.0:
                 continue
-            signed = DIRECTIONAL_RESPONSE_MINIMUM[axis]
+            # Half the command along it beats standing still.
             directional[axis] = {
                 "command": command,
-                "measured_mean": signed if command > 0 else -signed,
-                "signed_response": signed,
-                "minimum_signed_response": signed,
-                "passed": True,
+                "measured_mean": 0.5 * command,
+                "signed_response": abs(0.5 * command),
             }
         hmd_axes = {
             name: {
@@ -324,7 +321,14 @@ def _tracking_report(
                     "passed": True,
                 },
                 "directional_response": directional,
-                "twist_directional_response_passed": True,
+                "twist_judgment": (
+                    None
+                    if all(value == 0.0 for value in scenario.twist)
+                    else twist_judgment(
+                        scenario.twist, [0.5 * value for value in scenario.twist]
+                    )
+                ),
+                "twist_beats_standing_passed": True,
                 "measured_velocity_body": {
                     axis: {
                         "sample_count": 250,
@@ -388,7 +392,7 @@ def _tracking_report(
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-            "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+            "twist_pass_line": twist_pass_line_record(),
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
             ),
@@ -606,7 +610,7 @@ class TeleopV12StageTest(unittest.TestCase):
         for mutation in (
             {"completed": False, "termination_names": ["out_of_terrain_bounds"]},
             {"observation_coverage": {"passed": False}},
-            {"twist_directional_response_passed": False},
+            {"twist_beats_standing_passed": False},
             {
                 "maximum_actual_soft_limit_violation_rad": (
                     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD + 1.0e-9

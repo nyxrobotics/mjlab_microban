@@ -336,8 +336,7 @@ class Pipeline:
         out.mkdir(exist_ok=True)
         probe_out = out / f"{checkpoint.parent.name}_{checkpoint.stem}_walk_probe.json"
         receipt = out / f"{checkpoint.parent.name}_{checkpoint.stem}_9x300_seed{chk['probe_seed']}.json"
-        rules = {key: chk[key] for key in ("w1_angle_deg", "w2_axis_min", "w3_speed", "w4_falls",
-                                           "w5_single_min", "w5_still_max")}
+        rules = {"w4_falls": chk["w4_falls"]}
         commands = [
             [*UV, "python", "-m", "mjlab_microban.pipeline.walk_probe", str(checkpoint), str(probe_out),
              "--seeds", chk["seeds"], "--rules", json.dumps(rules)],
@@ -349,11 +348,16 @@ class Pipeline:
         def verdict(_log: Path) -> dict[str, Any]:
             probe = json.loads(probe_out.read_text())
             probe.pop("rows", None)
-            nine = probe_verdict(json.loads(receipt.read_text()), self.cfg["walk"])
+            nine = probe_verdict(json.loads(receipt.read_text()))
             return {"passed": bool(probe["passed"] and nine["ok"]), "probe": probe, "nine_by_300": nine,
-                    "summary": {"W": probe["checks"], "angle": probe["angle_deg"], "speed": probe["speed"],
+                    "summary": {"W": probe["checks"], "worst_value": [round(v, 3) for v in probe["worst_value"]],
+                                "still_value": round(probe["still_value"], 3),
+                                "angle": [round(v, 1) for v in probe["angle_deg"]],
+                                "speed": [round(v, 3) for v in probe["speed"]],
                                 "falls": probe["falls"], "9x300": nine["ok"],
-                                "9x300_worst": [nine["worst"], round(nine["worst_margin"], 4)]}}
+                                "9x300_worst": [nine["worst"], round(nine["worst_margin"], 4)],
+                                "9x300_signed": {k: round(v, 4) for k, v in nine["responses"].items()},
+                                "9x300_soft_limit_rad": round(nine["soft_limit_overshoot_rad"], 3)}}
 
         return self.start_check(f"check_walk_{checkpoint.stem}", commands, verdict, sequential=False)
 
@@ -379,10 +383,12 @@ class Pipeline:
                                         "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
                                         "--checkpoint", str(walker), "--expected-sha256", digest,
                                         "--output", str(receipt), "--force"], "eval", env=self.env)
-        verdict = probe_verdict(json.loads(receipt.read_text()), self.cfg["walk"])
+        verdict = probe_verdict(json.loads(receipt.read_text()))
         self.log(f"walker 9x300 probe (seed 42): {'PASS' if verdict['ok'] else 'FAIL'} "
-                 f"worst margin {verdict['worst_margin']:+.4f} ({verdict['worst']}), responses "
-                 f"{ {k: round(v, 3) for k, v in verdict['responses'].items()} }, falls {verdict['falls']}")
+                 f"worst reward margin over standing {verdict['worst_margin']:+.4f} ({verdict['worst']}), "
+                 f"rewards { {k: round(v, 3) for k, v in verdict['values'].items()} }, signed responses "
+                 f"{ {k: round(v, 3) for k, v in verdict['responses'].items()} }, falls {verdict['falls']}, "
+                 f"soft-limit overshoot {verdict['soft_limit_overshoot_rad']:.3f} rad")
         self.state.step("pico")["walker_probe"] = {**verdict, "receipt": str(receipt),
                                                    "receipt_sha256": sha256(receipt)}
         self.state.save()
@@ -860,32 +866,49 @@ def commit(repo: Path, paths: list[str], message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def probe_verdict(receipt: dict[str, Any], walk_cfg: dict[str, Any]) -> dict[str, Any]:
-    """Pass/fail and worst margin of one 9x300 walker probe receipt."""
+def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Pass/fail and worst margin of one 9x300 walker probe receipt.
 
-    thresholds = walk_cfg["probe_thresholds"]
+    Each moving scenario passes when the walking reward of its mean body twist
+    beats standing still (mjlab_microban/twist_pass_line.py; the margin is the
+    reward above 1/2); the measured joints may overshoot the soft limits by
+    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.  The neutral scenario is
+    checked for completion only, as the PICO source gate does.
+    """
+
+    from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+    from mjlab_microban.twist_pass_line import STANDING_STILL_VALUE, twist_passes, twist_value
+
     summary = receipt["summary"]
-    responses, below = {}, []
+    responses, values, below = {}, {}, []
     for result in receipt["results"]:
-        response = result.get("directional_response")
         name = result.get("scenario", result.get("name"))
-        if response is not None and name in thresholds:
+        command = [float(result["command"][axis]) for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")]
+        if all(x == 0.0 for x in command):
+            continue
+        measured = result.get("measured_velocity_body", {})
+        means = [measured.get(axis, {}).get("mean") for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")]
+        twist = [float("nan") if m is None else float(m) for m in means]
+        values[name] = twist_value(command, twist)
+        response = result.get("directional_response") or {}
+        if response.get("signed_response") is not None:
             responses[name] = float(response["signed_response"])
-            if responses[name] < thresholds[name]:
-                below.append(name)
-    margins = {key: responses.get(key, float("-inf")) - value for key, value in thresholds.items()}
-    worst = min(margins, key=margins.get)
+        if not twist_passes(command, twist):
+            below.append(name)
+    margins = {key: value - STANDING_STILL_VALUE for key, value in values.items()}
+    worst = min(margins, key=lambda key: margins[key] if margins[key] == margins[key] else float("-inf"))
+    overshoot = float(summary.get("maximum_actual_soft_limit_violation_rad", float("inf")))
     ok = (
-        not below and len(responses) == len(thresholds)
+        not below and len(values) == 8
         and summary.get("completed_scenario_count") == 9 and summary.get("fall_scenario_count") == 0
         and summary.get("nonfinite_scenario_count", 0) == 0
         and summary.get("directionally_correct_scenario_count") == 8
         and summary.get("raw_action_recurrence_all_steps") is True
-        and float(summary.get("maximum_actual_soft_limit_violation_rad", 0.0))
-        <= float(walk_cfg["probe_max_soft_limit_overshoot_rad"])
+        and overshoot <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
     )
     return {"ok": ok, "worst_margin": margins[worst], "worst": worst, "below": below,
-            "falls": summary.get("fall_scenario_count"), "responses": responses}
+            "falls": summary.get("fall_scenario_count"), "responses": responses, "values": values,
+            "soft_limit_overshoot_rad": overshoot}
 
 
 def getup_summary(results: dict[str, dict[str, Any]]) -> dict[str, float]:

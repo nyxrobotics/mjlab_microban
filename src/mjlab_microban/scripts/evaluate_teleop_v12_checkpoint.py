@@ -51,16 +51,36 @@ from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
 
-MINIMUM_SIGNED_RESPONSE = {
-    "forward_0p1": 0.04,
-    "forward_0p2": 0.08,
-    "backward_0p1": 0.02,
-    "backward_0p2": 0.04,
-    "lateral_left_0p1": 0.02,
-    "lateral_right_0p1": 0.02,
-    "yaw_left_0p5": 0.20,
-    "yaw_right_0p5": 0.20,
-}
+from mjlab_microban.twist_pass_line import (
+    twist_judgment,
+    twist_pass_line_record,
+)
+
+_AXES = ("vx_m_s", "vy_m_s", "yaw_rad_s")
+# The eight moving scenarios after "neutral" (legacy_velocity_diagnostics).
+LOCOMOTION_MOVING_SCENARIOS = (
+    "forward_0p1",
+    "forward_0p2",
+    "backward_0p1",
+    "backward_0p2",
+    "lateral_left_0p1",
+    "lateral_right_0p1",
+    "yaw_left_0p5",
+    "yaw_right_0p5",
+)
+
+
+def locomotion_twist_judgments(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """The walking reward's pass line on each moving scenario's mean body twist."""
+
+    judgments = {}
+    for result in results:
+        command = [float(result["command"][axis]) for axis in _AXES]
+        if all(value == 0.0 for value in command):
+            continue
+        twist = [float(result["measured_velocity_body"][axis]["mean"]) for axis in _AXES]
+        judgments[result["name"]] = twist_judgment(command, twist)
+    return judgments
 
 
 def _actor(device: str) -> LegacyAdapterTeleopActor:
@@ -144,6 +164,7 @@ def _load_actor(
 
 
 def _acceptance(results: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
+    judgments = locomotion_twist_judgments(results)
     directional = {
         result["name"]: result["directional_response"] for result in results[1:]
     }
@@ -170,12 +191,8 @@ def _acceptance(results: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
             response is not None and response["sign_matches"] is True
             for response in directional.values()
         ),
-        "minimum_directional_response": all(
-            response is not None
-            and response["signed_response"] is not None
-            and float(response["signed_response"]) >= MINIMUM_SIGNED_RESPONSE[name]
-            for name, response in directional.items()
-        ),
+        "twist_beats_standing": tuple(judgments) == LOCOMOTION_MOVING_SCENARIOS
+        and all(item["passed"] is True for item in judgments.values()),
     }
     return checks, "pass" if all(checks.values()) else "fail"
 
@@ -300,9 +317,10 @@ def run_evaluation(
             "actual_soft_limit_violation_rad_max": (
                 ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             ),
-            "minimum_signed_response": MINIMUM_SIGNED_RESPONSE,
+            "twist_pass_line": twist_pass_line_record(),
         },
         "checks": checks,
+        "twist_judgment": locomotion_twist_judgments(results),
         "results": results,
         "summary": {
             "scenario_count": len(results),

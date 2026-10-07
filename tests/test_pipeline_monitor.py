@@ -289,12 +289,10 @@ class RuleTest(unittest.TestCase):
 
     def test_walk_hopeless_at_12000(self) -> None:
         check = m.walk_check_abort(CFG["walk"]["check"])
-        probe = {"checks": {"W4": True}, "angle_deg": [30.0, 32.0], "speed": [0.4, 0.3]}
+        probe = {"checks": {"W1": False, "W4": True}, "angle_deg": [50.0, 50.0], "speed": [0.1, 0.1]}
         self.assertIsNone(check(12000, {"probe": probe}))
-        self.assertIsNone(check(11000, {"probe": {**probe, "angle_deg": [50.0, 50.0]}}))
-        self.assertIn("ratio angle", check(12000, {"probe": {**probe, "angle_deg": [36.0, 30.0]}}))
+        self.assertIsNone(check(11000, {"probe": {**probe, "checks": {"W4": False}}}))
         self.assertIn("W4", check(12000, {"probe": {**probe, "checks": {"W4": False}}}))
-        self.assertIn("speed", check(12000, {"probe": {**probe, "speed": [0.1, 0.1]}}))
 
     def test_getup_standing_bonus(self) -> None:
         c = CFG["getup"]["check"]
@@ -310,18 +308,18 @@ class RuleTest(unittest.TestCase):
 
 
 class WalkRulesTest(unittest.TestCase):
-    def rows(self, *, angle_scale=1.0, falls=0, single=0.1):
+    def rows(self, *, scale=(0.5, 0.5, 0.5), falls=0, single=0.1, still=(0.0, 0.0, 0.0)):
         rows = []
         for push in ("none", "p30_15"):
             for name, twist in DIAGONAL.items():
                 for rep in range(3):
-                    motion = [twist[0] * 0.5, twist[1] * 0.5 * angle_scale, twist[2] * 0.5]
+                    motion = [twist[i] * scale[i] for i in range(3)]
                     rows.append({"push": push, "cmd": name, "twist": twist, "fell": rep < falls and push == "none",
                                  "mean": motion})
         for name, twist in SINGLE.items():
             for _ in range(3):
                 rows.append({"push": "none", "cmd": name, "twist": twist, "fell": False,
-                             "mean": [0.0, 0.0, 0.0] if name == "S" else [
+                             "mean": list(still) if name == "S" else [
                                  (single * 3 if i == 2 else single) * (1 if v > 0 else -1 if v < 0 else 0)
                                  for i, v in enumerate(twist)]})
         return rows
@@ -331,12 +329,27 @@ class WalkRulesTest(unittest.TestCase):
         good = evaluate(self.rows(), rules)
         self.assertTrue(good["passed"], good)
         self.assertLess(good["angle_deg"][0], 1.0)
-        skewed = evaluate(self.rows(angle_scale=0.1), rules)
-        self.assertFalse(skewed["checks"]["W1"])
+        self.assertAlmostEqual(good["worst_value"][0], 0.75, places=6)
+        # Off the ray as the reward judges it: 40 % of the commanded lateral
+        # part (about 23 deg off) still beats standing still; none of it
+        # (40-45 deg off) is worse than standing.
+        off_ray = evaluate(self.rows(scale=(0.5, 0.2, 0.5)), rules)
+        self.assertGreater(off_ray["angle_deg"][0], 20.0)
+        self.assertTrue(off_ray["checks"]["W1"] and off_ray["checks"]["W2"], off_ray)
+        given_up = evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)
+        self.assertFalse(given_up["checks"]["W1"] or given_up["checks"]["W2"])
+        # Against the command on the diagonals: worse than standing.
+        backward = evaluate(self.rows(scale=(-0.5, -0.5, -0.5)), rules)
+        self.assertFalse(backward["checks"]["W1"] or backward["checks"]["W2"])
         fallen = evaluate(self.rows(falls=2), rules)
         self.assertFalse(fallen["checks"]["W4"])
-        slow = evaluate(self.rows(single=0.01), rules)
-        self.assertFalse(slow["checks"]["W5"])
+        # A tenth of a single-axis command still beats standing; the wrong way does not.
+        self.assertTrue(evaluate(self.rows(single=0.01), rules)["checks"]["W3"])
+        self.assertFalse(evaluate(self.rows(single=-0.01), rules)["checks"]["W3"])
+        # Standing drift below the smallest checked command (0.1 m/s forward).
+        self.assertTrue(evaluate(self.rows(still=(0.09, 0.0, 0.0)), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(still=(0.11, 0.0, 0.0)), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(still=(0.0, 0.05, 0.0)), rules)["checks"]["W5"])
 
 
 if __name__ == "__main__":

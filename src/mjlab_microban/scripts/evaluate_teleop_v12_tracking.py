@@ -79,6 +79,10 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
     validate_teleop_v12_environment_contract,
 )
 from mjlab_microban.schedules import PICO_SCHEDULE, PICO_TOTAL_UPDATES
+from mjlab_microban.twist_pass_line import (
+    twist_judgment,
+    twist_pass_line_record,
+)
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
@@ -95,11 +99,6 @@ HAND_RMS_MAX_M = 0.040
 HAND_P95_MAX_M = 0.07
 FOOT_RMS_MAX_M = 0.05
 FOOT_P95_MAX_M = 0.08
-DIRECTIONAL_RESPONSE_MINIMUM = {
-    "vx_m_s": 0.04,
-    "vy_m_s": 0.02,
-    "yaw_rad_s": 0.20,
-}
 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN = 1.0e-4
 TARGET_COLUMN_ABLATION_METHOD = (
     "same_observation_zero_target_position_columns_preserve_hand_active_flags_"
@@ -209,7 +208,7 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
         "forced_hmd_motion",
         "nonzero_observation_coverage",
         "target_column_ablation_response",
-        "twist_directional_response",
+        "twist_beats_standing",
         "hand_tracking_rms",
         "hand_tracking_p95",
         "foot_tracking_rms",
@@ -657,6 +656,8 @@ def _evaluate_scenario(
             zip(axis_names, velocity_stats, strict=True)
         )
     }
+    # Recorded per commanded axis; the twist is judged as a whole by the
+    # walking reward's pass line (mjlab_microban/twist_pass_line.py).
     directional_response: dict[str, dict[str, float | bool]] = {}
     for axis, command in zip(axis_names, scenario.twist, strict=True):
         if command == 0.0:
@@ -671,13 +672,19 @@ def _evaluate_scenario(
             "command": command,
             "measured_mean": measured_mean,
             "signed_response": signed,
-            "minimum_signed_response": DIRECTIONAL_RESPONSE_MINIMUM[axis],
-            "passed": (
-                signed is not None and signed >= DIRECTIONAL_RESPONSE_MINIMUM[axis]
-            ),
         }
-    directional_response_passed = all(
-        value["passed"] is True for value in directional_response.values()
+    judgment = (
+        None
+        if all(value == 0.0 for value in scenario.twist)
+        else twist_judgment(
+            scenario.twist,
+            [
+                float("nan")
+                if measured_velocity[axis]["mean"] is None
+                else float(measured_velocity[axis]["mean"])
+                for axis in axis_names
+            ],
+        )
     )
     target_column_ablation = _target_column_ablation_evidence(
         target_ablation_maximum,
@@ -715,7 +722,8 @@ def _evaluate_scenario(
         },
         "measured_velocity_body": measured_velocity,
         "directional_response": directional_response,
-        "twist_directional_response_passed": directional_response_passed,
+        "twist_judgment": judgment,
+        "twist_beats_standing_passed": judgment is None or judgment["passed"] is True,
         "hmd_motion": hmd_report,
         "hmd_motion_evidence_passed": hmd_motion,
         "target_error": {
@@ -761,8 +769,8 @@ def _acceptance(
         "target_column_ablation_response": (
             _target_column_ablation_response_passes(results, profile)
         ),
-        "twist_directional_response": all(
-            item["twist_directional_response_passed"] for item in results
+        "twist_beats_standing": all(
+            item["twist_beats_standing_passed"] for item in results
         ),
     }
     required = required_tracking_check_names(profile)
@@ -922,7 +930,7 @@ def run_evaluation(
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-            "directional_response_minimum": DIRECTIONAL_RESPONSE_MINIMUM,
+            "twist_pass_line": twist_pass_line_record(),
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
             ),

@@ -40,7 +40,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | --- | --- | --- |
 | home | `mjlab_microban.pipeline.home_check`（重心と足裏接地面）、`balance_home_pose.py --check`（警告のみ）、`home_pose_tool.py show`、学習側のテスト一式（CPU、約1分） | 重心が足裏の外、テストが1つでも落ちる |
 | walk | `Mjlab-Velocity-Microban` を最初から1本（4096 env、seed 42、最大 `WALK_MAX_UPDATES`）。選んだチェックポイントを `checkpoints/<prefix>_walk_<sha>/` に置く（PICO の来歴がそこを再ハッシュする） | 学習の異常終了・停滞 |
-| pico | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、`config/pipeline.yaml` の閾値）、bootstrap ゲート。`Mjlab-Teleop-V12-HandPoseRelease-Microban` を1本（2048 env、critic の準備 1000 → 手 → 足、合計 9000）。最後に判定1回: 歩行 9×300・追従（最終プロファイル、手先 RMS 0.040 m）・ONNX（どれも seed 42）。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
+| pico | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、合格ラインは `twist_pass_line.py`）、bootstrap ゲート。`Mjlab-Teleop-V12-HandPoseRelease-Microban` を1本（2048 env、critic の準備 1000 → 手 → 足、合計 9000）。最後に判定1回: 歩行 9×300・追従（最終プロファイル、手先 RMS 0.040 m）・ONNX（どれも seed 42）。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
 | getup | `Mjlab-Getup-Microban` を1本（4096 env、16500 回。IMU 遅延 2500、calm と探索の切り替え 4000、effort と押し 10000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位でクリップに張り付く割合 > 0.05 |
 | export | walk.onnx、getup.onnx、pico_teleop.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
 | install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents` とテスト一式を実行 | バリデータかテストが落ちる |
@@ -56,7 +56,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 
 | 方策 | いつ | 確認 | 早期停止 | 中止 |
 | --- | --- | --- | --- | --- |
-| 歩行 | 1000 回ごと | 保持プローブ W1-W5（`pipeline/walk_probe.py`、シード 101-105）と 9×300（シード 101） | N と N+1000 が続けて合格したら学習を止め、model_N+1000 を採る。ただし唯一の段（3000 回）の後 2000 回（`WALK_MIN_FINAL_UPDATES`、5000）より前では止めない | 500 回で平均エピソード長 < 100、2000 回で < 300、12000 回で W4 不合格・押しなしの角度 > 35°・速さ < 0.15、最大回数まで止まらない |
+| 歩行 | 1000 回ごと | 保持プローブ W1-W5（`pipeline/walk_probe.py`、シード 101-105）と 9×300（シード 101）。合格ラインは歩行の速度報酬そのもの（`twist_pass_line.py`：指令があれば平均の速度での報酬が止まっているとき（0.5）より高い、止まれなら動いた量が 0.1 m/s 前進の指令より小さい）、関節の限界の超過は 0.25 rad まで | N と N+1000 が続けて合格したら学習を止め、model_N+1000 を採る。ただし唯一の段（3000 回）の後 2000 回（`WALK_MIN_FINAL_UPDATES`、5000）より前では止めない | 500 回で平均エピソード長 < 100、2000 回で < 300、12000 回で W4（転倒）不合格、最大回数まで止まらない |
 | PICO | 足を絞った後、1000 回ごと | 判定と同じ 3 つの評価をシード 101 で | 同じ。ただし最後の段の半分（`PICO_MIN_FINAL_UPDATES`）より前では止めない | 段の切り替えが表の時刻から 1 回以上ずれた |
 | 起き上がり | 3500 と 9500（記録だけ）、effort_push の後 1000 回ごと | 判定と同じ 4 つの評価を別のシードで | 同じ（`GETUP_MIN_FINAL_UPDATES` より前では止めない） | standing_bonus が 2499 回で < 3.0、4500・10500 回で < 3.5、切り替え直後の 500 回を除き 200 回続けて < 3.0 |
 

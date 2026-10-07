@@ -171,7 +171,7 @@ class ConfigTest(unittest.TestCase):
         real, dry = load_config(dry=False), load_config(dry=True)
         self.assertEqual(real["walk"]["envs"], 4096)
         self.assertEqual(dry["walk"]["envs"], 64)
-        self.assertEqual(dry["walk"]["probe_thresholds"], real["walk"]["probe_thresholds"])
+        self.assertEqual(dry["walk"]["check"]["w4_falls"], real["walk"]["check"]["w4_falls"])
         self.assertNotIn("dry", real)
         self.assertLess(dry["schedule_scale"], 1.0)
 
@@ -193,20 +193,51 @@ class JudgmentTest(unittest.TestCase):
                 self.assertEqual(len(steps.getup_gate_failures({**good, key: value}, GATE)), 1)
 
     def test_walker_probe_verdict(self) -> None:
-        walk = load_config(dry=False)["walk"]
-        thresholds = walk["probe_thresholds"]
-        receipt = {
-            "summary": {"completed_scenario_count": 9, "fall_scenario_count": 0, "nonfinite_scenario_count": 0,
-                        "directionally_correct_scenario_count": 8, "raw_action_recurrence_all_steps": True,
-                        "maximum_actual_soft_limit_violation_rad": 0.01},
-            "results": [{"scenario": name, "directional_response": {"signed_response": value + 0.01}}
-                        for name, value in thresholds.items()] + [{"scenario": "neutral"}],
+        # Each moving scenario passes when the walking reward of its mean
+        # twist beats standing still; the joints may overshoot 0.25 rad.
+        commands = {
+            "forward_0p1": (0.1, 0.0, 0.0), "forward_0p2": (0.2, 0.0, 0.0),
+            "backward_0p1": (-0.1, 0.0, 0.0), "backward_0p2": (-0.2, 0.0, 0.0),
+            "lateral_left_0p1": (0.0, 0.1, 0.0), "lateral_right_0p1": (0.0, -0.1, 0.0),
+            "yaw_left_0p5": (0.0, 0.0, 0.5), "yaw_right_0p5": (0.0, 0.0, -0.5),
         }
-        verdict = steps.probe_verdict(receipt, walk)
+        axes = ("vx_m_s", "vy_m_s", "yaw_rad_s")
+
+        def result(name, twist, measured):
+            index = next((i for i, v in enumerate(twist) if v != 0.0), None)
+            return {"scenario": name, "command": dict(zip(axes, twist, strict=True)),
+                    "measured_velocity_body": {a: {"mean": m} for a, m in zip(axes, measured, strict=True)},
+                    "directional_response": None if index is None else {
+                        "signed_response": measured[index] * (1 if twist[index] > 0 else -1)}}
+
+        def receipt(measured, overshoot=0.2):
+            return {
+                "summary": {"completed_scenario_count": 9, "fall_scenario_count": 0, "nonfinite_scenario_count": 0,
+                            "directionally_correct_scenario_count": 8, "raw_action_recurrence_all_steps": True,
+                            "maximum_actual_soft_limit_violation_rad": overshoot},
+                "results": [result("neutral", (0.0, 0.0, 0.0), (0.03, 0.0, 0.0))]
+                + [result(name, twist, measured(twist)) for name, twist in commands.items()],
+            }
+
+        # A tenth of every command, exactly along it: reward 0.55.
+        verdict = steps.probe_verdict(receipt(lambda c: [0.1 * x for x in c]))
         self.assertTrue(verdict["ok"])
-        self.assertAlmostEqual(verdict["worst_margin"], 0.01)
-        receipt["results"][0]["directional_response"]["signed_response"] = 0.0
-        self.assertFalse(steps.probe_verdict(receipt, walk)["ok"])
+        self.assertAlmostEqual(verdict["worst_margin"], 0.05, places=6)
+        # Twice the command still beats standing.
+        self.assertTrue(steps.probe_verdict(receipt(lambda c: [2.0 * x for x in c]))["ok"])
+        # The first release walker's answer to 0.1 m/s forward (-0.0396 m/s).
+        bad = receipt(lambda c: [0.5 * x for x in c])
+        bad["results"][1]["measured_velocity_body"]["vx_m_s"]["mean"] = -0.0396
+        verdict = steps.probe_verdict(bad)
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(verdict["below"], ["forward_0p1"])
+        # Along the command but drifting off it more than it moves: fails.
+        drift = receipt(lambda c: [0.5 * x for x in c])
+        drift["results"][5]["measured_velocity_body"]["yaw_rad_s"]["mean"] = 0.8
+        self.assertEqual(steps.probe_verdict(drift)["below"], ["lateral_left_0p1"])
+        # The joint overshoot allowance is 0.25 rad.
+        self.assertTrue(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.25))["ok"])
+        self.assertFalse(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.2501))["ok"])
 
     def test_getup_summary(self) -> None:
         stand = {"fallen_standing_fraction": 0.9, "standing_joint_abs_vel_rad_s": 0.1,
