@@ -35,7 +35,7 @@ from mjlab.utils.lab_api.math import quat_apply_inverse, yaw_quat
 
 from mjlab_microban.robot.microban_constants import HOME_FRAME, HOME_TRUNK_PITCH_RAD
 from mjlab_microban.tasks.mdp import _head_height
-from mjlab_microban.tasks.microban_getup_env_cfg import HEAD_STANDING_HEIGHT
+from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD, HEAD_STANDING_HEIGHT
 
 DT = 0.02
 THR = 0.9 * HEAD_STANDING_HEIGHT
@@ -81,7 +81,7 @@ def stand(args) -> dict:
     hands = env.scene["hands_ground_contact"]
     feet = env.scene["feet_ground_contact"]
     action_term = env.action_manager.get_term("joint_pos")
-    h, hand_c, feet_c, tilt, dev, raw_abs, on_clip, jvel = (torch.zeros(steps, n) for _ in range(8))
+    h, hand_c, feet_c, tilt, dev, raw_abs, on_clip, past_1p57, jvel = (torch.zeros(steps, n) for _ in range(9))
     push_step = min(400, steps // 2)
     pre_push_standing = None
     obs = wrapped.get_observations()
@@ -103,8 +103,13 @@ def stand(args) -> dict:
         q = robot.data.joint_pos[:, ids]
         dev[t] = torch.sqrt(torch.mean((q - home) ** 2, dim=-1)).rad2deg().cpu()
         raw_abs[t] = actions.abs().mean(dim=-1).cpu()
-        # |target| >= 1.57 rad (the old clip): the calmness metric of the 2026-10 history.
-        on_clip[t] = (action_term._processed_actions.abs() >= 1.5699).float().mean(dim=-1).cpu()
+        target = action_term._processed_actions.abs()
+        # On the clip: the target saturated at the servo range (+-pi), the
+        # bound the reward's clip barrier charges beyond and the robot clips at.
+        on_clip[t] = (target >= GETUP_ACTION_CLIP_RAD - 1.0e-4).float().mean(dim=-1).cpu()
+        # |target| >= 1.57 rad (the old clip, before 2026-10-03): recorded to
+        # compare with the 2026-10 history; the reward allows it (torque authority).
+        past_1p57[t] = (target >= 1.5699).float().mean(dim=-1).cpu()
         jvel[t] = robot.data.joint_vel[:, ids].abs().mean(dim=-1).cpu()
     env.close()
 
@@ -132,7 +137,8 @@ def stand(args) -> dict:
         "final_hands_on_ground": float(hand_c[-win:].mean()),
         "standing_rms_dev_from_home_deg": masked_mean(dev),
         "standing_joint_abs_vel_rad_s": masked_mean(jvel),
-        "standing_targets_beyond_1p57": masked_mean(on_clip),
+        "standing_targets_on_clip": masked_mean(on_clip),
+        "standing_targets_beyond_1p57": masked_mean(past_1p57),
         "standing_raw_action_abs": masked_mean(raw_abs),
     }
     if pre_push_standing is not None:
@@ -146,8 +152,9 @@ def stand(args) -> dict:
     print(f"  STANDING at end: all {result['all_standing_end']}/{n}, fallen-start "
           f"{result['fallen_standing_end']}/{result['fallen_starts']}")
     print(f"  final: head {result['final_head_height_m']:.3f} m, tilt {result['final_tilt_deg']:.1f} deg; "
-          f"while standing: |vel| {result['standing_joint_abs_vel_rad_s']:.2f} rad/s, |target|>1.57 "
-          f"{result['standing_targets_beyond_1p57']:.2f}, |raw| {result['standing_raw_action_abs']:.1f}")
+          f"while standing: |vel| {result['standing_joint_abs_vel_rad_s']:.2f} rad/s, on the +-pi clip "
+          f"{result['standing_targets_on_clip']:.2f}, |target|>1.57 {result['standing_targets_beyond_1p57']:.2f}, "
+          f"|raw| {result['standing_raw_action_abs']:.1f}")
     if "push_fell_within_3s" in result:
         print(f"  PUSH {args.push}: standing before {result['push_standing_before']}, fell within 3 s "
               f"{result['push_fell_within_3s']}, standing at end {result['push_standing_end']}")

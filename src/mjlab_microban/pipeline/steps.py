@@ -1025,6 +1025,8 @@ def getup_summary(results: dict[str, dict[str, Any]]) -> dict[str, float]:
         "min_fallen_standing_fraction": min(r["fallen_standing_fraction"] for r in stand),
         "push_fall_fraction": push.get("push_fell_within_3s", 0) / max(1, push.get("push_standing_before", 0)),
         "standing_joint_abs_vel_rad_s": max(r["standing_joint_abs_vel_rad_s"] for r in stand),
+        "standing_targets_on_clip": max(r["standing_targets_on_clip"] for r in stand),
+        # recorded, not judged: |target| >= 1.57 (the clip before 2026-10-03)
         "standing_targets_beyond_1p57": max(r["standing_targets_beyond_1p57"] for r in stand),
         "posture_standing_fraction": results["posture_s11"]["standing_fraction"],
         "final_tilt_deg": max(r["final_tilt_deg"] for r in stand),
@@ -1044,9 +1046,9 @@ def getup_gate_failures(summary: dict[str, float], gate: dict[str, float]) -> li
     if summary["posture_standing_fraction"] < gate["min_posture_standing_fraction"]:
         failures.append(f"posture standing {summary['posture_standing_fraction']:.2f} < "
                         f"{gate['min_posture_standing_fraction']}")
-    if summary["standing_targets_beyond_1p57"] > gate["max_standing_targets_beyond_1p57"]:
-        failures.append(f"standing targets on the clip {summary['standing_targets_beyond_1p57']:.2f} > "
-                        f"{gate['max_standing_targets_beyond_1p57']}")
+    if summary["standing_targets_on_clip"] > gate["max_standing_targets_on_clip"]:
+        failures.append(f"standing targets on the +-pi clip {summary['standing_targets_on_clip']:.2f} > "
+                        f"{gate['max_standing_targets_on_clip']}")
     return failures
 
 

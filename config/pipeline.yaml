@@ -69,7 +69,12 @@ getup:
     max_push_fall_fraction: 0.10
     max_standing_joint_abs_vel_rad_s: 0.30
     min_posture_standing_fraction: 0.80
-    max_standing_targets_beyond_1p57: 0.05
+    # Standing targets saturated at the clip, the servo range +-pi (the
+    # reward's clip barrier charges beyond it; targets between 1.57 and pi
+    # are the torque authority the get-up needs and are allowed).  It was
+    # |target| >= 1.57, the clip before 2026-10-03: that line failed what
+    # the reward allows (user rule 2026-10-07: question the test first).
+    max_standing_targets_on_clip: 0.05
 
 # A job whose log is not written for this long is stopped (exit code 2).
 stall_minutes:

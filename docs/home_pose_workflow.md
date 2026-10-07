@@ -41,7 +41,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | home | `mjlab_microban.pipeline.home_check`（重心と足裏接地面）、`balance_home_pose.py --check`（警告のみ）、`home_pose_tool.py show`、学習側のテスト一式（CPU、約1分） | 重心が足裏の外、テストが1つでも落ちる |
 | walk | `Mjlab-Velocity-Microban` を最初から1本（4096 env、seed 42、最大 `WALK_MAX_UPDATES` = 8000）。続けて2回合格しなければ、5000 回以降に確かめたチェックポイントから一番良いもの（合格した項目の数、いちばん苦手な指令の報酬の余裕、後のもの、の順）を採る。選んだチェックポイントを `checkpoints/<prefix>_walk_<sha>/` に置く（PICO の来歴がそこを再ハッシュする） | 採ったチェックポイントが確認の項目に落ちる |
 | pico | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、合格ラインは `twist_pass_line.py`）、bootstrap ゲート。`Mjlab-Teleop-V12-HandPoseRelease-Microban` を1本（2048 env、critic の準備 1000 → 手 → 足、合計 9000）。最後に判定1回: 歩行 9×300・追従（最終プロファイル、手先 RMS 0.040 m）・ONNX（どれも seed 42）。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
-| getup | `Mjlab-Getup-Microban` を1本（4096 env、16500 回。IMU 遅延 2500、calm と探索の切り替え 4000、effort と押し 10000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位でクリップに張り付く割合 > 0.05 |
+| getup | `Mjlab-Getup-Microban` を1本（4096 env、16500 回。IMU 遅延 2500、calm と探索の切り替え 4000、effort と押し 10000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位で目標が切り詰め（±π）に張り付く割合 > 0.05 |
 | export | walk.onnx、getup.onnx、pico_teleop.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
 | install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents` とテスト一式を実行 | バリデータかテストが落ちる |
 | commit | ロボットのブランチにコミットして push、学習側は `config/home_pose.yaml` と `config/releases/<tag>/`（manifest.json と記録）をコミットして push | |

@@ -239,18 +239,20 @@ class ConfigTest(unittest.TestCase):
         self.assertLess(dry["schedule_scale"], 1.0)
 
     def test_judgment_thresholds(self) -> None:
-        self.assertEqual(GATE["max_standing_targets_beyond_1p57"], 0.05)
+        self.assertEqual(GATE["max_standing_targets_on_clip"], 0.05)
         self.assertEqual(GATE["min_fallen_standing_fraction"], 0.85)
 
 
 class JudgmentTest(unittest.TestCase):
     def test_getup_gate(self) -> None:
         good = {"min_fallen_standing_fraction": 0.9, "push_fall_fraction": 0.05,
-                "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_beyond_1p57": 0.03,
+                "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_on_clip": 0.03,
                 "posture_standing_fraction": 0.9, "final_tilt_deg": 4.0}
         self.assertEqual(steps.getup_gate_failures(good, GATE), [])
+        # Targets between 1.57 and the +-pi clip are allowed (torque authority).
+        self.assertEqual(steps.getup_gate_failures({**good, "standing_targets_beyond_1p57": 0.5}, GATE), [])
         for key, value in (("min_fallen_standing_fraction", 0.8), ("push_fall_fraction", 0.2),
-                           ("standing_joint_abs_vel_rad_s", 0.4), ("standing_targets_beyond_1p57", 0.06),
+                           ("standing_joint_abs_vel_rad_s", 0.4), ("standing_targets_on_clip", 0.06),
                            ("posture_standing_fraction", 0.7)):
             with self.subTest(key=key):
                 self.assertEqual(len(steps.getup_gate_failures({**good, key: value}, GATE)), 1)
@@ -304,7 +306,8 @@ class JudgmentTest(unittest.TestCase):
 
     def test_getup_summary(self) -> None:
         stand = {"fallen_standing_fraction": 0.9, "standing_joint_abs_vel_rad_s": 0.1,
-                 "standing_targets_beyond_1p57": 0.02, "final_tilt_deg": 3.0}
+                 "standing_targets_on_clip": 0.02, "standing_targets_beyond_1p57": 0.3,
+                 "final_tilt_deg": 3.0}
         summary = steps.getup_summary({
             "stand_s11": stand, "stand_s5": {**stand, "fallen_standing_fraction": 0.88},
             "push_s11": {**stand, "push_fell_within_3s": 3, "push_standing_before": 60},
