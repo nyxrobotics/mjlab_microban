@@ -37,7 +37,8 @@ class PassLineTest(unittest.TestCase):
             c = (torch.randn(3) * torch.tensor([0.3, 0.15, 0.8])).tolist()
             v = (torch.randn(3) * torch.tensor([0.2, 0.1, 0.6])).tolist()
             standing = twist_value(c, [0.0, 0.0, 0.0])
-            self.assertAlmostEqual(standing, STANDING_STILL_VALUE, places=12)
+            if math.dist(c, (0.0, 0.0, 0.0)) > 0.05:  # n >= eps: standing still is worth 1/2
+                self.assertAlmostEqual(standing, STANDING_STILL_VALUE, places=12)
             self.assertEqual(twist_passes(c, v), twist_value(c, v) > standing)
 
     def test_checked_commands(self) -> None:
@@ -58,7 +59,7 @@ class PassLineTest(unittest.TestCase):
         self.assertFalse(twist_passes((0.1, 0.0, 0.0), (0.05, 0.15, 0.0)))
 
     def test_standing_command_drift_line(self) -> None:
-        self.assertAlmostEqual(STANDING_DRIFT_VALUE_MIN, 0.5 * math.exp(-1.0 / 7.0), places=12)
+        self.assertAlmostEqual(STANDING_DRIFT_VALUE_MIN, math.exp(-1.0 / 7.0), places=12)
         self.assertTrue(twist_passes((0, 0, 0), (0.0, 0.0, 0.0)))
         self.assertTrue(twist_passes((0, 0, 0), (0.099, 0.0, 0.0)))
         self.assertFalse(twist_passes((0, 0, 0), (0.101, 0.0, 0.0)))

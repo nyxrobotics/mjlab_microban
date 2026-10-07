@@ -2,13 +2,14 @@
 
 The walking and PICO base rewards score the twist with one term, the
 twist-ratio reward (tasks/microban_twist_ratio_mdp.py): ``(1 + speed) / 2 *
-exp(-error)``, which is 1/2 for standing still on every command.  A check
-judges the motion the way that reward does, so it never fails a motion the
-reward prefers and never passes one the reward rejects:
+exp(-error)``, which is 1/2 for standing still on every moving command and 1
+for standing still on the standing command.  A check judges the motion the
+way that reward does, so it never fails a motion the reward prefers and
+never passes one the reward rejects:
 
 * a moving command passes when the reward of the measured mean twist is
-  higher than standing still (1/2): the robot moved along the command more
-  than it moved off it.  This one line holds for every command, feasible or
+  higher than standing still on that command (1/2 for every checked
+  command): the robot moved along the command more than it moved off it.  This one line holds for every command, feasible or
   not (the robot reaches about 0.2 m/s forward, 0.11 backward); a per-axis
   minimum or an angle limit would fail motions the reward prefers (its best
   answer to an infeasible diagonal command can be 24 deg off the command ray
@@ -16,7 +17,7 @@ reward prefers and never passes one the reward rejects:
 * a standing command passes when the measured drift costs less than walking
   at the smallest command the checks ask for (0.1 m/s forward): its reward
   is at least that of moving at that command on a standing command
-  (``0.5 * exp(-1/7)``), i.e. the normalized drift ``|v / (0.7, 0.3, 1.5)|``
+  (``exp(-1/7)``), i.e. the normalized drift ``|v / (0.7, 0.3, 1.5)|``
   is below 1/7 (0.1 m/s forward alone, 0.043 m/s lateral, 0.21 rad/s yaw).
   The reward prefers standing still; below this line the robot is not
   following any command the checks give.
@@ -47,8 +48,8 @@ from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     twist_ratio_reward,
 )
 
-TWIST_PASS_LINE_REVISION = "twist_ratio_reward_beats_standing_still_v1"
-# The reward of standing still on any command.
+TWIST_PASS_LINE_REVISION = "twist_ratio_reward_beats_standing_still_v2"
+# The reward of standing still on every checked moving command (n >= eps).
 STANDING_STILL_VALUE = 0.5
 # The smallest command any walking check asks for (v_x m/s, v_y m/s, w_z rad/s).
 SMALLEST_CHECKED_COMMAND = (0.1, 0.0, 0.0)
@@ -76,9 +77,9 @@ def is_standing(command: Sequence[float]) -> bool:
 
 
 def twist_line(command: Sequence[float]) -> float:
-    """The value a mean twist must exceed (moving) or reach (standing)."""
+    """The value a mean twist must exceed (moving: standing still on it) or reach (standing)."""
 
-    return STANDING_DRIFT_VALUE_MIN if is_standing(command) else STANDING_STILL_VALUE
+    return STANDING_DRIFT_VALUE_MIN if is_standing(command) else twist_value(command, (0.0, 0.0, 0.0))
 
 
 def twist_passes(command: Sequence[float], twist: Sequence[float]) -> bool:
@@ -87,7 +88,7 @@ def twist_passes(command: Sequence[float], twist: Sequence[float]) -> bool:
         return False
     if is_standing(command):
         return value >= STANDING_DRIFT_VALUE_MIN
-    return value > STANDING_STILL_VALUE
+    return value > twist_line(command)
 
 
 def twist_judgment(command: Sequence[float], twist: Sequence[float]) -> dict[str, Any]:

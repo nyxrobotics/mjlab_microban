@@ -19,14 +19,16 @@ and radians per second are comparable.  With ``c^ = c / scale``,
 
 ``a = clamp(p, 0, n)``
     progress along the command, capped at the command;
-``speed = a / max(n, eps)``
-    the along-command speed fraction, in [0, 1], for every command: one
-    formula, no separate small-command branch.  ``eps`` (0.01 in normalized
-    units, ``TWIST_RATIO_EPS``) only keeps the division finite: the direction
-    is ``u = c^ / max(n, eps)`` too, so for ``n >= eps`` it is the unit
-    command direction and below it shrinks continuously to 0.  A standing
-    command (``n = 0``) has ``u = 0``, ``p = 0`` and speed 0, and all its
-    motion is off-command motion, so standing still is its best;
+``speed = 1 - (n - a) / max(n, eps)``
+    the share of the command achieved, in [0, 1], for every command: one
+    formula, no separate small-command branch.  For ``n >= eps`` it is
+    ``a / n``, the along-command speed fraction.  ``eps`` (0.01 in normalized
+    units, ``TWIST_RATIO_EPS``) keeps the divisions finite: the direction is
+    ``u = c^ / max(n, eps)`` too, so for ``n >= eps`` it is the unit command
+    direction and below it shrinks continuously to 0.  A standing command
+    (``n = 0``) has ``u = 0``, ``p = a = 0`` and speed 1: nothing is left
+    undone, and all its motion is off-command motion, so standing still
+    scores the full 1 there, as exact tracking does on a moving command;
 ``error = sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)``
     the norm of everything that is not capped forward progress along the
     command -- the perpendicular part, the overshoot beyond the command, any
@@ -37,9 +39,15 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     monotonically with the angle to the command.
 
 The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
-[0, 1]: 1 at exact tracking of a moving command (``n >= eps``), 1/2 for
-standing still (the best on a standing command, where any motion costs),
-less for anything off the command, and never negative.  On every moving
+[0, 1]: 1 at exact tracking of every command (standing still on a standing
+command included), 1/2 for standing still on a moving command
+(``n >= eps``), less for anything off the command, and never negative.
+The speed was ``a / max(n, eps)`` until 2026-10-07: it gave standing still
+on a standing command speed 0 (1/2), hardly above drifting forward on it
+(0.46), and the release walker trained with it drifted +0.05..0.08 m/s
+forward and -0.07..-0.15 rad/s in yaw on the standing command, which
+cancelled the slow backward commands; the standing command's best was half
+of every other command's.  On every moving
 command any progress along it beats standing still, also at twice the
 command (the overshoot only costs error ``(k - 1) n``), and moving against
 it is worse than standing; the reward is continuous in the command, also
@@ -113,8 +121,8 @@ from mjlab.utils.lab_api.math import quat_apply_inverse, quat_mul
 TWIST_RATIO_AXIS_SCALE = (0.7, 0.3, 1.5)
 # Scale of the uncommanded motion (v_z m/s, w_x rad/s, w_y rad/s).
 TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
-# Floor of the command norm in the divisions (normalized units).  It only
-# keeps speed = a / max(n, eps) and u = c^ / max(n, eps) finite near a
+# Floor of the command norm in the divisions (normalized units).  It keeps
+# speed = 1 - (n - a) / max(n, eps) and u = c^ / max(n, eps) finite near a
 # standing command (see the module doc).
 TWIST_RATIO_EPS = 0.01
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
@@ -128,7 +136,7 @@ class TwistRatio(NamedTuple):
 
     command_norm: torch.Tensor  # (N,) n = |c^|
     along: torch.Tensor  # (N,) p = v^ . u with u = c^ / max(n, eps)
-    speed: torch.Tensor  # (N,) a / max(n, eps), in [0, 1]
+    speed: torch.Tensor  # (N,) 1 - (n - a) / max(n, eps), in [0, 1] (a / n for n >= eps)
     error: torch.Tensor  # (N,) sqrt(|v^ - a u|^2 + |w^|^2) + max(0, -p)
 
 
@@ -164,7 +172,7 @@ def twist_ratio(
     unit = c / floor.unsqueeze(-1)
     along = (v * unit).sum(dim=-1)
     progress = torch.minimum(torch.clamp(along, min=0.0), norm)
-    speed = progress / floor
+    speed = 1.0 - (norm - progress) / floor
     off = v - progress.unsqueeze(-1) * unit
     if uncommanded is not None:
         if uncommanded_scale is None:

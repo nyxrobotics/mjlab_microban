@@ -141,12 +141,13 @@ class DecompositionTest(unittest.TestCase):
             self.assertAlmostEqual(float(values[0]), 1.0, places=5)  # the best value
 
     def test_standing_command_is_best_answered_by_standing_still(self) -> None:
-        # n = 0: u = 0, p = 0, speed 0; all motion is off-command motion.
+        # n = 0: u = 0, p = a = 0, speed 1 (nothing left undone); all motion
+        # is off-command motion.
         standing = parts(
             [[0.0, 0.0, 0.0]] * 3,
             [[0.0, 0.0, 0.0], [0.007, -0.003, 0.03], [0.07, -0.03, 0.3]],
         )
-        self.assertTrue(torch.equal(standing.speed, torch.zeros(3)))
+        self.assertTrue(torch.equal(standing.speed, torch.ones(3)))
         self.assertTrue(torch.equal(standing.along, torch.zeros(3)))
         self.assertAlmostEqual(float(standing.error[0]), 0.0)
         moved = math.sqrt(0.01**2 + 0.01**2 + 0.02**2)
@@ -155,12 +156,24 @@ class DecompositionTest(unittest.TestCase):
         torch.manual_seed(1)
         moves = torch.randn(256, 3) * torch.tensor([0.2, 0.1, 0.5])
         values = twist_ratio_reward(torch.zeros(257, 3), torch.cat((torch.zeros(1, 3), moves)))
-        self.assertAlmostEqual(float(values[0]), 0.5, places=6)
+        self.assertAlmostEqual(float(values[0]), 1.0, places=6)  # full marks, as exact tracking
         self.assertTrue(bool((values[1:] < values[0]).all()))
 
+    def test_drifting_forward_on_the_standing_command_costs(self) -> None:
+        # The 2026-10-07 walker drifted about 0.06 m/s forward on the standing
+        # command; standing still must clearly beat that (it scored 0.5
+        # against 0.46 with the old speed a / max(n, eps)).
+        values = twist_ratio_reward(torch.zeros(3, 3), torch.tensor([[0.0, 0.0, 0.0], [0.06, 0.0, 0.0],
+                                                                    [0.06, 0.0, -0.1]]))
+        self.assertAlmostEqual(float(values[0]), 1.0, places=6)
+        self.assertAlmostEqual(float(values[1]), math.exp(-0.06 / 0.7), places=6)
+        self.assertLess(float(values[1]), 0.92)
+        self.assertLess(float(values[2]), float(values[1]))
+
     def test_one_speed_formula_for_every_command(self) -> None:
-        # speed = clamp(p, 0, n) / max(n, eps) with u = c^ / max(n, eps), also
-        # for the 0.1 m/s commands and below eps.
+        # speed = 1 - (n - clamp(p, 0, n)) / max(n, eps) with u = c^ / max(n, eps),
+        # also for the 0.1 m/s commands and below eps; for n >= eps it is the
+        # along-command fraction clamp(p, 0, n) / n.
         torch.manual_seed(2)
         for norm in (0.002, 0.009, TWIST_RATIO_EPS, 0.03, 0.1 / 0.7, 0.5, 1.2):
             direction = torch.randn(64, 3)
@@ -169,9 +182,12 @@ class DecompositionTest(unittest.TestCase):
             result = twist_ratio(c_hat * SCALE, v_hat * SCALE)
             floor = max(norm, TWIST_RATIO_EPS)
             along = (v_hat * c_hat).sum(dim=-1) / floor
-            speed = torch.clamp(along, min=0.0).clamp(max=norm) / floor
+            progress = torch.clamp(along, min=0.0).clamp(max=norm)
+            speed = 1.0 - (norm - progress) / floor
             self.assertTrue(torch.allclose(result.along, along, atol=1e-5), norm)
             self.assertTrue(torch.allclose(result.speed, speed, atol=1e-5), norm)
+            if norm >= TWIST_RATIO_EPS:  # the same value as the former a / max(n, eps)
+                self.assertTrue(torch.allclose(result.speed, progress / floor, atol=1e-5), norm)
 
     def test_no_nan_or_infinity_for_any_command_size(self) -> None:
         torch.manual_seed(3)
@@ -210,7 +226,7 @@ class DecompositionTest(unittest.TestCase):
     def test_any_progress_along_a_moving_command_beats_standing_still(self) -> None:
         # Every command from 0.1 eps up, at half, exactly and twice the command
         # and along it at the robot's slowest gait (0.02 normalized).  Below
-        # about 0.01 eps (0.07 mm/s forward) standing still is as good.
+        # eps standing still keeps 1 - n / eps of the speed (1 at n = 0).
         torch.manual_seed(5)
         for norm in (0.1 * TWIST_RATIO_EPS, 0.5 * TWIST_RATIO_EPS, 0.999 * TWIST_RATIO_EPS,
                      TWIST_RATIO_EPS, 0.05, 0.1 / 0.7, 0.2 / 0.7, 0.6, 1.5):
@@ -218,12 +234,13 @@ class DecompositionTest(unittest.TestCase):
             c_hat = direction / direction.norm(dim=-1, keepdim=True) * norm
             commands = c_hat * SCALE
             still = twist_ratio_reward(commands, torch.zeros_like(commands))
-            self.assertTrue(torch.allclose(still, torch.full((32,), 0.5)))
+            standing_speed = max(0.0, 1.0 - norm / TWIST_RATIO_EPS)
+            self.assertTrue(torch.allclose(still, torch.full((32,), 0.5 * (1.0 + standing_speed)), atol=1e-6))
             for k in (0.5, 1.0, 2.0):
                 moving = twist_ratio_reward(commands, commands * k)
                 # The overshoot costs (k - 1) n: twice the command beats
                 # standing for n < ln 2 (0.48 m/s forward, beyond the reach).
-                wins = (k - 1.0) * norm < math.log(2.0)
+                wins = (k - 1.0) * norm < math.log(2.0) - math.log(1.0 + standing_speed)
                 self.assertEqual(bool((moving > still).all()), wins, (norm, k))
             slow = twist_ratio_reward(commands, c_hat / c_hat.norm(dim=-1, keepdim=True) * 0.02 * SCALE)
             self.assertTrue(bool((slow > still).all()), norm)
@@ -233,9 +250,10 @@ class DecompositionTest(unittest.TestCase):
         for norm in (0.5 * TWIST_RATIO_EPS, TWIST_RATIO_EPS, 0.1 / 0.7, 0.8):
             direction = torch.randn(32, 3)
             commands = direction / direction.norm(dim=-1, keepdim=True) * norm * SCALE
+            still = twist_ratio_reward(commands, torch.zeros_like(commands))
             for k in (0.5, 1.0, 2.0):
                 values = twist_ratio_reward(commands, -k * commands)
-                self.assertTrue(bool((values < 0.5).all()), (norm, k))
+                self.assertTrue(bool((values < still).all()), (norm, k))
 
     def test_moving_commands_are_best_tracked_exactly(self) -> None:
         # 0.1 and 0.2 m/s forward and backward, 0.1 m/s lateral, 0.5 rad/s yaw:
@@ -329,7 +347,7 @@ class DecompositionTest(unittest.TestCase):
 
     def test_reward_is_bounded_and_never_negative(self) -> None:
         # Falling can never pay: every value is in [0, 1].  Standing still
-        # is worth 1/2 on every command.
+        # is worth 1 on the standing command and 1/2 on every moving one.
         torch.manual_seed(0)
         commands = torch.randn(4096, 3) * torch.tensor([0.5, 0.25, 1.2])
         commands[:256] = 0.0
@@ -341,7 +359,7 @@ class DecompositionTest(unittest.TestCase):
         still = twist_ratio_reward(
             torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 0.6], list(G)]), torch.zeros(3, 3)
         )
-        for value, want in zip(still.tolist(), [0.5, 0.5, 0.5], strict=True):
+        for value, want in zip(still.tolist(), [1.0, 0.5, 0.5], strict=True):
             self.assertAlmostEqual(value, want, places=6)
         half = twist_ratio_reward(torch.tensor([list(G)]), torch.tensor([scaled(G, 0.3)]))
         self.assertAlmostEqual(float(half[0]), 0.65, places=5)
