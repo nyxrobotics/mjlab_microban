@@ -139,6 +139,12 @@ class StateTest(unittest.TestCase):
                              ("running", "a" * 64, "j2"))
             for key in ("checks", "adopted", "adopted_by", "error"):
                 self.assertNotIn(key, record)
+            # The trained run's entry gate stays.
+            record["walker_probe"] = {"ok": True}
+            again.fail("walk", "fails again")
+            again.judge_inputs = "j3"
+            again.begin("walk", "a" * 64)
+            self.assertEqual(again.state.step("walk")["walker_probe"], {"ok": True})
 
     def test_a_training_started_by_hand_is_found_and_watched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

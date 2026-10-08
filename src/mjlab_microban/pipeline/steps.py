@@ -194,7 +194,9 @@ class Pipeline:
             # trained policy again, its training is kept.
             self.log(f"[{step}] failed earlier ({str(record.get('error'))[:200]}); the judgment changed: "
                      "re-judging without retraining")
-            for key in ("checks", "adopted", "adopted_by", "walker_probe", "error", "ended"):
+            # The walker's source probe (the PICO entry gate of the trained
+            # run) is part of the training; it is kept.
+            for key in ("checks", "adopted", "adopted_by", "error", "ended"):
                 record.pop(key, None)
         if record.get("inputs") != inputs:
             record.clear()
