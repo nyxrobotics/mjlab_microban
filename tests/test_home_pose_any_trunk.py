@@ -227,7 +227,7 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
                     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
                     "receiver_box_hands_active_hand_arm_pose_release_twist_ratio_one_run_"
-                    "warmup1000_total5500_v1"
+                    "warmup1000_total9000_v1"
                 ),
                 "v12_packager_revision": (
                     "microban_pico_packager_one_run_v1_forward_lean_home_servo_range"

@@ -88,17 +88,17 @@ from mjlab_microban.teleop_v12_safety import (
 )
 
 # One profile, the same at every HOME: a PICO run is judged once, on the
-# checkpoint it ends with, with every trained target type active and
-# tightened (mjlab_microban/schedules.py: any checkpoint after "foot_tighten",
-# which equals hand_tighten since PICO has no foot stage).  The name is the
-# published "_deployed_accuracy_v1" one the robot validator accepts; its
-# limits are the table below.  No foot tracking is judged (2026-10-08).
+# checkpoint it ends with, with every target type active (mjlab_microban/schedules.py:
+# any checkpoint after the foot targets were tightened).  The name is the
+# published "_deployed_accuracy_v1" one; its limits are the table below.
 FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
 TRACKING_PROFILES = (FINAL_PROFILE,)
 # Accuracy limits (user decision: hand RMS 0.040 m at every HOME; hand P95
-# 0.07 m).
+# 0.07 m, foot RMS 0.05 / P95 0.08 m).
 HAND_RMS_MAX_M = 0.040
 HAND_P95_MAX_M = 0.07
+FOOT_RMS_MAX_M = 0.05
+FOOT_P95_MAX_M = 0.08
 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN = 1.0e-4
 TARGET_COLUMN_ABLATION_METHOD = (
     "same_observation_zero_target_position_columns_preserve_hand_active_flags_"
@@ -123,6 +123,20 @@ def hand_tracking_p95_max_m(profile: str) -> float:
 
     required_tracking_scenario_names(profile)
     return HAND_P95_MAX_M
+
+
+def foot_tracking_rms_max_m(profile: str) -> float:
+    """Return the foot RMS limit (the same for every profile)."""
+
+    required_tracking_scenario_names(profile)
+    return FOOT_RMS_MAX_M
+
+
+def foot_tracking_p95_max_m(profile: str) -> float:
+    """Return the foot P95 limit (the same for every profile)."""
+
+    required_tracking_scenario_names(profile)
+    return FOOT_P95_MAX_M
 
 
 def target_column_ablation_observation_columns(
@@ -168,6 +182,9 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
             "low_forward",
             "max_hands_left",
             "max_hands_right",
+            "max_keypoints_left",
+            "max_keypoints_right",
+            "bounded_both_feet",
             "mixed_forward_left",
             "mixed_backward_right",
         ),
@@ -194,6 +211,8 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
         "twist_beats_standing",
         "hand_tracking_rms",
         "hand_tracking_p95",
+        "foot_tracking_rms",
+        "foot_tracking_p95",
     }
     return frozenset(names)
 
@@ -202,7 +221,7 @@ def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
     """Return target inputs that this curriculum stage must have learned to use."""
 
     required_tracking_scenario_names(profile)
-    return frozenset(("hand",))
+    return frozenset(("hand", "foot"))
 
 
 def required_tracking_profile(completed_updates: int) -> str:
@@ -219,10 +238,6 @@ def required_tracking_profile(completed_updates: int) -> str:
     return FINAL_PROFILE
 
 
-# No foot tracking is judged (user decision, 2026-10-08: PICO is completed
-# without foot tracking first; mjlab_microban/schedules.py): the single-foot,
-# both-feet and keypoint scenarios are not judged and the mixed scenarios
-# keep their foot targets neutral (zero).
 # The judged mixed scenarios walk at half the command envelope (user decision,
 # 2026-10-08): walking at the maximum on every axis at once while both arms
 # reach far is rare on the robot, the frozen walker itself beats standing
@@ -234,12 +249,10 @@ MIXED_TRACKING_SCENARIOS = ("mixed_forward_left", "mixed_backward_right")
 
 def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
     by_name = {scenario.name: scenario for scenario in default_scenarios()}
-    zero = (0.0, 0.0, 0.0)
     for name in MIXED_TRACKING_SCENARIOS:
         by_name[name] = replace(
             by_name[name],
             twist=tuple(MIXED_TRACKING_TWIST_SCALE * value for value in by_name[name].twist),
-            foot_target=(zero, zero),
         )
     reachable = dict(microban_reachable_hand_evaluation_offsets())
     forward = reachable["F"]
@@ -789,6 +802,30 @@ def _acceptance(
             float(value["p95"]) <= hand_tracking_p95_max_m(profile)
             for value in active_hand
         )
+    if "foot_tracking_rms" in required:
+        fade = foot_tracking_velocity_fade_range()
+        # Foot error weighted as the reward weighs foot tracking: a scenario
+        # walking at or beyond the fade end (the mixed ones) has weight 0.
+        active_foot = [
+            (item["target_error"]["foot"], weight)
+            for item in results
+            if any(
+                abs(value) > 0.0
+                for xyz in item["command"]["foot_target"]
+                for value in xyz
+            )
+            and (weight := foot_tracking_weight(item["command"]["twist"], fade)) > 0.0
+        ]
+        # A commanded foot scenario that measured no sample (the robot fell
+        # before the target phase) fails the check instead of crashing.
+        checks["foot_tracking_rms"] = bool(active_foot) and all(
+            _measured_within(value, "rms", foot_tracking_rms_max_m(profile), weight)
+            for value, weight in active_foot
+        )
+        checks["foot_tracking_p95"] = bool(active_foot) and all(
+            _measured_within(value, "p95", foot_tracking_p95_max_m(profile), weight)
+            for value, weight in active_foot
+        )
     return checks, "pass" if all(checks.values()) else "fail"
 
 
@@ -799,6 +836,45 @@ def _measured_within(
 
     value = error.get(key)
     return value is not None and weight * float(value) <= limit
+
+
+def foot_tracking_velocity_fade_range() -> tuple[float, float]:
+    """The velocity fade of the PICO foot-tracking reward at the end of training.
+
+    Read from the training stage table (TELEOP_STAGES), the one place it is
+    set, so the judgment weighs foot error as the reward does.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+
+    value = None
+    for stage in TELEOP_STAGES:
+        for setting in stage.settings:
+            if (setting.manager, setting.term, setting.path) == (
+                "reward",
+                "foot_target_tracking",
+                "params.velocity_fade_range",
+            ):
+                value = setting.value
+    if value is None:
+        raise ValueError("TELEOP_STAGES sets no foot-tracking velocity fade")
+    return float(value[0]), float(value[1])
+
+
+def foot_tracking_weight(twist: Any, fade_range: tuple[float, float]) -> float:
+    """The weight the PICO reward gives foot tracking under a velocity command.
+
+    The same continuous fade as mdp.foot_target_tracking_error_exp: speed
+    ``|(v_x, v_y)| + |w_z|``, full weight at ``fade_range[0]`` and below,
+    zero at ``fade_range[1]`` and above, linear in between.  The policy is
+    trained not to hold a foot target while walking; the judgment counts the
+    foot error with this weight (a walking scenario's is 0: recorded, not
+    judged).
+    """
+
+    lo, hi = fade_range
+    speed = math.hypot(float(twist[0]), float(twist[1])) + abs(float(twist[2]))
+    return 1.0 - min(max((speed - lo) / (hi - lo), 0.0), 1.0)
 
 
 def _aggregate_action_envelopes(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -911,6 +987,9 @@ def run_evaluation(
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
             "hand_rms_m_max": hand_tracking_rms_max_m(profile),
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
+            "foot_rms_m_max": foot_tracking_rms_max_m(profile),
+            "foot_p95_m_max": foot_tracking_p95_max_m(profile),
+            "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
             "twist_pass_line": twist_pass_line_record(),
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN

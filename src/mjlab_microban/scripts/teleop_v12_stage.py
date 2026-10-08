@@ -33,6 +33,9 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
     TARGET_COLUMN_ABLATION_METHOD,
     _aggregate_action_envelopes,
+    foot_tracking_p95_max_m,
+    foot_tracking_rms_max_m,
+    foot_tracking_velocity_fade_range,
     hand_tracking_p95_max_m,
     hand_tracking_rms_max_m,
     required_tracking_check_names,
@@ -386,6 +389,9 @@ def _validate_tracking_report(
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
         "hand_rms_m_max": hand_tracking_rms_max_m(profile),
         "hand_p95_m_max": hand_tracking_p95_max_m(profile),
+        "foot_rms_m_max": foot_tracking_rms_max_m(profile),
+        "foot_p95_m_max": foot_tracking_p95_max_m(profile),
+        "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
         "twist_pass_line": twist_pass_line_record(),
         "target_column_ablation_action_delta_min": (
             TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
