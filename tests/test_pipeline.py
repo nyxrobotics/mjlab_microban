@@ -327,7 +327,7 @@ class JudgmentTest(unittest.TestCase):
         self.assertEqual(verdict["below"], ["forward_0p1"])
         # Along the command but drifting off it more than it moves: fails.
         drift = receipt(lambda c: [0.5 * x for x in c])
-        drift["results"][5]["measured_velocity_body"]["yaw_rad_s"]["mean"] = 0.8
+        drift["results"][5]["measured_velocity_body"]["yaw_rad_s"]["mean"] = 1.2
         self.assertEqual(steps.probe_verdict(drift)["below"], ["lateral_left_0p1"])
         # The joint overshoot allowance is 0.25 rad.
         self.assertTrue(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.25))["ok"])

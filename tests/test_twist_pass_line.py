@@ -53,13 +53,13 @@ class PassLineTest(unittest.TestCase):
             self.assertFalse(twist_passes(command, [-0.3 * x for x in command]), command)
         # The first release walker on 0.1 m/s forward: -0.0396 m/s.
         self.assertFalse(twist_passes((0.1, 0.0, 0.0), (-0.0396, 0.0, 0.0)))
-        # Half of 0.1 m/s forward: drifting 0.1 m/s sideways still beats
-        # standing (0.537), 0.15 m/s sideways does not (0.455).
-        self.assertTrue(twist_passes((0.1, 0.0, 0.0), (0.05, 0.1, 0.0)))
-        self.assertFalse(twist_passes((0.1, 0.0, 0.0), (0.05, 0.15, 0.0)))
+        # Half of 0.1 m/s forward: drifting 0.15 m/s sideways still beats
+        # standing (0.584, squared error), 0.2 m/s sideways does not (0.481).
+        self.assertTrue(twist_passes((0.1, 0.0, 0.0), (0.05, 0.15, 0.0)))
+        self.assertFalse(twist_passes((0.1, 0.0, 0.0), (0.05, 0.2, 0.0)))
 
     def test_standing_command_drift_line(self) -> None:
-        self.assertAlmostEqual(STANDING_DRIFT_VALUE_MIN, math.exp(-1.0 / 7.0), places=12)
+        self.assertAlmostEqual(STANDING_DRIFT_VALUE_MIN, math.exp(-((1.0 / 7.0) ** 2)), places=12)
         self.assertTrue(twist_passes((0, 0, 0), (0.0, 0.0, 0.0)))
         self.assertTrue(twist_passes((0, 0, 0), (0.099, 0.0, 0.0)))
         self.assertFalse(twist_passes((0, 0, 0), (0.101, 0.0, 0.0)))

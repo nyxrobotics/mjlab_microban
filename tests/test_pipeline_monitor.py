@@ -301,13 +301,15 @@ class WalkRulesTest(unittest.TestCase):
         self.assertTrue(good["passed"], good)
         self.assertLess(good["angle_deg"][0], 1.0)
         self.assertAlmostEqual(good["worst_value"][0], 0.75, places=6)
-        # Off the ray as the reward judges it: 40 % of the commanded lateral
-        # part (about 23 deg off) still beats standing still; none of it
-        # (40-45 deg off) is worse than standing.
+        # Off the ray as the reward judges it (squared error since
+        # 2026-10-08): 40 % of the commanded lateral part (about 23 deg off)
+        # and none of it (40-45 deg off, 0.56) still beat standing still; the
+        # lateral part the wrong way (-20 %) is worse than standing (0.45).
         off_ray = evaluate(self.rows(scale=(0.5, 0.2, 0.5)), rules)
         self.assertGreater(off_ray["angle_deg"][0], 20.0)
         self.assertTrue(off_ray["checks"]["W1"] and off_ray["checks"]["W2"], off_ray)
-        given_up = evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)
+        self.assertTrue(evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)["checks"]["W1"])
+        given_up = evaluate(self.rows(scale=(0.5, -0.2, 0.5)), rules)
         self.assertFalse(given_up["checks"]["W1"] or given_up["checks"]["W2"])
         # Against the command on the diagonals: worse than standing.
         backward = evaluate(self.rows(scale=(-0.5, -0.5, -0.5)), rules)

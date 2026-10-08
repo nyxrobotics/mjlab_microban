@@ -2,7 +2,7 @@
 
 The walking and PICO base rewards score the twist with one term, the
 twist-ratio reward (tasks/microban_twist_ratio_mdp.py): ``(1 + speed) / 2 *
-exp(-error)``, which is 1/2 for standing still on every moving command and 1
+exp(-error^2)`` (sigma 1), which is 1/2 for standing still on every moving command and 1
 for standing still on the standing command.  A check judges the motion the
 way that reward does, so it never fails a motion the reward prefers and
 never passes one the reward rejects:
@@ -17,7 +17,7 @@ never passes one the reward rejects:
 * a standing command passes when the measured drift costs less than walking
   at the smallest command the checks ask for (0.1 m/s forward): its reward
   is at least that of moving at that command on a standing command
-  (``exp(-1/7)``), i.e. the normalized drift ``|v / (0.7, 0.3, 1.5)|``
+  (``exp(-(1/7)^2)``), i.e. the normalized drift ``|v / (0.7, 0.3, 1.5)|``
   is below 1/7 (0.1 m/s forward alone, 0.043 m/s lateral, 0.21 rad/s yaw).
   The reward prefers standing still; below this line the robot is not
   following any command the checks give.
@@ -48,7 +48,7 @@ from mjlab_microban.tasks.microban_twist_ratio_mdp import (
     twist_ratio_reward,
 )
 
-TWIST_PASS_LINE_REVISION = "twist_ratio_reward_beats_standing_still_v2"
+TWIST_PASS_LINE_REVISION = "twist_ratio_reward_beats_standing_still_v3"
 # The reward of standing still on every checked moving command (n >= eps).
 STANDING_STILL_VALUE = 0.5
 # The smallest command any walking check asks for (v_x m/s, v_y m/s, w_z rad/s).

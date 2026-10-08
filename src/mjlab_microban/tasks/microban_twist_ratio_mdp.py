@@ -38,8 +38,8 @@ and radians per second are comparable.  With ``c^ = c / scale``,
     perpendicular motion costs k and opposite motion 2k; the error grows
     monotonically with the angle to the command.
 
-The reward is ``(1 + speed) / 2 * exp(-direction_penalty * error)``, in
-[0, 1]: 1 at exact tracking of every command (standing still on a standing
+The reward is ``(1 + speed) / 2 * exp(-direction_penalty * (error / sigma)^2)``
+with ``sigma = TWIST_RATIO_ERROR_SCALE`` (1.0, normalized units), in [0, 1]: 1 at exact tracking of every command (standing still on a standing
 command included), 1/2 for standing still on a moving command
 (``n >= eps``), less for anything off the command, and never negative.
 The speed was ``a / max(n, eps)`` until 2026-10-07: it gave standing still
@@ -96,11 +96,28 @@ from collecting speed reward on the way down (the tracking kernels this term
 replaces penalised vertical velocity and roll/pitch rates the same way);
 ``uncommanded_scale=None`` leaves it out.
 
-The reward term ``twist_ratio_velocity`` evaluates it on time-filtered
-command and motion (see its doc; on the instantaneous motion the per-step gait
-sway made walking cost more than standing still on small commands: the
-unfiltered walker stopped answering single-axis commands at update 4000).  It
-replaces the separate velocity tracking terms (exp kernels, L1 errors and the
+The error enters squared (2026-10-08, user: the former reward made the
+walker stand still on the standing command by update 4000 with the same 10 %
+standing commands).  The linear form ``exp(-error)`` was sensitive to the
+small sway of every stride, so it was evaluated on 0.5 s filtered motion;
+that filter let a stepping-in-place gait cost nothing and the walkers trained
+with it stepped in place on the standing command from the first updates
+(walk_c1ab6dcb, walk_91b4dbec: 3.5 touchdowns per second).  The former
+reward's exp kernels ``exp(-|v - c|^2 / sigma^2)`` (sigma 0.316 m/s linear,
+0.707 rad/s yaw) were tolerant of small sway and evaluated on the
+instantaneous motion, where stepping in place does cost.  The squared form
+does the same on the instantaneous command and motion (no filter): small
+errors cost little, large ones (a broken ratio, a fall) a lot.  Sigma: the
+former kernels' sigmas are 0.45 (forward), 1.05 (lateral) and 0.47 (yaw) in
+normalized units; this error is one norm that also holds the uncommanded
+vertical velocity and roll/pitch rates, and on the instantaneous motion of
+the forward-lean walker that stands still (lean_walk_cont2 model_29000, no
+pushes) walking at 0.1 m/s lateral beats standing still only for sigma >=
+0.8 (0.39 at 0.45, 0.57 at 0.8, 0.62 at 1.0), so sigma is 1.0, the lateral
+kernel's: on that walker the small commands score 0.62-0.82, stepping in
+place on the standing command (walk_91b4dbec model_4500) 0.81 against 1.0
+standing still.  The reward term ``twist_ratio_velocity`` evaluates it on
+the instantaneous command and motion.  It replaces the separate velocity tracking terms (exp kernels, L1 errors and the
 xy projection progress) of the walking and PICO base reward configurations.  The module depends only on
 torch and mjlab (no robot constants, no other task module): the caller passes
 the HOME trunk pitch and, if its command envelope differs, the axis scale.
@@ -126,11 +143,8 @@ TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 # standing command (see the module doc).
 TWIST_RATIO_EPS = 0.01
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
-TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
-# Command norm (normalized units) from which the reward is evaluated on the
-# filtered values only; below it the instantaneous values are blended in, all
-# of them at a standing command (twist_ratio_velocity).
-TWIST_RATIO_BLEND_NORM = 0.05
+# sigma of the squared error, normalized units (module doc).
+TWIST_RATIO_ERROR_SCALE = 1.0
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -199,7 +213,7 @@ def twist_ratio_reward(
     uncommanded: torch.Tensor | None = None,
     uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
 ) -> torch.Tensor:
-    """``(1 + speed) / 2 * exp(-direction_penalty * error)`` per env."""
+    """``(1 + speed) / 2 * exp(-direction_penalty * (error / sigma)^2)`` per env."""
 
     if not direction_penalty > 0.0:
         raise ValueError("direction_penalty must be positive")
@@ -210,7 +224,8 @@ def twist_ratio_reward(
 
 
 def _bounded(parts: TwistRatio, direction_penalty: float) -> torch.Tensor:
-    return 0.5 * (1.0 + parts.speed) * torch.exp(-direction_penalty * parts.error)
+    scaled = parts.error / TWIST_RATIO_ERROR_SCALE
+    return 0.5 * (1.0 + parts.speed) * torch.exp(-direction_penalty * scaled * scaled)
 
 
 def home_levelled_velocities(
@@ -254,41 +269,23 @@ def home_levelled_twist(
 
 
 class twist_ratio_velocity:
-    """Reward term: the bounded twist-ratio reward on time-filtered motion.
+    """Reward term: the bounded twist-ratio reward on the instantaneous motion.
 
-    The command and the measured motion are both low-pass filtered with the
-    same first-order filter (time constant ``filter_time_constant``, 0.5 s by
-    default; 0 uses the instantaneous values), and the reward of the module doc
-    is evaluated on the filtered values.  The reward is about the direction and
-    speed the robot walks at, not about the swaying within a stride: the
-    per-step lateral sway, vertical bob and roll/pitch rates of a normal gait
-    average out, while a sustained drift, a turn of the walking direction or a
-    fall do not.  Filtering the command the same way keeps a robot that follows
-    a new command at once on target while both settle.  Both filters start at
-    the current values on the first step of an episode.
-
-    The values the reward is evaluated on blend the filtered and the
-    instantaneous ones, ``w * filtered + (1 - w) * instantaneous`` with
-    ``w = min(1, n / TWIST_RATIO_BLEND_NORM)`` and ``n`` the norm of the
-    filtered command (normalized units, 0.05): from ``n = 0.05`` on (every
-    moving command the robot is given) it is the filtered reward above; on a
-    standing command (``n = 0``) it is the instantaneous one, so the sway of
-    stepping in place counts as motion and standing with the feet still is
-    the best (user decision, 2026-10-08: no separate stepping penalty, the
-    velocity reward itself makes standing still the natural best).  The
-    blend is continuous in ``n``, with no branch.
+    The command and the measured HOME-levelled motion of the current step,
+    no filter (module doc: the squared error tolerates the small sway of a
+    stride; on a standing command any motion, stepping in place included,
+    costs).  ``command``, ``twist`` and ``uncommanded`` keep the last values
+    evaluated (diagnostics).
     """
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
         num_envs, device = env.num_envs, env.device
-        self.step_dt = float(env.step_dt)
         self.command = torch.zeros(num_envs, 3, device=device)
         self.twist = torch.zeros(num_envs, 3, device=device)
         self.uncommanded = torch.zeros(num_envs, 3, device=device)
-        self.fresh = torch.ones(num_envs, dtype=torch.bool, device=device)
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
-        self.fresh[slice(None) if env_ids is None else env_ids] = True
+        return None
 
     def __call__(
         self,
@@ -298,38 +295,20 @@ class twist_ratio_velocity:
         axis_scale: Sequence[float] = TWIST_RATIO_AXIS_SCALE,
         direction_penalty: float = TWIST_RATIO_DIRECTION_PENALTY,
         uncommanded_scale: Sequence[float] | None = TWIST_RATIO_UNCOMMANDED_SCALE,
-        filter_time_constant: float = TWIST_RATIO_FILTER_TIME_CONSTANT_S,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
-        if not filter_time_constant >= 0.0:
-            raise ValueError("filter_time_constant must be non-negative")
+        if not direction_penalty > 0.0:
+            raise ValueError("direction_penalty must be positive")
         command = env.command_manager.get_command(command_name)[:, :3]
         linear, angular = home_levelled_velocities(env, trunk_pitch, asset_cfg)
-        twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
-        uncommanded = torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
-        gain = (
-            1.0
-            if filter_time_constant == 0.0
-            else 1.0 - math.exp(-self.step_dt / filter_time_constant)
-        )
-        fresh = self.fresh.unsqueeze(-1)
-        self.command = torch.where(fresh, command, self.command + gain * (command - self.command))
-        self.twist = torch.where(fresh, twist, self.twist + gain * (twist - self.twist))
-        self.uncommanded = torch.where(
-            fresh, uncommanded, self.uncommanded + gain * (uncommanded - self.uncommanded)
-        )
-        self.fresh[:] = False
-        scale = torch.as_tensor(tuple(float(v) for v in axis_scale), dtype=self.command.dtype,
-                                device=self.command.device)
-        norm = torch.linalg.vector_norm(self.command / scale, dim=-1, keepdim=True)
-        weight = torch.clamp(norm / TWIST_RATIO_BLEND_NORM, max=1.0)
+        self.command = command
+        self.twist = torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
+        self.uncommanded = torch.stack((linear[:, 2], angular[:, 0], angular[:, 1]), dim=-1)
         parts = twist_ratio(
-            weight * self.command + (1.0 - weight) * command,
-            weight * self.twist + (1.0 - weight) * twist,
+            self.command,
+            self.twist,
             axis_scale,
-            None
-            if uncommanded_scale is None
-            else weight * self.uncommanded + (1.0 - weight) * uncommanded,
+            None if uncommanded_scale is None else self.uncommanded,
             uncommanded_scale,
         )
         extras = getattr(env, "extras", None)

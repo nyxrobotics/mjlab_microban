@@ -97,7 +97,8 @@ TWIST_AXIS_SCALE = tuple(
 # The twist-ratio term is in [0, 1] (1/2 standing still on a moving command,
 # 1 at exact tracking): weight 8 spans 4..8, the range of the two exp terms it
 # replaces (exp/twist-ratio-validation AB_result.md, recommendation of
-# 2026-10-07 01:15: the bounded time-filtered form, direction penalty 1).
+# 2026-10-07 01:15: the bounded form, direction penalty 1; since 2026-10-08 the
+# squared error on the instantaneous motion, microban_twist_ratio_mdp.py).
 WALK_TWIST_RATIO_WEIGHT = 8.0
 WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
