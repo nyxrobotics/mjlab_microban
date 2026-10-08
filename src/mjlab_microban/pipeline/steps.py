@@ -483,7 +483,7 @@ class Pipeline:
         return failures
 
     def pico_judgment(self, checkpoint: Path) -> tuple[str, bool, list[str]]:
-        """The three PICO evaluators (seed 42) and, when all pass, the gate file."""
+        """The three PICO evaluators (seed 42; the PICO judgment also 43) and, when all pass, the gate file."""
 
         out_dir = self.state.dir / "pico_judgment"
         out_dir.mkdir(exist_ok=True)

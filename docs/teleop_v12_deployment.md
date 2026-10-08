@@ -44,25 +44,25 @@ It does not run or hash the robot's sources: the robot checks a release when
 it is installed (`tools/validate_policies.py src/agents` and its tests) and at
 every start (the self-test).
 
-## Tracking profile
+## PICO judgment
 
-One profile, `arm_overlay_foot_perturbation_v1`, the same at every HOME: all
-scenarios (low forward, low forward with both arms 70 deg forward, one arm
-reaching out while standing, both keypoint corners with the arms out, both
-feet, two mixed twists), the push perturbation, the target-column ablation of
-the arm and foot columns, and these limits:
+One profile, `pico_feet_push_still_arms_v1`, the same at every HOME
+(`scripts/evaluate_teleop_v12_tracking.py`).  Each scenario runs 64
+environments on seeds 42 and 43 with the HMD neck moving; the arms are driven
+from outside as on the robot (HOME, raised forward 70 deg, one arm reaching
+out, or moved as in training).
 
-| limit | value |
-| --- | --- |
-| foot RMS | 0.05 m |
-| foot P95 | 0.08 m |
+| check | scenarios | pass line |
+| --- | --- | --- |
+| feet (J1) | standing, no push: one foot up 20 / 40 mm and the four corners (+-24, +-24, 40) mm, left and right mirrored, two corners also with the arm on that side reaching out; both feet by the same (+8, +8, 16) / (-8, -8, 16) mm; reached through teleop's 0.12 m/s ramp, scored from 1 s after the change | one foot: height above the floor >= 0.7 x dz (median environment), support foot moves <= 10 mm; both feet (a crouch in the trunk frame): the trunk comes down >= 0.7 x dz; the one foot seen from the other within max(0.3 x their target difference, 8 mm) RMS |
+| pushes (J2) | standing and the 9x300 commands, a 0.4 m/s kick every second from eight directions | falls at most 5 points more often than the walker the adapter was built on |
+| standing still (J3) | standing with the HMD moving and the arms at HOME, raised, moving or one reaching out | <= 0.5 touchdowns per second and the standing drift of `twist_pass_line.py` |
+| arms (J4) | the 9x300 commands with the arms raised or moving | \|v - c\| <= \|v_HOME - c\| + 0.1 \|c\| along the command (v_HOME: the arms at HOME) |
 
-The arms are driven from outside (the robot's `pico_arms`), so hand accuracy
-is not judged here.
-
-plus no falls, finite values, actual soft-limit overshoot <= 0.25 rad, raw-action
-recurrence, forced HMD motion, observation coverage and the twist directional
-response.  The limits are the same at every HOME.
+plus no falls without pushes, finite values, actual soft-limit overshoot of
+the twelve leg joints <= 0.25 rad, raw-action recurrence, forced HMD motion
+and the arm-target observation.  There is no hand-tracking limit: the arms follow the robot's
+pico_arms, not the policy.
 
 Focused CPU-only tests:
 

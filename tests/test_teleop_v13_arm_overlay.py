@@ -18,8 +18,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import recipe_report_
 from mjlab_microban.scripts.export_teleop_v12_deployment import _deployment_recipe_revision
 from mjlab_microban.scripts.teleop_v12_scenarios import (
     ARMS_FORWARD_70,
-    ARMS_HALF_LEFT,
-    ARMS_HALF_RIGHT,
     ARMS_REACH_LEFT,
     ARMS_REACH_RIGHT,
 )
@@ -146,7 +144,7 @@ class ArmTargetTest(unittest.TestCase):
         home = torch.tensor([HOME.joint_pos_rad[n] for n in policy_contract.PICO_ARM_JOINT_NAMES])
         lower = torch.tensor(policy_contract.PICO_ARM_LOWER_RAD)
         upper = torch.tensor(policy_contract.PICO_ARM_UPPER_RAD)
-        for pose in (ARMS_FORWARD_70, ARMS_REACH_LEFT, ARMS_REACH_RIGHT, ARMS_HALF_LEFT, ARMS_HALF_RIGHT):
+        for pose in (ARMS_FORWARD_70, ARMS_REACH_LEFT, ARMS_REACH_RIGHT):
             absolute = home + torch.tensor(pose)
             self.assertTrue(bool(((absolute >= lower) & (absolute <= upper)).all()), pose)
             hands = microban_hand_positions_from_arm_joints(absolute.view(2, 3))
