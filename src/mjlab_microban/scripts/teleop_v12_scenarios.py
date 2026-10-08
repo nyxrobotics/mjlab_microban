@@ -222,15 +222,13 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
             (zero, (-foot_max[0], foot_max[1], foot_max[2])),
             ARMS_REACH_RIGHT,
         ),
-        # Simultaneous foot targets use the narrower stationary distribution
-        # trained by v2, including the live 0.8 safety margin.
+        # Simultaneous foot targets use the narrower stationary distribution,
+        # one offset for both feet as trained and sent by the teleop,
+        # including the live 0.8 safety margin.
         EvaluationScenario(
             "bounded_both_feet",
             zero,
-            (
-                (both_feet_max[0], -both_feet_max[1], both_feet_max[2]),
-                (-both_feet_max[0], both_feet_max[1], both_feet_max[2]),
-            ),
+            (both_feet_max, both_feet_max),
         ),
         EvaluationScenario(
             "mixed_forward_left",

@@ -1127,11 +1127,13 @@ def no_stepping_penalty(
     """Penalize feet in the air when the commanded speed is below threshold.
 
     Discourages marching in place when the robot should stand still.
-    When ``foot_target_command_name`` is provided, rows with a foot target are
-    exempt: a single- or two-foot target is drawn, or a published target is
-    still non-zero (a target that moves at a bounded speed takes a moment to
-    come back down).  Lifting a commanded foot must not simultaneously incur
-    the stationary no-stepping cost.
+    When ``foot_target_command_name`` is provided, rows whose target moves one
+    foot relative to the other are exempt: a single-foot target is drawn, or
+    the two published feet differ (a target that moves at a bounded speed
+    takes a moment to come back down).  Lifting a commanded foot must not
+    simultaneously incur the stationary no-stepping cost.  A two-foot target
+    moves both feet by the same offset, which the trunk reaches by lowering
+    and shifting with both feet down, so it stays penalized.
 
     Returns the count of airborne feet per environment (use with a negative weight).
     """
@@ -1139,7 +1141,12 @@ def no_stepping_penalty(
     cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
     below_threshold = cmd_speed < command_threshold
     if foot_target_command_name is not None:
-        below_threshold &= ~foot_target_active(env, foot_target_command_name)
+        foot_target = env.command_manager.get_term(foot_target_command_name)
+        published = foot_target.command.reshape(env.num_envs, 2, 3)
+        one_foot = foot_target.is_single_support_env.bool() | (
+            published[:, 0] != published[:, 1]
+        ).any(dim=-1)
+        below_threshold &= ~one_foot
 
     sensor = env.scene.sensors[sensor_name]
     found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)

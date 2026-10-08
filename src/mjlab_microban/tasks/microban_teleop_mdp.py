@@ -283,12 +283,14 @@ class ResetFixedFootTargetCommand(FootTargetCommand):
         if len(both_ids) == 0:
             return
 
+        # One (dx, dy, dz) for both feet: the feet keep their spacing and the
+        # trunk lowers and shifts to reach it, with no step.
         xy_lower, xy_upper = self.cfg.both_feet_reach_xy_range
         z_lower, z_upper = self.cfg.both_feet_lift_height_range
-        offsets = torch.empty((len(both_ids), 2, 3), device=self.device)
-        offsets[..., :2].uniform_(xy_lower, xy_upper)
-        offsets[..., 2].uniform_(z_lower, z_upper)
-        self.foot_target_offset_b[both_ids] = offsets
+        offset = torch.empty((len(both_ids), 1, 3), device=self.device)
+        offset[..., :2].uniform_(xy_lower, xy_upper)
+        offset[..., 2].uniform_(z_lower, z_upper)
+        self.foot_target_offset_b[both_ids] = offset.expand(-1, 2, -1)
 
     def _update_metrics(self) -> None:
         self._capture_pending_reference()
