@@ -1,457 +1,216 @@
-"""Fixed teleop evaluation scenarios and rollout helpers of the v12 tracking gate.
+"""Scenarios and command helpers of the PICO judgment (evaluate_teleop_v12_tracking).
 
-``evaluate_teleop_v12_tracking`` is the only user.
+Four parts, each scenario run on ``ENVS_PER_SCENARIO`` environments for each
+of two seeds, with the HMD neck moving as in training:
+
+* feet (J1): standing, no push, arms at HOME; one foot (or both) lifted to a
+  target that teleop's 0.12 m/s ramp reaches (left and right mirrored);
+* pushes (J2): standing and the nine-scenario walking set, pushed every
+  second from eight directions, against the walker the adapter was built on;
+* arms (J3, J4): the same nine commands with the arms at HOME, raised forward
+  70 degrees, or moved as in training (pico_arm_target_motion).
 """
 
 from __future__ import annotations
 
 import math
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
-from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
-from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_TELEOP_OBSERVATION_SCHEMA,
+from mjlab_microban.legacy_velocity_diagnostics import (
+    default_scenarios as walking_scenarios,
 )
+from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
 from mjlab_microban.tasks.microban_teleop_mdp import (
+    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     HmdNeckTargetMotion,
     ResetFixedFootTargetCommand,
-    ResetFixedHandTargetCommand,
 )
 
-# These are the physical command limits applied by microban's central input
-# scaler and the final teleop-training curriculum.  Stationary yaw is wider
-# than moving yaw, matching the runtime contract.
-FORWARD_MAX_M_S = 0.7
-BACKWARD_MAX_M_S = 0.5
-LATERAL_MAX_M_S = 0.3
-MOVING_YAW_MAX_RAD_S = 1.5
-STATIONARY_YAW_MAX_RAD_S = 3.0
+Vec3 = tuple[float, float, float]
+ZERO: Vec3 = (0.0, 0.0, 0.0)
 
-# Live PICO packets are limited to 80% of the training target envelope.  The
-# receiver enforces the same values, so the evaluator exercises deployable
-# maxima rather than unreachable wire commands.
+ENVS_PER_SCENARIO = 64
+SCENARIOS_PER_RUN = 9
+SETTLE_STEPS = 50
+FOOT_STEPS = 300
+FOOT_TARGET_STEP = 50
+# Scored from one second after the foot target changed (teleop's 0.12 m/s ramp
+# reaches the largest target, 52 mm, in 0.43 s).
+FOOT_SCORE_FROM_STEP = 100
+PUSH_STEPS = 300
+ARM_STEPS = 500
+PUSH_EVERY_STEPS = 50
+PUSH_SPEED_M_S = 0.40
+PUSH_DIRECTIONS = 8
+# teleop moves each foot target along a straight line at 0.12 m/s, then the
+# wire sends a target whose z is within the floor band as exact zero.
+TELEOP_FOOT_TARGET_SPEED_M_S = 0.12
+FOOT_FLOOR_BAND_M = MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
+
+# Live PICO packets are limited to 80% of the training target envelope.
 TARGET_SAFETY_MARGIN = 0.8
 FOOT_TARGET_LIMIT_M = (0.03, 0.03, 0.05)
 SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M = (0.01, 0.01, 0.02)
-HAND_TARGET_LIMIT_M = (0.08, 0.08, 0.08)
-CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M = 0.0026
 
-# A moving-HMD stage report must demonstrate that the event was actually
-# dispatched and that both its target and the physical neck moved on every
-# axis.  These floors are deliberately small relative to the narrowest runtime
-# range (46 degrees for neck roll), but large enough that numerical noise or a
-# stale target cannot satisfy the gate.
+# The six externally driven arm joints, in the order of the arm_target
+# observation (left, then right; pitch, roll, elbow).
+ARM_JOINT_NAMES = (
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_elbow",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_elbow",
+)
+# Both arms raised forward 70 degrees with the elbows straight (absolute
+# angles; shoulder roll stays at HOME).
+ARMS_RAISED_FORWARD_RAD = {"shoulder_pitch": math.radians(-70.0), "elbow": 0.0}
+ARM_MODES = ("home", "raised", "moving")
+MOVING_ARM_EVENT = "pico_arm_target_motion"
+
+# The moving HMD must be seen on every axis of every environment.
 HMD_TARGET_PEAK_TO_PEAK_MIN_RAD = 0.10
 HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD = 0.05
 
 
 @dataclass(frozen=True)
-class EvaluationScenario:
-    """One fixed command held for a complete evaluation rollout."""
+class Scenario:
+    """One command held for a whole rollout of ENVS_PER_SCENARIO environments."""
 
     name: str
-    twist: tuple[float, float, float]
-    foot_target: tuple[tuple[float, float, float], tuple[float, float, float]]
-    hand_target: tuple[tuple[float, float, float], tuple[float, float, float]]
-    hand_active: tuple[bool, bool]
+    twist: Vec3 = ZERO
+    foot_goal: tuple[Vec3, Vec3] = (ZERO, ZERO)  # left, right (HOME-levelled trunk frame, m)
+    arms: str = "home"
+    push: bool = False
+
+    def __post_init__(self) -> None:
+        if self.arms not in ARM_MODES:
+            raise ValueError(f"Unknown arm mode {self.arms!r}")
+
+    @property
+    def lifted(self) -> tuple[bool, bool]:
+        return tuple(any(value != 0.0 for value in goal) for goal in self.foot_goal)  # type: ignore[return-value]
 
 
-def default_scenarios() -> tuple[EvaluationScenario, ...]:
-    """Return deterministic neutral, extrema and mixed deployment coverage."""
+def _mirror(goal: Vec3) -> Vec3:
+    return (goal[0], -goal[1], goal[2])
 
-    zero = (0.0, 0.0, 0.0)
-    foot_max = tuple(value * TARGET_SAFETY_MARGIN for value in FOOT_TARGET_LIMIT_M)
-    both_feet_max = tuple(
-        value * TARGET_SAFETY_MARGIN for value in SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M
-    )
-    hand_max = tuple(value * TARGET_SAFETY_MARGIN for value in HAND_TARGET_LIMIT_M)
-    foot_half = tuple(value * 0.5 for value in foot_max)
-    hand_half = tuple(value * 0.5 for value in hand_max)
 
-    return (
-        EvaluationScenario("neutral", zero, (zero, zero), (zero, zero), (False, False)),
-        EvaluationScenario(
-            "low_forward", (0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "mid_forward", (0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "low_backward", (-0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "mid_backward", (-0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "low_lateral_left",
-            (0.0, 0.1, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "mid_lateral_left",
-            (0.0, 0.2, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "low_lateral_right",
-            (0.0, -0.1, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "mid_lateral_right",
-            (0.0, -0.2, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "low_yaw_left", (0.0, 0.0, 0.5), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "mid_yaw_left", (0.0, 0.0, 1.0), (zero, zero), (zero, zero), (False, False)
-        ),
-        EvaluationScenario(
-            "low_yaw_right",
-            (0.0, 0.0, -0.5),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "mid_yaw_right",
-            (0.0, 0.0, -1.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        # Exact zero is the only inactive foot representation.  These two
-        # stationary cases exercise the first practical active value just above
-        # the inclusive 2.5 mm support-foot floor band.
-        EvaluationScenario(
-            "floor_band_edge_single",
-            zero,
-            ((0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M), zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "floor_band_edge_both",
-            zero,
-            (
-                (0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M),
-                (0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M),
-            ),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "bounded_combined",
-            (0.35, -0.15, 0.75),
-            ((foot_half[0], -foot_half[1], foot_half[2]), zero),
-            (
-                (hand_half[0], -hand_half[1], hand_half[2]),
-                (-hand_half[0], hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
-        ),
-        EvaluationScenario(
-            "max_forward",
-            (FORWARD_MAX_M_S, 0.0, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_backward",
-            (-BACKWARD_MAX_M_S, 0.0, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_lateral_left",
-            (0.0, LATERAL_MAX_M_S, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_lateral_right",
-            (0.0, -LATERAL_MAX_M_S, 0.0),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_moving_yaw_left",
-            (0.0, 0.0, MOVING_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_moving_yaw_right",
-            (0.0, 0.0, -MOVING_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_stationary_yaw_left",
-            (0.0, 0.0, STATIONARY_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "max_stationary_yaw_right",
-            (0.0, 0.0, -STATIONARY_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        # Keep locomotion-only mixed commands separate from keypoint scenarios,
-        # so a locomotion check is not coupled to the hand/foot objectives.
-        EvaluationScenario(
-            "mixed_twist_forward_left",
-            (FORWARD_MAX_M_S, LATERAL_MAX_M_S, MOVING_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "mixed_twist_backward_right",
-            (-BACKWARD_MAX_M_S, -LATERAL_MAX_M_S, -MOVING_YAW_MAX_RAD_S),
-            (zero, zero),
-            (zero, zero),
-            (False, False),
-        ),
-        # Likewise, hand-only corners let the broad/tight hand stages be gated
-        # before non-zero foot targets are introduced (PICO_SCHEDULE["foot"]).
-        EvaluationScenario(
-            "max_hands_left",
-            zero,
-            (zero, zero),
-            (
-                (hand_max[0], -hand_max[1], hand_max[2]),
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-            ),
-            (True, True),
-        ),
-        EvaluationScenario(
-            "max_hands_right",
-            zero,
-            (zero, zero),
-            (
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-                (hand_max[0], -hand_max[1], hand_max[2]),
-            ),
-            (True, True),
-        ),
-        EvaluationScenario(
-            "max_keypoints_left",
-            zero,
-            ((foot_max[0], -foot_max[1], foot_max[2]), zero),
-            (
-                (hand_max[0], -hand_max[1], hand_max[2]),
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-            ),
-            (True, True),
-        ),
-        EvaluationScenario(
-            "max_keypoints_right",
-            zero,
-            (zero, (-foot_max[0], foot_max[1], foot_max[2])),
-            (
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-                (hand_max[0], -hand_max[1], hand_max[2]),
-            ),
-            (True, True),
-        ),
-        # Simultaneous foot targets use the narrower stationary distribution
-        # trained by v2, including the live 0.8 safety margin.
-        EvaluationScenario(
-            "bounded_both_feet",
-            zero,
-            (
-                (both_feet_max[0], -both_feet_max[1], both_feet_max[2]),
-                (-both_feet_max[0], both_feet_max[1], both_feet_max[2]),
-            ),
-            (zero, zero),
-            (False, False),
-        ),
-        EvaluationScenario(
-            "mixed_forward_left",
-            (FORWARD_MAX_M_S, LATERAL_MAX_M_S, MOVING_YAW_MAX_RAD_S),
-            ((foot_half[0], foot_half[1], foot_half[2]), zero),
-            (
-                (hand_half[0], hand_half[1], hand_half[2]),
-                (-hand_half[0], -hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
-        ),
-        EvaluationScenario(
-            "mixed_backward_right",
-            (-BACKWARD_MAX_M_S, -LATERAL_MAX_M_S, -MOVING_YAW_MAX_RAD_S),
-            (zero, (-foot_half[0], -foot_half[1], foot_half[2])),
-            (
-                (-hand_half[0], -hand_half[1], hand_half[2]),
-                (hand_half[0], hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
-        ),
+def foot_scenarios() -> tuple[Scenario, ...]:
+    """J1: single-foot lifts and the corners of the sent box, mirrored; both feet."""
+
+    x, y, z = (value * TARGET_SAFETY_MARGIN for value in FOOT_TARGET_LIMIT_M)
+    bx, by, bz = (value * TARGET_SAFETY_MARGIN for value in SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M)
+    single = {
+        "up20": (0.0, 0.0, 0.02),
+        "up40": (0.0, 0.0, z),
+        # +y is outward for the left foot (its mirror is outward for the right).
+        "front_out": (x, y, z),
+        "front_in": (x, -y, z),
+        "back_out": (-x, y, z),
+        "back_in": (-x, -y, z),
+    }
+    scenarios = []
+    for name, goal in single.items():
+        scenarios.append(Scenario(f"left_{name}", foot_goal=(goal, ZERO)))
+        scenarios.append(Scenario(f"right_{name}", foot_goal=(ZERO, _mirror(goal))))
+    for name, goal in {"front_out": (bx, by, bz), "back_in": (-bx, -by, bz)}.items():
+        scenarios.append(Scenario(f"both_{name}", foot_goal=(goal, _mirror(goal))))
+    return tuple(scenarios)
+
+
+def mirrored_foot_pairs() -> tuple[tuple[str, str], ...]:
+    names = {scenario.name for scenario in foot_scenarios()}
+    return tuple(
+        (name, "right_" + name.removeprefix("left_"))
+        for name in sorted(names)
+        if name.startswith("left_")
     )
 
 
-@dataclass
-class ScalarStats:
-    count: int = 0
-    total: float = 0.0
-    total_squared: float = 0.0
-    minimum: float | None = None
-    maximum: float | None = None
-    samples: list[float] = field(default_factory=list, repr=False)
+def push_scenarios() -> tuple[Scenario, ...]:
+    """J2: standing and the eight walking commands, pushed, arms at HOME."""
 
-    def add(self, values: torch.Tensor) -> None:
-        flat = values.detach().to(dtype=torch.float64).flatten()
-        if flat.numel() == 0:
-            return
-        self.count += flat.numel()
-        self.total += flat.sum().item()
-        self.total_squared += torch.square(flat).sum().item()
-        self.samples.extend(flat.cpu().tolist())
-        value_min = flat.min().item()
-        value_max = flat.max().item()
-        self.minimum = (
-            value_min if self.minimum is None else min(self.minimum, value_min)
-        )
-        self.maximum = (
-            value_max if self.maximum is None else max(self.maximum, value_max)
-        )
-
-    def report(self, *, units: str) -> dict[str, float | int | str | None]:
-        mean = self.total / self.count if self.count else None
-        rms = math.sqrt(self.total_squared / self.count) if self.count else None
-        p95 = _percentile(self.samples, 0.95)
-        return {
-            "sample_count": self.count,
-            "mean": mean,
-            "rms": rms,
-            "p95": p95,
-            "min": self.minimum,
-            "max": self.maximum,
-            "units": units,
-        }
+    return tuple(
+        Scenario(item.name, twist=tuple(item.twist), push=True)  # type: ignore[arg-type]
+        for item in walking_scenarios()
+    )
 
 
-@dataclass
-class HmdMotionStats:
-    """Streaming target/actual motion evidence for the three HMD joints."""
+def arm_scenarios(arms: str) -> tuple[Scenario, ...]:
+    """J3/J4: standing and the eight walking commands with one arm mode."""
 
-    joint_names: tuple[str, ...]
-    target_minimum: torch.Tensor
-    target_maximum: torch.Tensor
-    actual_minimum: torch.Tensor
-    actual_maximum: torch.Tensor
-    previous_target: torch.Tensor
-    maximum_target_step: torch.Tensor
-    tracking_error: tuple[ScalarStats, ...]
-    sample_count: int = 1
-
-    @classmethod
-    def start(
-        cls,
-        *,
-        joint_names: tuple[str, ...],
-        target: torch.Tensor,
-        actual: torch.Tensor,
-    ) -> HmdMotionStats:
-        target = target.detach().clone()
-        actual = actual.detach().clone()
-        return cls(
-            joint_names=joint_names,
-            target_minimum=target.clone(),
-            target_maximum=target.clone(),
-            actual_minimum=actual.clone(),
-            actual_maximum=actual.clone(),
-            previous_target=target.clone(),
-            maximum_target_step=torch.zeros_like(target),
-            tracking_error=tuple(ScalarStats() for _ in joint_names),
-        )
-
-    def add(self, *, target: torch.Tensor, actual: torch.Tensor) -> None:
-        target = target.detach()
-        actual = actual.detach()
-        self.target_minimum = torch.minimum(self.target_minimum, target)
-        self.target_maximum = torch.maximum(self.target_maximum, target)
-        self.actual_minimum = torch.minimum(self.actual_minimum, actual)
-        self.actual_maximum = torch.maximum(self.actual_maximum, actual)
-        self.maximum_target_step = torch.maximum(
-            self.maximum_target_step, torch.abs(target - self.previous_target)
-        )
-        self.previous_target = target.clone()
-        for index, stats in enumerate(self.tracking_error):
-            stats.add(torch.abs(target[index] - actual[index]).reshape(1))
-        self.sample_count += 1
-
-    def report(self, *, step_dt: float) -> dict[str, Any]:
-        target_minimum = self.target_minimum.cpu().tolist()
-        target_maximum = self.target_maximum.cpu().tolist()
-        actual_minimum = self.actual_minimum.cpu().tolist()
-        actual_maximum = self.actual_maximum.cpu().tolist()
-        maximum_target_step = self.maximum_target_step.cpu().tolist()
-        per_axis: dict[str, Any] = {}
-        for index, name in enumerate(self.joint_names):
-            per_axis[name] = {
-                "target_min_rad": target_minimum[index],
-                "target_max_rad": target_maximum[index],
-                "target_peak_to_peak_rad": (
-                    target_maximum[index] - target_minimum[index]
-                ),
-                "actual_min_rad": actual_minimum[index],
-                "actual_max_rad": actual_maximum[index],
-                "actual_peak_to_peak_rad": (
-                    actual_maximum[index] - actual_minimum[index]
-                ),
-                "maximum_target_step_rad": maximum_target_step[index],
-                "maximum_target_slew_rad_s": maximum_target_step[index] / step_dt,
-                "absolute_tracking_error": self.tracking_error[index].report(
-                    units="rad"
-                ),
-            }
-        return {
-            "active_event_member": True,
-            "sample_count": self.sample_count,
-            "joint_names": list(self.joint_names),
-            "per_axis": per_axis,
-        }
+    return tuple(
+        Scenario(f"{item.name}/arms_{arms}", twist=tuple(item.twist), arms=arms)  # type: ignore[arg-type]
+        for item in walking_scenarios()
+    )
 
 
-def _percentile(values: list[float], quantile: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * quantile
-    lower_index = math.floor(position)
-    upper_index = math.ceil(position)
-    if lower_index == upper_index:
-        return ordered[lower_index]
-    weight = position - lower_index
-    return ordered[lower_index] * (1.0 - weight) + ordered[upper_index] * weight
+def scenario_index(count: int, num_envs: int, device: str) -> torch.Tensor:
+    """The scenario of each environment (-1: an idle one), ENVS_PER_SCENARIO each."""
+
+    if count * ENVS_PER_SCENARIO > num_envs:
+        raise ValueError(f"{count} scenarios need {count * ENVS_PER_SCENARIO} environments")
+    index = torch.full((num_envs,), -1, dtype=torch.long, device=device)
+    index[: count * ENVS_PER_SCENARIO] = torch.arange(count, device=device).repeat_interleave(
+        ENVS_PER_SCENARIO
+    )
+    return index
 
 
-def _copy_forced_moving_hmd_neck_event(training_cfg: Any) -> Any:
+def per_env(scenarios: tuple[Scenario, ...], index: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Twist, foot goal, arm mode and push flag of every environment."""
+
+    device = index.device
+    padded = (*scenarios, Scenario("idle"))
+    rows = index.clone()
+    rows[rows < 0] = len(scenarios)
+    twist = torch.tensor([s.twist for s in padded], device=device)[rows]
+    foot = torch.tensor([s.foot_goal for s in padded], device=device)[rows]
+    arms = torch.tensor([ARM_MODES.index(s.arms) for s in padded], device=device)[rows]
+    push = torch.tensor([s.push for s in padded], device=device)[rows]
+    return {"twist": twist, "foot_goal": foot, "arms": arms, "push": push}
+
+
+def push_velocity(index: torch.Tensor) -> torch.Tensor:
+    """World-frame (vx, vy) kick of each environment: eight directions per scenario."""
+
+    slot = torch.arange(index.numel(), device=index.device) % PUSH_DIRECTIONS
+    angle = slot.float() * (2.0 * math.pi / PUSH_DIRECTIONS)
+    return PUSH_SPEED_M_S * torch.stack((torch.cos(angle), torch.sin(angle)), dim=-1)
+
+
+class FootTargetRamp:
+    """The foot target as the robot receives it from teleop.
+
+    Each foot's target moves to its goal along a straight line at
+    TELEOP_FOOT_TARGET_SPEED_M_S; a target within the floor band is sent as
+    exact zero (no target).  Shape (N, 2, 3), left then right.
+    """
+
+    def __init__(self, goal: torch.Tensor, step_dt: float) -> None:
+        self.goal = goal
+        self.internal = torch.zeros_like(goal)
+        self.step_m = TELEOP_FOOT_TARGET_SPEED_M_S * step_dt
+
+    def advance(self, active: bool) -> None:
+        delta = (self.goal if active else torch.zeros_like(self.goal)) - self.internal
+        distance = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
+        scale = torch.clamp(self.step_m / distance.clamp(min=1.0e-12), max=1.0)
+        self.internal = self.internal + delta * scale
+
+    @property
+    def observed(self) -> torch.Tensor:
+        floor = self.internal[..., 2:3] <= FOOT_FLOOR_BAND_M
+        return torch.where(floor, torch.zeros_like(self.internal), self.internal)
+
+
+def copy_forced_moving_hmd_neck_event(training_cfg: Any) -> Any:
     """Copy only the training HMD step event and force every waypoint non-neutral."""
 
     source = training_cfg.events.get("hmd_neck_target_motion")
@@ -464,117 +223,107 @@ def _copy_forced_moving_hmd_neck_event(training_cfg: Any) -> Any:
     return copied
 
 
-def _configure_nominal_evaluation(
-    cfg: Any, *, steps: int, moving_hmd_neck_event: Any | None = None
-) -> None:
-    """Keep nominal reset events and optionally one forced moving-HMD step event."""
+def final_stage_value(manager: str, term: str, path: str) -> Any:
+    """The value the PICO stage table (TELEOP_STAGES) last sets for one setting."""
 
-    cfg.scene.num_envs = 1
+    from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+
+    value = None
+    for stage in TELEOP_STAGES:
+        for setting in stage.settings:
+            if (setting.manager, setting.term, setting.path) == (manager, term, path):
+                value = setting.value
+    if value is None:
+        raise ValueError(f"TELEOP_STAGES sets no {manager}/{term}/{path}")
+    return value
+
+
+def copy_moving_arm_event(training_cfg: Any) -> Any:
+    """Copy the training arm-target step event at its final HOME probability."""
+
+    source = training_cfg.events.get(MOVING_ARM_EVENT)
+    if source is None or source.mode != "step":
+        raise ValueError(f"Teleop training config is missing the {MOVING_ARM_EVENT} step event")
+    copied = deepcopy(source)
+    copied.params["home_probability"] = float(
+        final_stage_value("event", MOVING_ARM_EVENT, "params.home_probability")
+    )
+    return copied
+
+
+def configure_nominal_evaluation(cfg: Any, *, steps: int, step_events: dict[str, Any]) -> None:
+    """Reset events at the nominal pose, the given step events, no curriculum or noise.
+
+    Only ``time_out`` terminates (the judgment detects falls itself, so a
+    fallen environment needs no reset and the batch runs to the end).
+    """
+
     cfg.auto_reset = False
-    # Make the requested evaluation horizon the time limit.  A healthy scenario
-    # therefore reaches ``time_out`` exactly on its final requested step.
-    cfg.episode_length_s = steps * cfg.decimation * cfg.sim.mujoco.timestep
-
-    reset_events = {
-        name: term for name, term in cfg.events.items() if term.mode == "reset"
-    }
-    if moving_hmd_neck_event is not None:
-        if (
-            moving_hmd_neck_event.mode != "step"
-            or moving_hmd_neck_event.func is not HmdNeckTargetMotion
-            or moving_hmd_neck_event.params.get("neutral_probability") != 0.0
-        ):
-            raise ValueError(
-                "Moving-HMD evaluation requires a non-neutral "
-                "HmdNeckTargetMotion step event"
-            )
-        reset_events["hmd_neck_target_motion"] = moving_hmd_neck_event
-    cfg.events = reset_events
+    cfg.episode_length_s = (steps + 2) * cfg.decimation * cfg.sim.mujoco.timestep
+    events = {name: term for name, term in cfg.events.items() if term.mode == "reset"}
+    events.update(step_events)
+    cfg.events = events
     reset_base = cfg.events.get("reset_base")
     if reset_base is None:
         raise ValueError("Teleop task is missing its reset_base event")
     reset_base.params["pose_range"] = {
-        "x": (0.0, 0.0),
-        "y": (0.0, 0.0),
-        "z": (0.0, 0.0),
-        "roll": (0.0, 0.0),
-        "pitch": (0.0, 0.0),
-        "yaw": (0.0, 0.0),
+        axis: (0.0, 0.0) for axis in ("x", "y", "z", "roll", "pitch", "yaw")
     }
     reset_base.params["velocity_range"] = {}
-
-    # Play mode already disables these, but assign them explicitly so copying
-    # the one training event can never bring training corruption/curriculum with it.
+    cfg.terminations = {
+        name: term for name, term in cfg.terminations.items() if name == "time_out"
+    }
     cfg.observations["actor"].enable_corruption = False
     cfg.curriculum = {}
-    if moving_hmd_neck_event is None and "hmd_neck_target_motion" in cfg.events:
-        raise AssertionError("Nominal evaluation must hold the HMD neck fixed")
 
 
-def _set_scenario(env: ManagerBasedRlEnv, scenario: EvaluationScenario) -> None:
-    twist = env.command_manager.get_term("twist")
-    foot = env.command_manager.get_term("foot_target")
-    hand = env.command_manager.get_term("hand_target")
-    if not isinstance(twist, UniformVelocityCommandWithRotation):
-        raise TypeError(f"Unexpected twist command type: {type(twist).__name__}")
-    if not isinstance(foot, ResetFixedFootTargetCommand):
-        raise TypeError(f"Unexpected foot command type: {type(foot).__name__}")
-    if not isinstance(hand, ResetFixedHandTargetCommand):
-        raise TypeError(f"Unexpected hand command type: {type(hand).__name__}")
-    if foot._reference_pending.any() or hand._reference_pending.any():
-        raise RuntimeError("Keypoint reset reference was not captured before injection")
+def write_commands(env: ManagerBasedRlEnv, twist: torch.Tensor, foot: torch.Tensor) -> None:
+    """Hold each environment's twist and write its (ramped) foot target."""
 
-    twist_value = torch.tensor(scenario.twist, device=env.device).unsqueeze(0)
-    twist.vel_command_b.copy_(twist_value)
-    twist.vel_command_w.copy_(twist_value)
-    for flag_name in (
-        "is_heading_env",
-        "is_standing_env",
-        "is_world_env",
-        "is_forward_env",
-        "is_rotation_env",
+    twist_term = env.command_manager.get_term("twist")
+    foot_term = env.command_manager.get_term("foot_target")
+    if not isinstance(twist_term, UniformVelocityCommandWithRotation):
+        raise TypeError(f"Unexpected twist command type: {type(twist_term).__name__}")
+    if not isinstance(foot_term, ResetFixedFootTargetCommand):
+        raise TypeError(f"Unexpected foot command type: {type(foot_term).__name__}")
+    twist_term.vel_command_b.copy_(twist)
+    twist_term.vel_command_w.copy_(twist)
+    for flag in ("is_heading_env", "is_standing_env", "is_world_env", "is_forward_env", "is_rotation_env"):
+        getattr(twist_term, flag).fill_(False)
+    twist_term.time_left.fill_(float("inf"))
+
+    lifted = torch.linalg.vector_norm(foot, dim=-1).gt(0.0)
+    foot_term.foot_target_offset_b.copy_(foot)
+    foot_term.is_both_feet_env.copy_(lifted.all(dim=-1))
+    foot_term.is_single_support_env.copy_(lifted.any(dim=-1) & ~lifted.all(dim=-1))
+    if hasattr(foot_term, "is_stationary_single_support_env"):
+        foot_term.is_stationary_single_support_env.fill_(False)
+    foot_term.lifted_foot_idx.copy_(torch.linalg.vector_norm(foot, dim=-1).argmax(dim=-1))
+    foot_term.time_left.fill_(float("inf"))
+
+
+def actor_term_slice(env: ManagerBasedRlEnv, name: str) -> slice:
+    """Columns of one actor observation term."""
+
+    offset = 0
+    for term, shape in zip(
+        env.observation_manager.active_terms["actor"],
+        env.observation_manager.group_obs_term_dim["actor"],
+        strict=True,
     ):
-        getattr(twist, flag_name).fill_(False)
-    twist.time_left.fill_(float("inf"))
-
-    foot_value = torch.tensor(scenario.foot_target, device=env.device).unsqueeze(0)
-    foot.foot_target_offset_b.copy_(foot_value)
-    foot.is_single_support_env.copy_(foot_value.norm(dim=-1).gt(0.0).any(dim=-1))
-    # The scenario's own twist is kept: no training-time stationary mask.
-    foot.is_both_feet_env.fill_(False)
-    if hasattr(foot, "is_stationary_single_support_env"):
-        foot.is_stationary_single_support_env.fill_(False)
-    foot.lifted_foot_idx.copy_(foot_value.norm(dim=-1).argmax(dim=-1))
-    foot.time_left.fill_(float("inf"))
-
-    hand_value = torch.tensor(scenario.hand_target, device=env.device).unsqueeze(0)
-    active_value = torch.tensor(scenario.hand_active, device=env.device).unsqueeze(0)
-    hand.hand_target_offset_b.copy_(hand_value)
-    hand.is_active.copy_(active_value)
-    hand.time_left.fill_(float("inf"))
+        width = math.prod(shape)
+        if term == name:
+            return slice(offset, offset + width)
+        offset += width
+    raise ValueError(f"Actor observation lacks {name!r}")
 
 
-def _patch_initial_command_observation(
-    observations: Any, env: ManagerBasedRlEnv
-) -> Any:
-    """Replace cached reset-time command slices without advancing delay buffers."""
+def patch_observation(observations: Any, columns: dict[slice, torch.Tensor]) -> Any:
+    """Replace actor observation columns (command values written after the step)."""
 
-    command_values = {
-        "command": env.command_manager.get_term("twist").command,
-        "foot_target": env.command_manager.get_term("foot_target").command,
-        "hand_target": env.command_manager.get_term("hand_target").command,
-    }
     patched = observations.clone()
     actor = patched["actor"].clone()
-    offset = 0
-    for name, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA:
-        if name in command_values:
-            value = command_values[name]
-            if value.shape != (env.num_envs, width):
-                raise ValueError(
-                    f"Unexpected {name} observation shape: {tuple(value.shape)}"
-                )
-            actor[:, offset : offset + width] = value
-        offset += width
+    for where, value in columns.items():
+        actor[:, where] = value.reshape(actor.shape[0], -1)
     patched["actor"] = actor
     return patched

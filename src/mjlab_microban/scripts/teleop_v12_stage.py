@@ -1,7 +1,7 @@
 """Create and validate the hash-bound gate of the checkpoint a PICO run ends with.
 
 A PICO run (one process, mjlab_microban/schedules.py) is judged once: the locomotion
-(9x300, seed 42), tracking (final profile, seed 42) and ONNX reports of the
+(9x300, seed 42), PICO judgment (seeds 42 and 43) and ONNX reports of the
 checkpoint it ends with (its last update, ``PICO_TOTAL_UPDATES``) are
 validated and bound into one gate file, which the packager requires.
 """
@@ -19,6 +19,7 @@ from typing import Any
 import torch
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
+from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     LOCOMOTION_MOVING_SCENARIOS,
     locomotion_twist_judgments,
@@ -27,42 +28,34 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-    HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-    TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
-    TARGET_COLUMN_ABLATION_METHOD,
-    _aggregate_action_envelopes,
-    foot_tracking_p95_max_m,
-    foot_tracking_rms_max_m,
-    foot_tracking_velocity_fade_range,
-    hand_tracking_p95_max_m,
-    hand_tracking_rms_max_m,
+    SEED_COUNT,
+    canonical_settings,
     required_tracking_check_names,
     required_tracking_profile,
-    required_tracking_scenario_names,
-    target_column_ablation_observation_columns,
-    tracking_profile_uses_perturbation,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _acceptance as _tracking_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
-    _scenarios as _tracking_scenarios,
-    twist_is_judged,
+    thresholds as tracking_thresholds,
 )
-from mjlab_microban.twist_pass_line import twist_judgment, twist_pass_line_record
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     PRISTINE_PARITY_TOLERANCE,
 )
+from mjlab_microban.scripts.teleop_v12_scenarios import (
+    ARM_MODES,
+    ENVS_PER_SCENARIO,
+    arm_scenarios,
+    foot_scenarios,
+    push_scenarios,
+)
 from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
     teleop_v12_active_adapter_columns,
-    teleop_v12_target_normalizer_metadata,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     portable_bootstrap_artifact_path,
@@ -72,7 +65,6 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
 )
-from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     validate_teleop_v12_home_pose,
@@ -83,6 +75,7 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
+from mjlab_microban.twist_pass_line import twist_pass_line_record
 
 _VELOCITY_AXES = ("vx_m_s", "vy_m_s", "yaw_rad_s")
 _LOCOMOTION_COMMANDS = {
@@ -347,286 +340,62 @@ def _validate_tracking_report(
     report: dict[str, Any],
     expected_identity: dict[str, int | str],
 ) -> str:
-    """Validate one passing tracking report; return the profile it was judged under.
+    """Validate one passing PICO judgment report; return its profile.
 
-    The profile of the report's clock is required (one profile per clock, the
-    same at every HOME).
+    The checks are recomputed from the recorded measurements of every
+    scenario (evaluate_teleop_v12_tracking._acceptance).
     """
 
     completed = int(expected_identity["completed_updates"])
     profile = required_tracking_profile(completed)
     if (
-        report.get("schema_version") != 1
+        report.get("schema_version") != 2
         or report.get("gate") != "microban_teleop_v12_tracking"
         or report.get("profile") != profile
         or report.get("status") != "pass"
     ):
         raise ValueError("Tracking report schema/profile/status drifted")
     _require_report_identity(report, expected_identity, "Tracking")
-    _require_canonical_settings(
-        report,
-        {
-            "seed": 42,
-            "steps": 300,
-            "settle_steps": 50,
-            "moving_hmd": "forced_non_neutral",
-            "perturbation": tracking_profile_uses_perturbation(profile),
-            "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
-            "previous_action": "raw_actor_output",
-            "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
-            "reachable_hand_target_fk": teleop_v12_target_normalizer_metadata()[
-                "hand_target_fk"
-            ],
-        },
-        "Tracking",
-    )
-    expected_thresholds = {
-        "actual_soft_limit_violation_rad_max": (
-            ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-        ),
-        "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-        "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-        "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-        "hand_p95_m_max": hand_tracking_p95_max_m(profile),
-        "foot_rms_m_max": foot_tracking_rms_max_m(profile),
-        "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-        "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
-        "twist_pass_line": twist_pass_line_record(),
-        "target_column_ablation_action_delta_min": (
-            TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
-        ),
-        "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
-    }
-    if report.get("thresholds") != expected_thresholds:
+    expected_settings = canonical_settings(device="", seed=42)
+    expected_settings.pop("device")
+    _require_canonical_settings(report, expected_settings, "Tracking")
+    if report.get("thresholds") != tracking_thresholds():
         raise ValueError("Tracking report thresholds drifted")
     results = report.get("results")
-    names = required_tracking_scenario_names(profile)
-    if (
-        not isinstance(results, list)
-        or tuple(
-            item.get("name") if isinstance(item, dict) else None for item in results
-        )
-        != names
-    ):
-        raise ValueError("Tracking report scenario set/order drifted")
-    scenarios = _tracking_scenarios(profile)
-    for result, scenario in zip(results, scenarios, strict=True):
-        assert isinstance(result, dict)
-        expected_command = {
-            "twist": list(scenario.twist),
-            "foot_target": [list(item) for item in scenario.foot_target],
-            "hand_target": [list(item) for item in scenario.hand_target],
-            "hand_active": list(scenario.hand_active),
-        }
-        coverage = result.get("observation_coverage")
-        expects_foot = any(
-            abs(item) > 0.0 for target in scenario.foot_target for item in target
-        )
-        expects_hand = any(scenario.hand_active)
+    if not isinstance(results, dict) or set(results) != {"feet", "push", "arms", "safety"}:
+        raise ValueError("Tracking report results are malformed")
+    expected_names = {
+        "feet": [s.name for s in foot_scenarios()],
+        "push": [s.name for s in push_scenarios()],
+        "arms": [s.name for mode in ARM_MODES for s in arm_scenarios(mode)],
+    }
+    rollouts = ENVS_PER_SCENARIO * SEED_COUNT
+    for part, names in expected_names.items():
+        records = results[part]
         if (
-            result.get("command") != expected_command
-            or result.get("completed") is not True
-            or result.get("executed_steps") != 300
-            or result.get("fell") is not False
-            or result.get("nonfinite") is not None
-            or result.get("termination_names") != []
-            or result.get("raw_action_recurrence_verified_steps") != 300
-            or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
-            or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
-            or float(result["maximum_actual_soft_limit_violation_rad"])
-            > ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-            or result.get("hmd_motion_evidence_passed") is not True
-            or result.get("twist_direction_passed") is not True
-            or not isinstance(coverage, dict)
-            or coverage.get("passed") is not True
-            or coverage.get("foot_target_expected") is not expects_foot
-            or coverage.get("hand_target_expected") is not expects_hand
-            or not isinstance(coverage.get("hmd_nonzero_steps"), int)
-            or coverage["hmd_nonzero_steps"] <= 0
-            or (expects_foot and coverage.get("foot_nonzero_steps") != 300)
-            or (expects_hand and coverage.get("hand_nonzero_steps") != 300)
+            not isinstance(records, list)
+            or [item.get("name") if isinstance(item, dict) else None for item in records] != names
+            or any(item.get("rollouts") != rollouts for item in records)
         ):
-            raise ValueError("Tracking report scenario evidence failed")
-        target_error = result.get("target_error")
-        if not isinstance(target_error, dict) or set(target_error) != {
-            "foot",
-            "active_hand",
-        }:
-            raise ValueError("Tracking target-error evidence is malformed")
-        active_foot_count = sum(
-            any(abs(value) > 0.0 for value in target) for target in scenario.foot_target
-        )
-        active_hand_count = sum(bool(value) for value in scenario.hand_active)
-        for target, expected, expected_samples in (
-            ("foot", expects_foot, 250 * active_foot_count),
-            ("active_hand", expects_hand, 250 * active_hand_count),
-        ):
-            values = target_error[target]
-            if not isinstance(values, dict) or values.get("units") != "m":
-                raise ValueError("Tracking target-error stats are malformed")
-            metrics = ("min", "max", "mean", "rms", "p95")
-            if expected:
-                if (
-                    values.get("sample_count") != expected_samples
-                    or not all(_finite_number(values.get(name)) for name in metrics)
-                    or not (
-                        0.0
-                        <= float(values["min"])
-                        <= float(values["mean"])
-                        <= float(values["rms"])
-                        <= float(values["max"])
-                    )
-                    or not (
-                        float(values["min"])
-                        <= float(values["p95"])
-                        <= float(values["max"])
-                    )
-                ):
-                    raise ValueError("Tracking active target-error stats failed")
-            elif values.get("sample_count") != 0 or any(
-                values.get(name) is not None for name in metrics
-            ):
-                raise ValueError("Tracking inactive target-error stats drifted")
-        ablation = result.get("target_column_ablation")
-        if not isinstance(ablation, dict) or set(ablation) != {"hand", "foot"}:
-            raise ValueError("Tracking target-column ablation evidence is malformed")
-        fields = {
-            "target_expected",
-            "ablated_observation_columns",
-            "preserved_observation_columns",
-            "maximum_absolute_action_delta",
-            "minimum_required_action_delta",
-            "passed",
-        }
-        for target, expected in (("hand", expects_hand), ("foot", expects_foot)):
-            evidence = ablation[target]
-            ablated_columns, preserved_columns = (
-                target_column_ablation_observation_columns(target)
-            )
-            if (
-                not isinstance(evidence, dict)
-                or set(evidence) != fields
-                or evidence.get("target_expected") is not expected
-                or evidence.get("ablated_observation_columns") != list(ablated_columns)
-                or evidence.get("preserved_observation_columns")
-                != list(preserved_columns)
-            ):
-                raise ValueError("Tracking target-column ablation target drifted")
-            maximum = evidence.get("maximum_absolute_action_delta")
-            if expected:
-                response = (
-                    _finite_number(maximum)
-                    and float(maximum) >= 0.0
-                    and float(maximum) > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
-                )
-                if (
-                    not _finite_number(maximum)
-                    or float(maximum) < 0.0
-                    or evidence.get("minimum_required_action_delta")
-                    != TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
-                    or evidence.get("passed") is not response
-                ):
-                    raise ValueError(
-                        "Tracking target-column ablation evidence is inconsistent"
-                    )
-            elif (
-                maximum is not None
-                or evidence.get("minimum_required_action_delta") is not None
-                or evidence.get("passed") is not True
-            ):
-                raise ValueError("Tracking inactive target-column ablation drifted")
-        hmd = result.get("hmd_motion")
-        per_axis = hmd.get("per_axis") if isinstance(hmd, dict) else None
-        if (
-            not isinstance(hmd, dict)
-            or hmd.get("joint_names") != list(MICROBAN_HMD_JOINT_NAMES)
-            or hmd.get("sample_count") != 301
-            or hmd.get("active_event_member") is not True
-            or not isinstance(per_axis, dict)
-            or set(per_axis) != set(MICROBAN_HMD_JOINT_NAMES)
-        ):
-            raise ValueError("Tracking HMD motion evidence is malformed")
-        for axis in MICROBAN_HMD_JOINT_NAMES:
-            values = per_axis[axis]
-            if (
-                not isinstance(values, dict)
-                or not _finite_number(values.get("target_peak_to_peak_rad"))
-                or not _finite_number(values.get("actual_peak_to_peak_rad"))
-                or float(values["target_peak_to_peak_rad"])
-                < HMD_TARGET_PEAK_TO_PEAK_MIN_RAD
-                or float(values["actual_peak_to_peak_rad"])
-                < HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD
-            ):
-                raise ValueError("Tracking HMD per-axis motion evidence failed")
-        response = result.get("directional_response")
-        measured = result.get("measured_velocity_body")
-        expected_axes = {
-            axis
-            for axis, command in zip(
-                ("vx_m_s", "vy_m_s", "yaw_rad_s"), scenario.twist, strict=True
-            )
-            if command != 0.0
-        }
-        if (
-            not isinstance(response, dict)
-            or set(response) != expected_axes
-            or not isinstance(measured, dict)
-            or set(measured) != set(_VELOCITY_AXES)
-            or any(
-                not isinstance(measured.get(axis), dict)
-                or measured[axis].get("sample_count") != 250
-                or not _finite_number(measured[axis].get("mean"))
-                for axis in _VELOCITY_AXES
-            )
-        ):
-            raise ValueError("Tracking directional response axes drifted")
-        for axis, command in zip(_VELOCITY_AXES, scenario.twist, strict=True):
-            if command == 0.0:
-                continue
-            item = response[axis]
-            mean = float(measured[axis]["mean"])
-            signed = mean * (1.0 if command > 0.0 else -1.0)
-            if (
-                not isinstance(item, dict)
-                or item.get("command") != command
-                or item.get("measured_mean") != mean
-                or item.get("signed_response") != signed
-            ):
-                raise ValueError("Tracking directional response is inconsistent")
-        expected_judgment = (
-            None
-            if not twist_is_judged(scenario)
-            else twist_judgment(
-                scenario.twist,
-                [float(measured[axis]["mean"]) for axis in _VELOCITY_AXES],
-            )
-        )
-        if result.get("twist_judgment") != expected_judgment or result.get(
-            "twist_direction_passed"
-        ) is not (expected_judgment is None or expected_judgment["passed"] is True):
-            raise ValueError("Tracking twist judgment is inconsistent")
-        _require_action_envelope(
-            result.get("raw_action_envelope"),
-            label=f"Tracking/{scenario.name}",
-            aggregate=False,
-        )
+            raise ValueError(f"Tracking report {part} scenario set/order drifted")
+    for item, scenario in zip(results["feet"], foot_scenarios(), strict=True):
+        if item.get("foot_goal") != [list(goal) for goal in scenario.foot_goal] or item.get(
+            "lifted"
+        ) != list(scenario.lifted):
+            raise ValueError("Tracking report foot targets drifted")
     try:
-        recomputed, status = _tracking_acceptance(results, profile)
-    except (KeyError, TypeError, ValueError) as exc:
+        recomputed, status = _tracking_acceptance(results)
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
         raise ValueError("Tracking result evidence is malformed") from exc
     checks = _require_exact_true_checks(report, required_tracking_check_names(profile), "Tracking")
-    if report.get("status") != status or recomputed != checks:
+    if status != "pass" or recomputed != checks:
         raise ValueError("Tracking checks do not match result evidence")
-    envelope = _require_action_envelope(
+    _require_action_envelope(
         report.get("raw_action_envelope"),
         label="Tracking/aggregate",
         aggregate=True,
-        scenario_count=len(results),
+        scenario_count=sum(len(names) for names in expected_names.values()),
     )
-    if envelope["step_count"] != 300 * len(results):
-        raise ValueError("Tracking aggregate step count drifted")
-    if envelope != _aggregate_action_envelopes(results):
-        raise ValueError("Tracking aggregate action envelope is inconsistent")
     return profile
 
 

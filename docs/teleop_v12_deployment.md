@@ -44,23 +44,25 @@ It does not run or hash the robot's sources: the robot checks a release when
 it is installed (`tools/validate_policies.py src/agents` and its tests) and at
 every start (the self-test).
 
-## Tracking profile
+## PICO judgment
 
-One profile, `full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1`,
-the same at every HOME: all scenarios (low forward, both hand corners, both
-keypoint corners, both feet, two mixed twists), the push perturbation, the
-target-column ablation of hands and feet, and these limits:
+One profile, `pico_feet_push_still_arms_v1`, the same at every HOME
+(`scripts/evaluate_teleop_v12_tracking.py`).  Each scenario runs 64
+environments on seeds 42 and 43 with the HMD neck moving; the arms are driven
+from outside as on the robot (HOME, raised forward 70 deg, or moved as in
+training).
 
-| limit | value |
-| --- | --- |
-| hand RMS | 0.040 m |
-| hand P95 | 0.07 m |
-| foot RMS | 0.05 m |
-| foot P95 | 0.08 m |
+| check | scenarios | pass line |
+| --- | --- | --- |
+| feet (J1) | standing, no push: one foot up 20 / 40 mm, the four corners (+-24, +-24, 40) mm, both feet (+-8, +-8, 16) mm; left and right mirrored; reached through teleop's 0.12 m/s ramp, scored from 1 s after the change | height above the floor >= 0.7 x target (median environment); the lifted foot seen from the support foot within max(0.3 x target, 8 mm) RMS; support foot moves <= 10 mm; mirrored halves within 5 mm |
+| pushes (J2) | standing and the 9x300 commands, a 0.4 m/s kick every second from eight directions | falls at most 5 points more often than the walker the adapter was built on |
+| standing still (J3) | standing with the HMD and the arms moving | <= 0.5 touchdowns per second and the standing drift of `twist_pass_line.py` |
+| arms (J4) | the 9x300 commands with the arms raised or moving | speed along the command within 10 % of the speed with the arms at HOME |
 
-plus no falls, finite values, actual soft-limit overshoot <= 0.25 rad, raw-action
-recurrence, forced HMD motion, observation coverage and the twist directional
-response.  The limits are the same at every HOME.
+plus no falls without pushes, finite values, actual soft-limit overshoot
+<= 0.25 rad, raw-action recurrence, forced HMD motion and the arm-target
+observation.  There is no hand-tracking limit: the arms follow the robot's
+pico_arms, not the policy.
 
 Focused CPU-only tests:
 

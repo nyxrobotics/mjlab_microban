@@ -11,9 +11,9 @@ from pathlib import Path
 
 import torch
 
-from mjlab_microban.robot.microban_hand_fk import (
-    microban_hand_fk_metadata,
-    microban_reachable_hand_evaluation_offsets,
+from mjlab_microban.schedules import (
+    PICO_SCHEDULE,
+    PICO_TOTAL_UPDATES,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     LOCOMOTION_MOVING_SCENARIOS,
@@ -24,46 +24,33 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FINAL_PROFILE,
-    HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-    HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-    TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
-    TARGET_COLUMN_ABLATION_METHOD,
+    SEED_COUNT,
     TRACKING_PROFILES,
     _acceptance,
-    _active_foot_tracking_error,
-    _aggregate_action_envelopes,
-    _scenarios,
-    twist_is_judged,
-    foot_tracking_p95_max_m,
-    foot_tracking_rms_max_m,
-    foot_tracking_velocity_fade_range,
-    foot_tracking_weight,
-    hand_tracking_p95_max_m,
-    hand_tracking_rms_max_m,
-    required_target_column_ablation_targets,
+    canonical_settings,
+    foot_error_limit_m,
     required_tracking_check_names,
     required_tracking_profile,
-    target_column_ablated_observation,
-    target_column_ablation_observation_columns,
-    tracking_profile_uses_perturbation,
+    thresholds,
 )
-from mjlab_microban.twist_pass_line import twist_judgment, twist_pass_line_record
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     ONNX_PARITY_TOLERANCE,
     PRISTINE_PARITY_TOLERANCE,
+)
+from mjlab_microban.scripts.teleop_v12_scenarios import (
+    ARM_MODES,
+    ENVS_PER_SCENARIO,
+    arm_scenarios,
+    foot_scenarios,
+    push_scenarios,
 )
 from mjlab_microban.scripts.teleop_v12_stage import (
     _validate_tracking_report,
     create_gate,
     validate_gate,
 )
-from mjlab_microban.schedules import (
-    PICO_SCHEDULE,
-    PICO_TOTAL_UPDATES,
-)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
@@ -84,53 +71,57 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
+from mjlab_microban.twist_pass_line import twist_pass_line_record
+
+ROLLOUTS = ENVS_PER_SCENARIO * SEED_COUNT
 
 
-def _ablation(
-    *, target: str, expected: bool, maximum: float = 0.01
-) -> dict[str, object]:
-    ablated_columns, preserved_columns = target_column_ablation_observation_columns(
-        target
-    )
-    return {
-        "target_expected": expected,
-        "ablated_observation_columns": list(ablated_columns),
-        "preserved_observation_columns": list(preserved_columns),
-        "maximum_absolute_action_delta": maximum if expected else None,
-        "minimum_required_action_delta": (
-            TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN if expected else None
-        ),
-        "passed": (not expected or maximum > TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN),
-    }
+def _results() -> dict[str, object]:
+    """Measurements of a policy that does what every PICO check asks."""
 
-
-def _result(**overrides):
-    value = {
-        "completed": True,
-        "fell": False,
-        "nonfinite": None,
+    feet = []
+    for scenario in foot_scenarios():
+        lifted = list(scenario.lifted)
+        feet.append({
+            "name": scenario.name,
+            "foot_goal": [list(goal) for goal in scenario.foot_goal],
+            "lifted": lifted,
+            "rollouts": ROLLOUTS,
+            "falls": 0,
+            "lift_median_m": [goal[2] if up else None for goal, up in zip(scenario.foot_goal, lifted)],
+            "relative_target_m": math.dist(scenario.foot_goal[0], scenario.foot_goal[1]),
+            "relative_error_rms_m": 0.006,
+            "support_move_median_m": 0.002 if sum(lifted) == 1 else None,
+        })
+    push = [
+        {"name": s.name, "twist": list(s.twist), "rollouts": ROLLOUTS,
+         "falls": {"pico": 3, "walker": 2}, "falls_by_direction": {"pico": [0] * 8, "walker": [0] * 8}}
+        for s in push_scenarios()
+    ]
+    arms = []
+    for mode in ARM_MODES:
+        for scenario in arm_scenarios(mode):
+            axis = next((i for i, value in enumerate(scenario.twist) if value != 0.0), None)
+            mean = [0.8 * value for value in scenario.twist]
+            arms.append({
+                "name": scenario.name, "base": scenario.name.split("/")[0], "arms": mode,
+                "twist": list(scenario.twist), "rollouts": ROLLOUTS, "falls": 0, "mean_twist": mean,
+                "signed_speed": None if axis is None else abs(mean[axis]),
+                "touchdowns_per_s": 0.1 if axis is None else 3.0,
+            })
+    safety = {
+        "finite": True,
+        "raw_action_recurrence": True,
         "maximum_actual_soft_limit_violation_rad": 0.0,
-        "raw_action_recurrence_verified_steps": 300,
-        "executed_steps": 300,
-        "hmd_motion_evidence_passed": True,
-        "observation_coverage": {"passed": True},
-        "twist_direction_passed": True,
-        "target_error": {
-            "active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
-            "foot": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
-        },
-        "command": {
-            "twist": [0.0, 0.0, 0.0],
-            "foot_target": [[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]],
-            "hand_active": [True, True],
-        },
-        "target_column_ablation": {
-            "hand": _ablation(target="hand", expected=True),
-            "foot": _ablation(target="foot", expected=True),
-        },
+        "hmd_median_target_peak_to_peak_rad": [0.5, 0.5, 0.5],
+        "hmd_median_actual_peak_to_peak_rad": [0.4, 0.4, 0.4],
+        "arm_observation": {"home_nonzero_steps": 0, "raised_zero_steps": 0},
     }
-    value.update(overrides)
-    return value
+    return {"feet": feet, "push": push, "arms": arms, "safety": safety}
+
+
+def _find(records: list[dict[str, object]], name: str) -> dict[str, object]:
+    return next(item for item in records if item["name"] == name)
 
 
 def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
@@ -235,174 +226,25 @@ def _zero_action_envelope() -> dict[str, object]:
 
 
 def _tracking_report(
-    identity: dict[str, object],
-    *,
-    profile: str | None = None,
-    hand_rms: float = 0.01,
+    identity: dict[str, object], results: dict[str, object] | None = None
 ) -> dict[str, object]:
-    if profile is None:
-        profile = required_tracking_profile(int(identity["completed_updates"]))
-    results = []
-    for scenario in _scenarios(profile):
-        expects_foot = any(
-            abs(value) > 0.0 for target in scenario.foot_target for value in target
-        )
-        expects_hand = any(scenario.hand_active)
-        directional = {}
-        for axis, command in zip(
-            ("vx_m_s", "vy_m_s", "yaw_rad_s"), scenario.twist, strict=True
-        ):
-            if command == 0.0:
-                continue
-            # Half the command along it: above every fixed minimum.
-            directional[axis] = {
-                "command": command,
-                "measured_mean": 0.5 * command,
-                "signed_response": abs(0.5 * command),
-            }
-        hmd_axes = {
-            name: {
-                "target_peak_to_peak_rad": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-                "actual_peak_to_peak_rad": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            }
-            for name in MICROBAN_HMD_JOINT_NAMES
-        }
-
-        def target_error(
-            *, expected: bool, samples: int, hand: bool = False
-        ) -> dict[str, object]:
-            if not expected:
-                return {
-                    "sample_count": 0,
-                    "min": None,
-                    "max": None,
-                    "mean": None,
-                    "rms": None,
-                    "p95": None,
-                    "units": "m",
-                }
-            return {
-                "sample_count": samples,
-                "min": 0.005,
-                "max": max(0.02, hand_rms) if hand else 0.02,
-                "mean": 0.008,
-                "rms": hand_rms if hand else 0.01,
-                "p95": 0.015,
-                "units": "m",
-            }
-
-        results.append(
-            {
-                "name": scenario.name,
-                "command": {
-                    "twist": list(scenario.twist),
-                    "foot_target": [list(value) for value in scenario.foot_target],
-                    "hand_target": [list(value) for value in scenario.hand_target],
-                    "hand_active": list(scenario.hand_active),
-                },
-                "completed": True,
-                "executed_steps": 300,
-                "fell": False,
-                "nonfinite": None,
-                "termination_names": [],
-                "maximum_actual_soft_limit_violation_rad": 0.0,
-                "raw_action_recurrence_verified_steps": 300,
-                "hmd_motion_evidence_passed": True,
-                "hmd_motion": {
-                    "joint_names": list(MICROBAN_HMD_JOINT_NAMES),
-                    "sample_count": 301,
-                    "active_event_member": True,
-                    "per_axis": hmd_axes,
-                },
-                "observation_coverage": {
-                    "hmd_nonzero_steps": 299,
-                    "foot_nonzero_steps": 300 if expects_foot else 0,
-                    "hand_nonzero_steps": 300 if expects_hand else 0,
-                    "foot_target_expected": expects_foot,
-                    "hand_target_expected": expects_hand,
-                    "passed": True,
-                },
-                "directional_response": directional,
-                "twist_judgment": (
-                    None
-                    if not twist_is_judged(scenario)
-                    else twist_judgment(
-                        scenario.twist, [0.5 * value for value in scenario.twist]
-                    )
-                ),
-                "twist_direction_passed": True,
-                "measured_velocity_body": {
-                    axis: {
-                        "sample_count": 250,
-                        "mean": (
-                            directional[axis]["measured_mean"]
-                            if axis in directional
-                            else 0.0
-                        ),
-                    }
-                    for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")
-                },
-                "target_error": {
-                    "active_hand": target_error(
-                        expected=expects_hand,
-                        hand=True,
-                        samples=250
-                        * sum(bool(value) for value in scenario.hand_active),
-                    ),
-                    "foot": target_error(
-                        expected=expects_foot,
-                        samples=250
-                        * sum(
-                            any(abs(value) > 0.0 for value in target)
-                            for target in scenario.foot_target
-                        ),
-                    ),
-                },
-                "target_column_ablation": {
-                    "hand": _ablation(target="hand", expected=expects_hand),
-                    "foot": _ablation(target="foot", expected=expects_foot),
-                },
-                "raw_action_envelope": _zero_action_envelope(),
-            }
-        )
-    checks, status = _acceptance(results, profile)
+    results = _results() if results is None else results
+    checks, status = _acceptance(results)
+    envelope = _zero_action_envelope()
+    envelope.update(
+        scenario_count=sum(len(results[part]) for part in ("feet", "push", "arms")), step_count=12000
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "gate": "microban_teleop_v12_tracking",
-        "profile": profile,
+        "profile": required_tracking_profile(int(identity["completed_updates"])),
         "status": status,
         "checkpoint": identity,
-        "settings": {
-            "device": "cpu",
-            "seed": 42,
-            "steps": 300,
-            "settle_steps": 50,
-            "moving_hmd": "forced_non_neutral",
-            "perturbation": tracking_profile_uses_perturbation(profile),
-            "action_clip": [-math.pi, math.pi],
-            "previous_action": "raw_actor_output",
-            "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
-            "reachable_hand_target_fk": microban_hand_fk_metadata(),
-        },
-        "thresholds": {
-            "actual_soft_limit_violation_rad_max": (
-                ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-            ),
-            "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
-            "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-            "hand_p95_m_max": hand_tracking_p95_max_m(profile),
-            "foot_rms_m_max": foot_tracking_rms_max_m(profile),
-            "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-            "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
-            "twist_pass_line": twist_pass_line_record(),
-            "target_column_ablation_action_delta_min": (
-                TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
-            ),
-            "raw_action_amplitude": "reported_finite_only_no_invented_threshold",
-        },
+        "settings": canonical_settings(device="cpu", seed=42),
+        "thresholds": thresholds(),
         "checks": checks,
-        "raw_action_envelope": _aggregate_action_envelopes(results),
+        "raw_action_envelope": envelope,
+        "runtime_smoke_observations": [],
         "results": results,
     }
 
@@ -438,38 +280,6 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
 
 
 class TeleopV12StageTest(unittest.TestCase):
-    def test_tracking_scenarios_use_fk_reachable_hand_targets(self) -> None:
-        poses = dict(microban_reachable_hand_evaluation_offsets())
-        scenarios = {scenario.name: scenario for scenario in _scenarios(FINAL_PROFILE)}
-        self.assertEqual(
-            scenarios["max_hands_left"].hand_target,
-            (poses["F"][0], poses["B"][1]),
-        )
-        self.assertEqual(
-            scenarios["max_hands_right"].hand_target,
-            (poses["B"][0], poses["F"][1]),
-        )
-        self.assertEqual(
-            scenarios["mixed_forward_left"].hand_target,
-            (poses["f"][0], poses["b"][1]),
-        )
-        self.assertEqual(
-            scenarios["mixed_backward_right"].hand_target,
-            (poses["b"][0], poses["f"][1]),
-        )
-        # The mixed scenarios walk at half the command envelope.
-        from mjlab_microban.scripts.teleop_v12_scenarios import (
-            BACKWARD_MAX_M_S,
-            FORWARD_MAX_M_S,
-            LATERAL_MAX_M_S,
-            MOVING_YAW_MAX_RAD_S,
-        )
-
-        self.assertEqual(scenarios["mixed_forward_left"].twist,
-                         (0.5 * FORWARD_MAX_M_S, 0.5 * LATERAL_MAX_M_S, 0.5 * MOVING_YAW_MAX_RAD_S))
-        self.assertEqual(scenarios["mixed_backward_right"].twist,
-                         (-0.5 * BACKWARD_MAX_M_S, -0.5 * LATERAL_MAX_M_S, -0.5 * MOVING_YAW_MAX_RAD_S))
-
     def test_one_profile_for_the_checkpoint_a_run_ends_with(self) -> None:
         for completed in (PICO_SCHEDULE["foot_tighten"] + 1, PICO_TOTAL_UPDATES):
             with self.subTest(completed=completed):
@@ -478,70 +288,70 @@ class TeleopV12StageTest(unittest.TestCase):
             with self.subTest(completed=completed), self.assertRaises(ValueError):
                 required_tracking_profile(completed)
         self.assertEqual(TRACKING_PROFILES, (FINAL_PROFILE,))
-        # The robot validator accepts this published final name.
-        self.assertEqual(
-            FINAL_PROFILE,
-            "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
-        )
+        self.assertEqual(set(_acceptance(_results())[0]), required_tracking_check_names(FINAL_PROFILE))
 
-    def test_foot_error_is_weighted_as_the_reward_weighs_foot_tracking(self) -> None:
-        # The PICO reward fades foot tracking out with the velocity command
-        # (mdp.foot_target_tracking_error_exp, final range (0, 0.15)): the
-        # judgment weighs the foot error the same way.
-        self.assertEqual(foot_tracking_velocity_fade_range(), (0.0, 0.15))
-        fade = foot_tracking_velocity_fade_range()
-        self.assertEqual(foot_tracking_weight((0.0, 0.0, 0.0), fade), 1.0)
-        self.assertAlmostEqual(foot_tracking_weight((0.03, 0.04, 0.0), fade), 1.0 - 0.05 / 0.15)
-        self.assertAlmostEqual(foot_tracking_weight((0.0, 0.0, -0.075), fade), 0.5)
-        self.assertEqual(foot_tracking_weight((0.7, 0.3, 1.5), fade), 0.0)
-        for scenario in _scenarios(FINAL_PROFILE):
-            if scenario.name.startswith("mixed_"):
-                self.assertEqual(foot_tracking_weight(scenario.twist, fade), 0.0, scenario.name)
-            elif any(value != 0.0 for target in scenario.foot_target for value in target):
-                self.assertEqual(foot_tracking_weight(scenario.twist, fade), 1.0, scenario.name)
-        # The reward's own fade at a zero tracking error is this weight.
-        from types import SimpleNamespace
+    def test_the_feet_fail_a_policy_that_keeps_them_down(self) -> None:
+        # The v12 PICO and its pristine start: the lifted foot stays on the
+        # floor and the other foot sees it where it was (error = target).
+        checks, status = _acceptance(_results())
+        self.assertEqual(status, "pass", checks)
+        still = _results()
+        for item in still["feet"]:
+            item["lift_median_m"] = [0.0 if up else None for up in item["lifted"]]
+            item["relative_error_rms_m"] = item["relative_target_m"]
+        checks, status = _acceptance(still)
+        self.assertEqual(status, "fail")
+        self.assertFalse(checks["foot_lift"] or checks["foot_error"])
+        self.assertTrue(checks["support_foot_still"] and checks["foot_left_right"])
+        # max(0.3 x target, 8 mm): 15.7 mm at a 52 mm corner, 8 mm for both feet.
+        self.assertAlmostEqual(foot_error_limit_m(0.0524595), 0.0157379, places=6)
+        self.assertEqual(foot_error_limit_m(0.016), 0.008)
+        low = _results()
+        _find(low["feet"], "left_up40")["lift_median_m"][0] = 0.7 * 0.04 - 1.0e-4
+        self.assertFalse(_acceptance(low)[0]["foot_lift"])
 
-        from mjlab_microban.tasks.mdp import foot_target_tracking_error_exp
+    def test_the_support_foot_stays_and_the_halves_are_mirrored(self) -> None:
+        moved = _results()
+        _find(moved["feet"], "right_front_in")["support_move_median_m"] = 0.011
+        self.assertFalse(_acceptance(moved)[0]["support_foot_still"])
+        lopsided = _results()
+        _find(lopsided["feet"], "left_back_out")["relative_error_rms_m"] = 0.012
+        checks = _acceptance(lopsided)[0]
+        self.assertTrue(checks["foot_error"])
+        self.assertFalse(checks["foot_left_right"])
 
-        for twist in ((0.0, 0.0, 0.0), (0.03, 0.04, 0.0), (0.0, 0.0, -0.075), (0.7, 0.3, 1.5)):
-            command = SimpleNamespace(current_foot_pos_b=lambda: torch.zeros(1, 2, 3),
-                                      _default_foot_pos_b=torch.zeros(1, 2, 3),
-                                      foot_target_offset_b=torch.zeros(1, 2, 3))
-            env = SimpleNamespace(command_manager=SimpleNamespace(
-                get_term=lambda _name: command, get_command=lambda _name: torch.tensor([twist])))
-            reward = foot_target_tracking_error_exp(env, "foot_target", 0.05, velocity_fade_range=fade)
-            self.assertAlmostEqual(float(reward[0]), foot_tracking_weight(twist, fade), places=6)
-        # A walking scenario's foot error is recorded, not judged.
-        walking = _result(command={"twist": [0.7, 0.3, 1.5], "foot_target": [[0.0, 0.0, 0.02], [0.0] * 3],
-                                   "hand_active": [True, True]},
-                          target_error={"active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
-                                        "foot": {"sample_count": 1, "rms": 0.30, "p95": 0.40}})
-        checks, _ = _acceptance([_result(), walking], FINAL_PROFILE)
-        self.assertTrue(checks["foot_tracking_rms"] and checks["foot_tracking_p95"])
-        standing = deepcopy(walking)
-        standing["command"]["twist"] = [0.0, 0.0, 0.0]
-        checks, _ = _acceptance([_result(), standing], FINAL_PROFILE)
-        self.assertFalse(checks["foot_tracking_rms"])
+    def test_pushes_are_compared_with_the_walker(self) -> None:
+        results = _results()
+        for item in results["push"]:
+            item["falls"] = {"pico": 0, "walker": 0}
+        _find(results["push"], "neutral")["falls"]["pico"] = 57  # 57/1152 < 5 points
+        self.assertTrue(_acceptance(results)[0]["push_falls"])
+        _find(results["push"], "neutral")["falls"]["pico"] = 58
+        self.assertFalse(_acceptance(results)[0]["push_falls"])
+        _find(results["push"], "forward_0p1")["falls"]["walker"] = 10
+        self.assertTrue(_acceptance(results)[0]["push_falls"])
 
-    def test_the_mixed_scenarios_do_not_judge_the_walking_direction(self) -> None:
-        from mjlab_microban.scripts.evaluate_teleop_v12_tracking import twist_is_judged
+    def test_standing_still_with_the_head_and_arms_moving(self) -> None:
+        stepping = _results()
+        _find(stepping["arms"], "neutral/arms_moving")["touchdowns_per_s"] = 0.6
+        self.assertFalse(_acceptance(stepping)[0]["standing_still"])
+        drifting = _results()
+        _find(drifting["arms"], "neutral/arms_raised")["mean_twist"] = [0.06, 0.0, 0.0]
+        self.assertFalse(_acceptance(drifting)[0]["standing_still"])
 
-        judged = {scenario.name: twist_is_judged(scenario) for scenario in _scenarios(FINAL_PROFILE)}
-        self.assertTrue(judged["low_forward"])
-        self.assertFalse(judged["mixed_forward_left"] or judged["mixed_backward_right"])
-        self.assertFalse(judged["max_hands_left"])  # standing
-
-    def test_accuracy_limits_are_one_table(self) -> None:
-        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m;
-        # foot 0.05/0.08 m.
-        self.assertEqual(hand_tracking_rms_max_m(FINAL_PROFILE), 0.040)
-        self.assertEqual(foot_tracking_rms_max_m(FINAL_PROFILE), 0.05)
-        self.assertEqual(foot_tracking_p95_max_m(FINAL_PROFILE), 0.08)
-        self.assertEqual(hand_tracking_p95_max_m(FINAL_PROFILE), 0.07)
-        self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
-        with self.assertRaises(ValueError):
-            hand_tracking_rms_max_m("full_body_reachable_performance_perturbation_v2")
+    def test_walking_speed_does_not_depend_on_the_arms(self) -> None:
+        for mode, ratio, passed in (("raised", 1.09, True), ("raised", 0.89, False), ("moving", 1.12, False)):
+            with self.subTest(mode=mode, ratio=ratio):
+                results = _results()
+                home = _find(results["arms"], "forward_0p1/arms_home")["signed_speed"]
+                _find(results["arms"], f"forward_0p1/arms_{mode}")["signed_speed"] = ratio * home
+                self.assertIs(_acceptance(results)[0]["walking_with_arms"], passed)
+        stuck = _results()
+        _find(stuck["arms"], "yaw_left_0p5/arms_home")["signed_speed"] = 0.0
+        self.assertFalse(_acceptance(stuck)[0]["walking_with_arms"])
+        fell = _results()
+        _find(fell["arms"], "lateral_left_0p1/arms_moving")["falls"] = 1
+        self.assertFalse(_acceptance(fell)[0]["no_falls_without_push"])
 
     def test_the_gate_judges_the_report_under_the_final_profile(self) -> None:
         identity = {
@@ -549,21 +359,26 @@ class TeleopV12StageTest(unittest.TestCase):
             "iteration": PICO_TOTAL_UPDATES - 1,
             "completed_updates": PICO_TOTAL_UPDATES,
         }
-        within = _tracking_report(identity, hand_rms=0.039)
-        self.assertEqual(within["status"], "pass")
-        self.assertEqual(_validate_tracking_report(within, identity), FINAL_PROFILE)
-        over = _tracking_report(identity, hand_rms=0.041)
-        self.assertEqual(over["status"], "fail")
+        report = _tracking_report(identity)
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(_validate_tracking_report(report, identity), FINAL_PROFILE)
+        still = _results()
+        _find(still["feet"], "left_up20")["lift_median_m"][0] = 0.0
         with self.assertRaises(ValueError):
-            _validate_tracking_report(over, identity)
-        relabelled = deepcopy(within)
-        relabelled["profile"] = "whole_body_reachable_performance_v2_deployed_accuracy_v1"
+            _validate_tracking_report(_tracking_report(identity, still), identity)
+        relabelled = deepcopy(report)
+        relabelled["profile"] = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
         with self.assertRaisesRegex(ValueError, "schema/profile/status drifted"):
             _validate_tracking_report(relabelled, identity)
-        held_out = deepcopy(within)
-        held_out["settings"]["seed"] = 101
-        with self.assertRaises(ValueError):
-            _validate_tracking_report(held_out, identity)
+        for key, value in (("seeds", [101, 102]), ("envs_per_scenario", 1)):
+            changed = deepcopy(report)
+            changed["settings"][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                _validate_tracking_report(changed, identity)
+        forged = deepcopy(report)
+        _find(forged["results"]["arms"], "forward_0p2/arms_raised")["signed_speed"] = 0.0
+        with self.assertRaisesRegex(ValueError, "checks do not match"):
+            _validate_tracking_report(forged, identity)
 
     def test_final_gate_records_the_final_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -599,7 +414,7 @@ class TeleopV12StageTest(unittest.TestCase):
             onnx_path.write_bytes(b"unit-test-onnx")
             paths["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
             paths["tracking_report"].write_text(
-                json.dumps(_tracking_report(identity, hand_rms=0.039))
+                json.dumps(_tracking_report(identity))
             )
             paths["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
             gate = create_gate(checkpoint=checkpoint, **paths)
@@ -648,7 +463,7 @@ class TeleopV12StageTest(unittest.TestCase):
                 }
                 reports["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
                 reports["tracking_report"].write_text(
-                    json.dumps(_tracking_report(identity, profile=FINAL_PROFILE))
+                    json.dumps(_tracking_report(identity))
                 )
                 reports["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
                 if not accepted:
@@ -661,176 +476,6 @@ class TeleopV12StageTest(unittest.TestCase):
                 gate_path = root / "gate.json"
                 gate_path.write_text(json.dumps(gate))
                 self.assertEqual(validate_gate(gate_path, checkpoint), gate)
-
-    def test_tracking_acceptance_rejects_done_coverage_direction_and_active_error(
-        self,
-    ) -> None:
-        checks, status = _acceptance([_result()], FINAL_PROFILE)
-        self.assertEqual(status, "pass")
-        self.assertTrue(all(checks.values()))
-        for mutation in (
-            {"completed": False, "termination_names": ["out_of_terrain_bounds"]},
-            {"observation_coverage": {"passed": False}},
-            {"twist_direction_passed": False},
-            {
-                "maximum_actual_soft_limit_violation_rad": (
-                    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD + 1.0e-9
-                )
-            },
-        ):
-            with self.subTest(mutation=mutation):
-                failed, failed_status = _acceptance(
-                    [_result(**mutation)], FINAL_PROFILE
-                )
-                self.assertEqual(failed_status, "fail")
-                self.assertFalse(all(failed.values()))
-
-        allowed, allowed_status = _acceptance(
-            [
-                _result(
-                    maximum_actual_soft_limit_violation_rad=(
-                        ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-                    )
-                )
-            ],
-            FINAL_PROFILE,
-        )
-        self.assertEqual(allowed_status, "pass")
-        self.assertTrue(allowed["actual_soft_limits"])
-
-    def test_target_column_ablation_acceptance_follows_activation_schedule(
-        self,
-    ) -> None:
-        self.assertEqual(
-            target_column_ablation_observation_columns("hand"),
-            (tuple(range(75, 81)), tuple(range(81, 83))),
-        )
-        self.assertEqual(
-            target_column_ablation_observation_columns("foot"),
-            (tuple(range(69, 75)), ()),
-        )
-        with self.assertRaisesRegex(ValueError, "Unknown"):
-            target_column_ablation_observation_columns("head")
-        observation = torch.arange(83, dtype=torch.float32).unsqueeze(0)
-        hand_ablated = target_column_ablated_observation(observation, "hand")
-        torch.testing.assert_close(
-            hand_ablated[:, 75:81], torch.zeros((1, 6)), rtol=0.0, atol=0.0
-        )
-        torch.testing.assert_close(
-            hand_ablated[:, 81:83], observation[:, 81:83], rtol=0.0, atol=0.0
-        )
-        torch.testing.assert_close(
-            hand_ablated[:, :75], observation[:, :75], rtol=0.0, atol=0.0
-        )
-        torch.testing.assert_close(
-            observation,
-            torch.arange(83, dtype=torch.float32).unsqueeze(0),
-            rtol=0.0,
-            atol=0.0,
-        )
-        with self.assertRaisesRegex(ValueError, r"\[batch, 83\]"):
-            target_column_ablated_observation(torch.zeros((1, 82)), "hand")
-        self.assertEqual(
-            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand", "foot"))
-        )
-
-        unresponsive = _result(
-            target_column_ablation={
-                "hand": _ablation(
-                    target="hand",
-                    expected=True,
-                    maximum=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
-                ),
-                "foot": _ablation(
-                    target="foot",
-                    expected=True,
-                    maximum=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
-                ),
-            }
-        )
-        checks, status = _acceptance([unresponsive], FINAL_PROFILE)
-        self.assertEqual(status, "fail")
-        self.assertFalse(checks["target_column_ablation_response"])
-        hand_only = deepcopy(unresponsive)
-        hand_only["target_column_ablation"]["hand"] = _ablation(
-            target="hand", expected=True
-        )
-        checks, status = _acceptance([hand_only], FINAL_PROFILE)
-        self.assertEqual(status, "fail")
-        self.assertFalse(checks["target_column_ablation_response"])
-        both = deepcopy(hand_only)
-        both["target_column_ablation"]["foot"] = _ablation(target="foot", expected=True)
-        checks, status = _acceptance([both], FINAL_PROFILE)
-        self.assertEqual(status, "pass")
-
-    def test_tracking_ablation_evidence_is_exact_and_fail_closed(self) -> None:
-        identity = {
-            "sha256": "a" * 64,
-            "iteration": PICO_TOTAL_UPDATES - 1,
-            "completed_updates": PICO_TOTAL_UPDATES,
-        }
-        report = _tracking_report(identity)
-        self.assertEqual(
-            set(report["checks"]),
-            set(required_tracking_check_names(FINAL_PROFILE)),
-        )
-        self.assertIn("hand_tracking_rms", report["checks"])
-        self.assertIn("foot_tracking_rms", report["checks"])
-        _validate_tracking_report(report, identity)
-        active_index = next(
-            index
-            for index, result in enumerate(report["results"])
-            if result["target_column_ablation"]["hand"]["target_expected"]
-        )
-
-        def active_hand(candidate: dict[str, object]) -> dict[str, object]:
-            return candidate["results"][active_index]["target_column_ablation"]["hand"]
-
-        mutations = (
-            lambda candidate: active_hand(candidate).update(target_expected=False),
-            lambda candidate: active_hand(candidate).update(
-                ablated_observation_columns=list(range(75, 83))
-            ),
-            lambda candidate: active_hand(candidate).update(
-                preserved_observation_columns=[]
-            ),
-            lambda candidate: active_hand(candidate).update(
-                maximum_absolute_action_delta=-1.0
-            ),
-            lambda candidate: active_hand(candidate).update(
-                maximum_absolute_action_delta=float("nan")
-            ),
-            lambda candidate: active_hand(candidate).update(
-                minimum_required_action_delta=0.0
-            ),
-            lambda candidate: active_hand(candidate).update(passed=False),
-            lambda candidate: active_hand(candidate).update(untrusted=True),
-            lambda candidate: active_hand(candidate).pop(
-                "maximum_absolute_action_delta"
-            ),
-        )
-        for mutate in mutations:
-            with self.subTest(mutate=mutate):
-                corrupted = deepcopy(report)
-                mutate(corrupted)
-                with self.assertRaises(ValueError):
-                    _validate_tracking_report(corrupted, identity)
-
-        below_floor = deepcopy(report)
-        active_hand(below_floor).update(
-            maximum_absolute_action_delta=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
-            passed=False,
-        )
-        with self.assertRaisesRegex(ValueError, "checks do not match"):
-            _validate_tracking_report(below_floor, identity)
-
-    def test_active_foot_metric_excludes_inactive_foot(self) -> None:
-        default = torch.zeros(1, 2, 3)
-        target = torch.tensor([[[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]]])
-        current = torch.tensor([[[0.0, 0.0, 0.03], [9.0, 9.0, 9.0]]])
-        error = _active_foot_tracking_error(current, default, target)
-        self.assertEqual(tuple(error.shape), (1,))
-        torch.testing.assert_close(error, torch.tensor([0.01]))
 
     def test_gate_evidence_is_hash_bound_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -883,18 +528,10 @@ class TeleopV12StageTest(unittest.TestCase):
             corruptions = (
                 (locomotion_path, locomotion, ("checks",), {}),
                 (tracking_path, tracking, ("results",), []),
-                (
-                    tracking_path,
-                    tracking,
-                    ("results", 0, "hmd_motion", "per_axis"),
-                    {},
-                ),
-                (
-                    tracking_path,
-                    tracking,
-                    ("results", 0, "directional_response"),
-                    {},
-                ),
+                (tracking_path, tracking, ("results", "feet"), []),
+                (tracking_path, tracking, ("results", "safety", "finite"), False),
+                (tracking_path, tracking, ("results", "feet", 0, "lift_median_m", 0), 0.0),
+                (tracking_path, tracking, ("results", "feet", 0, "foot_goal", 0, 2), 0.0),
                 (
                     onnx_report_path,
                     onnx,
@@ -911,22 +548,6 @@ class TeleopV12StageTest(unittest.TestCase):
                     onnx_report_path,
                     onnx,
                     ("onnx", "reference_evaluator_maximum_absolute_error"),
-                    -1.0,
-                ),
-                (
-                    tracking_path,
-                    tracking,
-                    (
-                        "results",
-                        next(
-                            index
-                            for index, result in enumerate(tracking["results"])
-                            if result["target_error"]["active_hand"]["sample_count"] > 0
-                        ),
-                        "target_error",
-                        "active_hand",
-                        "rms",
-                    ),
                     -1.0,
                 ),
             )
