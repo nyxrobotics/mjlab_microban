@@ -4,7 +4,6 @@ src/mjlab_microban/robot/microban/scad/
 
 .vscode/*
 .venv/*
-uv.lock
 
 logs/*
 wandb/*

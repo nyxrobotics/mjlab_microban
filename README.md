@@ -21,8 +21,11 @@ If you don't have it yet, you can install it by following the instructions [here
 
 Then, clone this repository and run the following command in your terminal:
 ```
-uv sync
+uv sync --locked
 ```
+
+The tracked `uv.lock` is part of the training provenance. Do not regenerate it
+inside a canonical run; review and commit dependency updates separately.
 
 ## Using a velocity agent
 
