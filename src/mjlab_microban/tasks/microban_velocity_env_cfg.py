@@ -427,7 +427,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     #---------------------------- Play mode -------------------------
     # No curriculum, standing or rotation-only commands, pushes or observation
-    # noise.  The command ranges stay the initial ones.
+    # noise.  The command ranges stay the initial ones: the PICO play env (its
+    # 9x300 probe and stage gates, tests/fixtures/teleop_play_env_snapshot.json)
+    # inherits them, and the walk evaluators write their commands directly.
     if play:
         cfg.curriculum = {}
         

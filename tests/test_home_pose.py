@@ -104,6 +104,20 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
         self.assertEqual(HOME_TRUNK_PITCH_RAD, 0.0)
         self.assertEqual(HOME_PROJECTED_GRAVITY, (0.0, 0.0, -1.0))
 
+    def test_hand_fk_contract(self):
+        from mjlab_microban.robot import microban_hand_fk as fk
+
+        self.assertEqual(fk.MICROBAN_ARM_HOME_JOINT_DEG, ((0.0, 10.0, -20.0), (0.0, -10.0, -20.0)))
+        self.assertEqual(
+            fk.MICROBAN_HAND_FK_REVISION,
+            "microban_robot_xml_arm_fk_reachable_box_elbow_upper_minus10_v2",
+        )
+        self.assertEqual(fk.MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M, (0.0630, 0.0388, 0.0605))
+        self.assertEqual(
+            fk.MICROBAN_HAND_FK_OFFSET_AABB_MAX_M[0],
+            (0.06289464331528255, 0.0387512193701912, 0.060477220857479266),
+        )
+
     def test_fk_analysis_matches_the_centered_solve(self):
         analysis = HOME.analysis
         self.assertEqual(round(analysis.root_pos[2], 12), CENTERED_ROOT_Z)

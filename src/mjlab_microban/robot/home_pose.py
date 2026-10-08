@@ -116,9 +116,14 @@ HEAD_STANDING_HEIGHT_DECIMALS = 4
 FEET_LATERAL_DECIMALS = 4
 
 # Values published for one exact HOME, keyed by its joint hash: the
-# forward-lean HOME (trunk +10 deg), whose policies are trained with them:
+# forward-lean HOME (trunk +10 deg), whose policies were trained and deployed
+# with them.  It keeps every value and string it was trained with, so its
+# checkpoints, gates and ONNX stay valid:
 #
 # * ``tag``: the identifier used where a string embeds the HOME;
+# * ``contracts``: its HOME-bound contract/recipe/revision strings by key
+#   (robot/home_contracts.py derives "<label>_<hash>" strings for any other
+#   HOME);
 # * ``root_z_m``: the published root z (checked against FK to
 #   ROOT_Z_PIN_TOLERANCE_M);
 # * ``joint_pos_deg``: published full-precision joint values that differ from
@@ -126,11 +131,22 @@ FEET_LATERAL_DECIMALS = 4
 #   unrounded hip/ankle pitch); checked against the YAML to
 #   JOINT_PIN_TOLERANCE_DEG.
 #
-# Any edit of the HOME changes the hash and drops all of this: the tag is then
-# "<label>_<hash>" and every value is the FK value.
+# Any edit of the HOME changes the hash and drops all of this: strings then
+# carry "<label>_<hash>" and every value is the FK value.
 JOINT_PIN_TOLERANCE_DEG = 1.0e-9
 
 FORWARD_LEAN_HOME_HASH = "481503d292"
+
+_FORWARD_LEAN_HOME_CONTRACTS = {
+    "v12_home_pose_revision": (
+        "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
+    ),
+    "v12_recipe_revision": (
+        "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+        "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+        "receiver_box_hands_v17"
+    ),
+}
 
 PUBLISHED_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
     {
@@ -149,6 +165,7 @@ PUBLISHED_HOME_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType(
                         "right_ankle_pitch": 4.127976841869204,
                     }
                 ),
+                "contracts": MappingProxyType(_FORWARD_LEAN_HOME_CONTRACTS),
             }
         ),
     }
@@ -566,6 +583,13 @@ class HomePose:
     def trunk_is_vertical(self) -> bool:
         return self.trunk_pitch_deg == 0.0
 
+    def contract(self, key: str, derived: str) -> str:
+        """A HOME-bound string: the published one if the HOME has one, else ``derived``."""
+
+        contracts = self.overrides.get("contracts")
+        if isinstance(contracts, Mapping) and key in contracts:
+            return str(contracts[key])
+        return derived
 
     @property
     def hip_pitch_deg(self) -> float:

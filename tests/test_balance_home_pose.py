@@ -599,6 +599,18 @@ class TrainingLineTest(unittest.TestCase):
         result = check_training_line(self.balanced(trunk_pitch_deg=10.0), 10.0)
         self.assertTrue(result.ok, result.error)
 
+    def test_refused_homes_say_why(self):
+        cases = (
+            (self.balanced(elbow=-25.0), 0.0, "receiver box"),
+            (self.balanced(shoulder_pitch=-1.0), 0.0, "shoulder_pitch"),
+        )
+        for joints, trunk, message in cases:
+            with self.subTest(message=message):
+                result = check_training_line(joints, trunk)
+                self.assertFalse(result.ok)
+                self.assertIn(message, result.error)
+                self.assertEqual(result.error.count("\n"), 0)
+
 
 class HomePoseToolTest(unittest.TestCase):
     def run_tool(self, *argv: str) -> subprocess.CompletedProcess:

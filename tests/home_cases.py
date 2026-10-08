@@ -28,6 +28,21 @@ FORWARD_LEAN_HOME_YAML = FIXTURES / "home_pose_forward_lean.yaml"
 
 FORWARD_LEAN_HOME_TAG = "forward_lean_home"
 
+# The contract strings the forward-lean HOME was published with.
+PUBLISHED_CONTRACT_STRINGS = {
+    FORWARD_LEAN_HOME_TAG: {
+        "v12_home_pose_revision": (
+            "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
+        ),
+        "v12_recipe_revision": (
+            "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
+            "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
+            "receiver_box_hands_v17"
+        ),
+    },
+}
+
+
 def home_tag() -> str:
     from mjlab_microban.robot.home_pose import HOME
 
@@ -88,4 +103,20 @@ forward_lean_home_only = _pinned(
     AT_FORWARD_LEAN_HOME,
     "pins the forward-lean HOME's published values; run at the forward-lean HOME by "
     "test_home_pose_any_trunk.py::HomePinnedTestsTest",
+)
+
+
+def _home_trunk_pitch_deg() -> float:
+    from mjlab_microban.robot.home_pose import HOME
+
+    return float(HOME.trunk_pitch_deg)
+
+
+# Mechanisms that exist only with a pitched trunk (a vertical trunk keeps the
+# unlevelled terms); the subprocess run checks them at the forward-lean HOME.
+pitched_home_only = _pinned(
+    "forward_lean",
+    _home_trunk_pitch_deg() != 0.0,
+    "a vertical HOME trunk keeps the unlevelled terms; run at the forward-lean "
+    "HOME by test_home_pose_any_trunk.py::HomePinnedTestsTest",
 )

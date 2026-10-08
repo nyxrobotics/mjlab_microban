@@ -88,6 +88,13 @@ class HomePinnedTestsTest(unittest.TestCase):
         self.assertIn(" passed", summary)
         self.assertNotIn("skipped", summary, completed.stdout[-4000:])
 
+    def test_forward_lean_pinned_tests_pass_at_the_forward_lean_home(self):
+        import home_cases
+
+        if home_cases.AT_FORWARD_LEAN_HOME:
+            self.skipTest("this checkout is the forward-lean HOME: its pinned tests ran directly")
+        self._run_marked(LEAN_YAML, "forward_lean_home_pinned")
+
     def test_centered_pinned_tests_pass_at_the_centered_home(self):
         import home_cases
 
