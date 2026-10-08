@@ -279,6 +279,22 @@ class YamlEditTest(unittest.TestCase):
             load_home_pose(self.path)
 
 
+class WalkHomeStampTest(unittest.TestCase):
+    def test_stamp_rules(self):
+        from mjlab_microban.tasks.microban_getup_runner import getup_home_pose
+        from mjlab_microban.tasks.microban_velocity_runner import (
+            WALK_HOME_POSE_INFO_KEY,
+            require_walk_home_pose,
+        )
+
+        require_walk_home_pose({WALK_HOME_POSE_INFO_KEY: getup_home_pose()})
+        other = getup_home_pose()
+        other["root_pos_m"] = [0.0, 0.0, 0.17]
+        for infos in (None, {}, {WALK_HOME_POSE_INFO_KEY: other}):
+            with self.subTest(infos=infos), self.assertRaises(ValueError):
+                require_walk_home_pose(infos)
+
+
 class FloorContactAndRootZPinTest(unittest.TestCase):
     """Rolled soles, the published root z and the HOME stamp tolerance."""
 

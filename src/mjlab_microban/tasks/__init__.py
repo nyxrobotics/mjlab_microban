@@ -32,7 +32,8 @@ register_mjlab_task(
     env_cfg=make_microban_velocity_env_cfg(),
     play_env_cfg=make_microban_velocity_env_cfg(play=True),
     rl_cfg=MicrobanVelocityRlCfg,
-    # Binds the curriculum's update clock; a run is never resumed.
+    # Binds the curriculum's update clock and stamps checkpoints with the
+    # training HOME (another HOME is refused on load).
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
