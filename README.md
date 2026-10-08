@@ -27,21 +27,6 @@ uv sync --locked
 The tracked `uv.lock` is part of the training provenance. Do not regenerate it
 inside a canonical run; review and commit dependency updates separately.
 
-## Using a velocity agent
-
-<p align="center">
-  <img width="480" alt="MicrobanSimu" src="https://github.com/user-attachments/assets/fa79d712-e2ff-4452-b3ef-7ac41b87ff13" />
-</p>
-
-You can use a pre-trained agent directly in its MjLab environment (GPU required), where random velocity commands are given to the robot at regular intervals.
-Linear velocity commands are represented by a blue arrow, while angular velocity commands are represented by a green vertical one.
-
-```
-uv run play Mjlab-Velocity-Microban --checkpoint-file src/mjlab_microban/agents/velocity.pt
-```
-
-To push the robot while playing, double-click on the trunk in the simulation window, then hold the left-ctrl key and right-click and drag to apply a force.
-
 ## Transferring to the real robot
 
 The transfer on the real robot is always a challenge due to the sim-to-real gap. However, the policies trained in this repository have been successfully transferred to the real Microban robot. It is possible due to a combination of domain randomization and a well-tuned modelisation of the actuators (delays, friction, voltage drop, current clipping, etc.). This modelisation is done using the [BAM](https://github.com/Rhoban/bam) library.
@@ -51,6 +36,14 @@ Here is a video of the trained agent being transferred to the real robot: [https
 <p align="center">
   <img width="70%" alt="image" src="https://github.com/user-attachments/assets/dd91b082-faf0-4c73-a216-fe9b633f51b3" />
 </p>
+
+## HOME pose
+
+Every policy is trained and deployed at one HOME pose, defined only in
+[`config/home_pose.yaml`](config/README.md). Root height, gravity at HOME and
+the HOME identity are derived from it by MuJoCo FK
+(`src/mjlab_microban/robot/home_pose.py`). Changing it means retraining every
+policy.
 
 ## Training your own agent
 
@@ -76,6 +69,15 @@ uv run play Mjlab-Velocity-Microban --checkpoint-file [path to your checkpoint]
 ```
 
 Where `[path to your checkpoint]` is typically located at `logs/rsl_rl/mjlab_microban_velocity/[date]/model_[number].pt`.
+
+<p align="center">
+  <img width="480" alt="MicrobanSimu" src="https://github.com/user-attachments/assets/fa79d712-e2ff-4452-b3ef-7ac41b87ff13" />
+</p>
+
+Random velocity commands are given to the robot at regular intervals.
+Linear velocity commands are represented by a blue arrow, while angular velocity commands are represented by a green vertical one.
+
+To push the robot while playing, double-click on the trunk in the simulation window, then hold the left-ctrl key and right-click and drag to apply a force.
 
 You can also play back the last checkpoint in wandb with:
 

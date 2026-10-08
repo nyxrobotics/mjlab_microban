@@ -1,0 +1,59 @@
+# Test fixture: the forward-lean HOME (trunk +10 deg), as written by
+#   uv run python config/balance_home_pose.py --yaml <copy of home_pose_centered.yaml> --trunk-pitch-deg 10 --write
+# with name/label edited.  Tests read this file, never the checkout's
+# config/home_pose.yaml, when they need the forward-lean HOME as input.
+#
+#
+# Every policy is trained at this pose: env spawn and default joint pose.
+# Everything else -- root height/quaternion, projected gravity, head standing
+# height, feet distance, the HOME identity -- is computed from this file by
+# src/mjlab_microban/robot/home_pose.py (MuJoCo FK on
+# src/mjlab_microban/robot/microban/robot.xml).
+#
+# Changing HOME (see config/README.md):
+#   1. edit the values below (config/README.md lists the ones this training
+#      line can retrain at),
+#   2. optionally re-centre the COM by moving only hip/ankle pitch:
+#      uv run python config/balance_home_pose.py [--write] [--trunk-pitch-deg X]
+#   3. uv run python config/home_pose_tool.py show      # check derived values
+#   4. retrain every policy from scratch at it.
+#
+# Joint angles are in degrees, logical (training/MJCF) joint coordinates.  The
+# pose must be left/right mirror symmetric and the soles must be flat at
+# trunk_pitch_deg (the loader refuses it otherwise).
+
+schema_version: 1
+
+# Human-readable name, and the identifier of the HOME (a changed pose becomes
+# "<label>_<10-digit joint hash>").
+name: "Forward-lean HOME: trunk 10 deg forward, knees straight, COM over the sole centre"
+label: forward_lean_home
+
+# Root pitch at HOME (positive = trunk leans forward).  The soles must be level
+# at this pitch.
+trunk_pitch_deg: 10.0
+
+joint_pos_deg:
+  head: 0.0
+  neck_roll: 0.0
+  neck_pitch: 0.0
+  left_shoulder_roll: 10.0
+  right_shoulder_roll: -10.0
+  left_shoulder_pitch: 0.0
+  right_shoulder_pitch: 0.0
+  left_elbow: -20.0
+  right_elbow: -20.0
+  left_hip_roll: 5.0
+  right_hip_roll: -5.0
+  # Hip/ankle pitch: solved so the soles are flat and the whole-body COM is over
+  # the fore-aft centre of the sole contact area (config/balance_home_pose.py).
+  left_hip_pitch: -14.166561199931
+  right_hip_pitch: -14.166561199931
+  left_hip_yaw: 0.0
+  right_hip_yaw: 0.0
+  left_knee: 0.0
+  right_knee: 0.0
+  left_ankle_roll: -5.0
+  right_ankle_roll: 5.0
+  left_ankle_pitch: 4.127976841869
+  right_ankle_pitch: 4.127976841869
