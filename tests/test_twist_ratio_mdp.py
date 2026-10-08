@@ -531,6 +531,77 @@ class FilteredTermTest(unittest.TestCase):
         self.assertAlmostEqual(float(value[1]), 0.5, places=5)  # restarted: standing now
         self.assertGreater(float(value[0]), 0.9)  # filter still near the walk
 
+    def test_moving_commands_keep_the_filtered_reward(self) -> None:
+        # n >= 0.05 (normalized): the value is the filtered reward exactly.
+        from mjlab_microban.tasks.microban_twist_ratio_mdp import TWIST_RATIO_BLEND_NORM
+
+        self.assertEqual(TWIST_RATIO_BLEND_NORM, 0.05)
+        commands = [[0.035, 0.0, 0.0], [0.0, 0.015, 0.0], [0.0, 0.0, 0.075], list(G), [0.1, 0.0, 0.0]]
+        env = _FilterEnv(commands)
+        call, term = self.make(env)
+        torch.manual_seed(3)
+        for _ in range(80):
+            twist = torch.tensor(commands) + 0.1 * torch.randn(5, 3)
+            unc = 0.2 * torch.randn(5, 3)
+            env.move(twist.tolist(), unc.tolist())
+            value = call()
+            filtered = twist_ratio(term.command, term.twist, uncommanded=term.uncommanded)
+            expected = 0.5 * (1.0 + filtered.speed) * torch.exp(-filtered.error)
+            self.assertTrue(torch.allclose(value, expected, atol=1e-6))
+
+    def test_standing_still_on_the_standing_command_is_full_marks(self) -> None:
+        env = _FilterEnv([[0.0, 0.0, 0.0]])
+        call, _term = self.make(env)
+        env.move([[0.0, 0.0, 0.0]])
+        for _ in range(50):
+            value = call()
+        self.assertAlmostEqual(float(value[0]), 1.0, places=6)
+
+    def test_stepping_in_place_on_the_standing_command_costs(self) -> None:
+        # Stepping in place: lateral sway +-0.1 m/s at 2 Hz, bob and roll rate,
+        # zero mean.  Filtered it nearly vanished (about 0.95); the blend
+        # evaluates the instantaneous motion on a standing command.
+        env = _FilterEnv([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        call, _term = self.make(env)
+        values = []
+        for step in range(300):
+            t = step * env.step_dt
+            sway = 0.1 * math.sin(2 * math.pi * 2.0 * t)
+            bob = 0.05 * math.sin(2 * math.pi * 4.0 * t)
+            roll = 0.6 * math.sin(2 * math.pi * 2.0 * t)
+            env.move([[0.0, sway, 0.0], [0.0, 0.0, 0.0]], [[bob, roll, 0.0], [0.0, 0.0, 0.0]])
+            values.append(call())
+        mean = torch.stack(values[100:]).mean(dim=0)
+        self.assertAlmostEqual(float(mean[1]), 1.0, places=6)  # still
+        self.assertLess(float(mean[0]), 0.8)  # stepping in place
+
+    def test_the_blend_is_continuous_where_the_command_crosses_its_norm(self) -> None:
+        torch.manual_seed(4)
+        twist = (0.05 * torch.randn(1, 3)).tolist()
+        unc = (0.2 * torch.randn(1, 3)).tolist()
+        values = []
+        for norm in (0.0, 1e-6, 0.05 * (1 - 1e-6), 0.05, 0.05 * (1 + 1e-6)):
+            env = _FilterEnv([[norm * 0.7, 0.0, 0.0]])
+            call, _term = self.make(env)
+            env.move([[0.0, 0.0, 0.0]])
+            call()
+            env.move(twist, unc)
+            values.append(float(call()[0]))
+        self.assertLess(abs(values[0] - values[1]), 1e-4)
+        self.assertLess(abs(values[2] - values[3]), 1e-4)
+        self.assertLess(abs(values[3] - values[4]), 1e-4)
+
+    def test_the_blend_has_no_nan(self) -> None:
+        sizes = (0.0, 1e-30, 1e-12, 1e-6, 0.05, 1.0)
+        env = _FilterEnv([[s * 0.7, 0.0, 0.0] for s in sizes])
+        call, _term = self.make(env)
+        torch.manual_seed(5)
+        for _ in range(20):
+            env.move((torch.randn(len(sizes), 3)).tolist(), (torch.randn(len(sizes), 3)).tolist())
+            value = call()
+            self.assertTrue(bool(torch.isfinite(value).all()))
+            self.assertTrue(bool(((value >= 0.0) & (value <= 1.0)).all()))
+
 # Outputs of the filtered term and the pure reward as implemented when the
 # walker of the comparison was trained (form B3: exp/twist-ratio-validation
 # cf91eec, run trw6B3_s42) on the motion of _golden_sequence().

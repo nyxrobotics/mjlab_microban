@@ -127,6 +127,10 @@ TWIST_RATIO_UNCOMMANDED_SCALE = (0.7, 1.5, 1.5)
 TWIST_RATIO_EPS = 0.01
 TWIST_RATIO_DIRECTION_PENALTY = 1.0
 TWIST_RATIO_FILTER_TIME_CONSTANT_S = 0.5
+# Command norm (normalized units) from which the reward is evaluated on the
+# filtered values only; below it the instantaneous values are blended in, all
+# of them at a standing command (twist_ratio_velocity).
+TWIST_RATIO_BLEND_NORM = 0.05
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -262,6 +266,17 @@ class twist_ratio_velocity:
     fall do not.  Filtering the command the same way keeps a robot that follows
     a new command at once on target while both settle.  Both filters start at
     the current values on the first step of an episode.
+
+    The values the reward is evaluated on blend the filtered and the
+    instantaneous ones, ``w * filtered + (1 - w) * instantaneous`` with
+    ``w = min(1, n / TWIST_RATIO_BLEND_NORM)`` and ``n`` the norm of the
+    filtered command (normalized units, 0.05): from ``n = 0.05`` on (every
+    moving command the robot is given) it is the filtered reward above; on a
+    standing command (``n = 0``) it is the instantaneous one, so the sway of
+    stepping in place counts as motion and standing with the feet still is
+    the best (user decision, 2026-10-08: no separate stepping penalty, the
+    velocity reward itself makes standing still the natural best).  The
+    blend is continuous in ``n``, with no branch.
     """
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
@@ -304,11 +319,17 @@ class twist_ratio_velocity:
             fresh, uncommanded, self.uncommanded + gain * (uncommanded - self.uncommanded)
         )
         self.fresh[:] = False
+        scale = torch.as_tensor(tuple(float(v) for v in axis_scale), dtype=self.command.dtype,
+                                device=self.command.device)
+        norm = torch.linalg.vector_norm(self.command / scale, dim=-1, keepdim=True)
+        weight = torch.clamp(norm / TWIST_RATIO_BLEND_NORM, max=1.0)
         parts = twist_ratio(
-            self.command,
-            self.twist,
+            weight * self.command + (1.0 - weight) * command,
+            weight * self.twist + (1.0 - weight) * twist,
             axis_scale,
-            None if uncommanded_scale is None else self.uncommanded,
+            None
+            if uncommanded_scale is None
+            else weight * self.uncommanded + (1.0 - weight) * uncommanded,
             uncommanded_scale,
         )
         extras = getattr(env, "extras", None)
