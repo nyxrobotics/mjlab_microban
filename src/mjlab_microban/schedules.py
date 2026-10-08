@@ -38,6 +38,18 @@ def scaled(iteration: int) -> int:
 WALK_WIDEN_UPDATE = scaled(3000)
 WALK_TOTAL_UPDATES = scaled(30000)
 
+# Get-up: IMU latency, calm refinement, low effort, then pushes.  The pushes
+# start after the low-effort stage has released the arms from their stops
+# (5000 updates; a push-free effort stage releases them 3000-4500 updates in)
+# and last 3000 updates.
+GETUP_SCHEDULE = {
+    "imu_delay": scaled(2500),
+    "refine": scaled(4000),
+    "effort": scaled(10000),
+    "push": scaled(15000),
+}
+GETUP_TOTAL_UPDATES = scaled(18000)
+
 # PICO: the critic of the frozen walker's adapter warms up for
 # PICO_WARMUP_UPDATES (no actor column trains before hand targets open), then
 # hands (tightened after 1500), feet (3000 after the hands, tightened 2000

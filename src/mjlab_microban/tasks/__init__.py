@@ -8,6 +8,11 @@
 
 from mjlab.tasks.registry import register_mjlab_task
 
+from mjlab_microban.tasks.microban_getup_env_cfg import (
+    MicrobanGetupRlCfg,
+    make_microban_getup_env_cfg,
+)
+from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
     MicrobanTeleopV12HandPoseReleaseRlCfg,
@@ -31,6 +36,16 @@ register_mjlab_task(
     runner_cls=MicrobanVelocityOnPolicyRunner,
 )
 
+# Get-up: one training run with step-scheduled switches (IMU latency at 2500,
+# calm refinement at 4000, low effort at 10000, pushes at 15000; see
+# mjlab_microban/schedules.py and docs/getup_training_export.md).
+register_mjlab_task(
+    task_id="Mjlab-Getup-Microban",
+    env_cfg=make_microban_getup_env_cfg(),
+    play_env_cfg=make_microban_getup_env_cfg(play=True),
+    rl_cfg=MicrobanGetupRlCfg,
+    runner_cls=MicrobanGetupOnPolicyRunner,
+)
 # PICO v12: the active-hand arm pose-release recipe, trained in one run.
 register_mjlab_task(
     task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,

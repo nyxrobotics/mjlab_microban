@@ -36,6 +36,9 @@ _ANKLE = signed_degree_token(HOME.ankle_pitch_deg)
 _V12_RECIPE_BASE = "velocity_source_staged_mask_reachable_fk_elbow_minus10_raw_prev_action_servo_range_pi"
 _V12_LEVELLED = "home_levelled_targets_level_hmd_receiver_box_hands"
 
+# Get-up checkpoints (microban_getup_runner).
+GETUP_CONTRACT_VERSION = _contract("getup_contract_version", f"v5_{_TAG}", f"v6_{_TAG}")
+
 # PICO contract v12 checkpoints, gates and packages (microban_teleop_v12_env_cfg).
 V12_HOME_POSE_REVISION = _contract(
     "v12_home_pose_revision",
@@ -60,6 +63,7 @@ def contract_strings() -> dict[str, str]:
     """The HOME-bound identifiers stamped into this HOME's checkpoints and gates."""
 
     return {
+        "getup_contract_version": GETUP_CONTRACT_VERSION,
         "v12_home_pose_revision": V12_HOME_POSE_REVISION,
         "v12_recipe_revision": V12_RECIPE_REVISION,
         "v12_hand_pose_release_recipe_revision": V12_HAND_POSE_RELEASE_RECIPE_REVISION,

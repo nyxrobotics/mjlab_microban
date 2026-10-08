@@ -81,13 +81,13 @@ MIRROR_OPPOSITE_JOINTS = ("shoulder_roll", "hip_roll", "hip_yaw", "ankle_roll")
 MIRROR_ZERO_JOINTS = ("head", "neck_roll")
 
 TRUNK_BODY = "trunk"
-# Virtual head point: the head standing height is measured there.
+# Virtual head point used by the get-up rewards (mdp._TRUNK_TO_HEAD_OFFSET).
 TRUNK_TO_HEAD_OFFSET_M = 0.07324
 SOLE_GEOMS = {
     side: tuple(f"{side}_foot_collision_{index}" for index in range(1, 7))
     for side in ("left", "right")
 }
-# The feet distance is measured between the foot BODY origins.
+# The get-up feet_stance reward measures the foot BODY origins.
 FOOT_BODIES = {"left": "foot_2", "right": "foot"}
 # A sole corner belongs to the contact area when it lies within this distance
 # of the lowest corner along the sole normal (box 1's local z axis).
@@ -109,7 +109,7 @@ SOLE_ON_FLOOR_TOLERANCE_M = 5.0e-4
 # FK value to sit within that of a 1e-12 boundary.  A HOME with published
 # artifacts keeps its exact published value through PUBLISHED_HOME_OVERRIDES
 # ("root_z_m", checked against FK to ROOT_Z_PIN_TOLERANCE_M).  The head height
-# is rounded to 0.1 mm.
+# is rounded to 0.1 mm, the value the get-up gates use.
 ROOT_Z_DECIMALS = 12
 ROOT_Z_PIN_TOLERANCE_M = 1.0e-12
 HEAD_STANDING_HEIGHT_DECIMALS = 4
@@ -138,6 +138,7 @@ JOINT_PIN_TOLERANCE_DEG = 1.0e-9
 FORWARD_LEAN_HOME_HASH = "481503d292"
 
 _FORWARD_LEAN_HOME_CONTRACTS = {
+    "getup_contract_version": "v6",
     "v12_home_pose_revision": (
         "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
     ),
@@ -578,6 +579,12 @@ class HomePose:
         if "tag" in self.overrides:
             return str(self.overrides["tag"])
         return f"{self.label}_{self.joint_hash}"
+
+    @property
+    def is_published(self) -> bool:
+        """True for a HOME with published artifacts (PUBLISHED_HOME_OVERRIDES)."""
+
+        return "contracts" in self.overrides
 
     @property
     def trunk_is_vertical(self) -> bool:

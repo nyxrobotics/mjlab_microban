@@ -31,6 +31,7 @@ FORWARD_LEAN_HOME_TAG = "forward_lean_home"
 # The contract strings the forward-lean HOME was published with.
 PUBLISHED_CONTRACT_STRINGS = {
     FORWARD_LEAN_HOME_TAG: {
+        "getup_contract_version": "v6",
         "v12_home_pose_revision": (
             "forward_lean10_hip_minus14p166561199931_ankle_plus4p127976841869_shoulder_zero_v6"
         ),

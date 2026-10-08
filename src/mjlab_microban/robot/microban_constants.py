@@ -23,7 +23,7 @@ def get_spec() -> mujoco.MjSpec:
 
 from mjlab_microban.robot.home_pose import HOME
 
-# Shared reference pose of every policy, loaded
+# Shared reference pose of every policy (walking, PICO teleop, get-up), loaded
 # from config/home_pose.yaml (the single source of truth; see config/README.md).
 # Everything below is derived from that file by MuJoCo FK
 # (robot/home_pose.py): the soles are flat at the HOME trunk pitch and the
@@ -80,10 +80,15 @@ bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
 # the XC330-T288-T firmware current limit.  vin_drop_gain_range is an empirical
 # pack-level V/Nm coefficient (battery + wiring resistance across all 21
 # servos), not derivable from a single motor's R/kt.
+# Firmware position P gain of all 21 servos while a learned policy (walking,
+# get-up, PICO) runs, in training and on the robot (the robot's KP_RL).  The
+# robot holds static poses without a policy at its own, stiffer gain.
+SERVO_KP_POLICY = 125
+
 actuators = BamActuatorCfg(
     json_path=str(Path(os.path.dirname(__file__)) / "xc330_params.json"),
     target_names_expr=(r".*",),
-    kp_fw=125,
+    kp_fw=SERVO_KP_POLICY,
     vin_range=(9.0, 12.6),
     vin_drop_gain_range=(0.0, 0.2),
     vin_min=9.0,

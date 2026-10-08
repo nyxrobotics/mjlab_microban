@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import sys
@@ -103,6 +104,17 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
         )
         self.assertEqual(HOME_TRUNK_PITCH_RAD, 0.0)
         self.assertEqual(HOME_PROJECTED_GRAVITY, (0.0, 0.0, -1.0))
+
+    def test_derived_training_values(self):
+        from mjlab_microban.tasks.microban_getup_env_cfg import (
+            HEAD_STANDING_HEIGHT,
+            HOME_FEET_LATERAL_M,
+            STANDING_GATE_HEIGHT,
+        )
+
+        self.assertEqual(HEAD_STANDING_HEIGHT, 0.2965)
+        self.assertEqual(STANDING_GATE_HEIGHT, 0.9 * 0.2965)
+        self.assertEqual(HOME_FEET_LATERAL_M, 0.0935)
 
     def test_hand_fk_contract(self):
         from mjlab_microban.robot import microban_hand_fk as fk
@@ -320,6 +332,37 @@ class FloorContactAndRootZPinTest(unittest.TestCase):
                 )
         finally:
             home_pose.PUBLISHED_HOME_OVERRIDES = original
+
+    def test_home_stamps_tolerate_fk_noise_only(self):
+        from mjlab_microban.tasks.microban_getup_runner import (
+            HOME_ROOT_RECORDED_ATOL,
+            HOME_STAMP_TOLERANCE,
+            getup_home_pose,
+            home_pose_stamps_match,
+        )
+
+        # A derived HOME (FK-computed values) tolerates 1e-9 of FK noise.
+        stamp = json.loads(json.dumps(getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
+        stamp["root_pos_m"][2] += 1.0e-12
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
+        # A HOME with published artifacts pins its values and compares
+        # exactly (stamp == HOME, root atol 1e-12); any other HOME keeps the
+        # 1e-9 FK-noise tolerance.
+        if HOME.is_published:
+            self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (0.0, 1.0e-12))
+            self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose()))
+        else:
+            self.assertEqual((HOME_STAMP_TOLERANCE, HOME_ROOT_RECORDED_ATOL), (1.0e-9, 1.0e-9))
+            self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 0.0))
+        stamp["root_pos_m"][2] += 1.0e-6
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
+        stamp = json.loads(json.dumps(getup_home_pose()))
+        self.assertTrue(home_pose_stamps_match(stamp, getup_home_pose()))
+        stamp["joint_pos_rad"].pop("left_knee")
+        self.assertFalse(home_pose_stamps_match(stamp, getup_home_pose(), 1.0e-9))
+        self.assertFalse(home_pose_stamps_match(None, getup_home_pose()))
 
     def test_mjcf_range_message_is_unambiguous(self):
         joints = self.centered_deg(knee=(135.0, 135.0))
