@@ -99,6 +99,7 @@ TWIST_AXIS_SCALE = tuple(
 # replaces (exp/twist-ratio-validation AB_result.md, recommendation of
 # 2026-10-07 01:15: the bounded time-filtered form, direction penalty 1).
 WALK_TWIST_RATIO_WEIGHT = 8.0
+WALK_STANDING_ENVS = 0.25
 WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
@@ -342,7 +343,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.build = lambda env, _cmd=command: UniformVelocityCommandWithRotation(_cmd, env)
     command.viz.z_offset = 0.5
 
-    command.rel_standing_envs = 0.1
+    # A quarter of the commands stand (WALK_STANDING_ENVS): with the twist
+    # reward that counts stepping in place as motion on a standing command
+    # (1746fc5), a walker trained with a tenth kept stepping in place there
+    # for 4000 updates (walk_91b4dbec, 2026-10-08).
+    command.rel_standing_envs = WALK_STANDING_ENVS
     command.rel_heading_envs = 0.0
     command.rel_rotation_envs = 0.1
 
