@@ -238,8 +238,22 @@ def required_tracking_profile(completed_updates: int) -> str:
     return FINAL_PROFILE
 
 
+# The judged mixed scenarios walk at half the command envelope (user decision,
+# 2026-10-08): walking at the maximum on every axis at once while both arms
+# reach far is rare on the robot, the frozen walker itself beats standing
+# still there by only about 0.03 of the twist reward, and the deployed
+# centered-HOME PICO scores 0.487 there (below the 0.5 line).
+MIXED_TRACKING_TWIST_SCALE = 0.5
+MIXED_TRACKING_SCENARIOS = ("mixed_forward_left", "mixed_backward_right")
+
+
 def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
     by_name = {scenario.name: scenario for scenario in default_scenarios()}
+    for name in MIXED_TRACKING_SCENARIOS:
+        by_name[name] = replace(
+            by_name[name],
+            twist=tuple(MIXED_TRACKING_TWIST_SCALE * value for value in by_name[name].twist),
+        )
     reachable = dict(microban_reachable_hand_evaluation_offsets())
     forward = reachable["F"]
     backward = reachable["B"]

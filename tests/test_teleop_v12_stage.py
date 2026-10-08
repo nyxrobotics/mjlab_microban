@@ -458,6 +458,18 @@ class TeleopV12StageTest(unittest.TestCase):
             scenarios["mixed_backward_right"].hand_target,
             (poses["b"][0], poses["f"][1]),
         )
+        # The mixed scenarios walk at half the command envelope (user decision 2026-10-08).
+        from mjlab_microban.scripts.teleop_v12_scenarios import (
+            BACKWARD_MAX_M_S,
+            FORWARD_MAX_M_S,
+            LATERAL_MAX_M_S,
+            MOVING_YAW_MAX_RAD_S,
+        )
+
+        self.assertEqual(scenarios["mixed_forward_left"].twist,
+                         (0.5 * FORWARD_MAX_M_S, 0.5 * LATERAL_MAX_M_S, 0.5 * MOVING_YAW_MAX_RAD_S))
+        self.assertEqual(scenarios["mixed_backward_right"].twist,
+                         (-0.5 * BACKWARD_MAX_M_S, -0.5 * LATERAL_MAX_M_S, -0.5 * MOVING_YAW_MAX_RAD_S))
 
     def test_one_profile_for_the_checkpoint_a_run_ends_with(self) -> None:
         for completed in (PICO_SCHEDULE["foot_tighten"] + 1, PICO_MIN_FINAL_UPDATES, PICO_TOTAL_UPDATES):
