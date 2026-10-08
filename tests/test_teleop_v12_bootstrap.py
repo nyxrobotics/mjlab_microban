@@ -16,7 +16,6 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
@@ -28,6 +27,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+    LEGACY_TELEOP_PROBE_REVISION,
     assert_actor_frozen_against_source,
     bootstrap_legacy_actor,
     inspect_legacy_velocity_checkpoint,
@@ -73,7 +73,7 @@ def _source_model() -> MLPModel:
 
 def _target_model() -> LegacyAdapterTeleopActor:
     return LegacyAdapterTeleopActor(
-        obs=_observations(83),
+        obs=_observations(81),
         obs_groups={"actor": ["actor"]},
         obs_set="actor",
         output_dim=18,
@@ -107,11 +107,11 @@ def _write_synthetic_source() -> tuple[str, str]:
         "nonfinite": None,
         "executed_steps": 300,
         "raw_action_recurrence_verified_steps": 300,
-        "neutral_foot_hand_target_verified_steps": 300,
+        "neutral_target_verified_steps": 300,
         "maximum_actual_soft_limit_violation_rad": 0.0,
     }
     receipt = {
-        "probe": "legacy_velocity_actor_in_nominal_teleop_env_v1",
+        "probe": LEGACY_TELEOP_PROBE_REVISION,
         "checkpoint": {"path": str(CHECKPOINT), "sha256": source_sha256},
         "settings": {
             "seed": 42,
@@ -121,11 +121,11 @@ def _write_synthetic_source() -> tuple[str, str]:
             "action_clip": MICROBAN_TELEOP_V12_ACTION_CLIP,
             "previous_action": "raw_actor_output",
             "foot_target": "exact_zero_inactive",
-            "hand_target": "exact_zero_inactive",
+            "arm_target": "home_overlay",
         },
         "mapping": {
             "legacy_observation_width": 63,
-            "teleop_observation_width": 83,
+            "teleop_observation_width": 81,
             "legacy_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
             "teleop_joint_names": [
                 *MICROBAN_HMD_JOINT_NAMES,
@@ -204,10 +204,7 @@ class TeleopV12BootstrapTest(unittest.TestCase):
             rtol=0.0,
             atol=4.0e-9,
         )
-        identity_columns = (
-            *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
-            *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-        )
+        identity_columns = TELEOP_V12_HMD_OBSERVATION_COLUMNS
         self.assertTrue(
             torch.equal(
                 state["obs_normalizer._std"][:, identity_columns],
@@ -216,7 +213,7 @@ class TeleopV12BootstrapTest(unittest.TestCase):
         )
 
         generator = torch.Generator().manual_seed(20260925)
-        teleop = torch.randn(10_000, 83, generator=generator)
+        teleop = torch.randn(10_000, 81, generator=generator)
         legacy = teleop[
             :, [target for _source, target in LEGACY_TO_TELEOP_OBSERVATION_INDEX]
         ]

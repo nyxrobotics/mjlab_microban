@@ -13,6 +13,12 @@ joints.  During training those joints therefore need an external command that
 resembles the independent HMD controller used on the physical robot.  The term
 below generates random HMD waypoints and slews the position targets towards
 them at the same bounded rate as the robot runtime.
+
+The six arm joints are driven from outside too: on the robot the direct-IK
+``pico_arms`` move overwrites them during PICO teleoperation, so the policy's
+arm outputs never reach the servos.  ``PicoArmOverlayJointPositionAction``
+writes an external arm target instead (slewed at the robot's rate),
+``PicoArmTargetMotion`` draws it, and ``arm_target_rel`` observes it.
 """
 
 from __future__ import annotations
@@ -25,15 +31,19 @@ from typing import Any
 import torch
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.envs.mdp.actions import JointPositionAction
+from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from mjlab_microban.policy_contract import (
+    PICO_ARM_JOINT_NAMES,
+    PICO_ARM_LOWER_RAD,
+    PICO_ARM_SLEW_RATE_RAD_S,
+    PICO_ARM_UPPER_RAD,
+)
 from mjlab_microban.tasks.mdp import (
     FootTargetCommand,
     FootTargetCommandCfg,
-    HandTargetCommand,
-    HandTargetCommandCfg,
 )
 from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
 
@@ -160,9 +170,14 @@ def normalized_joint_soft_limit_guard_l1_sum(
     if not isinstance(action, JointPositionAction):
         raise TypeError(f"{action_name!r} must be a JointPositionAction")
     entity = action._entity
-    limits = entity.data.soft_joint_pos_limits[:, action.target_ids]
-    joint_pos = entity.data.joint_pos[:, action.target_ids]
-    joint_vel = entity.data.joint_vel[:, action.target_ids]
+    # Joints the policy does not drive (the overlaid arms) are not its to guard.
+    columns = getattr(action, "policy_columns", None)
+    if columns is None:
+        columns = torch.arange(action.action_dim, device=env.device)
+    target_ids = action.target_ids[columns]
+    limits = entity.data.soft_joint_pos_limits[:, target_ids]
+    joint_pos = entity.data.joint_pos[:, target_ids]
+    joint_vel = entity.data.joint_vel[:, target_ids]
     if not bool(
         torch.isfinite(limits).all()
         and torch.isfinite(joint_pos).all()
@@ -181,7 +196,9 @@ def normalized_joint_soft_limit_guard_l1_sum(
     default_target = torch.as_tensor(
         action.offset, dtype=joint_pos.dtype, device=joint_pos.device
     )
-    default_target = torch.broadcast_to(default_target, joint_pos.shape)
+    default_target = torch.broadcast_to(
+        default_target, (joint_pos.shape[0], action.action_dim)
+    )[:, columns]
     if not bool(
         torch.isfinite(default_target).all()
         and torch.all((default_target >= lower) & (default_target <= upper)).item()
@@ -346,49 +363,6 @@ class ResetFixedFootTargetCommandCfg(FootTargetCommandCfg):
 
     def build(self, env: ManagerBasedRlEnv) -> ResetFixedFootTargetCommand:
         return ResetFixedFootTargetCommand(self, env)
-
-
-class ResetFixedHandTargetCommand(HandTargetCommand):
-    """Hand offsets whose trunk-frame zero is fixed for one episode."""
-
-    def __init__(self, cfg: ResetFixedHandTargetCommandCfg, env: ManagerBasedRlEnv):
-        super().__init__(cfg, env)
-        self._reference_pending = torch.ones(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-
-    def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
-        if not isinstance(env_ids, torch.Tensor):
-            raise TypeError("Hand target reset requires explicit environment IDs")
-        self._reference_pending[env_ids] = True
-        return super().reset(env_ids)
-
-    def _capture_pending_reference(self) -> None:
-        env_ids = self._reference_pending.nonzero(as_tuple=False).flatten()
-        if len(env_ids) == 0:
-            return
-        self._default_hand_pos_b[env_ids] = self.current_hand_pos_b()[env_ids]
-        self._reference_pending[env_ids] = False
-
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
-        reference = self._default_hand_pos_b[env_ids].clone()
-        super()._resample_command(env_ids)
-        self._default_hand_pos_b[env_ids] = reference
-
-    def _update_metrics(self) -> None:
-        self._capture_pending_reference()
-        super()._update_metrics()
-
-    def _update_command(self) -> None:
-        self._capture_pending_reference()
-
-
-@dataclass(kw_only=True)
-class ResetFixedHandTargetCommandCfg(HandTargetCommandCfg):
-    """Configuration for episode-reset-fixed hand targets."""
-
-    def build(self, env: ManagerBasedRlEnv) -> ResetFixedHandTargetCommand:
-        return ResetFixedHandTargetCommand(self, env)
 
 
 def _ordered_values(
@@ -617,4 +591,206 @@ class HmdNeckTargetMotion:
         )
         self.asset.set_joint_position_target(
             self.current_target, joint_ids=self.joint_ids
+        )
+
+
+def _explicit_ids(env_ids: torch.Tensor | slice | None, count: int, device: Any) -> torch.Tensor:
+    if env_ids is None or isinstance(env_ids, slice):
+        return torch.arange(count, dtype=torch.long, device=device)[
+            env_ids if isinstance(env_ids, slice) else slice(None)
+        ]
+    return env_ids.to(device=device, dtype=torch.long)
+
+
+class PicoArmOverlayJointPositionAction(JointPositionAction):
+    """The policy's 18 outputs, with the six arm targets written from outside.
+
+    As on the robot (``pico_arms`` overwrites the arm servos during PICO
+    teleoperation), the twelve leg joints take ``HOME + raw`` (saturated at
+    the servo range) and the six arm joints take ``arm_target_rad``, which
+    ``process_actions`` slews towards ``arm_goal_rad`` once per policy step
+    at ``PICO_ARM_SLEW_RATE_RAD_S``.  ``raw_action`` (the previous-action
+    observation) stays the policy's 18 raw outputs.  Both arm tensors are
+    absolute angles in ``PICO_ARM_JOINT_NAMES`` order and reset to HOME.
+    """
+
+    cfg: PicoArmOverlayJointPositionActionCfg
+
+    def __init__(self, cfg: PicoArmOverlayJointPositionActionCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        names = list(self.target_names)
+        missing = [name for name in PICO_ARM_JOINT_NAMES if name not in names]
+        if missing:
+            raise ValueError(f"Arm overlay joints are not policy targets: {missing}")
+        arm = [names.index(name) for name in PICO_ARM_JOINT_NAMES]
+        self.arm_columns = torch.tensor(arm, dtype=torch.long, device=self.device)
+        self.policy_columns = torch.tensor(
+            [index for index in range(self.action_dim) if index not in arm],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.arm_home_rad = self._offset[:, self.arm_columns].clone()
+        self.arm_lower_rad = torch.tensor(PICO_ARM_LOWER_RAD, device=self.device).unsqueeze(0)
+        self.arm_upper_rad = torch.tensor(PICO_ARM_UPPER_RAD, device=self.device).unsqueeze(0)
+        if not bool(
+            torch.all(
+                (self.arm_home_rad >= self.arm_lower_rad)
+                & (self.arm_home_rad <= self.arm_upper_rad)
+            ).item()
+        ):
+            raise ValueError("HOME arm pose lies outside the PICO arm box")
+        self.arm_max_step_rad = PICO_ARM_SLEW_RATE_RAD_S * env.step_dt
+        self.arm_target_rad = self.arm_home_rad.clone()
+        self.arm_goal_rad = self.arm_home_rad.clone()
+
+    def set_arm_target(
+        self, env_ids: torch.Tensor, value: torch.Tensor, *, immediate: bool
+    ) -> None:
+        """Set the arm goal of ``env_ids`` (absolute, clamped to the box)."""
+
+        value = torch.clamp(
+            value, min=self.arm_lower_rad, max=self.arm_upper_rad
+        )
+        self.arm_goal_rad[env_ids] = value
+        if immediate:
+            self.arm_target_rad[env_ids] = value
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        super().process_actions(actions)
+        step = torch.clamp(
+            self.arm_goal_rad - self.arm_target_rad,
+            min=-self.arm_max_step_rad,
+            max=self.arm_max_step_rad,
+        )
+        self.arm_target_rad = torch.clamp(
+            self.arm_target_rad + step, min=self.arm_lower_rad, max=self.arm_upper_rad
+        )
+        self._processed_actions[:, self.arm_columns] = self.arm_target_rad
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        ids = _explicit_ids(env_ids, self.num_envs, self.device)
+        self.arm_target_rad[ids] = self.arm_home_rad[ids]
+        self.arm_goal_rad[ids] = self.arm_home_rad[ids]
+        self._processed_actions[ids.unsqueeze(-1), self.arm_columns] = self.arm_home_rad[ids]
+
+
+@dataclass(kw_only=True)
+class PicoArmOverlayJointPositionActionCfg(JointPositionActionCfg):
+    def build(self, env: ManagerBasedRlEnv) -> PicoArmOverlayJointPositionAction:
+        return PicoArmOverlayJointPositionAction(self, env)
+
+
+def arm_target_rel(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
+    """The arm targets the last physics step used, minus HOME (N, 6), in
+    ``PICO_ARM_JOINT_NAMES`` order (the robot's ``pico_arms`` output of the
+    previous control cycle)."""
+
+    action = env.action_manager.get_term(action_name)
+    if not isinstance(action, PicoArmOverlayJointPositionAction):
+        raise TypeError(f"{action_name!r} must be the PICO arm overlay action")
+    return action.arm_target_rad - action.arm_home_rad
+
+
+# The arm-target distribution of training (training-side only; not part of
+# the robot contract): a goal is redrawn every 0.5-3 s; with
+# ``home_probability`` both arms go HOME (the right trigger released, which
+# switches both arms at once), otherwise each joint is uniform in the box and
+# a draw whose hand lies inside the trunk or across the body's mid-plane is
+# redrawn.
+PICO_ARM_RETARGET_INTERVAL_S = (0.5, 3.0)
+PICO_ARM_HOME_PROBABILITY = 0.3
+# Trunk collision boxes of robot.xml (trunk frame, metres) grown by 1 cm.
+_TRUNK_KEEP_OUT_HALF_XY_M = (0.043, 0.064)
+_TRUNK_KEEP_OUT_Z_M = (-0.01, 0.1175)
+_ARM_DRAW_ROUNDS = 32
+
+
+def sample_pico_arm_targets(count: int, *, device: Any) -> torch.Tensor:
+    """``count`` absolute arm targets (N, 6) drawn in the box, hands clear of the trunk."""
+
+    from mjlab_microban.robot.microban_hand_fk import (
+        microban_hand_positions_from_arm_joints,
+    )
+
+    lower = torch.tensor(PICO_ARM_LOWER_RAD, device=device)
+    upper = torch.tensor(PICO_ARM_UPPER_RAD, device=device)
+    result = torch.empty((count, 6), device=device)
+    pending = torch.arange(count, device=device)
+    for _ in range(_ARM_DRAW_ROUNDS):
+        if pending.numel() == 0:
+            return result
+        draw = lower + torch.rand((pending.numel(), 6), device=device) * (upper - lower)
+        hands = microban_hand_positions_from_arm_joints(draw.view(-1, 2, 3))
+        x, y, z = hands[..., 0], hands[..., 1], hands[..., 2]
+        inside_trunk = (
+            (x.abs() < _TRUNK_KEEP_OUT_HALF_XY_M[0])
+            & (y.abs() < _TRUNK_KEEP_OUT_HALF_XY_M[1])
+            & (z > _TRUNK_KEEP_OUT_Z_M[0])
+            & (z < _TRUNK_KEEP_OUT_Z_M[1])
+        )
+        crossed = torch.stack((y[:, 0] < 0.0, y[:, 1] > 0.0), dim=-1)
+        ok = ~(inside_trunk | crossed).any(dim=-1)
+        result[pending[ok]] = draw[ok]
+        pending = pending[~ok]
+    if pending.numel():
+        raise RuntimeError("PICO arm target sampling did not converge")
+    return result
+
+
+class PicoArmTargetMotion:
+    """``mode='step'`` event that redraws the overlaid arms' goal.
+
+    Writes only ``arm_goal_rad`` of the arm overlay action (which slews the
+    servo targets).  ``home_probability`` is a param a curriculum stage may
+    change; resets put the arms at HOME and draw a new goal on the first step.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedRlEnv) -> None:
+        params = cfg.params
+        self.action_name = str(params.get("action_name", "joint_pos"))
+        interval = params["retarget_interval_s"]
+        self.retarget_interval_s = (float(interval[0]), float(interval[1]))
+        if not 0.0 < self.retarget_interval_s[0] <= self.retarget_interval_s[1]:
+            raise ValueError("Arm retarget interval must be positive and ordered")
+        self.home_probability = float(params.get("home_probability", 1.0))
+        if not 0.0 <= self.home_probability <= 1.0:
+            raise ValueError("home_probability must be in [0, 1]")
+        self.time_to_retarget_s = torch.zeros(
+            env.num_envs, dtype=torch.float32, device=env.device
+        )
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = _explicit_ids(env_ids, self.time_to_retarget_s.shape[0], self.time_to_retarget_s.device)
+        self.time_to_retarget_s[ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | None,
+        home_probability: float | None = None,
+        **_unused: Any,
+    ) -> None:
+        if env_ids is not None:
+            raise ValueError("PicoArmTargetMotion step event expects env_ids=None")
+        if home_probability is not None:
+            if not 0.0 <= home_probability <= 1.0:
+                raise ValueError("home_probability must be in [0, 1]")
+            self.home_probability = float(home_probability)
+        action = env.action_manager.get_term(self.action_name)
+        if not isinstance(action, PicoArmOverlayJointPositionAction):
+            raise TypeError("PicoArmTargetMotion requires the PICO arm overlay action")
+
+        self.time_to_retarget_s -= env.step_dt
+        due = (self.time_to_retarget_s <= 0.0).nonzero().flatten()
+        if due.numel() == 0:
+            return
+        goal = action.arm_home_rad[due].clone()
+        moving = torch.rand(due.numel(), device=env.device) >= self.home_probability
+        if bool(moving.any().item()):
+            goal[moving] = sample_pico_arm_targets(int(moving.sum().item()), device=env.device)
+        action.set_arm_target(due, goal, immediate=False)
+        minimum, maximum = self.retarget_interval_s
+        self.time_to_retarget_s[due] = (
+            torch.rand(due.numel(), device=env.device) * (maximum - minimum) + minimum
         )

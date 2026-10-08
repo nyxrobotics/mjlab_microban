@@ -43,7 +43,6 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_target_offsets_within_limit,
     microban_reachable_hand_evaluation_offsets,
     rotate_trunk_offsets_to_home_levelled,
-    sample_microban_reachable_hand_targets,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,61 +111,6 @@ class MicrobanHandFkForwardLeanTest(unittest.TestCase):
             atol=0.0,
         )
 
-    def test_joint_box_samples_are_reachable_finite_and_bounded(self) -> None:
-        count = 100_000
-        active = torch.ones(count, 2, dtype=torch.bool)
-        generator = torch.Generator().manual_seed(20260925)
-        joints, offsets = sample_microban_reachable_hand_targets(
-            active, generator=generator, dtype=torch.float64
-        )
-        lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64)
-        upper = torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD, dtype=torch.float64)
-        self.assertTrue(bool(torch.isfinite(joints).all().item()))
-        self.assertTrue(bool(torch.isfinite(offsets).all().item()))
-        self.assertTrue(bool((joints >= lower).all().item()))
-        self.assertTrue(bool((joints <= upper).all().item()))
-        torch.testing.assert_close(
-            offsets,
-            microban_hand_target_offsets_from_arm_joints(joints),
-            rtol=0.0,
-            atol=0.0,
-        )
-        bounds = torch.tensor(
-            MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M, dtype=torch.float64
-        )
-        self.assertTrue(bool((offsets.abs() <= bounds).all().item()))
-        self.assertTrue(
-            bool(microban_hand_target_offsets_within_limit(offsets).all().item())
-        )
-
-        # The samples are the uniform joint box conditioned on the receiver
-        # box: their mean matches an independent filter of unconditioned
-        # uniform draws (about 1 % removed, all forward-up), and stays within
-        # a few mrad of each interval's midpoint.  This also catches
-        # accidental Cartesian-box sampling.
-        reference = lower + torch.rand(
-            (400_000, 2, 3),
-            generator=torch.Generator().manual_seed(99),
-            dtype=torch.float64,
-        ) * (upper - lower)
-        reference_offsets = microban_hand_target_offsets_from_arm_joints(reference)
-        expected_mean = torch.stack(
-            [
-                reference[:, side][
-                    microban_hand_target_offsets_within_limit(
-                        reference_offsets[:, side]
-                    )
-                ].mean(dim=0)
-                for side in range(2)
-            ]
-        )
-        torch.testing.assert_close(
-            joints.mean(dim=0), expected_mean, rtol=0.0, atol=2.0e-3
-        )
-        torch.testing.assert_close(
-            joints.mean(dim=0), (lower + upper) * 0.5, rtol=0.0, atol=1.0e-2
-        )
-
     def test_rejection_removes_only_targets_outside_the_receiver_box(self) -> None:
         count = 200_000
         lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64)
@@ -201,60 +145,6 @@ class MicrobanHandFkForwardLeanTest(unittest.TestCase):
             bool(microban_hand_target_offsets_within_limit(float32_limit).item())
         )
         self.assertGreater(MICROBAN_HAND_TARGET_MAX_REJECTION_ROUNDS, 8)
-
-    def test_exhausted_rejection_falls_back_to_home(self) -> None:
-        # A box only HOME fits in: every draw is rejected, so after the
-        # bounded number of rounds the active hands hold HOME (zero offset).
-        joints, offsets = sample_microban_reachable_hand_targets(
-            torch.tensor([[True, False], [True, True]]),
-            generator=torch.Generator().manual_seed(1),
-            dtype=torch.float64,
-            abs_limit_m=(1.0e-9, 1.0e-9, 1.0e-9),
-        )
-        home = torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
-        self.assertTrue(torch.equal(joints, home.expand(2, -1, -1)))
-        self.assertTrue(torch.equal(offsets, torch.zeros_like(offsets)))
-
-    def test_float32_samples_stay_inside_the_receiver_box(self) -> None:
-        active = torch.ones(200_000, 2, dtype=torch.bool)
-        joints, offsets = sample_microban_reachable_hand_targets(
-            active, generator=torch.Generator().manual_seed(3)
-        )
-        self.assertEqual(offsets.dtype, torch.float32)
-        limit = torch.tensor(
-            MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M, dtype=torch.float64
-        )
-        self.assertTrue(bool((offsets.double().abs() <= limit).all().item()))
-        # Not a Cartesian clip: no target sits on the box face, and the
-        # forward reach still gets close to it.
-        self.assertFalse(bool((offsets.double().abs() == limit).any().item()))
-        self.assertGreater(float(offsets[..., 0].max()), 0.0635)
-        lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD)
-        upper = torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD)
-        self.assertTrue(bool(((joints >= lower) & (joints <= upper)).all().item()))
-        torch.testing.assert_close(
-            offsets,
-            microban_hand_target_offsets_from_arm_joints(joints),
-            rtol=0.0,
-            atol=0.0,
-        )
-
-    def test_inactive_hands_use_home_joints_and_exact_zero_offsets(self) -> None:
-        active = torch.tensor(
-            [[False, False], [True, False], [False, True], [True, True]]
-        )
-        joints, offsets = sample_microban_reachable_hand_targets(
-            active,
-            generator=torch.Generator().manual_seed(4),
-            dtype=torch.float64,
-        )
-        home = torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
-        inactive = ~active
-        self.assertTrue(torch.equal(joints[inactive], home.expand(4, -1, -1)[inactive]))
-        self.assertTrue(
-            torch.equal(offsets[inactive], torch.zeros_like(offsets[inactive]))
-        )
-        self.assertTrue(bool(torch.count_nonzero(offsets[active]).item() > 0))
 
     def test_metadata_exposes_joint_box_and_normalizer_bound(self) -> None:
         metadata = microban_hand_fk_metadata()
@@ -303,16 +193,10 @@ class MicrobanHandFkForwardLeanTest(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-15,
         )
-        # Zero lean is the plain trunk frame, and the trunk-frame sampler
-        # returns the raw FK offsets.
-        joints, offsets = sample_microban_reachable_hand_targets(
-            torch.ones(64, 2, dtype=torch.bool),
-            generator=torch.Generator().manual_seed(7),
-            dtype=torch.float64,
-            trunk_pitch=0.0,
-        )
+        # Zero lean is the plain trunk frame.
+        offsets = torch.tensor([[0.01, -0.02, 0.03]], dtype=torch.float64)
         torch.testing.assert_close(
-            offsets, microban_hand_offsets_from_arm_joints(joints), rtol=0.0, atol=0.0
+            rotate_trunk_offsets_to_home_levelled(offsets, 0.0), offsets, rtol=0.0, atol=0.0
         )
 
     def test_target_aabb_is_the_rotated_joint_box_fk(self) -> None:

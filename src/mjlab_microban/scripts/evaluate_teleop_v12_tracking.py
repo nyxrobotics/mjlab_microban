@@ -1,4 +1,4 @@
-"""Hash-bound staged HMD/hand/foot exposure and tracking gate for v12.
+"""Hash-bound HMD/arm/foot exposure and tracking gate of a PICO checkpoint.
 
 The raw action contract intentionally has no software target clip (the target
 saturates only at the servo's +-pi goal range).  This gate
@@ -27,10 +27,6 @@ from mjlab.utils.torch import configure_torch_backends
 from tensordict import TensorDict
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
-from mjlab_microban.robot.microban_hand_fk import (
-    microban_hand_fk_metadata,
-    microban_reachable_hand_evaluation_offsets,
-)
 from mjlab_microban.scripts.teleop_v12_scenarios import (
     HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
     HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
@@ -45,7 +41,7 @@ from mjlab_microban.scripts.teleop_v12_scenarios import (
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _load_actor,
-    hand_pose_release_report_settings,
+    recipe_report_settings,
 )
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
     _legacy_model,
@@ -58,9 +54,8 @@ from mjlab_microban.tasks.microban_policy_export import (
 from mjlab_microban.tasks.microban_teleop_mdp import HmdNeckTargetMotion
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
+    TELEOP_V12_ARM_OBSERVATION_COLUMNS,
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
@@ -89,40 +84,22 @@ from mjlab_microban.teleop_v12_safety import (
 
 # One profile, the same at every HOME: a PICO run is judged once, on the
 # checkpoint it ends with, with every target type active (mjlab_microban/schedules.py:
-# any checkpoint after the foot targets were tightened).  The name is the
-# published "_deployed_accuracy_v1" one; its limits are the table below.
-FINAL_PROFILE = "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1"
+# any checkpoint after the foot targets were tightened).  Its limits are the
+# table below.  The arms are driven from outside (the robot's pico_arms), so
+# no hand accuracy is judged here: hand accuracy is the IK's and the servos'.
+FINAL_PROFILE = "arm_overlay_foot_perturbation_v1"
 TRACKING_PROFILES = (FINAL_PROFILE,)
-# Accuracy limits: hand RMS 0.040 m, hand P95 0.07 m, foot RMS 0.05 m,
-# foot P95 0.08 m (the same at every HOME).
-HAND_RMS_MAX_M = 0.040
-HAND_P95_MAX_M = 0.07
+# Accuracy limits: foot RMS 0.05 m, foot P95 0.08 m (the same at every HOME).
 FOOT_RMS_MAX_M = 0.05
 FOOT_P95_MAX_M = 0.08
 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN = 1.0e-4
-TARGET_COLUMN_ABLATION_METHOD = (
-    "same_observation_zero_target_position_columns_preserve_hand_active_flags_"
-    "before_actor_forward_v2"
-)
+TARGET_COLUMN_ABLATION_METHOD = "same_observation_zero_target_columns_before_actor_forward_v3"
+TARGET_COLUMN_ABLATION_TARGETS = ("arm", "foot")
 
 
 def tracking_profile_uses_perturbation(profile: str) -> bool:
     required_tracking_scenario_names(profile)
     return True
-
-
-def hand_tracking_rms_max_m(profile: str) -> float:
-    """Return the hand RMS limit (the same for every profile)."""
-
-    required_tracking_scenario_names(profile)
-    return HAND_RMS_MAX_M
-
-
-def hand_tracking_p95_max_m(profile: str) -> float:
-    """Return the profile's hand P95 limit."""
-
-    required_tracking_scenario_names(profile)
-    return HAND_P95_MAX_M
 
 
 def foot_tracking_rms_max_m(profile: str) -> float:
@@ -144,11 +121,8 @@ def target_column_ablation_observation_columns(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Return zeroed and explicitly preserved actor columns for one target."""
 
-    if target == "hand":
-        return (
-            TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
-            TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-        )
+    if target == "arm":
+        return TELEOP_V12_ARM_OBSERVATION_COLUMNS, ()
     if target == "foot":
         return TELEOP_V12_FOOT_OBSERVATION_COLUMNS, ()
     raise ValueError(f"Unknown target-column ablation target: {target!r}")
@@ -162,7 +136,9 @@ def target_column_ablated_observation(
     if actor_observation.ndim != 2 or actor_observation.shape[1] != (
         MICROBAN_TELEOP_OBSERVATION_WIDTH
     ):
-        raise ValueError("Target-column ablation requires a [batch, 83] observation")
+        raise ValueError(
+            f"Target-column ablation requires a [batch, {MICROBAN_TELEOP_OBSERVATION_WIDTH}] observation"
+        )
     ablated_columns, preserved_columns = target_column_ablation_observation_columns(
         target
     )
@@ -180,8 +156,8 @@ def required_tracking_scenario_names(profile: str) -> tuple[str, ...]:
     names_by_profile = {
         FINAL_PROFILE: (
             "low_forward",
-            "max_hands_left",
-            "max_hands_right",
+            "arms_forward_low_forward",
+            "arms_reach_left",
             "max_keypoints_left",
             "max_keypoints_right",
             "bounded_both_feet",
@@ -209,8 +185,6 @@ def required_tracking_check_names(profile: str) -> frozenset[str]:
         "nonzero_observation_coverage",
         "target_column_ablation_response",
         "twist_direction",
-        "hand_tracking_rms",
-        "hand_tracking_p95",
         "foot_tracking_rms",
         "foot_tracking_p95",
     }
@@ -221,7 +195,7 @@ def required_target_column_ablation_targets(profile: str) -> frozenset[str]:
     """Return target inputs that this curriculum stage must have learned to use."""
 
     required_tracking_scenario_names(profile)
-    return frozenset(("hand", "foot"))
+    return frozenset(TARGET_COLUMN_ABLATION_TARGETS)
 
 
 def required_tracking_profile(completed_updates: int) -> str:
@@ -239,7 +213,7 @@ def required_tracking_profile(completed_updates: int) -> str:
 
 
 # The judged mixed scenarios walk at half the command envelope: walking at the
-# maximum on every axis at once while both arms reach far is rare on the
+# maximum on every axis at once while an arm reaches far is rare on the
 # robot, and the frozen walker itself hardly moves there.
 MIXED_TRACKING_TWIST_SCALE = 0.5
 MIXED_TRACKING_SCENARIOS = ("mixed_forward_left", "mixed_backward_right")
@@ -251,7 +225,7 @@ def twist_is_judged(scenario: EvaluationScenario) -> bool:
     Not for standing scenarios, and not for the mixed ones: a command on
     several axes is the walker's diagonal behaviour, which the walking
     judgment does not judge either (the frozen walker under PICO hardly walks sideways
-    while walking forward); falls, hands, feet and joints are judged there as
+    while walking forward); falls, feet and joints are judged there as
     everywhere.
     """
 
@@ -265,21 +239,6 @@ def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
             by_name[name],
             twist=tuple(MIXED_TRACKING_TWIST_SCALE * value for value in by_name[name].twist),
         )
-    reachable = dict(microban_reachable_hand_evaluation_offsets())
-    forward = reachable["F"]
-    backward = reachable["B"]
-    forward_moderate = reachable["f"]
-    backward_moderate = reachable["b"]
-    hand_overrides = {
-        "max_hands_left": (forward[0], backward[1]),
-        "max_hands_right": (backward[0], forward[1]),
-        "max_keypoints_left": (forward[0], backward[1]),
-        "max_keypoints_right": (backward[0], forward[1]),
-        "mixed_forward_left": (forward_moderate[0], backward_moderate[1]),
-        "mixed_backward_right": (backward_moderate[0], forward_moderate[1]),
-    }
-    for name, hand_target in hand_overrides.items():
-        by_name[name] = replace(by_name[name], hand_target=hand_target)
     names = required_tracking_scenario_names(profile)
     return tuple(by_name[name] for name in names)
 
@@ -328,15 +287,14 @@ def _target_column_ablation_evidence(
     maximum_by_target: dict[str, float | None],
     expected_by_target: dict[str, bool],
 ) -> dict[str, dict[str, Any]]:
-    """Report actor sensitivity to target positions with hand flags preserved."""
+    """Report actor sensitivity to the arm and foot target columns."""
 
-    if set(maximum_by_target) != {"hand", "foot"} or set(expected_by_target) != {
-        "hand",
-        "foot",
-    }:
+    if set(maximum_by_target) != set(TARGET_COLUMN_ABLATION_TARGETS) or set(
+        expected_by_target
+    ) != set(TARGET_COLUMN_ABLATION_TARGETS):
         raise ValueError("Target-column ablation keys drifted")
     result: dict[str, dict[str, Any]] = {}
-    for target in ("hand", "foot"):
+    for target in TARGET_COLUMN_ABLATION_TARGETS:
         expected = expected_by_target[target]
         maximum = maximum_by_target[target]
         ablated_columns, preserved_columns = target_column_ablation_observation_columns(
@@ -390,12 +348,17 @@ def _target_column_ablation_response_passes(
     try:
         for result in results:
             command = result["command"]
-            hand_active = command["hand_active"]
+            arm_target = command["arm_target"]
             foot_target = command["foot_target"]
             if (
-                not isinstance(hand_active, (list, tuple))
-                or len(hand_active) != 2
-                or any(type(value) is not bool for value in hand_active)
+                not isinstance(arm_target, (list, tuple))
+                or len(arm_target) != 6
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in arm_target
+                )
                 or not isinstance(foot_target, (list, tuple))
                 or len(foot_target) != 2
                 or any(
@@ -412,13 +375,15 @@ def _target_column_ablation_response_passes(
             ):
                 return False
             expected_by_target = {
-                "hand": any(hand_active),
+                "arm": any(float(value) != 0.0 for value in arm_target),
                 "foot": any(
                     float(value) != 0.0 for xyz in foot_target for value in xyz
                 ),
             }
             ablation = result["target_column_ablation"]
-            if not isinstance(ablation, dict) or set(ablation) != {"hand", "foot"}:
+            if not isinstance(ablation, dict) or set(ablation) != set(
+                TARGET_COLUMN_ABLATION_TARGETS
+            ):
                 return False
             for target, expected in expected_by_target.items():
                 evidence = ablation[target]
@@ -484,11 +449,10 @@ def _evaluate_scenario(
     ):
         raise ValueError("V12 tracking gate requires raw actions bounded only by the servo goal range (+-pi)")
     foot = env.command_manager.get_term("foot_target")
-    hand = env.command_manager.get_term("hand_target")
     expects_foot = any(
         abs(value) > 0.0 for xyz in scenario.foot_target for value in xyz
     )
-    expects_hand = any(scenario.hand_active)
+    expects_arm = any(value != 0.0 for value in scenario.arm_target)
     hmd_cfg = env.event_manager.get_term_cfg("hmd_neck_target_motion")
     hmd = hmd_cfg.func
     if not isinstance(hmd, HmdNeckTargetMotion):
@@ -515,7 +479,6 @@ def _evaluate_scenario(
     action_min = torch.full((3, 18), math.inf, device=env.device)
     action_max = torch.full((3, 18), -math.inf, device=env.device)
     foot_error = ScalarStats()
-    hand_error = ScalarStats()
     velocity_stats = (ScalarStats(), ScalarStats(), ScalarStats())
     executed = 0
     raw_recurrence_steps = 0
@@ -524,11 +487,10 @@ def _evaluate_scenario(
     max_actual_violation = 0.0
     max_raw_target_excess = 0.0
     foot_observation_nonzero_steps = 0
-    hand_observation_nonzero_steps = 0
+    arm_observation_nonzero_steps = 0
     hmd_observation_nonzero_steps = 0
     target_ablation_maximum: dict[str, float | None] = {
-        "hand": None,
-        "foot": None,
+        target: None for target in TARGET_COLUMN_ABLATION_TARGETS
     }
     termination_names: list[str] = []
     fall_height = float(
@@ -553,8 +515,8 @@ def _evaluate_scenario(
         foot_observation_nonzero_steps += int(
             bool(torch.count_nonzero(actor_obs[:, 69:75]).item())
         )
-        hand_observation_nonzero_steps += int(
-            bool(torch.count_nonzero(actor_obs[:, 75:83]).item())
+        arm_observation_nonzero_steps += int(
+            bool(torch.count_nonzero(actor_obs[:, 75:81]).item())
         )
         hmd_observation_nonzero_steps += int(
             bool(
@@ -571,7 +533,7 @@ def _evaluate_scenario(
             )
             ablated_actions: dict[str, torch.Tensor] = {}
             for target, expected in (
-                ("hand", expects_hand),
+                ("arm", expects_arm),
                 ("foot", expects_foot),
             ):
                 if not expected:
@@ -648,12 +610,6 @@ def _evaluate_scenario(
                     foot.foot_target_offset_b,
                 )
             )
-            current_hand = hand.current_hand_pos_b()
-            per_hand = torch.linalg.vector_norm(
-                current_hand - hand._default_hand_pos_b - hand.hand_target_offset_b,
-                dim=-1,
-            )
-            hand_error.add(per_hand[hand.is_active])
             velocity_stats[0].add(robot.data.root_link_lin_vel_b[:, 0])
             velocity_stats[1].add(robot.data.root_link_lin_vel_b[:, 1])
             velocity_stats[2].add(robot.data.root_link_ang_vel_b[:, 2])
@@ -713,15 +669,14 @@ def _evaluate_scenario(
     )
     target_column_ablation = _target_column_ablation_evidence(
         target_ablation_maximum,
-        {"hand": expects_hand, "foot": expects_foot},
+        {"arm": expects_arm, "foot": expects_foot},
     )
     return {
         "name": scenario.name,
         "command": {
             "twist": list(scenario.twist),
             "foot_target": [list(value) for value in scenario.foot_target],
-            "hand_target": [list(value) for value in scenario.hand_target],
-            "hand_active": list(scenario.hand_active),
+            "arm_target": list(scenario.arm_target),
         },
         "completed": completed,
         "executed_steps": executed,
@@ -736,13 +691,13 @@ def _evaluate_scenario(
         "observation_coverage": {
             "hmd_nonzero_steps": hmd_observation_nonzero_steps,
             "foot_nonzero_steps": foot_observation_nonzero_steps,
-            "hand_nonzero_steps": hand_observation_nonzero_steps,
+            "arm_nonzero_steps": arm_observation_nonzero_steps,
             "foot_target_expected": expects_foot,
-            "hand_target_expected": expects_hand,
+            "arm_target_expected": expects_arm,
             "passed": (
                 hmd_observation_nonzero_steps > 0
                 and (not expects_foot or foot_observation_nonzero_steps == executed)
-                and (not expects_hand or hand_observation_nonzero_steps == executed)
+                and (not expects_arm or arm_observation_nonzero_steps == executed)
             ),
         },
         "measured_velocity_body": measured_velocity,
@@ -753,7 +708,6 @@ def _evaluate_scenario(
         "hmd_motion_evidence_passed": hmd_motion,
         "target_error": {
             "foot": foot_error.report(units="m"),
-            "active_hand": hand_error.report(units="m"),
         },
         "target_column_ablation": target_column_ablation,
         "runtime_smoke_observations": smoke_observations,
@@ -799,20 +753,6 @@ def _acceptance(
         ),
     }
     required = required_tracking_check_names(profile)
-    if "hand_tracking_rms" in required:
-        active_hand = [
-            item["target_error"]["active_hand"]
-            for item in results
-            if item["target_error"]["active_hand"]["sample_count"]
-        ]
-        checks["hand_tracking_rms"] = bool(active_hand) and all(
-            float(value["rms"]) <= hand_tracking_rms_max_m(profile)
-            for value in active_hand
-        )
-        checks["hand_tracking_p95"] = bool(active_hand) and all(
-            float(value["p95"]) <= hand_tracking_p95_max_m(profile)
-            for value in active_hand
-        )
     if "foot_tracking_rms" in required:
         fade = foot_tracking_velocity_fade_range()
         # Foot error weighted as the reward weighs foot tracking: a scenario
@@ -987,8 +927,7 @@ def run_evaluation(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
-            "reachable_hand_target_fk": microban_hand_fk_metadata(),
-            **hand_pose_release_report_settings(infos),
+            **recipe_report_settings(infos),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -996,8 +935,6 @@ def run_evaluation(
             ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-            "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
             "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),

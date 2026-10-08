@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_TELEOP_OBSERVATION_WIDTH
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     LOCOMOTION_MOVING_SCENARIOS,
@@ -35,8 +36,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
     foot_tracking_velocity_fade_range,
-    hand_tracking_p95_max_m,
-    hand_tracking_rms_max_m,
+    TARGET_COLUMN_ABLATION_TARGETS,
     required_tracking_check_names,
     required_tracking_profile,
     required_tracking_scenario_names,
@@ -71,6 +71,7 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
+    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
 )
 from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
@@ -181,7 +182,7 @@ def _validate_locomotion_report(
             "settle_steps": 50,
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
-            "policy_observation_width": 83,
+            "policy_observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
         },
         "Locomotion",
     )
@@ -224,7 +225,7 @@ def _validate_locomotion_report(
             or result.get("nonfinite") is not None
             or result.get("termination_names") != []
             or result.get("raw_action_recurrence_verified_steps") != 300
-            or result.get("neutral_foot_hand_target_verified_steps") != 300
+            or result.get("neutral_target_verified_steps") != 300
             or not _finite_number(result.get("maximum_actual_soft_limit_violation_rad"))
             or float(result["maximum_actual_soft_limit_violation_rad"]) < 0.0
             or float(result["maximum_actual_soft_limit_violation_rad"])
@@ -374,9 +375,6 @@ def _validate_tracking_report(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
-            "reachable_hand_target_fk": teleop_v12_target_normalizer_metadata()[
-                "hand_target_fk"
-            ],
         },
         "Tracking",
     )
@@ -386,8 +384,6 @@ def _validate_tracking_report(
         ),
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-        "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-        "hand_p95_m_max": hand_tracking_p95_max_m(profile),
         "foot_rms_m_max": foot_tracking_rms_max_m(profile),
         "foot_p95_m_max": foot_tracking_p95_max_m(profile),
         "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
@@ -415,14 +411,13 @@ def _validate_tracking_report(
         expected_command = {
             "twist": list(scenario.twist),
             "foot_target": [list(item) for item in scenario.foot_target],
-            "hand_target": [list(item) for item in scenario.hand_target],
-            "hand_active": list(scenario.hand_active),
+            "arm_target": list(scenario.arm_target),
         }
         coverage = result.get("observation_coverage")
         expects_foot = any(
             abs(item) > 0.0 for target in scenario.foot_target for item in target
         )
-        expects_hand = any(scenario.hand_active)
+        expects_arm = any(value != 0.0 for value in scenario.arm_target)
         if (
             result.get("command") != expected_command
             or result.get("completed") is not True
@@ -440,26 +435,21 @@ def _validate_tracking_report(
             or not isinstance(coverage, dict)
             or coverage.get("passed") is not True
             or coverage.get("foot_target_expected") is not expects_foot
-            or coverage.get("hand_target_expected") is not expects_hand
+            or coverage.get("arm_target_expected") is not expects_arm
             or not isinstance(coverage.get("hmd_nonzero_steps"), int)
             or coverage["hmd_nonzero_steps"] <= 0
             or (expects_foot and coverage.get("foot_nonzero_steps") != 300)
-            or (expects_hand and coverage.get("hand_nonzero_steps") != 300)
+            or (expects_arm and coverage.get("arm_nonzero_steps") != 300)
         ):
             raise ValueError("Tracking report scenario evidence failed")
         target_error = result.get("target_error")
-        if not isinstance(target_error, dict) or set(target_error) != {
-            "foot",
-            "active_hand",
-        }:
+        if not isinstance(target_error, dict) or set(target_error) != {"foot"}:
             raise ValueError("Tracking target-error evidence is malformed")
         active_foot_count = sum(
             any(abs(value) > 0.0 for value in target) for target in scenario.foot_target
         )
-        active_hand_count = sum(bool(value) for value in scenario.hand_active)
         for target, expected, expected_samples in (
             ("foot", expects_foot, 250 * active_foot_count),
-            ("active_hand", expects_hand, 250 * active_hand_count),
         ):
             values = target_error[target]
             if not isinstance(values, dict) or values.get("units") != "m":
@@ -488,7 +478,9 @@ def _validate_tracking_report(
             ):
                 raise ValueError("Tracking inactive target-error stats drifted")
         ablation = result.get("target_column_ablation")
-        if not isinstance(ablation, dict) or set(ablation) != {"hand", "foot"}:
+        if not isinstance(ablation, dict) or set(ablation) != set(
+            TARGET_COLUMN_ABLATION_TARGETS
+        ):
             raise ValueError("Tracking target-column ablation evidence is malformed")
         fields = {
             "target_expected",
@@ -498,7 +490,7 @@ def _validate_tracking_report(
             "minimum_required_action_delta",
             "passed",
         }
-        for target, expected in (("hand", expects_hand), ("foot", expects_foot)):
+        for target, expected in (("arm", expects_arm), ("foot", expects_foot)):
             evidence = ablation[target]
             ablated_columns, preserved_columns = (
                 target_column_ablation_observation_columns(target)
@@ -658,17 +650,17 @@ def _validate_onnx_report(
     if (
         not isinstance(onnx, dict)
         or onnx.get("opset") != 18
-        or onnx.get("input_shape") != [1, 83]
+        or onnx.get("input_shape") != [1, MICROBAN_TELEOP_OBSERVATION_WIDTH]
         or onnx.get("output_shape") != [1, 18]
         or onnx.get("reference_samples") != 64
-        or onnx.get("input_coverage") != "deterministic_nonzero_all_83_columns"
+        or onnx.get("input_coverage") != f"deterministic_nonzero_all_{MICROBAN_TELEOP_OBSERVATION_WIDTH}_columns"
         or onnx.get("teleop_only_columns_nonzero") is not True
         or onnx.get("onnxruntime_providers") != ["CPUExecutionProvider"]
         or not isinstance(onnx.get("onnxruntime_version"), str)
         or not onnx["onnxruntime_version"]
         or onnx.get("tolerance") != parity_tolerance
     ):
-        raise ValueError("ONNX full-83 CPU evidence drifted")
+        raise ValueError("ONNX full-width CPU evidence drifted")
     if "relative_tolerance" in onnx or "parity_rule" in onnx:
         # Per-sample atol + rtol*max|expected| bound (teleop_v12_onnx_gate).
         from mjlab_microban.scripts.teleop_v12_onnx_gate import (
@@ -725,8 +717,10 @@ def _checkpoint_identity(path: Path) -> tuple[str, int, int, dict[str, Any]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or not isinstance(payload.get("infos"), dict):
         raise TypeError("Checkpoint payload is malformed")
-    if payload["infos"].get("microban_teleop_training_contract_version") != "12":
-        raise ValueError("Checkpoint is not contract-v12")
+    if payload["infos"].get("microban_teleop_training_contract_version") != (
+        MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
+    ):
+        raise ValueError("Checkpoint is not of the current PICO training contract")
     infos = payload["infos"]
     validate_teleop_v12_home_pose(infos)
     require_bilateral_site_order(infos)

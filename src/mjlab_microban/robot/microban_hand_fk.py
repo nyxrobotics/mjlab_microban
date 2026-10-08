@@ -1,5 +1,10 @@
 """Exact Microban arm forward kinematics for reachable hand commands.
 
+The PICO policy no longer tracks hand targets (its arms are driven from
+outside, microban_teleop_mdp); the FK draws its arm targets clear of the
+trunk, and the hand-target record below is still written to the robot's HOME
+file (``hand_target_fk``), whose target frame the teleop reads.
+
 The constants below are the ``body`` and ``site`` transforms from
 ``robot/microban/robot.xml``.  Every arm joint is a hinge about its local +Z
 axis.  Joint tensors and results use the fixed side order ``(left, right)`` and
@@ -532,85 +537,6 @@ def microban_hand_target_offsets_within_limit(
     limit = torch.tensor(abs_limit_m, dtype=torch.float64, device=offsets.device)
     values = offsets.to(torch.float64)
     return ((values >= -limit) & (values <= limit)).all(dim=-1)
-
-
-def sample_microban_reachable_hand_targets(
-    is_active: torch.Tensor,
-    *,
-    generator: torch.Generator | None = None,
-    dtype: torch.dtype = torch.float32,
-    trunk_pitch: float = MICROBAN_HAND_TARGET_FRAME_PITCH_RAD,
-    abs_limit_m: tuple[float, float, float] = (
-        MICROBAN_HAND_TARGET_RUNTIME_VALIDATED_ABS_LIMIT_M
-    ),
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Uniformly sample the arm joint box and return joints plus reachable offsets.
-
-    Offsets are FK offsets rotated into the HOME-levelled frame of a trunk
-    leaning ``trunk_pitch`` forward (0 keeps the trunk frame).  An active
-    hand's joint tuple is redrawn while its offset has a component outside
-    ``+-abs_limit_m`` (the receiver box), so the result is the uniform joint
-    box conditioned on a deliverable target; every offset stays exact FK of
-    the returned joints.  (With nothing rejected -- always at the vertical-trunk
-    HOME -- this is one uniform draw, exactly the unconditioned sampler.)
-    Inactive hands are set to the exact HOME joint tuple before FK, producing an
-    exact-zero offset instead of sampling a Cartesian point that will be ignored.
-    """
-
-    if not isinstance(is_active, torch.Tensor) or is_active.dtype != torch.bool:
-        raise TypeError("Microban hand activation mask must be a bool tensor")
-    if is_active.ndim != 2 or is_active.shape[1] != 2:
-        raise ValueError("Microban hand activation mask must have shape (N, 2)")
-    if not torch.empty((), dtype=dtype).is_floating_point():
-        raise TypeError("Microban hand target samples require a floating dtype")
-    lower = torch.tensor(
-        MICROBAN_ARM_JOINT_LOWER_RAD,
-        dtype=dtype,
-        device=is_active.device,
-    )
-    upper = torch.tensor(
-        MICROBAN_ARM_JOINT_UPPER_RAD, dtype=lower.dtype, device=is_active.device
-    )
-    home = torch.tensor(
-        MICROBAN_ARM_HOME_JOINT_RAD, dtype=lower.dtype, device=is_active.device
-    )
-    sampled = home.expand(is_active.shape[0], -1, -1).clone()
-    active_env, active_side = is_active.nonzero(as_tuple=True)
-    pending_env, pending_side = active_env, active_side
-    offsets = None
-    for _round in range(MICROBAN_HAND_TARGET_MAX_REJECTION_ROUNDS):
-        if len(pending_env) == 0:
-            break
-        random = torch.rand(
-            (len(pending_env), 3),
-            dtype=lower.dtype,
-            device=is_active.device,
-            generator=generator,
-        )
-        sampled[pending_env, pending_side] = lower[pending_side] + random * (
-            upper[pending_side] - lower[pending_side]
-        )
-        # Check the very offsets that are returned (same batch, same FK call),
-        # so float rounding cannot differ between the check and the result.
-        offsets = microban_hand_target_offsets_from_arm_joints(
-            sampled, trunk_pitch=trunk_pitch
-        )
-        rejected = ~microban_hand_target_offsets_within_limit(
-            offsets[active_env, active_side], abs_limit_m
-        )
-        pending_env = active_env[rejected]
-        pending_side = active_side[rejected]
-    if len(pending_env) > 0:
-        # Practically unreachable (~0.01 ** 64); HOME (zero offset) is inside
-        # every box.
-        sampled[pending_env, pending_side] = home[pending_side]
-        offsets = None
-    if offsets is None:
-        offsets = microban_hand_target_offsets_from_arm_joints(
-            sampled, trunk_pitch=trunk_pitch
-        )
-    offsets = torch.where(is_active.unsqueeze(-1), offsets, torch.zeros_like(offsets))
-    return sampled, offsets
 
 
 def microban_reachable_hand_evaluation_offsets() -> tuple[

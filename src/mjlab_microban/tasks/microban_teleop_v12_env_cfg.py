@@ -20,7 +20,7 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
 
-MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
+MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "13"
 # HOME-bound identities (robot/home_contracts.py, from config/home_pose.yaml):
 # the forward-lean HOME (trunk 10 deg forward; the root quaternion is part of
 # the marker) keeps
@@ -28,21 +28,20 @@ MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "12"
 # any other HOME embeds "<label>_<joint hash>", so checkpoints, gates and
 # packages of another HOME are refused.
 MICROBAN_TELEOP_V12_HOME_POSE_REVISION = home_contracts.V12_HOME_POSE_REVISION
-# Canonical recipe.  With a pitched HOME trunk the foot/hand targets are offsets in the HOME-levelled trunk frame
-# R_trunk * R_y(-HOME_TRUNK_PITCH_RAD) (reachable-FK hand samples rotated into
-# it and capped to the robot receiver's +-64 mm box, hand FK v4: joint-sample
-# rejection, F evaluation/corner pose (-20, 25, -50) deg) and the neutral HMD
-# neck pose is the level headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  With a
-# vertical trunk all of that is the trunk frame and neck_pitch 0.
+# Base recipe (the published HOME-bound string; the runner of the trained
+# recipe records the one below instead).  With a pitched HOME trunk the foot
+# targets are offsets in the HOME-levelled trunk frame
+# R_trunk * R_y(-HOME_TRUNK_PITCH_RAD) and the neutral HMD neck pose is the
+# level headset's neck_pitch = -HOME_TRUNK_PITCH_RAD.  With a vertical trunk
+# that is the trunk frame and neck_pitch 0.
 MICROBAN_TELEOP_V12_RECIPE_REVISION = home_contracts.V12_RECIPE_REVISION
 # The recipe that is trained and packaged (task
-# ``Mjlab-Teleop-V12-HandPoseRelease-Microban``, one run from scratch): the
-# canonical recipe except that the inherited HOME pose reward drops the
-# shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
-# active (an inactive hand's arm and every other joint keep the canonical
-# term), with the one-run schedule.
-MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
-    home_contracts.V12_HAND_POSE_RELEASE_RECIPE_REVISION
+# ``Mjlab-Teleop-V13-ArmOverlay-Microban``, one run from scratch): the arms
+# are driven from outside as the robot's pico_arms drives them and observed as
+# arm targets, and the inherited HOME pose reward covers the leg joints only,
+# released on rows tracking a foot target, with the one-run schedule.
+MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION = (
+    home_contracts.V13_ARM_OVERLAY_RECIPE_REVISION
 )
 # The robot's hmd_head move keeps the camera at the headset's world attitude,
 # so on a HOME whose trunk leans forward a level headset holds neck_pitch at

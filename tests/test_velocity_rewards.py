@@ -21,8 +21,8 @@ from mjlab_microban.tasks.microban_teleop_velocity_rewards import (
     planar_velocity_tracking_exp,
     yaw_velocity_tracking_error_l1,
 )
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
-    make_microban_teleop_v12_hand_pose_release_env_cfg,
+from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+    make_microban_teleop_v13_arm_overlay_env_cfg,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 from mjlab_microban.tasks.microban_velocity_tracking import (
@@ -43,7 +43,7 @@ WALK_REWARD_WEIGHTS = {
 }
 PICO_ONLY_REWARD_WEIGHTS = {
     "action_rate_l2": -0.02, "dof_pos_limits": -10.0, "feet_distance": -100.0,
-    "foot_target_tracking": 1.0, "hand_target_tracking": 0.0, "joint_soft_limit_guard": -5.0,
+    "foot_target_tracking": 1.0, "joint_soft_limit_guard": -5.0,
     "track_linear_velocity": 5.0, "commanded_planar_velocity_progress": 2.0,
     "linear_velocity_error_l1": -16.0, "yaw_velocity_error_l1": -1.0,
 }
@@ -73,7 +73,7 @@ def play_env_snapshot(cfg) -> dict:
                 "both_feet_lift_height_range", "reach_xy_range", "both_feet_reach_xy_range",
             )
         },
-        "hand": {"rel_active": cfg.commands["hand_target"].rel_active},
+        "action": type(cfg.actions["joint_pos"]).__name__,
         "events": sorted(cfg.events),
         "curriculum": sorted(cfg.curriculum),
         "terminations": sorted(cfg.terminations),
@@ -85,7 +85,7 @@ class VelocityRewardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.walk = make_microban_velocity_env_cfg()
-        cls.pico = make_microban_teleop_v12_hand_pose_release_env_cfg()
+        cls.pico = make_microban_teleop_v13_arm_overlay_env_cfg()
 
     def test_pico_envelope_peaks_at_the_robot_moving_limits(self) -> None:
         envelope = MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
@@ -126,7 +126,7 @@ class VelocityRewardTest(unittest.TestCase):
             self.assertEqual(WALK_REWARD_WEIGHTS[name], weight, name)
 
     def test_pico_play_env_is_unchanged(self) -> None:
-        current = play_env_snapshot(make_microban_teleop_v12_hand_pose_release_env_cfg(play=True))
+        current = play_env_snapshot(make_microban_teleop_v13_arm_overlay_env_cfg(play=True))
         self.assertEqual(current, json.loads(FIXTURE.read_text()))
 
     def test_pico_training_samples_the_full_envelope_with_pushes(self) -> None:

@@ -13,13 +13,13 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_getup_runner import MicrobanGetupOnPolicyRunner
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
-    MicrobanTeleopV12HandPoseReleaseRlCfg,
-    make_microban_teleop_v12_hand_pose_release_env_cfg,
+from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_TASK_ID,
+    MicrobanTeleopV13ArmOverlayRlCfg,
+    make_microban_teleop_v13_arm_overlay_env_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release_runner import (
-    MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
+from mjlab_microban.tasks.microban_teleop_v13_arm_overlay_runner import (
+    MicrobanTeleopV13ArmOverlayOnPolicyRunner,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     make_microban_velocity_env_cfg,
@@ -47,11 +47,11 @@ register_mjlab_task(
     rl_cfg=MicrobanGetupRlCfg,
     runner_cls=MicrobanGetupOnPolicyRunner,
 )
-# PICO v12: the active-hand arm pose-release recipe, trained in one run.
+# PICO v13: arms driven from outside, legs released for foot targets, one run.
 register_mjlab_task(
-    task_id=MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_TASK_ID,
-    env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(),
-    play_env_cfg=make_microban_teleop_v12_hand_pose_release_env_cfg(play=True),
-    rl_cfg=MicrobanTeleopV12HandPoseReleaseRlCfg,
-    runner_cls=MicrobanTeleopV12HandPoseReleaseOnPolicyRunner,
+    task_id=MICROBAN_TELEOP_V13_ARM_OVERLAY_TASK_ID,
+    env_cfg=make_microban_teleop_v13_arm_overlay_env_cfg(),
+    play_env_cfg=make_microban_teleop_v13_arm_overlay_env_cfg(play=True),
+    rl_cfg=MicrobanTeleopV13ArmOverlayRlCfg,
+    runner_cls=MicrobanTeleopV13ArmOverlayOnPolicyRunner,
 )

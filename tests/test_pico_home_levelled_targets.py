@@ -1,4 +1,4 @@
-"""PICO foot/hand targets live in the HOME-levelled trunk frame.
+"""PICO foot targets live in the HOME-levelled trunk frame.
 
 The frame is R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): at the forward-lean HOME it
 is level (x forward, y left, z up), so a world-vertical foot lift reads
@@ -34,11 +34,9 @@ from mjlab_microban.robot.microban_hand_fk import (
     MICROBAN_ARM_JOINT_UPPER_RAD,
     microban_hand_offsets_from_arm_joints,
     rotate_trunk_offsets_to_home_levelled,
-    sample_microban_reachable_hand_targets,
 )
 from mjlab_microban.tasks.mdp import (
     FootTargetCommandCfg,
-    HandTargetCommandCfg,
     _home_levelled_quat,
 )
 from mjlab_microban.tasks.microban_policy_export import (
@@ -69,7 +67,6 @@ def _levelled_offset(
 class HomeLevelledTargetFrameTest(unittest.TestCase):
     def test_command_cfg_default_keeps_the_trunk_frame(self) -> None:
         self.assertEqual(FootTargetCommandCfg(resampling_time_range=(1, 2)).trunk_pitch, 0.0)
-        self.assertEqual(HandTargetCommandCfg(resampling_time_range=(1, 2)).trunk_pitch, 0.0)
 
     @pitched_home_only
     def test_teleop_tasks_define_targets_in_the_levelled_frame(self) -> None:
@@ -79,9 +76,7 @@ class HomeLevelledTargetFrameTest(unittest.TestCase):
                 self.assertEqual(
                     cfg.commands["foot_target"].trunk_pitch, HOME_TRUNK_PITCH_RAD
                 )
-                self.assertEqual(
-                    cfg.commands["hand_target"].trunk_pitch, HOME_TRUNK_PITCH_RAD
-                )
+                self.assertNotIn("hand_target", cfg.commands)
         self.assertEqual(
             MICROBAN_TELEOP_TARGET_FRAME,
             "robot_home_levelled_trunk_xyz_forward_left_up",
@@ -140,9 +135,8 @@ class HomeLevelledTargetFrameTest(unittest.TestCase):
     def test_rotated_fk_offsets_equal_the_levelled_reading_of_trunk_offsets(
         self,
     ) -> None:
-        # The hand command rotates trunk-frame FK offsets by R_y(lean); this is
-        # exactly how the levelled frame reads the same displacement, for any
-        # trunk attitude.
+        # Rotating trunk-frame FK offsets by R_y(lean) is exactly how the
+        # levelled frame reads the same displacement, for any trunk attitude.
         generator = torch.Generator().manual_seed(11)
         lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64)
         upper = torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD, dtype=torch.float64)
@@ -164,11 +158,6 @@ class HomeLevelledTargetFrameTest(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-15,
         )
-        # Inactive hands remain exact zero after the rotation.
-        _, offsets = sample_microban_reachable_hand_targets(
-            torch.zeros(4, 2, dtype=torch.bool), dtype=torch.float64
-        )
-        self.assertTrue(torch.equal(offsets, torch.zeros_like(offsets)))
 
     @pitched_home_only
     def test_v12_hmd_neutral_is_the_level_headset_pose(self) -> None:

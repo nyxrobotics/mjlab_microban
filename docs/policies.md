@@ -24,7 +24,7 @@
 | --- | --- |
 | `walk.onnx` | 歩行（入力 `obs` [1, 63]、出力 `actions` [1, 18]） |
 | `getup.onnx` | 起き上がり（入力 [1, 60]） |
-| `pico_teleop.onnx` | PICO（入力 [1, 83]） |
+| `pico_teleop.onnx` | PICO（入力 [1, 81]） |
 | `manifest.json` | 3つのファイルを1つのリリースに結びつける（下） |
 | `walk_gate.json`、`getup_gate.json` | 歩行と起き上がりの判定の記録（`gate_report_sha256` の元。実機にはコピーしない） |
 
@@ -76,11 +76,15 @@ PICO の `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確
 バイト単位で同じになる）。PICO は判定の追従評価のロールアウトの観測から取る。
 
 PICO だけのキー: `pico_walk_checkpoint_sha256`（凍結した歩行器）、`pico_target_frame`、
-`pico_hand_target_fk_json`（実機の yaml の `hand_target_fk` と同じ）、足・両足・手の目標の範囲
-（`pico_*_target_lower_json` / `_upper_json`）、`pico_raw_action_guard_json`
-（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
-（`critic_warmup`、`hand_start`、`hand_tighten`、`foot_start`、`foot_tighten`、`total`。更新回数）、
+足・両足の目標の範囲（`pico_*_target_lower_json` / `_upper_json`）、`pico_arm_target_json`（腕の目標の
+取り決め: 名前 `microban_pico_arm_target_rel_home_v1`、関節の名前、箱 `lower_rad`/`upper_rad`、速さ 4.0 rad/s）、
+`pico_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
+（`critic_warmup`、`arm_start`、`foot_start`、`foot_tighten`、`total`。更新回数）、
 `pico_active_adapter_columns_json`。
+
+PICO の観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME
+（左 pitch, roll, elbow、右 pitch, roll, elbow）。腕のサーボには方策の出力を使わない。PICO の自己テストの
+行には、足の目標と腕の目標が 0 でない行を含め、腕の目標は箱の中（± 1e-6 rad）でなければならない。
 
 ## 実機側の検証
 

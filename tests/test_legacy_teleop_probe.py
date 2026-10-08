@@ -15,12 +15,11 @@ from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_VELOCITY_NORMALIZER_EPS,
-    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
-    transplant_legacy_actor_state_to_teleop83,
+    transplant_legacy_actor_state_to_teleop,
 )
 
 BODY_JOINTS = tuple(f"body_{index}" for index in range(18))
@@ -54,9 +53,9 @@ def _teleop_layout() -> ActorLayout:
             "actions": slice(48, 66),
             "command": slice(66, 69),
             "foot_target": slice(69, 75),
-            "hand_target": slice(75, 83),
+            "arm_target": slice(75, 81),
         },
-        width=83,
+        width=81,
         joint_pos_names=HMD_JOINTS + BODY_JOINTS,
         joint_vel_names=HMD_JOINTS + BODY_JOINTS,
         action_names=BODY_JOINTS,
@@ -91,7 +90,7 @@ class LegacyTeleopObservationMappingTest(unittest.TestCase):
         action_indices = _indices_by_name(
             BODY_JOINTS, teleop.action_names, label="action"
         )
-        source = torch.arange(83, dtype=torch.float32).unsqueeze(0)
+        source = torch.arange(81, dtype=torch.float32).unsqueeze(0)
         twist = torch.tensor([[101.0, 102.0, 103.0]])
         projected = _assemble_legacy_observation(
             source,
@@ -123,10 +122,10 @@ class LegacyTeleopObservationMappingTest(unittest.TestCase):
 
 
 class LegacyActorTransplantTest(unittest.TestCase):
-    def test_83_input_transplant_preserves_legacy_deterministic_actor(self) -> None:
+    def test_81_input_transplant_preserves_legacy_deterministic_actor(self) -> None:
         torch.manual_seed(7)
         legacy_model = _model(63)
-        target_model = _model(83)
+        target_model = _model(81)
         source_state = legacy_model.state_dict()
         source_state["obs_normalizer._mean"].normal_()
         source_state["obs_normalizer._var"].uniform_(0.1, 2.0)
@@ -152,34 +151,31 @@ class LegacyActorTransplantTest(unittest.TestCase):
             *range(teleop.terms["command"].start, teleop.terms["command"].stop),
         )
         mapping = tuple(enumerate(target_columns))
-        transplanted = transplant_legacy_actor_state_to_teleop83(
+        transplanted = transplant_legacy_actor_state_to_teleop(
             source_state, target_model.state_dict(), mapping
         )
         target_model.load_state_dict(transplanted, strict=True)
 
-        teleop_obs = torch.randn(16, 83)
+        teleop_obs = torch.randn(16, 81)
         legacy_obs = teleop_obs[:, list(target_columns)]
         expected = legacy_model(TensorDict({"actor": legacy_obs}, batch_size=[16]))
         actual = target_model(TensorDict({"actor": teleop_obs}, batch_size=[16]))
         torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-6)
 
-        new_columns = sorted(set(range(83)) - set(target_columns))
+        new_columns = sorted(set(range(81)) - set(target_columns))
         self.assertTrue(
             torch.equal(
                 transplanted["mlp.0.weight"][:, new_columns],
-                torch.zeros((512, 20)),
+                torch.zeros((512, 18)),
             )
         )
         self.assertTrue(
             torch.equal(
                 transplanted["obs_normalizer._mean"][:, new_columns],
-                torch.zeros((1, 20)),
+                torch.zeros((1, 18)),
             )
         )
-        identity_columns = (
-            *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
-            *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-        )
+        identity_columns = TELEOP_V12_HMD_OBSERVATION_COLUMNS
         self.assertEqual(
             new_columns,
             sorted(
@@ -213,9 +209,9 @@ class LegacyActorTransplantTest(unittest.TestCase):
 
     def test_transplant_rejects_incomplete_mapping(self) -> None:
         with self.assertRaisesRegex(ValueError, "cover source columns"):
-            transplant_legacy_actor_state_to_teleop83(
+            transplant_legacy_actor_state_to_teleop(
                 _model(63).state_dict(),
-                _model(83).state_dict(),
+                _model(81).state_dict(),
                 tuple((index, index) for index in range(62)),
             )
 

@@ -1,4 +1,5 @@
-"""Single-foot targets with a standing twist (microban_teleop_foot_command.py)."""
+"""PICO foot targets (microban_teleop_foot_command.py): single-foot targets with a
+standing twist, the 0.12 m/s target speed and the floor band."""
 
 from __future__ import annotations
 
@@ -28,6 +29,10 @@ def _command(stationary_probability: float, n: int = 3):
     command._velocity_command_counter = None
     command._saved_vel_command_b = command._saved_vel_command_w = command._saved_is_rotation_env = None
     command.is_stationary_single_support_env = torch.zeros(n, dtype=torch.bool)
+    command.foot_target_offset_b = torch.zeros(n, 2, 3)
+    command.foot_target_goal_b = torch.zeros(n, 2, 3)
+    command.foot_target_slewed_b = torch.zeros(n, 2, 3)
+    command._max_step_m = fc.MICROBAN_TELEOP_FOOT_TARGET_SLEW_M_S * 0.02
     return command, velocity, twist
 
 
@@ -63,6 +68,8 @@ class StationaryFootTargetTest(unittest.TestCase):
             n = 4000
             command.is_single_support_env = torch.zeros(n, dtype=torch.bool)
             command.is_stationary_single_support_env = torch.zeros(n, dtype=torch.bool)
+            command.foot_target_offset_b = torch.zeros(n, 2, 3)
+            command.foot_target_goal_b = torch.zeros(n, 2, 3)
             with mock.patch.object(ResetFixedFootTargetCommand, "_resample_command", parent):
                 command._resample_command(torch.arange(n))
             self.assertEqual(int(command.is_stationary_single_support_env.sum()), expected)
@@ -70,10 +77,42 @@ class StationaryFootTargetTest(unittest.TestCase):
         n = 4000
         command.is_single_support_env = torch.zeros(n, dtype=torch.bool)
         command.is_stationary_single_support_env = torch.zeros(n, dtype=torch.bool)
+        command.foot_target_offset_b = torch.zeros(n, 2, 3)
+        command.foot_target_goal_b = torch.zeros(n, 2, 3)
         torch.manual_seed(0)
         with mock.patch.object(ResetFixedFootTargetCommand, "_resample_command", parent):
             command._resample_command(torch.arange(n))
         self.assertAlmostEqual(float(command.is_stationary_single_support_env.float().mean()), 0.5, delta=0.03)
+
+    def test_the_target_moves_at_the_teleop_speed_and_drops_the_floor_band(self) -> None:
+        command, _velocity, _twist = _command(0.0, n=1)
+        command.foot_target_goal_b[0, 0] = torch.tensor([0.0, 0.0, 0.04])
+        heights = []
+        for _ in range(25):
+            command._update_command()
+            heights.append(float(command.foot_target_offset_b[0, 0, 2]))
+        # 0.12 m/s at 50 Hz is 2.4 mm per step; the first step (2.4 mm) is in
+        # the 2.5 mm floor band and reads exactly zero, like the wire.
+        self.assertEqual(heights[0], 0.0)
+        self.assertTrue(torch.equal(command.foot_target_offset_b[0, 1], torch.zeros(3)))
+        self.assertAlmostEqual(heights[1], 0.0048, places=6)
+        self.assertAlmostEqual(heights[16], 0.04, places=6)  # 17 steps for 40 mm
+        steps = [b - a for a, b in zip(heights[1:], heights[2:])]
+        self.assertLessEqual(max(steps), 0.0024 + 1e-7)
+        # Back down at the same speed when the target ends.
+        command.foot_target_goal_b.zero_()
+        command._update_command()
+        self.assertAlmostEqual(float(command.foot_target_offset_b[0, 0, 2]), 0.04 - 0.0024, places=6)
+
+    def test_two_published_feet_hold_the_twist_until_one_is_down(self) -> None:
+        command, velocity, twist = _command(0.0, n=1)
+        command.foot_target_slewed_b[0] = torch.tensor([[0.0, 0.0, 0.01], [0.0, 0.0, 0.006]])
+        command._update_command()
+        self.assertTrue(torch.equal(velocity.vel_command_b[0], torch.zeros(3)))
+        self.assertFalse(bool(command.is_both_feet_env.any()))
+        command._update_command()  # the right foot reaches the floor band
+        self.assertTrue(torch.equal(command.foot_target_offset_b[0, 1], torch.zeros(3)))
+        self.assertTrue(torch.equal(velocity.vel_command_b, twist))
 
     def test_the_foot_stage_sets_half(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES

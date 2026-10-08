@@ -1,12 +1,12 @@
 """Legacy-preserving actor components for the contract-v12 teleop policy.
 
 The proven velocity actor is a normalized, unbounded Gaussian policy with a
-63-value observation.  Contract v12 expands that input to the teleop 83-value
-schema without changing the legacy computation at bootstrap: shared first-layer
-columns are copied by semantic name and the 20 new HMD/keypoint columns start at
-exact zero.
+63-value observation.  The PICO contract (v13) expands that input to the
+teleop 81-value schema without changing the legacy computation at bootstrap:
+shared first-layer columns are copied by semantic name and the 18 new
+HMD/foot-target/arm-target columns start at exact zero.
 
-Only those 20 first-layer columns are trainable.  The empirical normalizer,
+Only those 18 first-layer columns are trainable.  The empirical normalizer,
 legacy columns, downstream trunk, output head, bias, and Gaussian standard
 deviation are immutable.  This prevents a teleop update from silently
 erasing the already-proven locomotion policy.
@@ -23,10 +23,12 @@ from rsl_rl.models import MLPModel
 from rsl_rl.modules import EmpiricalNormalization
 from rsl_rl.modules.distribution import GaussianDistribution
 
-from mjlab_microban.robot.microban_hand_fk import (
-    MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
-    microban_hand_fk_metadata,
+from mjlab_microban.policy_contract import (
+    PICO_ARM_JOINT_NAMES,
+    PICO_ARM_LOWER_RAD,
+    PICO_ARM_UPPER_RAD,
 )
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.schedules import (
     PICO_ADAPTER_SCHEDULE_REVISION,
     PICO_SCHEDULE,
@@ -41,12 +43,9 @@ from mjlab_microban.tasks.microban_policy_export import (
 
 LEGACY_VELOCITY_OBSERVATION_WIDTH = 63
 LEGACY_VELOCITY_NORMALIZER_EPS = 1.0e-2
-TELEOP_V12_ACTOR_TOPOLOGY = (83, 512, 256, 128, 18)
-TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION = (
-    "normalized_legacy_velocity_63_to_teleop83_masked_extra_columns_v1"
-)
+TELEOP_V12_ACTOR_TOPOLOGY = (81, 512, 256, 128, 18)
 TELEOP_V12_BOOTSTRAP_MAPPING_VERSION = (
-    "normalized_legacy_velocity_63_to_teleop83_reachable_fk_elbow_minus10_v4"
+    "normalized_legacy_velocity_63_to_teleop81_arm_target_v1"
 )
 
 LEGACY_VELOCITY_ACTOR_STATE_KEYS: frozenset[str] = frozenset(
@@ -93,19 +92,7 @@ def _semantic_observation_names(*, include_teleop_features: bool) -> tuple[str, 
                 "right_z",
             )
         )
-        names.extend(
-            f"hand_target/{member}"
-            for member in (
-                "left_x",
-                "left_y",
-                "left_z",
-                "right_x",
-                "right_y",
-                "right_z",
-                "left_active",
-                "right_active",
-            )
-        )
+        names.extend(f"arm_target/{name}" for name in PICO_ARM_JOINT_NAMES)
     return tuple(names)
 
 
@@ -151,26 +138,29 @@ TELEOP_V12_EXTRA_OBSERVATION_COLUMNS = tuple(
     for index in range(MICROBAN_TELEOP_OBSERVATION_WIDTH)
     if index not in set(TELEOP_V12_SHARED_OBSERVATION_COLUMNS)
 )
-if len(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS) != 20:
-    raise RuntimeError("Contract v12 must introduce exactly 20 actor columns")
+if len(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS) != 18:
+    raise RuntimeError("The PICO contract must introduce exactly 18 actor columns")
 
 TELEOP_V12_HMD_OBSERVATION_COLUMNS = (6, 7, 8, 27, 28, 29)
 TELEOP_V12_FOOT_OBSERVATION_COLUMNS = tuple(range(69, 75))
-TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS = tuple(range(75, 81))
-TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS = tuple(range(81, 83))
-TELEOP_V12_HAND_OBSERVATION_COLUMNS = (
-    *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
-    *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-)
+TELEOP_V12_ARM_OBSERVATION_COLUMNS = tuple(range(75, 81))
 TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS = (
     *TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
-    *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+    *TELEOP_V12_ARM_OBSERVATION_COLUMNS,
 )
-# EmpiricalNormalization divides by ``stored_std + eps``.  Position commands
-# are already bounded in metres, so scale them by their physical per-axis
-# maximum instead of leaving centimetre-sized signals near zero.  The active
-# flags and the six HMD columns deliberately retain their existing identity
-# normalizer state.
+# The largest distance from HOME to an edge of the arm box, per arm joint
+# (pitch 100, roll 110, elbow 90 deg at the current HOME): HOME reads exactly 0
+# and the whole box at most 1.
+TELEOP_V12_ARM_TARGET_NORMALIZER_DENOMINATORS = tuple(
+    max(upper - HOME.joint_pos_rad[name], HOME.joint_pos_rad[name] - lower)
+    for name, lower, upper in zip(
+        PICO_ARM_JOINT_NAMES, PICO_ARM_LOWER_RAD, PICO_ARM_UPPER_RAD, strict=True
+    )
+)
+# EmpiricalNormalization divides by ``stored_std + eps``.  The target columns
+# are bounded (feet in metres, arms in radians), so scale them by their
+# physical per-axis maximum.  The six HMD columns deliberately retain their
+# identity normalizer state.
 TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS = (
     0.03,
     0.03,
@@ -178,8 +168,7 @@ TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS = (
     0.03,
     0.03,
     0.05,
-    *MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
-    *MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M,
+    *TELEOP_V12_ARM_TARGET_NORMALIZER_DENOMINATORS,
 )
 TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD = tuple(
     denominator - LEGACY_VELOCITY_NORMALIZER_EPS
@@ -199,9 +188,6 @@ def teleop_v12_target_normalizer_metadata() -> dict[str, object]:
     """Return the exact JSON-safe target-normalizer migration contract."""
 
     return {
-        "source_bootstrap_mapping_version": (
-            TELEOP_V12_IDENTITY_NORMALIZER_BOOTSTRAP_MAPPING_VERSION
-        ),
         "target_bootstrap_mapping_version": TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
         "authenticated_source_extra_normalizer": "identity_mean0_var1_std1",
         "normalized_target_position_columns": list(
@@ -220,7 +206,6 @@ def teleop_v12_target_normalizer_metadata() -> dict[str, object]:
         "unchanged_identity_normalizer_columns": list(
             TELEOP_V12_UNCHANGED_EXTRA_NORMALIZER_COLUMNS
         ),
-        "hand_target_fk": microban_hand_fk_metadata(),
     }
 
 
@@ -233,37 +218,37 @@ def teleop_v12_active_adapter_columns(common_step_counter: int) -> tuple[int, ..
     # the exact boundary locked so the batch gathered before the curriculum
     # transition cannot update newly enabled columns.  The following rollout
     # ends above the boundary and is the first eligible batch.
-    if common_step_counter <= PICO_SCHEDULE["hand"] * PICO_STEPS_PER_UPDATE:
+    if common_step_counter <= PICO_SCHEDULE["arm"] * PICO_STEPS_PER_UPDATE:
         return ()
     if common_step_counter <= PICO_SCHEDULE["foot"] * PICO_STEPS_PER_UPDATE:
         return (
             *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
-            *TELEOP_V12_HAND_OBSERVATION_COLUMNS,
+            *TELEOP_V12_ARM_OBSERVATION_COLUMNS,
         )
     return TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
 
 
-def transplant_legacy_actor_state_to_teleop83(
+def transplant_legacy_actor_state_to_teleop(
     source_state: Mapping[str, torch.Tensor],
     target_template: Mapping[str, torch.Tensor],
     source_to_target_columns: Sequence[tuple[int, int]] = (
         LEGACY_TO_TELEOP_OBSERVATION_INDEX
     ),
 ) -> dict[str, torch.Tensor]:
-    """Map the pinned normalized 63-input actor into the 83-input actor.
+    """Map the pinned normalized 63-input actor into the 81-input actor.
 
     The 63 shared normalization statistics and first-layer columns are copied by
-    semantic scalar name.  The 12 bounded foot/hand position columns use their
-    physical maximum as the effective normalization denominator; the remaining
-    eight teleoperation-only columns retain identity normalization.  All 20 new
-    first-layer weights are exact zero.  All downstream tensors, including the
+    semantic scalar name.  The 12 bounded foot/arm target columns use their
+    physical maximum as the effective normalization denominator; the six HMD
+    columns retain identity normalization.  All 18 new first-layer weights are
+    exact zero.  All downstream tensors, including the
     scalar Gaussian standard deviation, are copied verbatim.
     """
 
     if set(source_state) != LEGACY_VELOCITY_ACTOR_STATE_KEYS:
         raise ValueError("Legacy source actor state keys drifted")
     if set(target_template) != LEGACY_VELOCITY_ACTOR_STATE_KEYS:
-        raise ValueError("83-input target actor state keys drifted")
+        raise ValueError("81-input target actor state keys drifted")
     pairs = tuple(
         (int(source), int(target)) for source, target in source_to_target_columns
     )
@@ -296,10 +281,10 @@ def transplant_legacy_actor_state_to_teleop83(
     target_shapes = dict(source_shapes)
     target_shapes.update(
         {
-            "obs_normalizer._mean": (1, 83),
-            "obs_normalizer._var": (1, 83),
-            "obs_normalizer._std": (1, 83),
-            "mlp.0.weight": (512, 83),
+            "obs_normalizer._mean": (1, MICROBAN_TELEOP_OBSERVATION_WIDTH),
+            "obs_normalizer._var": (1, MICROBAN_TELEOP_OBSERVATION_WIDTH),
+            "obs_normalizer._std": (1, MICROBAN_TELEOP_OBSERVATION_WIDTH),
+            "mlp.0.weight": (512, MICROBAN_TELEOP_OBSERVATION_WIDTH),
         }
     )
     for name, shape in source_shapes.items():
@@ -371,7 +356,7 @@ class FrozenEmpiricalNormalization(EmpiricalNormalization):
 
 
 class LegacyAdapterTeleopActor(MLPModel):
-    """Standard 83-wide MLP with only the 20 new input columns trainable."""
+    """Standard 81-wide MLP with only the 18 new input columns trainable."""
 
     def __init__(
         self,
@@ -404,7 +389,7 @@ class LegacyAdapterTeleopActor(MLPModel):
         )
         if self.obs_dim != MICROBAN_TELEOP_OBSERVATION_WIDTH:
             raise ValueError(
-                "Contract-v12 actor requires an 83-value observation, got "
+                f"Contract-v12 actor requires a {MICROBAN_TELEOP_OBSERVATION_WIDTH}-value observation, got "
                 f"{self.obs_dim}"
             )
         if not isinstance(self.obs_normalizer, EmpiricalNormalization):

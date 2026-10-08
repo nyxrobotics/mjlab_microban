@@ -10,7 +10,7 @@
 
 The PICO policy deliberately leaves ``head``, ``neck_roll`` and ``neck_pitch``
 to the independent HMD controller: it acts on the 18 body joints and observes
-all 21.  This module holds those orders, the 83-wide actor observation schema
+all 21.  This module holds those orders, the 81-wide actor observation schema
 and its environment check.
 """
 
@@ -61,7 +61,7 @@ MICROBAN_TELEOP_OBSERVATION_SCHEMA: tuple[tuple[str, int], ...] = (
     ("actions", 18),
     ("command", 3),
     ("foot_target", 6),
-    ("hand_target", 8),
+    ("arm_target", 6),
 )
 MICROBAN_TELEOP_OBSERVATION_WIDTH = sum(
     width for _, width in MICROBAN_TELEOP_OBSERVATION_SCHEMA
@@ -111,7 +111,7 @@ def validate_microban_teleop_observation_contract(
             f"({MICROBAN_TELEOP_OBSERVATION_WIDTH},)"
         )
 
-# PICO foot/hand target columns are offsets in the trunk frame with HOME's
+# PICO foot target columns are offsets in the trunk frame with HOME's
 # forward lean rotated out, R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): level at HOME,
 # x forward, y left, z up (the twist uses the same frame).  With a vertical
 # trunk at HOME that is the trunk frame ("robot_trunk_xyz_forward_left_up").

@@ -13,7 +13,6 @@ from home_cases import FORWARD_LEAN_HOME_TAG, home_tag  # noqa: E402
 
 from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
 from mjlab_microban.policy_contract import POLICY_CONTRACT
-from mjlab_microban.robot.microban_hand_fk import microban_hand_fk_metadata
 from mjlab_microban.schedules import (
     PICO_TOTAL_UPDATES,
     pico_schedule_record,
@@ -37,7 +36,7 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -141,9 +140,7 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
             "scenario_count": 12,
             "step_count": 3_600,
         },
-        "runtime_smoke_observations": [
-            [0.0] * 5 + [-1.0] + [0.001 * row] * 77 for row in range(16)
-        ],
+        "runtime_smoke_observations": [_smoke_row(row) for row in range(16)],
     }
     onnx_report = {
         "gate": "microban_teleop_v12_checkpoint_onnx",
@@ -159,7 +156,7 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
         },
     }
     infos = {
-        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
         TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
         "trainable_actor_parameters": ["mlp.0.weight"],
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
@@ -171,6 +168,14 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
 
 
 FINAL_NAME = f"model_{PICO_TOTAL_UPDATES - 1}.pt"
+
+
+def _smoke_row(row: int) -> list[float]:
+    """A possible PICO observation: a lifted foot and moved arms (in the box)."""
+
+    value = 0.001 * row
+    arms = [value, value, value, value, -value, value]
+    return [0.0] * 5 + [-1.0] + [value] * 63 + [value] * 6 + arms
 
 
 @pytest.mark.parametrize(
@@ -256,10 +261,8 @@ def test_metadata_is_the_pico_contract_and_derives_guard(tmp_path: Path) -> None
     assert json.loads(metadata["pico_raw_action_guard_json"]) == [24.0] * 18
     assert json.loads(metadata["pico_curriculum_json"]) == pico_schedule_record()
     assert metadata["pico_walk_checkpoint_sha256"] == LEGACY_VELOCITY_CHECKPOINT_SHA256
-    assert json.loads(metadata["pico_hand_target_lower_json"]) == [-0.08] * 6
-    assert json.loads(metadata["pico_hand_target_fk_json"]) == json.loads(
-        json.dumps(microban_hand_fk_metadata())
-    )
+    assert "pico_hand_target_lower_json" not in metadata
+    assert json.loads(metadata["pico_arm_target_json"])["slew_rad_s"] == 4.0
     assert json.loads(metadata["self_test_observations_json"]) == rows
     assert metadata["joint_names"].split(",")[:3] == ["head", "neck_roll", "neck_pitch"]
     defaults = [float(value) for value in metadata["default_joint_pos"].split(",")]
@@ -377,16 +380,16 @@ def test_a_failed_final_check_preserves_last_known_good_output(
 
 
 def test_self_test_rows_are_the_final_tracking_observations():
-    rows = [[0.0] * 5 + [-1.0] + [0.0] * 77 for _ in range(16)]
+    rows = [[0.0] * 5 + [-1.0] + [0.0] * 75 for _ in range(16)]
     assert deployment._self_test_rows({"runtime_smoke_observations": rows}) == rows
-    fast = [0.0] * 5 + [-1.0] + [0.0] * 21 + [20.0] * 21 + [0.0] * 35
+    fast = [0.0] * 5 + [-1.0] + [0.0] * 21 + [20.0] * 21 + [0.0] * 33
     assert deployment._self_test_rows({"runtime_smoke_observations": rows[:8] + [fast]}) == rows[:8]
     for bad in (
         {},
         {"runtime_smoke_observations": rows[:7]},
-        {"runtime_smoke_observations": [row[:82] for row in rows]},
-        {"runtime_smoke_observations": [[float("nan")] * 83] * 16},
-        {"runtime_smoke_observations": [[True] * 83] + rows[1:]},
+        {"runtime_smoke_observations": [row[:80] for row in rows]},
+        {"runtime_smoke_observations": [[float("nan")] * 81] * 16},
+        {"runtime_smoke_observations": [[True] * 81] + rows[1:]},
     ):
         with pytest.raises(ValueError):
             deployment._self_test_rows(bad)

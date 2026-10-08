@@ -28,10 +28,10 @@ The packager, on CPU:
 2. captures the checkpoint bytes, revalidates the frozen walker and its probe
    (bootstrap provenance) and the corrected bilateral site order, and refuses
    dry-run evidence unless it packages a dry run;
-3. exports a fixed-shape `obs[1,83] -> actions[1,18]` float32 graph;
+3. exports a fixed-shape `obs[1,81] -> actions[1,18]` float32 graph;
 4. writes the robot's contract microban-policy-1 from the validated evidence
-   (docs/policies.md): the HOME stamp and layout, the PICO targets, frame and
-   curriculum, the per-joint raw-action guard derived from the final tracking
+   (docs/policies.md): the HOME stamp and layout, the PICO foot targets and
+   frame, the arm-target box and slew, the curriculum, the per-joint raw-action guard derived from the final tracking
    envelope, and the startup self-test: the final tracking rollouts' actor
    observations (possible states only) with the actor's deterministic output
    for each;
@@ -46,17 +46,19 @@ every start (the self-test).
 
 ## Tracking profile
 
-One profile, `full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1`,
-the same at every HOME: all scenarios (low forward, both hand corners, both
-keypoint corners, both feet, two mixed twists), the push perturbation, the
-target-column ablation of hands and feet, and these limits:
+One profile, `arm_overlay_foot_perturbation_v1`, the same at every HOME: all
+scenarios (low forward, low forward with both arms 70 deg forward, one arm
+reaching out while standing, both keypoint corners with the arms out, both
+feet, two mixed twists), the push perturbation, the target-column ablation of
+the arm and foot columns, and these limits:
 
 | limit | value |
 | --- | --- |
-| hand RMS | 0.040 m |
-| hand P95 | 0.07 m |
 | foot RMS | 0.05 m |
 | foot P95 | 0.08 m |
+
+The arms are driven from outside (the robot's `pico_arms`), so hand accuracy
+is not judged here.
 
 plus no falls, finite values, actual soft-limit overshoot <= 0.25 rad, raw-action
 recurrence, forced HMD motion, observation coverage and the twist directional

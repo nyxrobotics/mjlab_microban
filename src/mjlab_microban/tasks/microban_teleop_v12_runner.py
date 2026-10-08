@@ -48,7 +48,7 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
 
 TELEOP_V12_BOOTSTRAP_INFO_KEY = "legacy_velocity_actor_bootstrap_v12"
 # Every checkpoint records the corrected bilateral (left/right) site order of
-# the foot/hand target columns; the packager requires it.
+# the foot target columns; the packager requires it.
 BILATERAL_SITE_ORDER_INFO_KEY = "bilateral_site_order_revision"
 
 
@@ -68,7 +68,7 @@ TELEOP_V12_OBSERVATION_TERM_LAYOUTS = {
         ("actions", 18),
         ("command", 3),
         ("foot_target", 6),
-        ("hand_target", 8),
+        ("arm_target", 6),
     ),
     "critic": (
         ("base_lin_vel", 3),
@@ -83,7 +83,7 @@ TELEOP_V12_OBSERVATION_TERM_LAYOUTS = {
         ("foot_contact", 2),
         ("foot_contact_forces", 6),
         ("foot_target", 6),
-        ("hand_target", 8),
+        ("arm_target", 6),
     ),
 }
 
@@ -108,12 +108,12 @@ def teleop_v12_observation_term_slices(manager) -> dict[str, dict[str, slice]]:
             offset += width
         result[group] = slices
     if result["actor"]["foot_target"] != slice(69, 75) or result["actor"][
-        "hand_target"
-    ] != slice(75, 83):
+        "arm_target"
+    ] != slice(75, 81):
         raise RuntimeError("Contract-v12 actor bilateral target slices drifted")
     if result["critic"]["foot_target"] != slice(84, 90) or result["critic"][
-        "hand_target"
-    ] != slice(90, 98):
+        "arm_target"
+    ] != slice(90, 96):
         raise RuntimeError("Contract-v12 critic bilateral target slices drifted")
     return result
 

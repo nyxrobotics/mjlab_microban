@@ -3,7 +3,7 @@
 The gate (teleop_v12_stage) proves the checkpoint and its evaluation
 evidence; this command turns that evidence into the robot's contract
 microban-policy-1 (policy_contract.py, docs/policies.md: the HOME stamp, the
-layout, the PICO targets and curriculum, the raw-action guard and the startup
+layout, the PICO foot and arm targets and curriculum, the raw-action guard and the startup
 self-test: the final tracking rollouts' actor observations with the actor's
 deterministic output for each), checks the final metadata-bearing graph with
 both ONNX implementations and the robot's self-test rule and only then
@@ -31,11 +31,9 @@ import torch
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from onnx.reference import ReferenceEvaluator
 
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_TELEOP_OBSERVATION_WIDTH
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import HOME_FRAME
-from mjlab_microban.robot.microban_hand_fk import (
-    microban_hand_fk_metadata,
-)
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import FINAL_PROFILE
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
@@ -59,7 +57,7 @@ from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -163,13 +161,13 @@ def _require_final_gate(
 
 
 def _deployment_recipe_revision(infos: Mapping[str, Any]) -> str:
-    """Recipe string the package declares to the robot (the pose-release recipe)."""
+    """Recipe string the package declares to the robot (the arm-overlay recipe)."""
 
     if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
     ):
-        raise ValueError("Only a pose-release checkpoint is packaged")
-    return MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        raise ValueError("Only an arm-overlay checkpoint is packaged")
+    return MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
 
 
 def _read_onnx_metadata(path: Path) -> dict[str, str]:
@@ -283,7 +281,6 @@ def build_v12_deployment_metadata(
         metadata.update(policy_contract.pico_metadata(
             walk_checkpoint_sha256=bootstrap.source.sha256,
             target_frame=MICROBAN_TELEOP_TARGET_FRAME,
-            hand_target_fk=microban_hand_fk_metadata(),
             raw_action_guard=_runtime_guard(tracking_envelope),
             curriculum=pico_schedule_record(),
             active_adapter_columns=infos["active_actor_columns_at_save"],
@@ -313,7 +310,7 @@ def _validate_graph_contract(path: Path) -> None:
     output_value = model.graph.output[0]
     if input_value.name != "obs" or output_value.name != "actions":
         raise ValueError("Contract-v12 deployment tensors must be obs -> actions")
-    for value, expected in ((input_value, [1, 83]), (output_value, [1, 18])):
+    for value, expected in ((input_value, [1, MICROBAN_TELEOP_OBSERVATION_WIDTH]), (output_value, [1, 18])):
         tensor = value.type.tensor_type
         shape = [dimension.dim_value for dimension in tensor.shape.dim]
         if tensor.elem_type != onnx.TensorProto.FLOAT or shape != expected:
@@ -330,9 +327,9 @@ def _validate_final_parity(
 
     generator = torch.Generator().manual_seed(20260925)
     # Advance the generator exactly as the hash-bound ONNX report did before
-    # drawing its full-83-column corpus.
-    torch.randn(10_000, 83, generator=generator)
-    observations = torch.randn(64, 83, generator=generator)
+    # drawing its full-width corpus.
+    torch.randn(10_000, MICROBAN_TELEOP_OBSERVATION_WIDTH, generator=generator)
+    observations = torch.randn(64, MICROBAN_TELEOP_OBSERVATION_WIDTH, generator=generator)
     if not bool(
         torch.all(
             observations[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS].abs().amax(dim=0)

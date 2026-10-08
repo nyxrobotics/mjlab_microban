@@ -30,7 +30,6 @@ from mjlab_microban.robot.microban_hand_fk import (
     microban_hand_target_offsets_from_arm_joints,
     microban_hand_positions_from_arm_joints,
     microban_reachable_hand_evaluation_offsets,
-    sample_microban_reachable_hand_targets,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,55 +96,6 @@ class MicrobanHandFkTest(unittest.TestCase):
             rtol=0.0,
             atol=0.0,
         )
-
-    @centered_home_only  # the forward-lean box: test_microban_hand_fk_forward_lean.py
-    def test_joint_box_samples_are_reachable_finite_and_bounded(self) -> None:
-        count = 100_000
-        active = torch.ones(count, 2, dtype=torch.bool)
-        generator = torch.Generator().manual_seed(20260925)
-        joints, offsets = sample_microban_reachable_hand_targets(
-            active, generator=generator, dtype=torch.float64
-        )
-        lower = torch.tensor(MICROBAN_ARM_JOINT_LOWER_RAD, dtype=torch.float64)
-        upper = torch.tensor(MICROBAN_ARM_JOINT_UPPER_RAD, dtype=torch.float64)
-        self.assertTrue(bool(torch.isfinite(joints).all().item()))
-        self.assertTrue(bool(torch.isfinite(offsets).all().item()))
-        self.assertTrue(bool((joints >= lower).all().item()))
-        self.assertTrue(bool((joints <= upper).all().item()))
-        torch.testing.assert_close(
-            offsets,
-            microban_hand_offsets_from_arm_joints(joints),
-            rtol=0.0,
-            atol=0.0,
-        )
-        bounds = torch.tensor(
-            MICROBAN_HAND_TARGET_NORMALIZER_ABS_BOUND_M, dtype=torch.float64
-        )
-        self.assertTrue(bool((offsets.abs() <= bounds).all().item()))
-
-        # Independent uniform joint sampling has expectation at each interval's
-        # midpoint.  This also catches accidental Cartesian-box sampling.
-        expected_mean = (lower + upper) * 0.5
-        torch.testing.assert_close(
-            joints.mean(dim=0), expected_mean, rtol=0.0, atol=2.0e-3
-        )
-
-    def test_inactive_hands_use_home_joints_and_exact_zero_offsets(self) -> None:
-        active = torch.tensor(
-            [[False, False], [True, False], [False, True], [True, True]]
-        )
-        joints, offsets = sample_microban_reachable_hand_targets(
-            active,
-            generator=torch.Generator().manual_seed(4),
-            dtype=torch.float64,
-        )
-        home = torch.tensor(MICROBAN_ARM_HOME_JOINT_RAD, dtype=torch.float64)
-        inactive = ~active
-        self.assertTrue(torch.equal(joints[inactive], home.expand(4, -1, -1)[inactive]))
-        self.assertTrue(
-            torch.equal(offsets[inactive], torch.zeros_like(offsets[inactive]))
-        )
-        self.assertTrue(bool(torch.count_nonzero(offsets[active]).item() > 0))
 
     def test_metadata_exposes_joint_box_and_normalizer_bound(self) -> None:
         metadata = microban_hand_fk_metadata()

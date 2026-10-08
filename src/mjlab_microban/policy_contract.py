@@ -41,7 +41,7 @@ POLICY_CONTRACT = "microban-policy-1"
 RECIPES: Mapping[str, str] = {
     "walk": "microban-walk-track-velocity-1",
     "getup": "microban-getup-single-run-1",
-    "pico": "microban-pico-pose-release-track-velocity-1",
+    "pico": "microban-pico-arm-overlay-track-velocity-1",
 }
 KINDS = tuple(RECIPES)
 POLICY_FILES: Mapping[str, str] = {
@@ -74,7 +74,7 @@ OBSERVATION_SCHEMAS: Mapping[str, tuple[tuple[str, int], ...]] = {
     ),
     "pico": (
         ("base_ang_vel", 3), ("projected_gravity", 3), ("joint_pos", 21), ("joint_vel", 21),
-        ("actions", ACTION_WIDTH), ("command", 3), ("foot_target", 6), ("hand_target", 8),
+        ("actions", ACTION_WIDTH), ("command", 3), ("foot_target", 6), ("arm_target", 6),
     ),
 }
 OBSERVATION_WIDTHS = {kind: sum(width for _, width in schema) for kind, schema in OBSERVATION_SCHEMAS.items()}
@@ -97,16 +97,25 @@ SELF_TEST_RTOL = 1.0e-5
 SELF_TEST_GRAVITY_NORM_TOLERANCE = 0.05
 SELF_TEST_MAX_JOINT_SPEED_RAD_S = 12.1
 SELF_TEST_JOINT_RANGE_MARGIN_RAD = math.radians(5.0)
+SELF_TEST_ARM_TARGET_TOLERANCE_RAD = 1.0e-6
 
 # PICO targets: the command support of the training task.
 PICO_FOOT_TARGET_LOWER = [-0.03, -0.03, 0.0] * 2
 PICO_FOOT_TARGET_UPPER = [0.03, 0.03, 0.05] * 2
 PICO_BOTH_FEET_TARGET_LOWER = [-0.01, -0.01, 0.0] * 2
 PICO_BOTH_FEET_TARGET_UPPER = [0.01, 0.01, 0.02] * 2
-PICO_HAND_TARGET_LOWER = [-0.08] * 6
-PICO_HAND_TARGET_UPPER = [0.08] * 6
-PICO_ADAPTER_COLUMNS = [6, 7, 8, 27, 28, 29, *range(69, 83)]
-PICO_CURRICULUM_KEYS = ("critic_warmup", "hand_start", "hand_tighten", "foot_start", "foot_tighten", "total")
+# PICO arm targets (columns 75-80): the angles last written to the six arm
+# servos minus HOME, left then right, each (shoulder_pitch, shoulder_roll,
+# elbow).  The box is the robot's pico_arm_contract (absolute angles) and the
+# slew its pico_arms rate.
+PICO_ARM_TARGET_CONTRACT = "microban_pico_arm_target_rel_home_v1"
+PICO_ARM_JOINT_NAMES = ("left_shoulder_pitch", "left_shoulder_roll", "left_elbow",
+                        "right_shoulder_pitch", "right_shoulder_roll", "right_elbow")
+PICO_ARM_LOWER_RAD = [math.radians(value) for value in (-100.0, 10.0, -110.0, -100.0, -120.0, -110.0)]
+PICO_ARM_UPPER_RAD = [math.radians(value) for value in (100.0, 120.0, 0.0, 100.0, -10.0, 0.0)]
+PICO_ARM_SLEW_RATE_RAD_S = 4.0
+PICO_ADAPTER_COLUMNS = [6, 7, 8, 27, 28, 29, *range(69, 81)]
+PICO_CURRICULUM_KEYS = ("critic_warmup", "arm_start", "foot_start", "foot_tighten", "total")
 
 
 class PolicyContractError(ValueError):
@@ -186,6 +195,12 @@ def physical_row_problem(kind: str, row: Sequence[float]) -> str | None:
         angle = residual + HOME.joint_pos_rad[name]
         if not lower - SELF_TEST_JOINT_RANGE_MARGIN_RAD <= angle <= upper + SELF_TEST_JOINT_RANGE_MARGIN_RAD:
             return f"{name} outside its range"
+    if "arm_target" in terms:
+        for name, value, lower, upper in zip(PICO_ARM_JOINT_NAMES, values[terms["arm_target"]],
+                                             PICO_ARM_LOWER_RAD, PICO_ARM_UPPER_RAD, strict=True):
+            angle = value + HOME.joint_pos_rad[name]
+            if not lower - SELF_TEST_ARM_TARGET_TOLERANCE_RAD <= angle <= upper + SELF_TEST_ARM_TARGET_TOLERANCE_RAD:
+                return f"arm_target {name} outside the arm box"
     return None
 
 
@@ -271,6 +286,11 @@ def contract_metadata(
             raise PolicyContractError(f"self-test row {index}: {problem}")
     if any(len(row) != ACTION_WIDTH or not all(math.isfinite(v) for v in row) for row in actions):
         raise PolicyContractError(f"self-test actions must be finite rows of {ACTION_WIDTH}")
+    if kind == "pico":
+        terms = _term_slices(kind)
+        for term in ("foot_target", "arm_target"):
+            if not any(any(value != 0.0 for value in row[terms[term]]) for row in rows):
+                raise PolicyContractError(f"the PICO self-test has no row with a non-zero {term}")
     metadata = {
         "microban_policy_contract": POLICY_CONTRACT,
         "microban_policy_kind": kind,
@@ -300,11 +320,22 @@ def contract_metadata(
     return metadata
 
 
+def pico_arm_target_record() -> dict[str, Any]:
+    """The arm-target contract the robot checks (pico_arm_target_json)."""
+
+    return {
+        "contract": PICO_ARM_TARGET_CONTRACT,
+        "joint_names": list(PICO_ARM_JOINT_NAMES),
+        "lower_rad": list(PICO_ARM_LOWER_RAD),
+        "upper_rad": list(PICO_ARM_UPPER_RAD),
+        "slew_rad_s": PICO_ARM_SLEW_RATE_RAD_S,
+    }
+
+
 def pico_metadata(
     *,
     walk_checkpoint_sha256: str,
     target_frame: str,
-    hand_target_fk: Mapping[str, Any],
     raw_action_guard: Sequence[float],
     curriculum: Mapping[str, int],
     active_adapter_columns: Sequence[int],
@@ -318,7 +349,7 @@ def pico_metadata(
     if len(guard) != ACTION_WIDTH or not np.isfinite(guard32).all() or min(guard) <= 0.0:
         raise PolicyContractError("the PICO raw-action guard must be 18 positive finite float32 values")
     record = {key: curriculum[key] for key in PICO_CURRICULUM_KEYS}
-    if not 0 < record["hand_start"] <= record["foot_start"] <= record["foot_tighten"] <= record["total"]:
+    if not 0 < record["arm_start"] <= record["foot_start"] <= record["foot_tighten"] <= record["total"]:
         raise PolicyContractError(f"PICO curriculum {record} is not ordered")
     if not record["foot_tighten"] <= checkpoint_iteration + 1 <= record["total"]:
         raise PolicyContractError("the PICO checkpoint is not from the final curriculum stage")
@@ -329,13 +360,11 @@ def pico_metadata(
     return {
         "pico_walk_checkpoint_sha256": walk_checkpoint_sha256,
         "pico_target_frame": target_frame,
-        "pico_hand_target_fk_json": _json(hand_target_fk),
         "pico_foot_target_lower_json": _json(PICO_FOOT_TARGET_LOWER),
         "pico_foot_target_upper_json": _json(PICO_FOOT_TARGET_UPPER),
         "pico_both_feet_target_lower_json": _json(PICO_BOTH_FEET_TARGET_LOWER),
         "pico_both_feet_target_upper_json": _json(PICO_BOTH_FEET_TARGET_UPPER),
-        "pico_hand_target_lower_json": _json(PICO_HAND_TARGET_LOWER),
-        "pico_hand_target_upper_json": _json(PICO_HAND_TARGET_UPPER),
+        "pico_arm_target_json": _json(pico_arm_target_record()),
         "pico_raw_action_guard_json": _json(guard),
         "pico_curriculum_json": _json(record),
         "pico_active_adapter_columns_json": _json(list(active_adapter_columns)),

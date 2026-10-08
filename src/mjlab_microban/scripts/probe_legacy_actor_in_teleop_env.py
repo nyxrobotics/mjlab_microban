@@ -1,8 +1,9 @@
-"""Run the original 63-input walk actor inside the nominal 83-input teleop task.
+"""Run the original 63-input walk actor inside the nominal 81-input teleop task.
 
-This is a bounded feasibility probe, not a deployment gate.  It intentionally
-changes only two teleop execution details needed to preserve the legacy actor's
-closed-loop contract:
+This is a bounded feasibility probe, not a deployment gate.  The arms are held
+at HOME by the PICO arm overlay, as the robot's pico_arms holds them with the
+right trigger released.  It intentionally changes only two teleop execution
+details needed to preserve the legacy actor's closed-loop contract:
 
 * the joint-position action term applies only the shared target rule of every
   Microban policy, HOME + raw_action with no software clip, saturated at the
@@ -39,7 +40,11 @@ from mjlab_microban.legacy_velocity_diagnostics import (
     publish_json_atomic,
     summarize_samples,
 )
-from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_TELEOP_OBSERVATION_WIDTH,
+)
+from mjlab_microban.tasks.microban_teleop_v12_bootstrap import LEGACY_TELEOP_PROBE_REVISION
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
@@ -215,23 +220,23 @@ def _termination_names(env: ManagerBasedRlEnv) -> list[str]:
 
 def _zero_neutral_targets(env: ManagerBasedRlEnv) -> None:
     foot = env.command_manager.get_term("foot_target")
-    hand = env.command_manager.get_term("hand_target")
-    foot.foot_target_offset_b.zero_()
+    all_envs = torch.arange(env.num_envs, device=env.device)
+    foot.hold_targets(all_envs, torch.zeros_like(foot.foot_target_offset_b))
     foot.is_single_support_env.fill_(False)
     foot.is_both_feet_env.fill_(False)
-    hand.hand_target_offset_b.zero_()
-    hand.is_active.fill_(False)
+    foot.is_stationary_single_support_env.fill_(False)
+    foot.time_left.fill_(float("inf"))
 
 
 def _targets_are_neutral(env: ManagerBasedRlEnv) -> bool:
     foot = env.command_manager.get_term("foot_target")
-    hand = env.command_manager.get_term("hand_target")
+    action = env.action_manager.get_term("joint_pos")
     return bool(
         torch.count_nonzero(foot.foot_target_offset_b).item() == 0
         and not foot.is_single_support_env.any().item()
         and not foot.is_both_feet_env.any().item()
-        and torch.count_nonzero(hand.hand_target_offset_b).item() == 0
-        and not hand.is_active.any().item()
+        and torch.equal(action.arm_target_rad, action.arm_home_rad)
+        and torch.equal(action.arm_goal_rad, action.arm_home_rad)
     )
 
 
@@ -314,9 +319,9 @@ def _evaluate_scenario(
                 raise ValueError(
                     f"Legacy mapped observation drifted: {policy_obs.shape}"
                 )
-        elif policy_observation_mode == "teleop83":
+        elif policy_observation_mode == "teleop":
             policy_obs = actor_obs
-            if tuple(policy_obs.shape) != (1, 83):
+            if tuple(policy_obs.shape) != (1, MICROBAN_TELEOP_OBSERVATION_WIDTH):
                 raise ValueError(f"Teleop observation drifted: {policy_obs.shape}")
         else:
             raise ValueError(
@@ -350,7 +355,7 @@ def _evaluate_scenario(
         if not bool(torch.equal(command.vel_command_b, expected_twist)):
             raise RuntimeError(f"Twist command drifted in {scenario.name}")
         if not _targets_are_neutral(env):
-            raise RuntimeError(f"Neutral foot/hand targets drifted in {scenario.name}")
+            raise RuntimeError(f"Neutral foot/arm targets drifted in {scenario.name}")
         neutral_target_verified_steps += 1
 
         finite = all(
@@ -461,7 +466,7 @@ def _evaluate_scenario(
         "maximum_hypothetical_raw_target_soft_limit_excess_rad": (
             maximum_raw_target_soft_limit_excess
         ),
-        "neutral_foot_hand_target_verified_steps": neutral_target_verified_steps,
+        "neutral_target_verified_steps": neutral_target_verified_steps,
         "raw_action_recurrence_verified_steps": (
             raw_action_recurrence_verified_steps
         ),
@@ -520,7 +525,7 @@ def run_probe(
     teleop_wrapped = RslRlVecEnvWrapper(teleop_env, clip_actions=None)
     try:
         teleop_layout = _actor_layout(teleop_env)
-        if legacy_layout.width != 63 or teleop_layout.width != 83:
+        if legacy_layout.width != 63 or teleop_layout.width != MICROBAN_TELEOP_OBSERVATION_WIDTH:
             raise ValueError(
                 f"Unexpected actor widths legacy={legacy_layout.width}, "
                 f"teleop={teleop_layout.width}"
@@ -607,7 +612,7 @@ def run_probe(
         )
     )
     return {
-        "probe": "legacy_velocity_actor_in_nominal_teleop_env_v1",
+        "probe": LEGACY_TELEOP_PROBE_REVISION,
         "checkpoint": {"path": str(checkpoint), "sha256": digest},
         "settings": {
             "device": device,
@@ -618,7 +623,7 @@ def run_probe(
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
             "foot_target": "exact_zero_inactive",
-            "hand_target": "exact_zero_inactive",
+            "arm_target": "home_overlay",
         },
         "mapping": {
             "legacy_observation_width": legacy_layout.width,
@@ -667,7 +672,7 @@ def run_probe(
                 for result in results
             ),
             "neutral_target_contract_all_steps": all(
-                result["neutral_foot_hand_target_verified_steps"]
+                result["neutral_target_verified_steps"]
                 == result["executed_steps"]
                 for result in results
             ),

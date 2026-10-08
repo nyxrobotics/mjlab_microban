@@ -12,8 +12,8 @@ from bam.mjlab import BamActuatorCfg
 
 from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_KP_POLICY
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
-from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
-    make_microban_teleop_v12_hand_pose_release_env_cfg,
+from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+    make_microban_teleop_v13_arm_overlay_env_cfg,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
@@ -27,7 +27,7 @@ class ServoGainTest(unittest.TestCase):
         for name, cfg in (
             ("walk", make_microban_velocity_env_cfg()),
             ("getup", make_microban_getup_env_cfg()),
-            ("pico", make_microban_teleop_v12_hand_pose_release_env_cfg()),
+            ("pico", make_microban_teleop_v13_arm_overlay_env_cfg()),
         ):
             with self.subTest(name):
                 robot = cfg.scene.entities["robot"]

@@ -17,10 +17,10 @@ from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotation
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_OBSERVATION_SCHEMA,
 )
+from mjlab_microban.tasks.microban_teleop_foot_command import StationaryFootTargetCommand
 from mjlab_microban.tasks.microban_teleop_mdp import (
     HmdNeckTargetMotion,
-    ResetFixedFootTargetCommand,
-    ResetFixedHandTargetCommand,
+    PicoArmOverlayJointPositionAction,
 )
 
 # These are the physical command limits applied by microban's central input
@@ -38,7 +38,15 @@ STATIONARY_YAW_MAX_RAD_S = 3.0
 TARGET_SAFETY_MARGIN = 0.8
 FOOT_TARGET_LIMIT_M = (0.03, 0.03, 0.05)
 SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M = (0.01, 0.01, 0.02)
-HAND_TARGET_LIMIT_M = (0.08, 0.08, 0.08)
+# Arm poses (minus HOME, rad; shoulder pitch < 0 raises an arm forward):
+# both arms 70 deg forward, one arm reaching forward-out while the other is
+# behind, and halfway versions for the mixed walking scenarios.  All inside
+# the PICO arm box with the hands clear of the trunk.
+ARMS_FORWARD_70 = (-math.radians(70.0), 0.0, 0.0, -math.radians(70.0), 0.0, 0.0)
+ARMS_REACH_LEFT = (-1.4, 0.8, -0.8, 0.6, 0.0, -0.4)
+ARMS_REACH_RIGHT = (0.6, 0.0, -0.4, -1.4, -0.8, -0.8)
+ARMS_HALF_LEFT = tuple(0.5 * value for value in ARMS_REACH_LEFT)
+ARMS_HALF_RIGHT = tuple(0.5 * value for value in ARMS_REACH_RIGHT)
 CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M = 0.0026
 
 # A moving-HMD stage report must demonstrate that the event was actually
@@ -57,8 +65,9 @@ class EvaluationScenario:
     name: str
     twist: tuple[float, float, float]
     foot_target: tuple[tuple[float, float, float], tuple[float, float, float]]
-    hand_target: tuple[tuple[float, float, float], tuple[float, float, float]]
-    hand_active: tuple[bool, bool]
+    arm_target: tuple[float, float, float, float, float, float] = (0.0,) * 6
+    """The arm targets minus HOME (rad), PICO_ARM_JOINT_NAMES order (left then
+    right, each pitch, roll, elbow); zero is HOME (right trigger released)."""
 
 
 def default_scenarios() -> tuple[EvaluationScenario, ...]:
@@ -69,71 +78,57 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
     both_feet_max = tuple(
         value * TARGET_SAFETY_MARGIN for value in SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M
     )
-    hand_max = tuple(value * TARGET_SAFETY_MARGIN for value in HAND_TARGET_LIMIT_M)
     foot_half = tuple(value * 0.5 for value in foot_max)
-    hand_half = tuple(value * 0.5 for value in hand_max)
 
     return (
-        EvaluationScenario("neutral", zero, (zero, zero), (zero, zero), (False, False)),
+        EvaluationScenario("neutral", zero, (zero, zero)),
         EvaluationScenario(
-            "low_forward", (0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+            "low_forward", (0.1, 0.0, 0.0), (zero, zero)
         ),
         EvaluationScenario(
-            "mid_forward", (0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+            "mid_forward", (0.2, 0.0, 0.0), (zero, zero)
         ),
         EvaluationScenario(
-            "low_backward", (-0.1, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+            "low_backward", (-0.1, 0.0, 0.0), (zero, zero)
         ),
         EvaluationScenario(
-            "mid_backward", (-0.2, 0.0, 0.0), (zero, zero), (zero, zero), (False, False)
+            "mid_backward", (-0.2, 0.0, 0.0), (zero, zero)
         ),
         EvaluationScenario(
             "low_lateral_left",
             (0.0, 0.1, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "mid_lateral_left",
             (0.0, 0.2, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "low_lateral_right",
             (0.0, -0.1, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "mid_lateral_right",
             (0.0, -0.2, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
-            "low_yaw_left", (0.0, 0.0, 0.5), (zero, zero), (zero, zero), (False, False)
+            "low_yaw_left", (0.0, 0.0, 0.5), (zero, zero)
         ),
         EvaluationScenario(
-            "mid_yaw_left", (0.0, 0.0, 1.0), (zero, zero), (zero, zero), (False, False)
+            "mid_yaw_left", (0.0, 0.0, 1.0), (zero, zero)
         ),
         EvaluationScenario(
             "low_yaw_right",
             (0.0, 0.0, -0.5),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "mid_yaw_right",
             (0.0, 0.0, -1.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         # Exact zero is the only inactive foot representation.  These two
         # stationary cases exercise the first practical active value just above
@@ -142,8 +137,6 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
             "floor_band_edge_single",
             zero,
             ((0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M), zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "floor_band_edge_both",
@@ -152,132 +145,82 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
                 (0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M),
                 (0.0, 0.0, CANONICAL_ACTIVE_FOOT_Z_LOWER_EDGE_M),
             ),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "bounded_combined",
             (0.35, -0.15, 0.75),
             ((foot_half[0], -foot_half[1], foot_half[2]), zero),
-            (
-                (hand_half[0], -hand_half[1], hand_half[2]),
-                (-hand_half[0], hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
+            ARMS_HALF_LEFT,
         ),
         EvaluationScenario(
             "max_forward",
             (FORWARD_MAX_M_S, 0.0, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_backward",
             (-BACKWARD_MAX_M_S, 0.0, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_lateral_left",
             (0.0, LATERAL_MAX_M_S, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_lateral_right",
             (0.0, -LATERAL_MAX_M_S, 0.0),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_moving_yaw_left",
             (0.0, 0.0, MOVING_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_moving_yaw_right",
             (0.0, 0.0, -MOVING_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_stationary_yaw_left",
             (0.0, 0.0, STATIONARY_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "max_stationary_yaw_right",
             (0.0, 0.0, -STATIONARY_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         # Keep locomotion-only mixed commands separate from keypoint scenarios,
-        # so a locomotion check is not coupled to the hand/foot objectives.
+        # so a locomotion check is not coupled to the arm/foot objectives.
         EvaluationScenario(
             "mixed_twist_forward_left",
             (FORWARD_MAX_M_S, LATERAL_MAX_M_S, MOVING_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "mixed_twist_backward_right",
             (-BACKWARD_MAX_M_S, -LATERAL_MAX_M_S, -MOVING_YAW_MAX_RAD_S),
             (zero, zero),
-            (zero, zero),
-            (False, False),
         ),
-        # Likewise, hand-only corners let the broad/tight hand stages be gated
-        # before non-zero foot targets are introduced (PICO_SCHEDULE["foot"]).
+        # The arms as the robot's pico_arms moves them: walking with both arms
+        # 70 deg forward, and standing with one arm reaching out.
         EvaluationScenario(
-            "max_hands_left",
-            zero,
-            (zero, zero),
-            (
-                (hand_max[0], -hand_max[1], hand_max[2]),
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-            ),
-            (True, True),
+            "arms_forward_low_forward", (0.1, 0.0, 0.0), (zero, zero), ARMS_FORWARD_70
         ),
-        EvaluationScenario(
-            "max_hands_right",
-            zero,
-            (zero, zero),
-            (
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-                (hand_max[0], -hand_max[1], hand_max[2]),
-            ),
-            (True, True),
-        ),
+        EvaluationScenario("arms_reach_left", zero, (zero, zero), ARMS_REACH_LEFT),
         EvaluationScenario(
             "max_keypoints_left",
             zero,
             ((foot_max[0], -foot_max[1], foot_max[2]), zero),
-            (
-                (hand_max[0], -hand_max[1], hand_max[2]),
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-            ),
-            (True, True),
+            ARMS_REACH_LEFT,
         ),
         EvaluationScenario(
             "max_keypoints_right",
             zero,
             (zero, (-foot_max[0], foot_max[1], foot_max[2])),
-            (
-                (-hand_max[0], hand_max[1], -hand_max[2]),
-                (hand_max[0], -hand_max[1], hand_max[2]),
-            ),
-            (True, True),
+            ARMS_REACH_RIGHT,
         ),
         # Simultaneous foot targets use the narrower stationary distribution
         # trained by v2, including the live 0.8 safety margin.
@@ -288,28 +231,18 @@ def default_scenarios() -> tuple[EvaluationScenario, ...]:
                 (both_feet_max[0], -both_feet_max[1], both_feet_max[2]),
                 (-both_feet_max[0], both_feet_max[1], both_feet_max[2]),
             ),
-            (zero, zero),
-            (False, False),
         ),
         EvaluationScenario(
             "mixed_forward_left",
             (FORWARD_MAX_M_S, LATERAL_MAX_M_S, MOVING_YAW_MAX_RAD_S),
             ((foot_half[0], foot_half[1], foot_half[2]), zero),
-            (
-                (hand_half[0], hand_half[1], hand_half[2]),
-                (-hand_half[0], -hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
+            ARMS_HALF_LEFT,
         ),
         EvaluationScenario(
             "mixed_backward_right",
             (-BACKWARD_MAX_M_S, -LATERAL_MAX_M_S, -MOVING_YAW_MAX_RAD_S),
             (zero, (-foot_half[0], -foot_half[1], foot_half[2])),
-            (
-                (-hand_half[0], -hand_half[1], hand_half[2]),
-                (hand_half[0], hand_half[1], -hand_half[2]),
-            ),
-            (True, True),
+            ARMS_HALF_RIGHT,
         ),
     )
 
@@ -514,14 +447,14 @@ def _configure_nominal_evaluation(
 def _set_scenario(env: ManagerBasedRlEnv, scenario: EvaluationScenario) -> None:
     twist = env.command_manager.get_term("twist")
     foot = env.command_manager.get_term("foot_target")
-    hand = env.command_manager.get_term("hand_target")
+    action = env.action_manager.get_term("joint_pos")
     if not isinstance(twist, UniformVelocityCommandWithRotation):
         raise TypeError(f"Unexpected twist command type: {type(twist).__name__}")
-    if not isinstance(foot, ResetFixedFootTargetCommand):
+    if not isinstance(foot, StationaryFootTargetCommand):
         raise TypeError(f"Unexpected foot command type: {type(foot).__name__}")
-    if not isinstance(hand, ResetFixedHandTargetCommand):
-        raise TypeError(f"Unexpected hand command type: {type(hand).__name__}")
-    if foot._reference_pending.any() or hand._reference_pending.any():
+    if not isinstance(action, PicoArmOverlayJointPositionAction):
+        raise TypeError(f"Unexpected action type: {type(action).__name__}")
+    if foot._reference_pending.any():
         raise RuntimeError("Keypoint reset reference was not captured before injection")
 
     twist_value = torch.tensor(scenario.twist, device=env.device).unsqueeze(0)
@@ -537,21 +470,20 @@ def _set_scenario(env: ManagerBasedRlEnv, scenario: EvaluationScenario) -> None:
         getattr(twist, flag_name).fill_(False)
     twist.time_left.fill_(float("inf"))
 
+    all_envs = torch.arange(env.num_envs, device=env.device)
     foot_value = torch.tensor(scenario.foot_target, device=env.device).unsqueeze(0)
-    foot.foot_target_offset_b.copy_(foot_value)
+    foot.hold_targets(all_envs, foot_value.expand(env.num_envs, -1, -1))
     foot.is_single_support_env.copy_(foot_value.norm(dim=-1).gt(0.0).any(dim=-1))
     # The scenario's own twist is kept: no training-time stationary mask.
     foot.is_both_feet_env.fill_(False)
-    if hasattr(foot, "is_stationary_single_support_env"):
-        foot.is_stationary_single_support_env.fill_(False)
+    foot.is_stationary_single_support_env.fill_(False)
     foot.lifted_foot_idx.copy_(foot_value.norm(dim=-1).argmax(dim=-1))
     foot.time_left.fill_(float("inf"))
 
-    hand_value = torch.tensor(scenario.hand_target, device=env.device).unsqueeze(0)
-    active_value = torch.tensor(scenario.hand_active, device=env.device).unsqueeze(0)
-    hand.hand_target_offset_b.copy_(hand_value)
-    hand.is_active.copy_(active_value)
-    hand.time_left.fill_(float("inf"))
+    arm_value = torch.tensor(scenario.arm_target, device=env.device).unsqueeze(0)
+    action.set_arm_target(all_envs, action.arm_home_rad + arm_value, immediate=True)
+    if not torch.allclose(action.arm_target_rad - action.arm_home_rad, arm_value, atol=1.0e-6):
+        raise ValueError(f"{scenario.name}: arm target outside the PICO arm box")
 
 
 def _patch_initial_command_observation(
@@ -559,10 +491,11 @@ def _patch_initial_command_observation(
 ) -> Any:
     """Replace cached reset-time command slices without advancing delay buffers."""
 
+    action = env.action_manager.get_term("joint_pos")
     command_values = {
         "command": env.command_manager.get_term("twist").command,
         "foot_target": env.command_manager.get_term("foot_target").command,
-        "hand_target": env.command_manager.get_term("hand_target").command,
+        "arm_target": action.arm_target_rad - action.arm_home_rad,
     }
     patched = observations.clone()
     actor = patched["actor"].clone()

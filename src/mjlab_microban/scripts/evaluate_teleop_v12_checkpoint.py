@@ -16,8 +16,10 @@ from tensordict import TensorDict
 
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
 )
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_TELEOP_OBSERVATION_WIDTH
 from mjlab_microban.legacy_velocity_diagnostics import (
     default_scenarios,
     publish_json_atomic,
@@ -85,7 +87,8 @@ def locomotion_twist_judgments(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _actor(device: str) -> LegacyAdapterTeleopActor:
     observations = TensorDict(
-        {"actor": torch.zeros(1, 83, device=device)}, batch_size=[1]
+        {"actor": torch.zeros(1, MICROBAN_TELEOP_OBSERVATION_WIDTH, device=device)},
+        batch_size=[1],
     )
     return LegacyAdapterTeleopActor(
         obs=observations,
@@ -103,11 +106,11 @@ def _actor(device: str) -> LegacyAdapterTeleopActor:
     ).to(device)
 
 
-def hand_pose_release_report_settings(infos: dict[str, Any]) -> dict[str, Any]:
-    """Report fields that label a pose-release checkpoint's evidence (or none)."""
+def recipe_report_settings(infos: dict[str, Any]) -> dict[str, Any]:
+    """Report fields that label an arm-overlay checkpoint's evidence (or none)."""
 
     if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
     ):
         return {}
     return {"recipe_revision": infos.get("microban_teleop_recipe_revision")}
@@ -126,8 +129,10 @@ def _load_actor(
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < -1:
         raise ValueError("Checkpoint iteration is invalid")
     expected_step = 0 if iteration == -1 else (iteration + 1) * 24
-    if infos.get("microban_teleop_training_contract_version") != "12":
-        raise ValueError("Checkpoint is not contract-v12")
+    if infos.get("microban_teleop_training_contract_version") != (
+        MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
+    ):
+        raise ValueError("Checkpoint is not of the current PICO training contract")
     validate_teleop_v12_home_pose(infos)
     require_bilateral_site_order(infos)
     expected_active_columns = list(teleop_v12_active_adapter_columns(expected_step))
@@ -183,7 +188,7 @@ def _acceptance(results: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
             for result in results
         ),
         "neutral_targets": all(
-            result["neutral_foot_hand_target_verified_steps"]
+            result["neutral_target_verified_steps"]
             == result["executed_steps"]
             for result in results
         ),
@@ -279,7 +284,7 @@ def run_evaluation(
                     seed=seed,
                     steps=steps,
                     settle_steps=settle_steps,
-                    policy_observation_mode="teleop83",
+                    policy_observation_mode="teleop",
                 )
             )
     finally:
@@ -310,8 +315,8 @@ def run_evaluation(
             "settle_steps": settle_steps,
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",
-            "policy_observation_width": 83,
-            **hand_pose_release_report_settings(_infos),
+            "policy_observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
+            **recipe_report_settings(_infos),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (

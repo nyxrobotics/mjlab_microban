@@ -385,7 +385,7 @@ class Pipeline:
         """The 9x300 source probe of the walker in the PICO env (seed 42); the PICO entry gate."""
 
         digest = sha256(walker)
-        receipt = PROBE_ROOT / f"velocity_{digest[:16]}_teleop83_raw_9x300.json"
+        receipt = PROBE_ROOT / f"velocity_{digest[:16]}_teleop81_arm_overlay_9x300.json"
         PROBE_ROOT.mkdir(parents=True, exist_ok=True)
         self.jobs.run("probe_walker", [*UV, "python", "-m",
                                         "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",

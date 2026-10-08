@@ -17,6 +17,7 @@ from onnx.reference import ReferenceEvaluator
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_TELEOP_OBSERVATION_WIDTH
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -62,7 +63,7 @@ def _legacy_model() -> MLPModel:
 
 def _teleop_model() -> LegacyAdapterTeleopActor:
     return LegacyAdapterTeleopActor(
-        obs=_observations(83),
+        obs=_observations(MICROBAN_TELEOP_OBSERVATION_WIDTH),
         obs_groups={"actor": ["actor"]},
         obs_set="actor",
         output_dim=18,
@@ -126,11 +127,11 @@ def run_gate(
     target.eval()
 
     generator = torch.Generator().manual_seed(20260925)
-    teleop_observations = torch.randn(10_000, 83, generator=generator)
+    teleop_observations = torch.randn(10_000, MICROBAN_TELEOP_OBSERVATION_WIDTH, generator=generator)
     legacy_observations = teleop_observations[
         :, [target for _source, target in LEGACY_TO_TELEOP_OBSERVATION_INDEX]
     ]
-    # Legacy parity checks the 63->83 weight mapping, so it is evaluated in
+    # Legacy parity checks the 63->81 weight mapping, so it is evaluated in
     # float64 on copies: in float32 the two widths accumulate in different
     # orders and randn inputs drive raw actions to hundreds of radians, where
     # one float32 ulp alone exceeds the 2e-5 bound.  A mapping defect still
@@ -227,7 +228,7 @@ def run_gate(
             "iteration": source_identity.iteration,
         },
         "contract": {
-            "observation_width": 83,
+            "observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
             "action_width": 18,
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
             "previous_action": "raw_actor_output",

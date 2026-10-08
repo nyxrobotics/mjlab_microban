@@ -14,15 +14,14 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_FOOT_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_OBSERVATION_COLUMNS,
-    TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
+    TELEOP_V12_ARM_OBSERVATION_COLUMNS,
+    TELEOP_V12_ARM_TARGET_NORMALIZER_DENOMINATORS,
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     FrozenEmpiricalNormalization,
     LegacyAdapterTeleopActor,
     teleop_v12_active_adapter_columns,
-    transplant_legacy_actor_state_to_teleop83,
+    transplant_legacy_actor_state_to_teleop,
 )
 
 
@@ -49,7 +48,7 @@ def _legacy_model() -> MLPModel:
 
 def _target_model() -> LegacyAdapterTeleopActor:
     return LegacyAdapterTeleopActor(
-        obs=_observation(83),
+        obs=_observation(81),
         obs_groups={"actor": ["actor"]},
         obs_set="actor",
         output_dim=18,
@@ -77,7 +76,7 @@ def _transplanted_pair() -> tuple[MLPModel, LegacyAdapterTeleopActor]:
     source_state["distribution.std_param"].uniform_(0.6, 1.0)
     source.load_state_dict(source_state, strict=True)
     target = _target_model()
-    mapped = transplant_legacy_actor_state_to_teleop83(
+    mapped = transplant_legacy_actor_state_to_teleop(
         source_state,
         target.state_dict(),
         LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -88,18 +87,13 @@ def _transplanted_pair() -> tuple[MLPModel, LegacyAdapterTeleopActor]:
 
 
 class TeleopV12ActorTest(unittest.TestCase):
-    def test_hand_observation_columns_split_position_from_active_flags(self) -> None:
-        self.assertEqual(
-            TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS, tuple(range(75, 81))
-        )
-        self.assertEqual(TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS, (81, 82))
-        self.assertEqual(
-            TELEOP_V12_HAND_OBSERVATION_COLUMNS,
-            (
-                *TELEOP_V12_HAND_POSITION_OBSERVATION_COLUMNS,
-                *TELEOP_V12_HAND_ACTIVE_OBSERVATION_COLUMNS,
-            ),
-        )
+    def test_arm_target_columns_and_their_normalizer(self) -> None:
+        self.assertEqual(TELEOP_V12_ARM_OBSERVATION_COLUMNS, tuple(range(75, 81)))
+        # The largest distance from HOME to the box edge: pitch 100, roll 110,
+        # elbow 90 deg, so HOME reads 0 and the box at most 1.
+        expected = [1.7453292519943295, 1.9198621771937625, 1.5707963267948966] * 2
+        for value, want in zip(TELEOP_V12_ARM_TARGET_NORMALIZER_DENOMINATORS, expected, strict=True):
+            self.assertAlmostEqual(value, want, places=12)
 
     def test_semantic_mapping_has_expected_shared_and_extra_columns(self) -> None:
         self.assertEqual(
@@ -113,13 +107,13 @@ class TeleopV12ActorTest(unittest.TestCase):
         self.assertEqual(len(TELEOP_V12_SHARED_OBSERVATION_COLUMNS), 63)
         self.assertEqual(
             TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
-            (6, 7, 8, 27, 28, 29, *range(69, 83)),
+            (6, 7, 8, 27, 28, 29, *range(69, 81)),
         )
 
     def test_pristine_actor_matches_legacy_with_float32_tolerance(self) -> None:
         source, target = _transplanted_pair()
         generator = torch.Generator().manual_seed(20260925)
-        teleop_obs = torch.randn(10_000, 83, generator=generator)
+        teleop_obs = torch.randn(10_000, 81, generator=generator)
         source_obs = teleop_obs[:, list(TELEOP_V12_SHARED_OBSERVATION_COLUMNS)]
         with torch.inference_mode():
             expected = source(TensorDict({"actor": source_obs}, batch_size=[10_000]))
@@ -128,12 +122,12 @@ class TeleopV12ActorTest(unittest.TestCase):
         self.assertLessEqual(float(torch.max(torch.abs(actual - expected))), 2.0e-5)
 
     def test_frozen_normalizer_ignores_updates_while_training(self) -> None:
-        normalizer = FrozenEmpiricalNormalization(83)
+        normalizer = FrozenEmpiricalNormalization(81)
         before = {
             name: value.clone() for name, value in normalizer.state_dict().items()
         }
         normalizer.train()
-        normalizer.update(torch.randn(128, 83))
+        normalizer.update(torch.randn(128, 81))
         self.assertTrue(normalizer.training)
         for name, expected in before.items():
             self.assertTrue(torch.equal(normalizer.state_dict()[name], expected))
@@ -145,7 +139,7 @@ class TeleopV12ActorTest(unittest.TestCase):
         self.assertEqual(trainable, ["mlp.0.weight"])
         optimizer = torch.optim.Adam(target.parameters(), lr=1.0e-3)
         before = {name: value.clone() for name, value in target.state_dict().items()}
-        obs = torch.randn(64, 83)
+        obs = torch.randn(64, 81)
         loss = target(TensorDict({"actor": obs}, batch_size=[64])).square().mean()
         optimizer.zero_grad()
         loss.backward()
@@ -174,7 +168,7 @@ class TeleopV12ActorTest(unittest.TestCase):
         _source, target = _transplanted_pair()
         target.bind_common_step_provider(lambda: 10_000 * 24)
         optimizer = torch.optim.Adam(target.parameters(), lr=1.0e-3)
-        obs = torch.randn(16, 83)
+        obs = torch.randn(16, 81)
         optimizer.zero_grad()
         target(TensorDict({"actor": obs}, batch_size=[16])).sum().backward()
         optimizer.step()
@@ -186,16 +180,16 @@ class TeleopV12ActorTest(unittest.TestCase):
             target.assert_optimizer_invariant(optimizer)
 
     def test_gradient_schedule_prevents_early_hmd_noise_contamination(self) -> None:
-        HAND, FOOT = PICO_SCHEDULE["hand"], PICO_SCHEDULE["foot"]
+        ARM, FOOT = PICO_SCHEDULE["arm"], PICO_SCHEDULE["foot"]
         self.assertEqual(teleop_v12_active_adapter_columns(0), ())
-        self.assertEqual(teleop_v12_active_adapter_columns(HAND * 24), ())
+        self.assertEqual(teleop_v12_active_adapter_columns(ARM * 24), ())
         self.assertEqual(
-            teleop_v12_active_adapter_columns(HAND * 24 + 24),
-            (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_HAND_OBSERVATION_COLUMNS),
+            teleop_v12_active_adapter_columns(ARM * 24 + 24),
+            (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_ARM_OBSERVATION_COLUMNS),
         )
         self.assertEqual(
             teleop_v12_active_adapter_columns(FOOT * 24),
-            (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_HAND_OBSERVATION_COLUMNS),
+            (*TELEOP_V12_HMD_OBSERVATION_COLUMNS, *TELEOP_V12_ARM_OBSERVATION_COLUMNS),
         )
         self.assertEqual(
             teleop_v12_active_adapter_columns(FOOT * 24 + 24),
@@ -212,7 +206,7 @@ class TeleopV12ActorTest(unittest.TestCase):
 
         def update() -> None:
             optimizer.zero_grad()
-            obs = torch.randn(64, 83)
+            obs = torch.randn(64, 81)
             target(
                 TensorDict({"actor": obs}, batch_size=[64])
             ).square().mean().backward()
@@ -222,11 +216,11 @@ class TeleopV12ActorTest(unittest.TestCase):
         self.assertTrue(torch.equal(first.weight, initial))
         target.assert_optimizer_invariant(optimizer)
 
-        common_step = HAND * 24 + 24
+        common_step = ARM * 24 + 24
         update()
         active = (
             *TELEOP_V12_HMD_OBSERVATION_COLUMNS,
-            *TELEOP_V12_HAND_OBSERVATION_COLUMNS,
+            *TELEOP_V12_ARM_OBSERVATION_COLUMNS,
         )
         self.assertFalse(torch.equal(first.weight[:, active], initial[:, active]))
         self.assertTrue(

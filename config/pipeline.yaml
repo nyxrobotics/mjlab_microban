@@ -36,7 +36,7 @@ walk:
     still_touchdowns_per_s: 0.5
 
 pico:
-  task: Mjlab-Teleop-V12-HandPoseRelease-Microban
+  task: Mjlab-Teleop-V13-ArmOverlay-Microban
   envs: 2048
   save_interval: 500
   stage_tolerance: 1

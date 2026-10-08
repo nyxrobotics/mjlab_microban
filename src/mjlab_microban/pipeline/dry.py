@@ -45,7 +45,7 @@ PROBE_PASS_RESULT = {
     "nonfinite": None,
     "executed_steps": 300,
     "raw_action_recurrence_verified_steps": 300,
-    "neutral_foot_hand_target_verified_steps": 300,
+    "neutral_target_verified_steps": 300,
 }
 
 

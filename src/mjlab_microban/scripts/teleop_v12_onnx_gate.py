@@ -14,6 +14,7 @@ import torch
 from onnx.reference import ReferenceEvaluator
 from tensordict import TensorDict
 
+from mjlab_microban.tasks.microban_policy_export import MICROBAN_TELEOP_OBSERVATION_WIDTH
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
@@ -83,12 +84,12 @@ def run_gate(
     source.eval()
 
     generator = torch.Generator().manual_seed(20260925)
-    neutral_observations = torch.randn(10_000, 83, generator=generator)
+    neutral_observations = torch.randn(10_000, MICROBAN_TELEOP_OBSERVATION_WIDTH, generator=generator)
     neutral_observations[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS] = 0.0
     legacy_observations = neutral_observations[
         :, [target for _source, target in LEGACY_TO_TELEOP_OBSERVATION_INDEX]
     ]
-    # Float64 copies: this checks the frozen 63->83 mapping exactly; float32
+    # Float64 copies: this checks the frozen 63->81 mapping exactly; float32
     # accumulation order differs between the two widths and alone exceeds 2e-5
     # once randn inputs drive raw actions to hundreds of radians (see
     # teleop_v12_bootstrap_gate).  The float32 export is checked below.
@@ -115,8 +116,8 @@ def run_gate(
     export_model = target.as_onnx(verbose=False).cpu().eval()
     # Keep neutral legacy equivalence and export compatibility as independent
     # checks.  An adapter could pass the former while ONNX silently drops or
-    # misorders every learned teleop-only column, so exercise all 83 inputs here.
-    onnx_observations = torch.randn(64, 83, generator=generator)
+    # misorders every learned teleop-only column, so exercise all inputs here.
+    onnx_observations = torch.randn(64, MICROBAN_TELEOP_OBSERVATION_WIDTH, generator=generator)
     if not bool(
         torch.all(
             onnx_observations[:, TELEOP_V12_EXTRA_OBSERVATION_COLUMNS].abs().amax(dim=0)
@@ -179,10 +180,10 @@ def run_gate(
             "path": str(onnx_path.resolve()),
             "sha256": sha256_file(onnx_path),
             "opset": 18,
-            "input_shape": [1, 83],
+            "input_shape": [1, MICROBAN_TELEOP_OBSERVATION_WIDTH],
             "output_shape": [1, 18],
             "reference_samples": 64,
-            "input_coverage": "deterministic_nonzero_all_83_columns",
+            "input_coverage": f"deterministic_nonzero_all_{MICROBAN_TELEOP_OBSERVATION_WIDTH}_columns",
             "teleop_only_columns_nonzero": True,
             "reference_evaluator_maximum_absolute_error": reference_max,
             "onnxruntime_cpu_maximum_absolute_error": runtime_max,

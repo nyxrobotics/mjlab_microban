@@ -11,10 +11,6 @@ from pathlib import Path
 
 import torch
 
-from mjlab_microban.robot.microban_hand_fk import (
-    microban_hand_fk_metadata,
-    microban_reachable_hand_evaluation_offsets,
-)
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     LOCOMOTION_MOVING_SCENARIOS,
     locomotion_twist_judgments,
@@ -38,8 +34,6 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     foot_tracking_rms_max_m,
     foot_tracking_velocity_fade_range,
     foot_tracking_weight,
-    hand_tracking_p95_max_m,
-    hand_tracking_rms_max_m,
     required_target_column_ablation_targets,
     required_tracking_check_names,
     required_tracking_profile,
@@ -72,7 +66,8 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
 )
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
@@ -116,16 +111,15 @@ def _result(**overrides):
         "observation_coverage": {"passed": True},
         "twist_direction_passed": True,
         "target_error": {
-            "active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
             "foot": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
         },
         "command": {
             "twist": [0.0, 0.0, 0.0],
             "foot_target": [[0.0, 0.0, 0.02], [0.0, 0.0, 0.0]],
-            "hand_active": [True, True],
+            "arm_target": [-0.5, 0.2, -0.3, 0.0, 0.0, 0.0],
         },
         "target_column_ablation": {
-            "hand": _ablation(target="hand", expected=True),
+            "arm": _ablation(target="arm", expected=True),
             "foot": _ablation(target="foot", expected=True),
         },
     }
@@ -173,7 +167,7 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
                 "termination_names": [],
                 "maximum_actual_soft_limit_violation_rad": 0.0,
                 "raw_action_recurrence_verified_steps": 300,
-                "neutral_foot_hand_target_verified_steps": 300,
+                "neutral_target_verified_steps": 300,
                 "directional_response": response,
                 "command": dict(zip(axis_names, twist, strict=True)),
                 "measured_velocity_body": {
@@ -195,7 +189,7 @@ def _locomotion_report(identity: dict[str, object]) -> dict[str, object]:
             "settle_steps": 50,
             "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
-            "policy_observation_width": 83,
+            "policy_observation_width": 81,
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -238,7 +232,7 @@ def _tracking_report(
     identity: dict[str, object],
     *,
     profile: str | None = None,
-    hand_rms: float = 0.01,
+    foot_rms: float = 0.01,
 ) -> dict[str, object]:
     if profile is None:
         profile = required_tracking_profile(int(identity["completed_updates"]))
@@ -247,7 +241,7 @@ def _tracking_report(
         expects_foot = any(
             abs(value) > 0.0 for target in scenario.foot_target for value in target
         )
-        expects_hand = any(scenario.hand_active)
+        expects_arm = any(value != 0.0 for value in scenario.arm_target)
         directional = {}
         for axis, command in zip(
             ("vx_m_s", "vy_m_s", "yaw_rad_s"), scenario.twist, strict=True
@@ -268,9 +262,7 @@ def _tracking_report(
             for name in MICROBAN_HMD_JOINT_NAMES
         }
 
-        def target_error(
-            *, expected: bool, samples: int, hand: bool = False
-        ) -> dict[str, object]:
+        def target_error(*, expected: bool, samples: int) -> dict[str, object]:
             if not expected:
                 return {
                     "sample_count": 0,
@@ -284,9 +276,9 @@ def _tracking_report(
             return {
                 "sample_count": samples,
                 "min": 0.005,
-                "max": max(0.02, hand_rms) if hand else 0.02,
+                "max": max(0.02, foot_rms),
                 "mean": 0.008,
-                "rms": hand_rms if hand else 0.01,
+                "rms": foot_rms,
                 "p95": 0.015,
                 "units": "m",
             }
@@ -297,8 +289,7 @@ def _tracking_report(
                 "command": {
                     "twist": list(scenario.twist),
                     "foot_target": [list(value) for value in scenario.foot_target],
-                    "hand_target": [list(value) for value in scenario.hand_target],
-                    "hand_active": list(scenario.hand_active),
+                    "arm_target": list(scenario.arm_target),
                 },
                 "completed": True,
                 "executed_steps": 300,
@@ -317,9 +308,9 @@ def _tracking_report(
                 "observation_coverage": {
                     "hmd_nonzero_steps": 299,
                     "foot_nonzero_steps": 300 if expects_foot else 0,
-                    "hand_nonzero_steps": 300 if expects_hand else 0,
+                    "arm_nonzero_steps": 300 if expects_arm else 0,
                     "foot_target_expected": expects_foot,
-                    "hand_target_expected": expects_hand,
+                    "arm_target_expected": expects_arm,
                     "passed": True,
                 },
                 "directional_response": directional,
@@ -343,12 +334,6 @@ def _tracking_report(
                     for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")
                 },
                 "target_error": {
-                    "active_hand": target_error(
-                        expected=expects_hand,
-                        hand=True,
-                        samples=250
-                        * sum(bool(value) for value in scenario.hand_active),
-                    ),
                     "foot": target_error(
                         expected=expects_foot,
                         samples=250
@@ -359,7 +344,7 @@ def _tracking_report(
                     ),
                 },
                 "target_column_ablation": {
-                    "hand": _ablation(target="hand", expected=expects_hand),
+                    "arm": _ablation(target="arm", expected=expects_arm),
                     "foot": _ablation(target="foot", expected=expects_foot),
                 },
                 "raw_action_envelope": _zero_action_envelope(),
@@ -382,7 +367,6 @@ def _tracking_report(
             "action_clip": [-math.pi, math.pi],
             "previous_action": "raw_actor_output",
             "target_column_ablation": TARGET_COLUMN_ABLATION_METHOD,
-            "reachable_hand_target_fk": microban_hand_fk_metadata(),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -390,8 +374,6 @@ def _tracking_report(
             ),
             "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
-            "hand_rms_m_max": hand_tracking_rms_max_m(profile),
-            "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
             "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
@@ -423,10 +405,10 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
             "path": str(onnx_path),
             "sha256": sha256_file(onnx_path),
             "opset": 18,
-            "input_shape": [1, 83],
+            "input_shape": [1, 81],
             "output_shape": [1, 18],
             "reference_samples": 64,
-            "input_coverage": "deterministic_nonzero_all_83_columns",
+            "input_coverage": "deterministic_nonzero_all_81_columns",
             "teleop_only_columns_nonzero": True,
             "reference_evaluator_maximum_absolute_error": 0.0,
             "onnxruntime_cpu_maximum_absolute_error": 0.0,
@@ -438,25 +420,24 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
 
 
 class TeleopV12StageTest(unittest.TestCase):
-    def test_tracking_scenarios_use_fk_reachable_hand_targets(self) -> None:
-        poses = dict(microban_reachable_hand_evaluation_offsets())
+    def test_tracking_scenarios_move_the_arms(self) -> None:
+        from mjlab_microban.scripts.teleop_v12_scenarios import (
+            ARMS_FORWARD_70,
+            ARMS_HALF_LEFT,
+            ARMS_HALF_RIGHT,
+            ARMS_REACH_LEFT,
+            ARMS_REACH_RIGHT,
+        )
+
         scenarios = {scenario.name: scenario for scenario in _scenarios(FINAL_PROFILE)}
-        self.assertEqual(
-            scenarios["max_hands_left"].hand_target,
-            (poses["F"][0], poses["B"][1]),
-        )
-        self.assertEqual(
-            scenarios["max_hands_right"].hand_target,
-            (poses["B"][0], poses["F"][1]),
-        )
-        self.assertEqual(
-            scenarios["mixed_forward_left"].hand_target,
-            (poses["f"][0], poses["b"][1]),
-        )
-        self.assertEqual(
-            scenarios["mixed_backward_right"].hand_target,
-            (poses["b"][0], poses["f"][1]),
-        )
+        self.assertEqual(scenarios["low_forward"].arm_target, (0.0,) * 6)
+        self.assertEqual(scenarios["arms_forward_low_forward"].arm_target, ARMS_FORWARD_70)
+        self.assertEqual(scenarios["arms_forward_low_forward"].twist, (0.1, 0.0, 0.0))
+        self.assertEqual(scenarios["arms_reach_left"].arm_target, ARMS_REACH_LEFT)
+        self.assertEqual(scenarios["max_keypoints_left"].arm_target, ARMS_REACH_LEFT)
+        self.assertEqual(scenarios["max_keypoints_right"].arm_target, ARMS_REACH_RIGHT)
+        self.assertEqual(scenarios["mixed_forward_left"].arm_target, ARMS_HALF_LEFT)
+        self.assertEqual(scenarios["mixed_backward_right"].arm_target, ARMS_HALF_RIGHT)
         # The mixed scenarios walk at half the command envelope.
         from mjlab_microban.scripts.teleop_v12_scenarios import (
             BACKWARD_MAX_M_S,
@@ -478,11 +459,7 @@ class TeleopV12StageTest(unittest.TestCase):
             with self.subTest(completed=completed), self.assertRaises(ValueError):
                 required_tracking_profile(completed)
         self.assertEqual(TRACKING_PROFILES, (FINAL_PROFILE,))
-        # The robot validator accepts this published final name.
-        self.assertEqual(
-            FINAL_PROFILE,
-            "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
-        )
+        self.assertEqual(FINAL_PROFILE, "arm_overlay_foot_perturbation_v1")
 
     def test_foot_error_is_weighted_as_the_reward_weighs_foot_tracking(self) -> None:
         # The PICO reward fades foot tracking out with the velocity command
@@ -514,9 +491,8 @@ class TeleopV12StageTest(unittest.TestCase):
             self.assertAlmostEqual(float(reward[0]), foot_tracking_weight(twist, fade), places=6)
         # A walking scenario's foot error is recorded, not judged.
         walking = _result(command={"twist": [0.7, 0.3, 1.5], "foot_target": [[0.0, 0.0, 0.02], [0.0] * 3],
-                                   "hand_active": [True, True]},
-                          target_error={"active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
-                                        "foot": {"sample_count": 1, "rms": 0.30, "p95": 0.40}})
+                                   "arm_target": [-0.5, 0.2, -0.3, 0.0, 0.0, 0.0]},
+                          target_error={"foot": {"sample_count": 1, "rms": 0.30, "p95": 0.40}})
         checks, _ = _acceptance([_result(), walking], FINAL_PROFILE)
         self.assertTrue(checks["foot_tracking_rms"] and checks["foot_tracking_p95"])
         standing = deepcopy(walking)
@@ -530,18 +506,17 @@ class TeleopV12StageTest(unittest.TestCase):
         judged = {scenario.name: twist_is_judged(scenario) for scenario in _scenarios(FINAL_PROFILE)}
         self.assertTrue(judged["low_forward"])
         self.assertFalse(judged["mixed_forward_left"] or judged["mixed_backward_right"])
-        self.assertFalse(judged["max_hands_left"])  # standing
+        self.assertTrue(judged["arms_forward_low_forward"])  # walking with the arms raised
+        self.assertFalse(judged["arms_reach_left"])  # standing
 
     def test_accuracy_limits_are_one_table(self) -> None:
-        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m;
-        # foot 0.05/0.08 m.
-        self.assertEqual(hand_tracking_rms_max_m(FINAL_PROFILE), 0.040)
+        # Foot 0.05/0.08 m; no hand limit (the arms are driven from outside).
         self.assertEqual(foot_tracking_rms_max_m(FINAL_PROFILE), 0.05)
         self.assertEqual(foot_tracking_p95_max_m(FINAL_PROFILE), 0.08)
-        self.assertEqual(hand_tracking_p95_max_m(FINAL_PROFILE), 0.07)
         self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
+        self.assertFalse(any("hand" in name for name in required_tracking_check_names(FINAL_PROFILE)))
         with self.assertRaises(ValueError):
-            hand_tracking_rms_max_m("full_body_reachable_performance_perturbation_v2")
+            foot_tracking_rms_max_m("full_body_reachable_performance_perturbation_v2")
 
     def test_the_gate_judges_the_report_under_the_final_profile(self) -> None:
         identity = {
@@ -549,10 +524,10 @@ class TeleopV12StageTest(unittest.TestCase):
             "iteration": PICO_TOTAL_UPDATES - 1,
             "completed_updates": PICO_TOTAL_UPDATES,
         }
-        within = _tracking_report(identity, hand_rms=0.039)
+        within = _tracking_report(identity, foot_rms=0.049)
         self.assertEqual(within["status"], "pass")
         self.assertEqual(_validate_tracking_report(within, identity), FINAL_PROFILE)
-        over = _tracking_report(identity, hand_rms=0.041)
+        over = _tracking_report(identity, foot_rms=0.051)
         self.assertEqual(over["status"], "fail")
         with self.assertRaises(ValueError):
             _validate_tracking_report(over, identity)
@@ -570,9 +545,11 @@ class TeleopV12StageTest(unittest.TestCase):
             root = Path(directory)
             checkpoint = root / f"model_{PICO_TOTAL_UPDATES - 1}.pt"
             infos = {
-                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_training_contract_version": (
+                    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
+                ),
                 "microban_teleop_recipe_revision": (
-                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
                 ),
                 BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
                 TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
@@ -599,7 +576,7 @@ class TeleopV12StageTest(unittest.TestCase):
             onnx_path.write_bytes(b"unit-test-onnx")
             paths["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
             paths["tracking_report"].write_text(
-                json.dumps(_tracking_report(identity, hand_rms=0.039))
+                json.dumps(_tracking_report(identity, foot_rms=0.049))
             )
             paths["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
             gate = create_gate(checkpoint=checkpoint, **paths)
@@ -616,9 +593,11 @@ class TeleopV12StageTest(unittest.TestCase):
     def test_only_the_last_checkpoint_of_a_run_is_gated(self) -> None:
         for completed, accepted in ((PICO_TOTAL_UPDATES, True), (PICO_TOTAL_UPDATES - 1, False)):
             infos = {
-                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_training_contract_version": (
+                    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
+                ),
                 "microban_teleop_recipe_revision": (
-                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
                 ),
                 BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
                 TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
@@ -702,8 +681,8 @@ class TeleopV12StageTest(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            target_column_ablation_observation_columns("hand"),
-            (tuple(range(75, 81)), tuple(range(81, 83))),
+            target_column_ablation_observation_columns("arm"),
+            (tuple(range(75, 81)), ()),
         )
         self.assertEqual(
             target_column_ablation_observation_columns("foot"),
@@ -711,33 +690,30 @@ class TeleopV12StageTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Unknown"):
             target_column_ablation_observation_columns("head")
-        observation = torch.arange(83, dtype=torch.float32).unsqueeze(0)
-        hand_ablated = target_column_ablated_observation(observation, "hand")
+        observation = torch.arange(81, dtype=torch.float32).unsqueeze(0)
+        arm_ablated = target_column_ablated_observation(observation, "arm")
         torch.testing.assert_close(
-            hand_ablated[:, 75:81], torch.zeros((1, 6)), rtol=0.0, atol=0.0
+            arm_ablated[:, 75:81], torch.zeros((1, 6)), rtol=0.0, atol=0.0
         )
         torch.testing.assert_close(
-            hand_ablated[:, 81:83], observation[:, 81:83], rtol=0.0, atol=0.0
-        )
-        torch.testing.assert_close(
-            hand_ablated[:, :75], observation[:, :75], rtol=0.0, atol=0.0
+            arm_ablated[:, :75], observation[:, :75], rtol=0.0, atol=0.0
         )
         torch.testing.assert_close(
             observation,
-            torch.arange(83, dtype=torch.float32).unsqueeze(0),
+            torch.arange(81, dtype=torch.float32).unsqueeze(0),
             rtol=0.0,
             atol=0.0,
         )
-        with self.assertRaisesRegex(ValueError, r"\[batch, 83\]"):
-            target_column_ablated_observation(torch.zeros((1, 82)), "hand")
+        with self.assertRaisesRegex(ValueError, r"\[batch, 81\]"):
+            target_column_ablated_observation(torch.zeros((1, 80)), "arm")
         self.assertEqual(
-            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand", "foot"))
+            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("arm", "foot"))
         )
 
         unresponsive = _result(
             target_column_ablation={
-                "hand": _ablation(
-                    target="hand",
+                "arm": _ablation(
+                    target="arm",
                     expected=True,
                     maximum=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
                 ),
@@ -751,14 +727,14 @@ class TeleopV12StageTest(unittest.TestCase):
         checks, status = _acceptance([unresponsive], FINAL_PROFILE)
         self.assertEqual(status, "fail")
         self.assertFalse(checks["target_column_ablation_response"])
-        hand_only = deepcopy(unresponsive)
-        hand_only["target_column_ablation"]["hand"] = _ablation(
-            target="hand", expected=True
+        arm_only = deepcopy(unresponsive)
+        arm_only["target_column_ablation"]["arm"] = _ablation(
+            target="arm", expected=True
         )
-        checks, status = _acceptance([hand_only], FINAL_PROFILE)
+        checks, status = _acceptance([arm_only], FINAL_PROFILE)
         self.assertEqual(status, "fail")
         self.assertFalse(checks["target_column_ablation_response"])
-        both = deepcopy(hand_only)
+        both = deepcopy(arm_only)
         both["target_column_ablation"]["foot"] = _ablation(target="foot", expected=True)
         checks, status = _acceptance([both], FINAL_PROFILE)
         self.assertEqual(status, "pass")
@@ -774,38 +750,38 @@ class TeleopV12StageTest(unittest.TestCase):
             set(report["checks"]),
             set(required_tracking_check_names(FINAL_PROFILE)),
         )
-        self.assertIn("hand_tracking_rms", report["checks"])
+        self.assertNotIn("hand_tracking_rms", report["checks"])
         self.assertIn("foot_tracking_rms", report["checks"])
         _validate_tracking_report(report, identity)
         active_index = next(
             index
             for index, result in enumerate(report["results"])
-            if result["target_column_ablation"]["hand"]["target_expected"]
+            if result["target_column_ablation"]["arm"]["target_expected"]
         )
 
-        def active_hand(candidate: dict[str, object]) -> dict[str, object]:
-            return candidate["results"][active_index]["target_column_ablation"]["hand"]
+        def active_arm(candidate: dict[str, object]) -> dict[str, object]:
+            return candidate["results"][active_index]["target_column_ablation"]["arm"]
 
         mutations = (
-            lambda candidate: active_hand(candidate).update(target_expected=False),
-            lambda candidate: active_hand(candidate).update(
+            lambda candidate: active_arm(candidate).update(target_expected=False),
+            lambda candidate: active_arm(candidate).update(
                 ablated_observation_columns=list(range(75, 83))
             ),
-            lambda candidate: active_hand(candidate).update(
-                preserved_observation_columns=[]
+            lambda candidate: active_arm(candidate).update(
+                preserved_observation_columns=[81]
             ),
-            lambda candidate: active_hand(candidate).update(
+            lambda candidate: active_arm(candidate).update(
                 maximum_absolute_action_delta=-1.0
             ),
-            lambda candidate: active_hand(candidate).update(
+            lambda candidate: active_arm(candidate).update(
                 maximum_absolute_action_delta=float("nan")
             ),
-            lambda candidate: active_hand(candidate).update(
+            lambda candidate: active_arm(candidate).update(
                 minimum_required_action_delta=0.0
             ),
-            lambda candidate: active_hand(candidate).update(passed=False),
-            lambda candidate: active_hand(candidate).update(untrusted=True),
-            lambda candidate: active_hand(candidate).pop(
+            lambda candidate: active_arm(candidate).update(passed=False),
+            lambda candidate: active_arm(candidate).update(untrusted=True),
+            lambda candidate: active_arm(candidate).pop(
                 "maximum_absolute_action_delta"
             ),
         )
@@ -817,7 +793,7 @@ class TeleopV12StageTest(unittest.TestCase):
                     _validate_tracking_report(corrupted, identity)
 
         below_floor = deepcopy(report)
-        active_hand(below_floor).update(
+        active_arm(below_floor).update(
             maximum_absolute_action_delta=TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN,
             passed=False,
         )
@@ -837,9 +813,11 @@ class TeleopV12StageTest(unittest.TestCase):
             root = Path(directory)
             checkpoint = root / f"model_{PICO_TOTAL_UPDATES - 1}.pt"
             infos = {
-                "microban_teleop_training_contract_version": "12",
+                "microban_teleop_training_contract_version": (
+                    MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION
+                ),
                 "microban_teleop_recipe_revision": (
-                    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+                    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
                 ),
                 BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
                 TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
@@ -921,10 +899,10 @@ class TeleopV12StageTest(unittest.TestCase):
                         next(
                             index
                             for index, result in enumerate(tracking["results"])
-                            if result["target_error"]["active_hand"]["sample_count"] > 0
+                            if result["target_error"]["foot"]["sample_count"] > 0
                         ),
                         "target_error",
-                        "active_hand",
+                        "foot",
                         "rms",
                     ),
                     -1.0,

@@ -12,7 +12,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
-    MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+    MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
     MICROBAN_TELEOP_V12_HOME_POSE_REVISION,
 )
 
@@ -63,14 +63,13 @@ def teleop_v12_home_pose_marker() -> dict[str, Any]:
 def validate_teleop_v12_home_pose(infos: Mapping[str, Any]) -> dict[str, Any]:
     """Reject old or relabeled checkpoints before loading actor or optimizer state.
 
-    Every PICO checkpoint is of the active-hand arm pose-release recipe at the
-    current HOME.
+    Every PICO checkpoint is of the arm-overlay recipe at the current HOME.
     """
 
     if not isinstance(infos, Mapping):
         raise TypeError("Contract-v12 checkpoint infos are malformed")
     if infos.get("microban_teleop_recipe_revision") != (
-        MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION
+        MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION
     ):
         raise ValueError("Checkpoint recipe does not match the current HOME pose")
     expected = teleop_v12_home_pose_marker()

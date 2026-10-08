@@ -78,11 +78,18 @@ class ObservationPatchTest(unittest.TestCase):
         values = {
             "twist": torch.tensor([[0.1, 0.2, 0.3]]),
             "foot_target": torch.arange(6, dtype=torch.float32).unsqueeze(0) + 100.0,
-            "hand_target": torch.arange(8, dtype=torch.float32).unsqueeze(0) + 200.0,
+            "arm_target": torch.arange(6, dtype=torch.float32).unsqueeze(0) + 200.0,
         }
         terms = {name: SimpleNamespace(command=value) for name, value in values.items()}
         manager = SimpleNamespace(get_term=lambda name: terms[name])
-        env = SimpleNamespace(num_envs=1, command_manager=manager)
+        action = SimpleNamespace(
+            arm_target_rad=values["arm_target"] + 1.0, arm_home_rad=torch.ones(1, 6)
+        )
+        env = SimpleNamespace(
+            num_envs=1,
+            command_manager=manager,
+            action_manager=SimpleNamespace(get_term=lambda name: action),
+        )
 
         patched = _patch_initial_command_observation(observations, env)
         self.assertTrue(torch.equal(observations["actor"], original_actor))

@@ -16,6 +16,7 @@ import torch
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_TELEOP_OBSERVATION_WIDTH,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -26,7 +27,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     LegacyAdapterTeleopActor,
-    transplant_legacy_actor_state_to_teleop83,
+    transplant_legacy_actor_state_to_teleop,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_ACTION_CLIP,
@@ -39,6 +40,9 @@ from mjlab_microban.teleop_v12_safety import (
 # current HOME selected on the command line.  Its SHA-256, iteration and
 # normalizer count are recorded here and re-hashed on every save and gate.
 TELEOP_V12_BOOTSTRAP_PROVENANCE_SCHEMA_VERSION = 2
+# The walker's 9x300 probe in the PICO env (scripts/probe_legacy_actor_in_teleop_env):
+# v2 runs it with the arms held at HOME by the arm overlay, as on the robot.
+LEGACY_TELEOP_PROBE_REVISION = "legacy_velocity_actor_in_nominal_teleop_env_v2_arm_overlay"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _REPO_PATH_PREFIX = "repo://"
@@ -194,7 +198,7 @@ def validate_legacy_teleop_probe_receipt(
         raise ValueError("Probe receipt must be UTF-8 JSON") from exc
     if not isinstance(report, dict):
         raise TypeError("Probe receipt root must be an object")
-    if report.get("probe") != "legacy_velocity_actor_in_nominal_teleop_env_v1":
+    if report.get("probe") != LEGACY_TELEOP_PROBE_REVISION:
         raise ValueError("Probe receipt revision drifted")
     checkpoint = report.get("checkpoint")
     if not isinstance(checkpoint, dict) or checkpoint.get("sha256") != source.sha256:
@@ -208,7 +212,7 @@ def validate_legacy_teleop_probe_receipt(
         "action_clip": MICROBAN_TELEOP_V12_ACTION_CLIP,
         "previous_action": "raw_actor_output",
         "foot_target": "exact_zero_inactive",
-        "hand_target": "exact_zero_inactive",
+        "arm_target": "home_overlay",
     }
     if not isinstance(settings, dict) or any(
         settings.get(name) != value for name, value in expected_settings.items()
@@ -219,7 +223,7 @@ def validate_legacy_teleop_probe_receipt(
         raise TypeError("Probe receipt mapping is malformed")
     exact_mapping = {
         "legacy_observation_width": 63,
-        "teleop_observation_width": 83,
+        "teleop_observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
         "legacy_joint_names": list(MICROBAN_TELEOP_ACTION_JOINT_NAMES),
         "teleop_joint_names": [
             *MICROBAN_HMD_JOINT_NAMES,
@@ -262,7 +266,7 @@ def validate_legacy_teleop_probe_receipt(
             or result.get("nonfinite") is not None
             or result.get("executed_steps") != 300
             or result.get("raw_action_recurrence_verified_steps") != 300
-            or result.get("neutral_foot_hand_target_verified_steps") != 300
+            or result.get("neutral_target_verified_steps") != 300
             # The source must satisfy the same measured-joint bound as every
             # PICO evaluation (teleop_v12_safety: 0.25 rad dynamic overshoot of
             # the 0.9 soft limits).
@@ -302,7 +306,7 @@ def bootstrap_legacy_actor(
     probe = validate_legacy_teleop_probe_receipt(
         probe_receipt_path, source, probe_receipt_sha256
     )
-    mapped = transplant_legacy_actor_state_to_teleop83(source_state, actor.state_dict())
+    mapped = transplant_legacy_actor_state_to_teleop(source_state, actor.state_dict())
     actor.load_state_dict(mapped, strict=True)
     actor.bind_frozen_legacy_reference()
     return TeleopV12BootstrapProvenance(
@@ -434,7 +438,7 @@ def assert_actor_frozen_against_source(
     )
     if source != provenance.source:
         raise ValueError("Legacy source identity no longer matches provenance")
-    expected = transplant_legacy_actor_state_to_teleop83(
+    expected = transplant_legacy_actor_state_to_teleop(
         source_state, actor.state_dict()
     )
     actual = actor.state_dict()

@@ -38,8 +38,8 @@ def _fake_env(
 
 
 class ObservationContractTest(unittest.TestCase):
-    def test_exact_schema_is_83_values(self) -> None:
-        self.assertEqual(MICROBAN_TELEOP_OBSERVATION_WIDTH, 83)
+    def test_exact_schema_is_81_values(self) -> None:
+        self.assertEqual(MICROBAN_TELEOP_OBSERVATION_WIDTH, 81)
         validate_microban_teleop_observation_contract(_fake_env())
 
     def test_rejects_reordered_actor_terms(self) -> None:

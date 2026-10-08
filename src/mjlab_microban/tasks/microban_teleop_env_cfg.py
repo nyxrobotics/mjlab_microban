@@ -37,8 +37,6 @@ from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotationCfg,
     foot_target_offset_b,
     foot_target_tracking_error_exp,
-    hand_target_offset_b,
-    hand_target_tracking_error_exp,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -50,8 +48,12 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+    PICO_ARM_HOME_PROBABILITY,
+    PICO_ARM_RETARGET_INTERVAL_S,
     HmdNeckTargetMotion,
-    ResetFixedHandTargetCommandCfg,
+    PicoArmOverlayJointPositionActionCfg,
+    PicoArmTargetMotion,
+    arm_target_rel,
     normalized_joint_soft_limit_guard_l1_sum,
 )
 from mjlab_microban.tasks.microban_teleop_foot_command import StationaryFootTargetCommandCfg
@@ -67,8 +69,6 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocit
 # The velocity tracking stds of the earlier forward-lean PICO's final stages.
 MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
-MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
-MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
 PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
@@ -138,14 +138,14 @@ def _materialize_rotation_command_cfg(
     return UniformVelocityCommandWithRotationCfg(**values)
 
 
-# Hand targets (and the moving HMD and the no-step guard) after the critic
-# warm-up, foot targets later, each tightened later (mjlab_microban/schedules.py).  The
-# adapter columns of the frozen walker open at the same updates
-# (microban_teleop_v12_actor); before the hands no actor column trains.
+# The arms (and the moving HMD and the no-step guard) after the critic
+# warm-up, foot targets later, tightened later (mjlab_microban/schedules.py).
+# The adapter columns of the frozen walker open at the same updates
+# (microban_teleop_v12_actor); before the arms move no actor column trains.
 TELEOP_STAGES = (
     Stage(
-        "enable moving-HMD, stationary no-step guard, and broad hand tracking",
-        PICO_SCHEDULE["hand"],
+        "enable moving-HMD, moving arms and the stationary no-step guard",
+        PICO_SCHEDULE["arm"],
         (
             Setting("reward", "no_stepping", "weight", -1.0),
             Setting(
@@ -154,18 +154,8 @@ TELEOP_STAGES = (
                 "params.neutral_probability",
                 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY,
             ),
-            Setting("reward", "hand_target_tracking", "weight", 1.0),
-            Setting("reward", "hand_target_tracking", "params.std", MICROBAN_TELEOP_HAND_TRACKING_STD_M),
-            Setting("command", "hand_target", "rel_active", 0.7),
-        ),
-    ),
-    Stage(
-        "tighten hand tracking",
-        PICO_SCHEDULE["hand_tighten"],
-        (
-            Setting("reward", "hand_target_tracking", "weight", 2.0),
             Setting(
-                "reward", "hand_target_tracking", "params.std", MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M
+                "event", "pico_arm_target_motion", "params.home_probability", PICO_ARM_HOME_PROBABILITY
             ),
         ),
     ),
@@ -225,7 +215,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if not play:
         # Training samples the full PICO command envelope with mixed-axis
         # replay from the first update, and the walking task's +-0.5 m/s
-        # pushes stay on.  (Until hand targets activate the frozen walker
+        # pushes stay on.  (Until the arms move the frozen walker
         # receives no policy gradient, so only the critic learns there.)
         twist = cfg.commands["twist"]
         envelope = MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
@@ -260,8 +250,15 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     action = cfg.actions["joint_pos"]
     if not isinstance(action, JointPositionActionCfg):
         raise TypeError("Expected velocity base task to use JointPositionActionCfg")
+    # The six arm joints are overwritten by the robot's pico_arms move during
+    # PICO teleoperation: the policy's arm outputs never reach the servos.
+    # Train the same way (microban_teleop_mdp.PicoArmOverlayJointPositionAction).
+    action = PicoArmOverlayJointPositionActionCfg(
+        **{f.name: deepcopy(getattr(action, f.name)) for f in fields(action) if f.init}
+    )
     action.actuator_names = MICROBAN_TELEOP_ACTION_JOINT_NAMES
     action.scale = 1.0
+    cfg.actions["joint_pos"] = action
 
     if not play:
         # The real HMD controller owns these joints independently of the policy.
@@ -284,11 +281,22 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 # Learn the signed locomotion axes before adding an external
                 # disturbance that sweeps a comparatively heavy head through
                 # its full runtime range.  The first stage
-                # (PICO_SCHEDULE["hand"]) switches the live stateful term to
+                # (PICO_SCHEDULE["arm"]) switches the live stateful term to
                 # the deployment-like distribution.
                 "neutral_probability": (
                     MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY
                 ),
+            },
+        )
+        # The arm goals the robot's pico_arms would follow: HOME until the
+        # arm stage (PICO_SCHEDULE["arm"]), then the deployment distribution.
+        cfg.events["pico_arm_target_motion"] = EventTermCfg(
+            func=PicoArmTargetMotion,
+            mode="step",
+            params={
+                "action_name": "joint_pos",
+                "retarget_interval_s": PICO_ARM_RETARGET_INTERVAL_S,
+                "home_probability": 1.0,
             },
         )
 
@@ -330,25 +338,25 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=foot_target_offset_b,
         params={"command_name": "foot_target"},
     )
-    actor_terms["hand_target"] = ObservationTermCfg(
-        func=hand_target_offset_b,
-        params={"command_name": "hand_target"},
+    # The arm targets of the last physics step minus HOME (the robot's
+    # pico_arms output of the previous control cycle): no noise, no delay.
+    actor_terms["arm_target"] = ObservationTermCfg(
+        func=arm_target_rel,
+        params={"action_name": "joint_pos"},
     )
     cfg.observations["critic"].terms["foot_target"] = ObservationTermCfg(
         func=foot_target_offset_b,
         params={"command_name": "foot_target"},
     )
-    cfg.observations["critic"].terms["hand_target"] = ObservationTermCfg(
-        func=hand_target_offset_b,
-        params={"command_name": "hand_target"},
+    cfg.observations["critic"].terms["arm_target"] = ObservationTermCfg(
+        func=arm_target_rel,
+        params={"action_name": "joint_pos"},
     )
 
     # Exact-zero standing receives a small foot anchor from the first update.
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
     # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
-    # Hand targets remain independent of walking and their two active flags
-    # mask inactive hands.
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
         weight=MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
@@ -357,14 +365,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "std": 0.05,
             "velocity_command_name": "twist",
             "velocity_fade_range": (0.0, 0.01),
-        },
-    )
-    cfg.rewards["hand_target_tracking"] = RewardTermCfg(
-        func=hand_target_tracking_error_exp,
-        weight=0.0,
-        params={
-            "command_name": "hand_target",
-            "std": MICROBAN_TELEOP_HAND_TRACKING_STD_M,
         },
     )
     cfg.rewards["joint_soft_limit_guard"] = RewardTermCfg(
@@ -414,8 +414,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["dof_pos_limits"].weight = -10.0
     cfg.rewards["no_stepping"].params["foot_target_command_name"] = "foot_target"
 
-    # Six foot XYZ offsets, and six hand XYZ offsets plus left/right active
-    # flags, in metres.  All offsets are expressed in the HOME-levelled trunk
+    # Six foot XYZ offsets in metres, expressed in the HOME-levelled trunk
     # frame R_trunk * R_y(-HOME_TRUNK_PITCH_RAD): level at HOME (x forward,
     # y left, z up), the frame the PICO bridge sends and the twist uses, so a
     # world-vertical foot lift at HOME reads (0, 0, dz).  With a vertical
@@ -433,11 +432,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         both_feet_reach_xy_range=(-0.01, 0.01),
         trunk_pitch=HOME_TRUNK_PITCH_RAD,
     )
-    cfg.commands["hand_target"] = ResetFixedHandTargetCommandCfg(
-        resampling_time_range=(3.0, 8.0),
-        rel_active=0.0,
-        trunk_pitch=HOME_TRUNK_PITCH_RAD,
-    )
 
     cfg.curriculum = {
         "staged_curriculum": CurriculumTermCfg(
@@ -451,6 +445,5 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.curriculum = {}
         cfg.commands["foot_target"].rel_single_support_envs = 0.0
         cfg.commands["foot_target"].rel_both_feet_envs = 0.0
-        cfg.commands["hand_target"].rel_active = 0.0
 
     return cfg

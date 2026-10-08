@@ -50,11 +50,12 @@ V12_RECIPE_REVISION = _contract(
     f"{_TAG}_{_V12_RECIPE_BASE}_v11",
     f"{_TAG}_{_V12_RECIPE_BASE}_{_V12_LEVELLED}_v17",
 )
-# The PICO recipe every run trains: the active-hand arm pose release and one
-# run with a critic warm-up (mjlab_microban/schedules.py).
-V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
+# The PICO recipe every run trains: the arms driven from outside (observed as
+# arm targets), the legs released from the HOME pose reward for foot targets,
+# and one run with a critic warm-up (mjlab_microban/schedules.py).
+V13_ARM_OVERLAY_RECIPE_REVISION = (
     f"{_TAG}_{_V12_RECIPE_BASE}{'' if _UPRIGHT else '_' + _V12_LEVELLED}"
-    f"_active_hand_arm_pose_release_one_run_warmup{PICO_CRITIC_WARMUP}"
+    f"_arm_overlay_leg_pose_release_one_run_warmup{PICO_CRITIC_WARMUP}"
     f"_total{PICO_TOTAL_UPDATES}_v1"
 )
 V12_PACKAGER_REVISION = f"microban_pico_packager_one_run_v1_{_TAG}_servo_range"
@@ -72,9 +73,9 @@ def contract_strings() -> dict[str, str]:
         "getup_contract_version": GETUP_CONTRACT_VERSION,
         "v12_home_pose_revision": V12_HOME_POSE_REVISION,
         "v12_recipe_revision": V12_RECIPE_REVISION,
-        "v12_hand_pose_release_recipe_revision": V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        "v13_arm_overlay_recipe_revision": V13_ARM_OVERLAY_RECIPE_REVISION,
         "v12_packager_revision": V12_PACKAGER_REVISION,
-        # Frame of the PICO foot/hand target columns (microban_hand_fk).
+        # Frame of the PICO foot target columns (microban_hand_fk).
         "v12_target_frame": _target_frame(),
     }
 

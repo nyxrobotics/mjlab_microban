@@ -56,15 +56,15 @@ GETUP_SCHEDULE = {
 GETUP_TOTAL_UPDATES = scaled(18000)
 
 # PICO: the critic of the frozen walker's adapter warms up for
-# PICO_WARMUP_UPDATES (no actor column trains before hand targets open), then
-# hands (tightened after 1500), feet (3000 after the hands, tightened 2000
-# later) and 3000 more updates with everything active and tightened.
+# PICO_WARMUP_UPDATES (no actor column trains before the arms move), then the
+# externally driven arms and the moving HMD (with their columns), feet 3000
+# updates later (tightened 2000 later) and 3000 more updates with everything
+# active and tightened.
 PICO_STEPS_PER_UPDATE = 24
 PICO_WARMUP_UPDATES = 1000
 PICO_CRITIC_WARMUP = scaled(PICO_WARMUP_UPDATES)
 PICO_SCHEDULE = {
-    "hand": PICO_CRITIC_WARMUP,
-    "hand_tighten": scaled(PICO_WARMUP_UPDATES + 1500),
+    "arm": PICO_CRITIC_WARMUP,
     "foot": scaled(PICO_WARMUP_UPDATES + 3000),
     "foot_tighten": scaled(PICO_WARMUP_UPDATES + 5000),
 }
@@ -72,8 +72,8 @@ PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 8000)
 # Recorded in every PICO checkpoint and package: the adapter's gradient
 # schedule (which actor columns train after which update).
 PICO_ADAPTER_SCHEDULE_REVISION = (
-    f"freeze_extra_to{PICO_SCHEDULE['hand']}_then_hmd_hand_to{PICO_SCHEDULE['foot']}"
-    f"_then_all_v2"
+    f"freeze_extra_to{PICO_SCHEDULE['arm']}_then_hmd_arm_to{PICO_SCHEDULE['foot']}"
+    f"_then_all_v3"
 )
 
 
@@ -82,8 +82,7 @@ def pico_schedule_record() -> dict[str, int]:
 
     return {
         "critic_warmup": PICO_CRITIC_WARMUP,
-        "hand_start": PICO_SCHEDULE["hand"],
-        "hand_tighten": PICO_SCHEDULE["hand_tighten"],
+        "arm_start": PICO_SCHEDULE["arm"],
         "foot_start": PICO_SCHEDULE["foot"],
         "foot_tighten": PICO_SCHEDULE["foot_tighten"],
         "total": PICO_TOTAL_UPDATES,
