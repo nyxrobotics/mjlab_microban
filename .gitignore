@@ -6,6 +6,8 @@ src/mjlab_microban/robot/microban/scad/
 .venv/*
 
 logs/*
-# Gates, probes and evaluations.
+# Gates, probes and evaluations, and the release pipeline's state and files.
 artifacts/*
+# Walker checkpoints the release pipeline keeps for the PICO provenance.
+checkpoints/
 wandb/*

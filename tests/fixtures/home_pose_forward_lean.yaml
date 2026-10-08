@@ -4,10 +4,12 @@
 # config/home_pose.yaml, when they need the forward-lean HOME as input.
 #
 #
-# Every policy is trained at this pose: env spawn and default joint pose.
-# Everything else -- root height/quaternion, projected gravity, head standing
-# height, feet distance, the HOME identity -- is computed from this file by
-# src/mjlab_microban/robot/home_pose.py (MuJoCo FK on
+# Every policy (walking, get-up, PICO teleop) is trained and deployed at this
+# pose: env spawn and default joint pose, action offset (target = HOME + raw
+# action), rewards, gates, exporters and the robot's NEUTRAL_POSE.  Everything
+# else -- root height/quaternion, projected gravity, head standing height,
+# feet distance, hand FK offsets, the HOME identity strings -- is computed from
+# this file by src/mjlab_microban/robot/home_pose.py (MuJoCo FK on
 # src/mjlab_microban/robot/microban/robot.xml).
 #
 # Changing HOME (see config/README.md):
@@ -16,7 +18,12 @@
 #   2. optionally re-centre the COM by moving only hip/ankle pitch:
 #      uv run python config/balance_home_pose.py [--write] [--trunk-pitch-deg X]
 #   3. uv run python config/home_pose_tool.py show      # check derived values
-#   4. retrain every policy from scratch at it.
+#   4. uv run --locked python scripts/retrain_all_for_home.py \
+#        --robot-repo ../microban_<label> --robot-branch <label>
+#      retrains walking, PICO and get-up from scratch at it (old checkpoints
+#      and ONNX are refused: their HOME stamp no longer matches), judges and
+#      exports them, installs them with the robot's copy of this file in the
+#      robot worktree, runs both test suites and commits both repos.
 #
 # Joint angles are in degrees, logical (training/MJCF) joint coordinates.  The
 # pose must be left/right mirror symmetric and the soles must be flat at
@@ -24,8 +31,8 @@
 
 schema_version: 1
 
-# Human-readable name, and the identifier of the HOME (a changed pose becomes
-# "<label>_<10-digit joint hash>").
+# Human-readable name, and the identifier used in HOME-bound contract strings
+# (a changed pose becomes "<label>_<10-digit joint hash>").
 name: "Forward-lean HOME: trunk 10 deg forward, knees straight, COM over the sole centre"
 label: forward_lean_home
 

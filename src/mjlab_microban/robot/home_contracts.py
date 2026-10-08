@@ -57,16 +57,23 @@ V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     f"_active_hand_arm_pose_release_one_run_warmup{PICO_CRITIC_WARMUP}"
     f"_total{PICO_TOTAL_UPDATES}_v1"
 )
+V12_PACKAGER_REVISION = f"microban_pico_packager_one_run_v1_{_TAG}_servo_range"
 
 
 def contract_strings() -> dict[str, str]:
-    """The HOME-bound identifiers stamped into this HOME's checkpoints and gates."""
+    """The HOME-bound identifiers stamped into this HOME's checkpoints and gates.
+
+    Training-side only (``home_pose_tool.py show --contracts``): the robot
+    checks a policy's ``home_pose`` stamp and the one contract
+    ``microban-policy-1`` (policy_contract.py), not these.
+    """
 
     return {
         "getup_contract_version": GETUP_CONTRACT_VERSION,
         "v12_home_pose_revision": V12_HOME_POSE_REVISION,
         "v12_recipe_revision": V12_RECIPE_REVISION,
         "v12_hand_pose_release_recipe_revision": V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        "v12_packager_revision": V12_PACKAGER_REVISION,
         # Frame of the PICO foot/hand target columns (microban_hand_fk).
         "v12_target_frame": _target_frame(),
     }

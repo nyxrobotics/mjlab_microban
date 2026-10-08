@@ -1,0 +1,88 @@
+# scripts/retrain_all_for_home.py: every number of one release run that is not
+# a training schedule (those are in src/mjlab_microban/schedules.py).  Editing
+# a policy's training keys (task, envs, save_interval; pipeline/steps.py
+# TRAINING_KEYS) retrains that policy (and what depends on it) on the next
+# run; editing its judgment re-judges, never retrains.  `dry:` overrides apply
+# to --dry-run only.
+#
+# Each policy trains once from scratch for its fixed number of updates
+# (walking 30000, PICO 9000, get-up 18000) and its last checkpoint is judged
+# once.  A failed item fails the step: the test is questioned first (a wrong
+# test is fixed and the rerun re-judges without retraining); a valid failing
+# test stops the release.  stage_tolerance: a curriculum stage may start at
+# most this many updates after its update in the table (pipeline/monitor.py).
+
+seed: 42
+
+walk:
+  task: Mjlab-Velocity-Microban
+  envs: 4096
+  save_interval: 500
+  stage_tolerance: 1
+  # Judgment: the held-out walk probe (pipeline/walk_probe.py, seeds
+  # 101-105) and the 9x300 probe with seed 101 (the PICO source gate's probe,
+  # which judges the walker with seed 42 at the start of the PICO step).  The
+  # walking direction is judged by fixed signed-response minimums
+  # (mjlab_microban/twist_pass_line.py); the measured joints may go 0.25 rad
+  # beyond the soft limits (teleop_v12_safety.py).
+  judgment:
+    seeds: "101,102,103,104,105"
+    probe_seed: 101
+    max_falls: [1, 5]               # diagonal falls of 90, no push / pushed; single-axis 0
+    # standing_still: foot touchdowns per second (both feet) on the standing command,
+    # no pushes: at most one re-planted foot every two seconds (the walker
+    # should stand still there).  Stepping in place is about 3.5 per second;
+    # a walker that stands still, 0.0.
+    still_touchdowns_per_s: 0.5
+
+pico:
+  task: Mjlab-Teleop-V12-HandPoseRelease-Microban
+  envs: 2048
+  save_interval: 500
+  stage_tolerance: 1
+
+getup:
+  task: Mjlab-Getup-Microban
+  envs: 4096
+  save_interval: 500
+  stage_tolerance: 1
+  # (name, mode, seed, extra arguments) of the judgment's evaluations.
+  evals:
+    - [stand_s11, stand, 11, [--imu-delay, "3", --noise]]
+    - [stand_s5, stand, 5, [--imu-delay, "3", --noise]]
+    - [push_s11, stand, 11, [--imu-delay, "3", --noise, --push, "x:0.3"]]
+    - [posture_s11, posture, 11, []]
+  gate:
+    min_fallen_standing_fraction: 0.85
+    max_push_fall_fraction: 0.10
+    max_standing_joint_abs_vel_rad_s: 0.30
+    min_posture_standing_fraction: 0.80
+    # Standing targets saturated at the clip, the servo range +-pi (the
+    # reward's clip barrier charges beyond it; targets between 1.57 and pi
+    # are the torque authority the get-up needs and are allowed).
+    max_standing_targets_on_clip: 0.05
+
+# A job whose log is not written for this long is stopped (exit code 2).
+stall_minutes:
+  train: 20
+  eval: 30
+# Another process training on the GPU (a `train` command or one with
+# --env.scene.num-envs >= this) makes a real run wait before its next GPU job.
+external_training_min_envs: 1024
+
+dry:
+  # Every schedule (mjlab_microban/schedules.py) is scaled by this factor; the
+  # judgments are recorded, never enforced.  A stage applies at the first
+  # episode reset after its update (StagedCurriculum runs in _reset_idx), so
+  # the logged update can trail the table: by about one update with the real
+  # env counts (~100 resets per rollout), by a few with 64 envs; hence
+  # stage_tolerance 3 here.
+  schedule_scale: 0.001
+  walk: {envs: 64, save_interval: 1, stage_tolerance: 3}
+  pico: {envs: 64, save_interval: 1, stage_tolerance: 3}
+  getup:
+    envs: 64
+    save_interval: 1
+    stage_tolerance: 3
+    eval_envs: 16
+    eval_steps: 150

@@ -1,9 +1,14 @@
-"""Training lengths and switch updates of the policies, in one place.
+"""Training lengths and switch updates of the three policies, in one place.
 
 Every number is a PPO update (iteration) of one training run.  The task
-configs read them from here; under ``MICROBAN_SCHEDULE_SCALE`` (dry runs)
-every value is scaled (``scaled``).  This module imports nothing, so any
-tool can read it without loading mjlab.
+configs, the PICO adapter, the evaluators, the exporters and the pipeline
+(scripts/retrain_all_for_home.py) read them from here; under
+``MICROBAN_SCHEDULE_SCALE`` (dry runs) every value is scaled
+(``scaled``).  This module imports nothing, so the pipeline and the HOME
+contracts can read it without loading mjlab.
+
+Every run trains its ``*_TOTAL_UPDATES`` from scratch and ends with
+``model_<total - 1>``, the checkpoint the pipeline judges.
 """
 
 from __future__ import annotations

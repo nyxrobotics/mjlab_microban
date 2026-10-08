@@ -3,7 +3,8 @@
 The robot (microban) has no MuJoCo at runtime, so it reads a generated YAML
 with the HOME joint angles and every derived value it checks: NEUTRAL_POSE
 (radians, bit-exact), root position/quaternion, projected gravity at HOME and
-the hand-target FK contract (schema 2: no HOME-bound contract strings).
+the hand-target FK contract (schema 2: no HOME-bound contract strings; the
+policies carry the one contract ``microban-policy-1``, docs/policies.md).
 ``config/home_pose_tool.py write-robot`` calls ``write_robot_home_pose``.
 
 The output is a strict YAML subset the robot parses without PyYAML: ``#``

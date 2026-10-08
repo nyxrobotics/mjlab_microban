@@ -9,7 +9,7 @@ Usage (from the training repository root)::
 
 ``show`` prints the HOME inputs and everything derived from them by MuJoCo FK
 (root pose, projected gravity, COM and sole contact area, heel/toe margins,
-head standing height, feet distance, identity hash/tag),
+head standing height, feet distance, identity hash/tag, contract strings),
 plus ``training_line``: whether this checkout's training tasks load at the
 HOME (``mjlab_microban.robot.home_pose_training``; exit 1 if they do not).
 ``write-robot`` writes ``<microban-repo>/config/home_pose.yaml``, the robot's
@@ -79,6 +79,15 @@ def _show(arguments: argparse.Namespace) -> int:
     training = None if arguments.no_training_check else _training_line(home)
     if training is not None:
         summary["training_line"] = training.summary()
+    if arguments.contracts:
+        if arguments.yaml.resolve() != HOME_POSE_YAML.resolve():
+            raise ToolError("--contracts describes the checkout's HOME only (drop --yaml)")
+        if training is not None and not training.ok:
+            raise ToolError(f"--contracts needs the training tasks: {training.error}")
+        warnings.filterwarnings("ignore")
+        from mjlab_microban.robot.home_contracts import contract_strings
+
+        summary["contracts"] = contract_strings()
     print(json.dumps(summary, indent=2))
     if training is not None and not training.ok:
         raise ToolError(
@@ -135,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-training-check",
         action="store_true",
         help="skip importing the training tasks at this HOME (a few seconds)",
+    )
+    show.add_argument(
+        "--contracts",
+        action="store_true",
+        help="also print the HOME-bound contract strings (imports the training tasks)",
     )
     show.set_defaults(handler=_show)
     write = commands.add_parser("write-robot", help="write the robot repo's config/home_pose.yaml")

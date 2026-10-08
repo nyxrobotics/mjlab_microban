@@ -20,6 +20,8 @@ same updates.  Every applied stage prints one line in a fixed format::
 
     Curriculum stage <k> <name> at step <S> (update <U>)
 
+which the pipeline monitor checks against the table.
+
 The tables' updates come from mjlab_microban/schedules.py, which scales them
 for dry runs (``MICROBAN_SCHEDULE_SCALE``).
 """

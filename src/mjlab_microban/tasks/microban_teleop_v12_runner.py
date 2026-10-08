@@ -48,7 +48,7 @@ from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
 
 TELEOP_V12_BOOTSTRAP_INFO_KEY = "legacy_velocity_actor_bootstrap_v12"
 # Every checkpoint records the corrected bilateral (left/right) site order of
-# the foot/hand target columns.
+# the foot/hand target columns; the packager requires it.
 BILATERAL_SITE_ORDER_INFO_KEY = "bilateral_site_order_revision"
 
 

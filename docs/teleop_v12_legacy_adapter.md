@@ -1,11 +1,12 @@
 # Microban teleop v12: 歩行器を保ったままの PICO 方策の学習
 
-PICO 方策（v12）は、現在のHOMEで学習した歩行器（`Mjlab-Velocity-Microban` の checkpoint）を凍結した
-source として、その上に PICO の入力の列を足して学習する。
+PICO 方策（v12）は、`scripts/retrain_all_for_home.py` の歩行段階が作った歩行器
+（`Mjlab-Velocity-Microban` の checkpoint、`checkpoints/<prefix>_walk_<sha>/`）を凍結した source として、
+その上に PICO の入力の列を足して学習する。
 
 - source の SHA-256・iteration・normalizer count は bootstrap provenance（schema 2）に記録され、save の
   たびに再ハッシュされる。source ファイルは動かさないこと。
-- bootstrap の前に source の 9x300 probe（`artifacts/legacy_teleop_probe/velocity_<sha16>_teleop83_raw_9x300.json`、
+- PICO 段階の入口で source の 9x300 probe（`artifacts/legacy_teleop_probe/velocity_<sha16>_teleop83_raw_9x300.json`、
   `mjlab_microban.scripts.probe_legacy_actor_in_teleop_env`）を作り、9/9 完走・転倒0・方向8/8・実関節の
   soft-limit 超過 ≤ 0.25 rad を満たさなければ bootstrap を拒否する。
 - action target は全18関節で `HOME + raw_action * 1.0`。ソフトウェア clip は無い。唯一の上下限は XC330 の
@@ -56,7 +57,7 @@ HOME tupleを使い、offsetをexact zeroにする。FK helperはMuJoCoのrefere
 
 ## 1本の学習と判定
 
-歩行器の probe と bootstrap ゲート（`mjlab_microban.scripts.teleop_v12_bootstrap_gate`）のあと、
+`scripts/retrain_all_for_home.py` の PICO 段階が、歩行器の probe と bootstrap ゲートのあと、
 `Mjlab-Teleop-V12-HandPoseRelease-Microban` を1つのプロセスで 9000 回学習する（2048 env、seed 42）。
 
 | 回数 | 段 |
@@ -84,9 +85,8 @@ uv run --locked train Mjlab-Teleop-V12-HandPoseRelease-Microban --env.scene.num-
   --agent.save-pristine-checkpoint True
 ```
 
-判定は学習の最後の保存点（`model_8999`）で1回だけ、9x300・最終プロファイルの追従評価・ONNX パリティ
-（どれも seed 42）で、`mjlab_microban.scripts.teleop_v12_stage create` がそれらの報告を1つのゲートファイルに
-まとめる。
+途中で止まったら最初から学習し直す。判定は学習の最後の保存点（`model_8999`）で1回だけ、9x300・最終
+プロファイルの追従評価・ONNX パリティ（どれも seed 42）（docs/teleop_v12_deployment.md）。
 
 どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と
 見なさない。ONNX は `[1,83] -> [1,18]`、neutral 10,000 samples と full83 64 samplesの誤差が許容内で、

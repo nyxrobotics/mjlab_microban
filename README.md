@@ -39,11 +39,15 @@ Here is a video of the trained agent being transferred to the real robot: [https
 
 ## HOME pose
 
-Every policy is trained and deployed at one HOME pose, defined only in
-[`config/home_pose.yaml`](config/README.md). Root height, gravity at HOME and
-the HOME identity are derived from it by MuJoCo FK
+Every policy (walking, get-up, PICO teleop) is trained and deployed at one
+HOME pose, defined only in [`config/home_pose.yaml`](config/README.md).
+Root height, gravity at HOME, get-up targets, hand FK bounds and the HOME
+identity strings are derived from it by MuJoCo FK
 (`src/mjlab_microban/robot/home_pose.py`). Changing it means retraining every
-policy.
+policy at it: `scripts/retrain_all_for_home.py` (below) retrains, judges and
+exports them and installs them, with the robot's copy of the YAML
+(`config/home_pose_tool.py write-robot`), into a robot worktree whose code
+reads `config/home_pose.yaml` (see `config/README.md`).
 
 ## Training your own agent
 
@@ -61,6 +65,12 @@ Start the training with:
 ```
 uv run train Mjlab-Velocity-Microban --env.scene.num-envs 4096
 ```
+
+The walking, get-up and PICO teleop policies of a HOME are retrained from
+scratch, gated, exported and installed into the robot repository by one
+command, `scripts/retrain_all_for_home.py` (see
+[`docs/home_pose_workflow.md`](docs/home_pose_workflow.md); the PICO package
+is described in [`docs/teleop_v12_deployment.md`](docs/teleop_v12_deployment.md)).
 
 Once training is complete, play back a checkpoint with:
 
@@ -92,8 +102,10 @@ Where `[path to your wandb run]` is available in the Overview tab of your wandb 
 A ONNX is generated during training with the latest checkpoint, but if you want to export a specific checkpoint, you can do so with the following command:
 
 ```
-uv run python src/mjlab_microban/scripts/export_onnx.py --checkpoint [path to your checkpoint]
+uv run python -m mjlab_microban.scripts.export_walk_onnx --checkpoint [path to your checkpoint] --gate-report [release]/walk_gate.json --output walk.onnx
 ```
+
+The robot's `walk.onnx` carries the passed judgment of its checkpoint: `[release]/walk_gate.json` is the gate report `scripts/retrain_all_for_home.py` writes into its release directory (`<state dir>/release/`), where it also exports the get-up and PICO policies.
 
 ## License
 

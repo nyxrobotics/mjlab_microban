@@ -20,6 +20,9 @@ from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     hand_pose_release_report_settings,
 )
+from mjlab_microban.scripts.export_teleop_v12_deployment import (
+    _deployment_recipe_revision,
+)
 from mjlab_microban.tasks.microban_teleop_v12_home_pose import (
     TELEOP_V12_HOME_POSE_INFO_KEY,
     teleop_v12_home_pose_marker,
@@ -147,6 +150,11 @@ class HandPoseReleaseRecipeTest(unittest.TestCase):
             MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
             MICROBAN_TELEOP_V12_RECIPE_REVISION,
         )
+        infos = self._infos(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION)
+        self.assertEqual(
+            _deployment_recipe_revision(infos),
+            MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION,
+        )
 
     def test_fresh_chain_is_accepted_by_every_validator(self) -> None:
         infos = self._infos(MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION)
@@ -169,6 +177,8 @@ class HandPoseReleaseRecipeTest(unittest.TestCase):
     def test_another_recipe_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "Checkpoint recipe does not match"):
             validate_teleop_v12_home_pose(self._infos(MICROBAN_TELEOP_V12_RECIPE_REVISION))
+        with self.assertRaisesRegex(ValueError, "Only a pose-release checkpoint"):
+            _deployment_recipe_revision(self._infos(MICROBAN_TELEOP_V12_RECIPE_REVISION))
 
 
 if __name__ == "__main__":

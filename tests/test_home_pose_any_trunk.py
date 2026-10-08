@@ -111,6 +111,9 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                     "receiver_box_hands_active_hand_arm_pose_release_one_run_warmup1000_"
                     "total9000_v1"
                 ),
+                "v12_packager_revision": (
+                    "microban_pico_packager_one_run_v1_forward_lean_home_servo_range"
+                ),
                 "v12_target_frame": "robot_home_levelled_trunk_xyz_forward_left_up",
             },
         )
@@ -161,7 +164,7 @@ class DerivedHomeStringsTest(unittest.TestCase):
                         "from mjlab_microban.robot import home_contracts as c\n"
                         "print(json.dumps({'tag': HOME.tag,"
                         " 'getup': c.GETUP_CONTRACT_VERSION,"
-                        " 'recipe': c.V12_RECIPE_REVISION}))",
+                        " 'recipe': c.V12_RECIPE_REVISION, 'packager': c.V12_PACKAGER_REVISION}))",
                     )
                 )
                 tag = result["tag"]
@@ -171,6 +174,7 @@ class DerivedHomeStringsTest(unittest.TestCase):
                 self.assertEqual(
                     result["recipe"].endswith("_v11"), pitch == 0.0, result["recipe"]
                 )
+                self.assertIn(tag, result["packager"])
 
 
 class HomePinnedTestsTest(unittest.TestCase):

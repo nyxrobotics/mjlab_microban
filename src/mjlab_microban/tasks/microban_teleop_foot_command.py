@@ -13,6 +13,9 @@ the samples train a single-foot target at full weight (30 % of the targets
 times the standing and slow commands), too few to learn to lift a foot.
 Holding the twist at zero gives the foot targets the standing time to learn
 on (the walking reward makes the walker stand still on a standing command).
+
+A separate module from microban_teleop_mdp.py, which is a get-up training
+input (pipeline/steps.py STEP_INPUTS).
 """
 
 from __future__ import annotations

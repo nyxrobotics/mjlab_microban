@@ -40,7 +40,8 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_SCHEDULE,
 )
 
-# Log name of the refine switch's exploration reset (at GETUP_SCHEDULE["refine"]).
+# Log name of the refine switch's exploration reset (the pipeline monitor
+# expects it at GETUP_SCHEDULE["refine"]).
 GETUP_REFINE_EXPLORATION_STAGE = "refine exploration (std, Adam, learning rate, entropy)"
 
 
@@ -224,7 +225,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
     GETUP_REFINE_ACTION_STD, clears the Adam moments, puts the adaptive
     learning rate back to its configured start and lowers the entropy
     coefficient to GETUP_REFINE_ENTROPY_COEF -- once.  The switch prints a
-    curriculum-format line.  A run is never resumed
+    curriculum-format line for the pipeline monitor.  A run is never resumed
     (curriculum.refuse_resume).
     """
 

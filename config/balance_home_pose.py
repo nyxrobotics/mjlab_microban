@@ -860,7 +860,10 @@ def main(argv: list[str] | None = None) -> int:
         f"       name:  {result.name!r}\n"
         f"       label: {result.label!r} (tag is now {home.tag})\n"
         "     then run: uv run python config/home_pose_tool.py show\n"
-        "  2. retrain every policy from scratch at the new HOME"
+        "  2. uv run --locked python scripts/retrain_all_for_home.py --robot-repo <robot worktree>\n"
+        "       --robot-branch <label>\n"
+        "     retrains, judges, exports and installs every policy at the new HOME and\n"
+        "     commits both repos"
     )
     return 0
 

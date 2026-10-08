@@ -3,7 +3,7 @@
 A PICO run (one process, mjlab_microban/schedules.py) is judged once: the locomotion
 (9x300, seed 42), tracking (final profile, seed 42) and ONNX reports of the
 checkpoint it ends with (its last update, ``PICO_TOTAL_UPDATES``) are
-validated and bound into one gate file.
+validated and bound into one gate file, which the packager requires.
 """
 
 from __future__ import annotations
