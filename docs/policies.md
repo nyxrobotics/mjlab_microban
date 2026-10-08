@@ -56,7 +56,7 @@ PICO の `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確
 | --- | --- |
 | `microban_policy_contract` | `microban-policy-1` |
 | `microban_policy_kind` | `walk` / `getup` / `pico` |
-| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-pose-release-track-velocity-1` |
+| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-arm-overlay-residual-track-velocity-1` |
 | `home_pose` | `{"joint_pos_rad":{21 関節},"root_pos_m":[3],"root_quat_wxyz":[4]}`（全精度） |
 | `joint_names`、`default_joint_pos` | 21 関節と、その順の HOME（`repr` の全精度） |
 | `action_joint_names` | 18 関節（実機の `OBSERVATION_DOF_ORDER`） |

@@ -47,6 +47,8 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_TELEOP_TARGET_FRAME,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
+    TELEOP_RESIDUAL_HIDDEN_DIMS,
+    TELEOP_TRAINABLE_ACTOR_PARAMETERS,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
@@ -242,9 +244,11 @@ def build_v12_deployment_metadata(
     home_pose = validate_teleop_v12_home_pose(infos)
     if gate.get(TELEOP_V12_HOME_POSE_INFO_KEY) != home_pose:
         raise ValueError("Final v12 gate HOME pose does not match its checkpoint")
-    if infos.get("trainable_actor_parameters") != ["mlp.0.weight"] or infos.get(
-        "trainable_actor_columns"
-    ) != list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS):
+    if (
+        infos.get("trainable_actor_parameters") != list(TELEOP_TRAINABLE_ACTOR_PARAMETERS)
+        or infos.get("trainable_actor_columns") != list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS)
+        or infos.get("residual_hidden_dims") != list(TELEOP_RESIDUAL_HIDDEN_DIMS)
+    ):
         raise ValueError("Final checkpoint trainable adapter declaration drifted")
     if infos.get("active_actor_columns_at_save") != list(
         TELEOP_V12_EXTRA_OBSERVATION_COLUMNS

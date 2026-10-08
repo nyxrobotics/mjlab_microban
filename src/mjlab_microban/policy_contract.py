@@ -37,11 +37,12 @@ from mjlab_microban.robot.home_pose import HOME
 POLICY_CONTRACT = "microban-policy-1"
 # The training recipe of each kind (the robot accepts exactly these).  A recipe
 # id changes with the reward family or a target meaning; fixing a failed run
-# inside the family (weights, switch updates) does not change it.
+# inside the family (weights, switch updates) does not change it.  PICO's
+# names its structure too: the frozen walker with a residual MLP.
 RECIPES: Mapping[str, str] = {
     "walk": "microban-walk-track-velocity-1",
     "getup": "microban-getup-single-run-1",
-    "pico": "microban-pico-arm-overlay-track-velocity-1",
+    "pico": "microban-pico-arm-overlay-residual-track-velocity-1",
 }
 KINDS = tuple(RECIPES)
 POLICY_FILES: Mapping[str, str] = {

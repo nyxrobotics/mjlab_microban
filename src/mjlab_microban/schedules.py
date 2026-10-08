@@ -70,10 +70,11 @@ PICO_SCHEDULE = {
 }
 PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 8000)
 # Recorded in every PICO checkpoint and package: the adapter's gradient
-# schedule (which actor columns train after which update).
+# schedule (which actor columns train after which update; the residual MLP
+# trains with the HMD and arm columns).
 PICO_ADAPTER_SCHEDULE_REVISION = (
-    f"freeze_extra_to{PICO_SCHEDULE['arm']}_then_hmd_arm_to{PICO_SCHEDULE['foot']}"
-    f"_then_all_v3"
+    f"freeze_extra_residual_to{PICO_SCHEDULE['arm']}_then_hmd_arm_residual_to{PICO_SCHEDULE['foot']}"
+    f"_then_all_v4"
 )
 
 

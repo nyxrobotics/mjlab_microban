@@ -2,7 +2,7 @@
 
 PICO 方策（学習の取り決め 13、腕は外から動かす）は、`scripts/retrain_all_for_home.py` の歩行段階が作った歩行器
 （`Mjlab-Velocity-Microban` の checkpoint、`checkpoints/<prefix>_walk_<sha>/`）を凍結した source として、
-その上に PICO の入力の列を足して学習する。
+その上に PICO の入力の列と、出力に足す小さな補正の網を足して学習する。
 
 - source の SHA-256・iteration・normalizer count は bootstrap provenance（schema 2）に記録され、save の
   たびに再ハッシュされる。source ファイルは動かさないこと。
@@ -18,7 +18,11 @@ PICO 方策（学習の取り決め 13、腕は外から動かす）は、`scrip
 
 ## actor と観測の対応
 
-- actor: `81 -> 512 -> 256 -> 128 -> 18`、ELU、scalar unbounded Gaussian
+- actor: `81 -> 512 -> 256 -> 128 -> 18`（凍結した歩行器）＋補正の網 `81 -> 64 -> 64 -> 18`（ELU）。
+  補正の網は歩行器と同じ正規化した 81 列を入力に取り、その出力を歩行器の出力（Gaussian の平均）に足す。
+  最後の層は 0 で始めるので、学習の最初は歩行器と同じ出力になる。隠れ層は専用の乱数（seed 20261009）で
+  初期化し、ほかの初期化と環境の乱数の流れを変えない。ONNX は両方を含む 1 つのグラフ
+- scalar unbounded Gaussian（std は歩行器のまま凍結）
 - action: clip なし。脚の 12 関節の target は `default_joint_pos + raw_action * scale`。腕の 6 関節は方策の
   出力を使わず、外からの腕の目標を書く（下の「腕」）
 - previous action observation: actor の raw output（18 個）をそのまま再入力
@@ -53,16 +57,17 @@ normalizer 全体は親 module が train mode になっても更新されない�
 
 ## 列ごとの学習の開始
 
-学習可能なのは第一層 weight の追加列だけである。inactive target のノイズ学習で adapter が暴走しないよう、
+学習可能なのは第一層 weight の追加列と補正の網だけである。inactive target のノイズ学習で adapter が暴走しないよう、
 更新可能列を段階的に開く（`mjlab_microban/schedules.py`）。
 
-- completed updates `<= 1000`（critic の準備）: 追加18列をすべて exact zero に固定
-- `1001..4000`: HMD 6列と腕 6列だけを許可
+- completed updates `<= 1000`（critic の準備）: 追加18列をすべて exact zero に固定し、補正の網も動かさない
+- `1001..4000`: HMD 6列と腕 6列と補正の網を許可
 - `>= 4001`: foot 6列も許可し、追加18列すべてを許可
 
 境界 rollout の古い batch で新しい列を更新しないため、gradient hook が見る `common_step_counter == 1000*24` と
 `4000*24` はまだ lock する。lock 中の weight と Adam moment は、update・save の各時点で exact zero を
-検証する。
+検証する（補正の網は、lock 中は最後の層が 0 で Adam moment が 0）。ONNX の判定の「歩行器との一致」は、
+補正の網を除いた actor で確かめる（補正の網はすべての列を見るため）。
 
 ## 1本の学習と判定
 

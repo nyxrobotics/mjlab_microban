@@ -108,7 +108,7 @@ class ForwardLeanHomeValuesTest(unittest.TestCase):
                 "v13_arm_overlay_recipe_revision": (
                     "forward_lean_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
                     "raw_prev_action_servo_range_pi_home_levelled_targets_level_hmd_"
-                    "receiver_box_hands_arm_overlay_leg_pose_release_one_run_warmup1000_"
+                    "receiver_box_hands_arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_"
                     "total9000_v1"
                 ),
                 "v12_packager_revision": (

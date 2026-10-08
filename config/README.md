@@ -33,7 +33,7 @@
 | `tag` | `forward_lean_home` | `<label>_<hash>` |
 | 起き上がりの契約 | `v6` | `v5_<tag>` / `v6_<tag>` |
 | PICO v12 HOME / recipe | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
-| PICO の学習レシピ | `forward_lean_home_..._arm_overlay_leg_pose_release_one_run_warmup1000_total9000_v1` | `<tag>_..._arm_overlay_leg_pose_release_one_run_warmup1000_total9000_v1` |
+| PICO の学習レシピ | `forward_lean_home_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total9000_v1` | `<tag>_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total9000_v1` |
 | 固定値 | root z 0.170430569776402、股・足首ピッチは全桁の値（yamlは12桁の正準値） | FK値 |
 | HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 1e-9 の許容（FK の最終桁の揺れ） |
 

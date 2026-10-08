@@ -52,10 +52,11 @@ V12_RECIPE_REVISION = _contract(
 )
 # The PICO recipe every run trains: the arms driven from outside (observed as
 # arm targets), the legs released from the HOME pose reward for foot targets,
-# and one run with a critic warm-up (mjlab_microban/schedules.py).
+# a 64x64 residual MLP on the frozen walker (microban_teleop_v12_actor), and
+# one run with a critic warm-up (mjlab_microban/schedules.py).
 V13_ARM_OVERLAY_RECIPE_REVISION = (
     f"{_TAG}_{_V12_RECIPE_BASE}{'' if _UPRIGHT else '_' + _V12_LEVELLED}"
-    f"_arm_overlay_leg_pose_release_one_run_warmup{PICO_CRITIC_WARMUP}"
+    f"_arm_overlay_residual64x64_leg_pose_release_one_run_warmup{PICO_CRITIC_WARMUP}"
     f"_total{PICO_TOTAL_UPDATES}_v1"
 )
 V12_PACKAGER_REVISION = f"microban_pico_packager_one_run_v1_{_TAG}_servo_range"

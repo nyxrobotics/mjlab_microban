@@ -263,6 +263,7 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
             "maximum_absolute_error": 0.0,
             "tolerance": PRISTINE_PARITY_TOLERANCE,
             "teleop_only_columns": "exact_zero",
+            "residual": "excluded",
         },
         "onnx": {
             "path": str(onnx_path),

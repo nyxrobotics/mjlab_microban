@@ -20,6 +20,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
+    TELEOP_TRAINABLE_ACTOR_PARAMETERS,
     LegacyAdapterTeleopActor,
 )
 from mjlab_microban.tasks.microban_policy_export import (
@@ -181,7 +182,7 @@ class TeleopV12BootstrapTest(unittest.TestCase):
             int(target.obs_normalizer.count.item()), source_identity.normalizer_count
         )
         trainable = [name for name, value in target.named_parameters() if value.requires_grad]
-        self.assertEqual(trainable, ["mlp.0.weight"])
+        self.assertEqual(sorted(trainable), sorted(TELEOP_TRAINABLE_ACTOR_PARAMETERS))
         state = target.state_dict()
         target_columns = TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS
         expected_std = torch.tensor([TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD])

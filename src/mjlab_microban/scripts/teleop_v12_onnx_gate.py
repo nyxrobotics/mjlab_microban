@@ -26,6 +26,7 @@ from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
+    without_residual,
 )
 from mjlab_microban.tasks.microban_teleop_v12_runner import (
     TELEOP_V12_BOOTSTRAP_INFO_KEY,
@@ -92,12 +93,14 @@ def run_gate(
     # Float64 copies: this checks the frozen 63->81 mapping exactly; float32
     # accumulation order differs between the two widths and alone exceeds 2e-5
     # once randn inputs drive raw actions to hundreds of radians (see
-    # teleop_v12_bootstrap_gate).  The float32 export is checked below.
+    # teleop_v12_bootstrap_gate).  The trained residual MLP sees every column,
+    # so the walker is compared without it; the float32 export (with it) is
+    # checked below.
     with torch.inference_mode():
         expected_actions = copy.deepcopy(source).double()(
             TensorDict({"actor": legacy_observations.double()}, batch_size=[10_000])
         )
-        actual_actions = copy.deepcopy(target).double()(
+        actual_actions = without_residual(target).double()(
             TensorDict({"actor": neutral_observations.double()}, batch_size=[10_000])
         )
     neutral_max = float(torch.max(torch.abs(actual_actions - expected_actions)).item())
@@ -175,6 +178,7 @@ def run_gate(
             "maximum_absolute_error": neutral_max,
             "tolerance": PRISTINE_PARITY_TOLERANCE,
             "teleop_only_columns": "exact_zero",
+            "residual": "excluded",
         },
         "onnx": {
             "path": str(onnx_path.resolve()),

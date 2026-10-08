@@ -19,9 +19,13 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_HMD_OBSERVATION_COLUMNS,
     TELEOP_V12_SHARED_OBSERVATION_COLUMNS,
     FrozenEmpiricalNormalization,
+    TELEOP_RESIDUAL_STATE_KEYS,
+    TELEOP_TRAINABLE_ACTOR_PARAMETERS,
     LegacyAdapterTeleopActor,
+    teleop_residual_trainable,
     teleop_v12_active_adapter_columns,
     transplant_legacy_actor_state_to_teleop,
+    without_residual,
 )
 
 
@@ -136,7 +140,7 @@ class TeleopV12ActorTest(unittest.TestCase):
         _source, target = _transplanted_pair()
         target.bind_common_step_provider(lambda: 10_000 * 24)
         trainable = [name for name, value in target.named_parameters() if value.requires_grad]
-        self.assertEqual(trainable, ["mlp.0.weight"])
+        self.assertEqual(sorted(trainable), sorted(TELEOP_TRAINABLE_ACTOR_PARAMETERS))
         optimizer = torch.optim.Adam(target.parameters(), lr=1.0e-3)
         before = {name: value.clone() for name, value in target.state_dict().items()}
         obs = torch.randn(64, 81)
@@ -161,7 +165,7 @@ class TeleopV12ActorTest(unittest.TestCase):
             )
         )
         for name, expected in before.items():
-            if name != "mlp.0.weight":
+            if name != "mlp.0.weight" and name not in TELEOP_RESIDUAL_STATE_KEYS:
                 self.assertTrue(torch.equal(after[name], expected), name)
 
     def test_optimizer_invariant_rejects_adam_momentum_in_locked_columns(self) -> None:
@@ -230,6 +234,132 @@ class TeleopV12ActorTest(unittest.TestCase):
             )
         )
         target.assert_optimizer_invariant(optimizer)
+
+
+def _nonzero_residual(target: LegacyAdapterTeleopActor) -> None:
+    output = target.residual[-1]
+    assert isinstance(output, torch.nn.Linear)
+    with torch.no_grad():
+        output.weight.normal_(0.0, 0.1, generator=torch.Generator().manual_seed(3))
+        output.bias.fill_(0.05)
+
+
+class TeleopResidualTest(unittest.TestCase):
+    """The residual MLP added to the frozen walker's action mean."""
+
+    def test_pristine_actor_is_the_walker_exactly(self) -> None:
+        _source, target = _transplanted_pair()
+        self.assertEqual(
+            sorted(name for name in target.state_dict() if name.startswith("residual.")),
+            sorted(TELEOP_RESIDUAL_STATE_KEYS),
+        )
+        self.assertEqual(tuple(target.residual[0].weight.shape), (64, 81))
+        self.assertEqual(tuple(target.residual[2].weight.shape), (64, 64))
+        self.assertEqual(tuple(target.residual[4].weight.shape), (18, 64))
+        obs = TensorDict({"actor": torch.randn(256, 81)}, batch_size=[256])
+        with torch.inference_mode():
+            self.assertTrue(torch.equal(target(obs), without_residual(target)(obs)))
+            self.assertTrue(torch.equal(target(obs), target.mlp(target.get_latent(obs))))
+
+    def test_residual_adds_to_the_walker_mean(self) -> None:
+        _source, target = _transplanted_pair()
+        _nonzero_residual(target)
+        obs = TensorDict({"actor": torch.randn(64, 81)}, batch_size=[64])
+        with torch.inference_mode():
+            latent = target.get_latent(obs)
+            expected = target.mlp(latent) + target.residual(latent)
+            torch.testing.assert_close(target(obs), expected, rtol=0.0, atol=0.0)
+            self.assertFalse(torch.equal(target(obs), without_residual(target)(obs)))
+        target.distribution.update(expected)
+        torch.testing.assert_close(target.distribution.mean, expected, rtol=0.0, atol=0.0)
+
+    def test_residual_init_leaves_the_global_random_stream(self) -> None:
+        torch.manual_seed(11)
+        _target_model()
+        with_residual = torch.rand(4)
+        torch.manual_seed(11)
+        MLPModel(
+            obs=_observation(81),
+            obs_groups={"actor": ["actor"]},
+            obs_set="actor",
+            output_dim=18,
+            hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+        )
+        self.assertTrue(torch.equal(with_residual, torch.rand(4)))
+
+    def test_residual_trains_only_from_the_arm_stage(self) -> None:
+        ARM = PICO_SCHEDULE["arm"]
+        self.assertFalse(teleop_residual_trainable(0))
+        self.assertFalse(teleop_residual_trainable(ARM * 24))
+        self.assertTrue(teleop_residual_trainable(ARM * 24 + 24))
+
+        _source, target = _transplanted_pair()
+        common_step = 0
+        target.bind_common_step_provider(lambda: common_step)
+        optimizer = torch.optim.Adam(target.parameters(), lr=1.0e-3)
+        initial = {name: value.clone() for name, value in target.residual.state_dict().items()}
+
+        def update() -> None:
+            optimizer.zero_grad()
+            obs = torch.randn(64, 81)
+            target(TensorDict({"actor": obs}, batch_size=[64]), stochastic_output=True)
+            target.get_output_log_prob(torch.randn(64, 18)).mean().backward()
+            optimizer.step()
+
+        update()
+        for name, value in target.residual.state_dict().items():
+            self.assertTrue(torch.equal(value, initial[name]), name)
+        target.assert_optimizer_invariant(optimizer)
+        target.assert_schedule_locked_weights_zero()
+
+        common_step = ARM * 24 + 24
+        update()
+        update()
+        self.assertFalse(torch.equal(target.residual[4].weight, initial["4.weight"]))
+        self.assertFalse(torch.equal(target.residual[0].weight, initial["0.weight"]))
+        target.assert_frozen_legacy_state()
+        target.assert_optimizer_invariant(optimizer)
+
+    def test_locked_residual_rejects_a_nonzero_output_layer(self) -> None:
+        _source, target = _transplanted_pair()
+        target.bind_common_step_provider(lambda: 0)
+        target.assert_schedule_locked_weights_zero()
+        _nonzero_residual(target)
+        with self.assertRaisesRegex(RuntimeError, "residual"):
+            target.assert_schedule_locked_weights_zero()
+        target.bind_common_step_provider(lambda: PICO_SCHEDULE["arm"] * 24 + 24)
+        target.assert_schedule_locked_weights_zero()
+
+    def test_onnx_is_one_graph_with_the_residual(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+        import onnxruntime as ort
+
+        from mjlab_microban.scripts.teleop_v12_bootstrap_gate import _export_onnx_atomic
+
+        _source, target = _transplanted_pair()
+        _nonzero_residual(target)
+        target.eval()
+        obs = torch.randn(32, 81, generator=torch.Generator().manual_seed(5))
+        with torch.inference_mode():
+            expected = target(TensorDict({"actor": obs}, batch_size=[32])).numpy()
+            walker = without_residual(target)(TensorDict({"actor": obs}, batch_size=[32])).numpy()
+            jit = target.as_jit()(obs).numpy()
+        self.assertGreater(float(np.max(np.abs(expected - walker))), 1.0e-2)
+        np.testing.assert_allclose(jit, expected, rtol=0.0, atol=1.0e-6)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pico.onnx"
+            _export_onnx_atomic(target, path)
+            session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+            actual = np.concatenate(
+                [session.run(None, {"obs": row[None].numpy()})[0] for row in obs]
+            )
+        np.testing.assert_allclose(actual, expected, rtol=1.0e-5, atol=1.0e-5)
 
 
 if __name__ == "__main__":

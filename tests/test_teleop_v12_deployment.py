@@ -27,6 +27,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_VELOCITY_NORMALIZER_EPS,
     TELEOP_V12_ACTOR_TOPOLOGY,
     TELEOP_V12_BOOTSTRAP_MAPPING_VERSION,
+    TELEOP_TRAINABLE_ACTOR_PARAMETERS,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
@@ -158,8 +159,9 @@ def _evidence(root: Path) -> tuple[dict, dict, dict, dict, dict]:
     infos = {
         "microban_teleop_recipe_revision": MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
         TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
-        "trainable_actor_parameters": ["mlp.0.weight"],
+        "trainable_actor_parameters": list(TELEOP_TRAINABLE_ACTOR_PARAMETERS),
         "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+        "residual_hidden_dims": [64, 64],
         "active_actor_columns_at_save": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
         deployment.TELEOP_V12_BOOTSTRAP_INFO_KEY: {},
         BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,

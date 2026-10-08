@@ -19,6 +19,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_TARGET_POSITION_NORMALIZER_DENOMINATORS,
     TELEOP_V12_TARGET_POSITION_NORMALIZER_STORED_STD,
     TELEOP_V12_TARGET_POSITION_OBSERVATION_COLUMNS,
+    LegacyAdapterTeleopActor,
     transplant_legacy_actor_state_to_teleop,
 )
 
@@ -63,8 +64,10 @@ def _teleop_layout() -> ActorLayout:
 
 
 def _model(width: int) -> MLPModel:
+    """The 63-input walker, or the 81-input PICO actor (with its residual MLP)."""
+
     observation = TensorDict({"actor": torch.zeros(1, width)}, batch_size=[1])
-    return MLPModel(
+    return (MLPModel if width == 63 else LegacyAdapterTeleopActor)(
         obs=observation,
         obs_groups={"actor": ["actor"]},
         obs_set="actor",

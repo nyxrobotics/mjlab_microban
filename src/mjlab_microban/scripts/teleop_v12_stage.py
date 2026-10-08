@@ -418,6 +418,7 @@ def _validate_onnx_report(
         not isinstance(neutral, dict)
         or neutral.get("samples") != 10_000
         or neutral.get("teleop_only_columns") != "exact_zero"
+        or neutral.get("residual") != "excluded"
         or neutral.get("tolerance") != PRISTINE_PARITY_TOLERANCE
         or not _finite_number(neutral.get("maximum_absolute_error"))
         or float(neutral["maximum_absolute_error"]) < 0.0

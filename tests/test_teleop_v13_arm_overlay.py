@@ -164,7 +164,7 @@ class ArmOverlayRecipeTest(unittest.TestCase):
 
     def test_the_recipe_string(self) -> None:
         self.assertTrue(MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION.startswith(f"{HOME.tag}_"))
-        self.assertIn("arm_overlay_leg_pose_release", MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION)
+        self.assertIn("arm_overlay_residual64x64_leg_pose_release", MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION)
         infos = self._infos(MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION)
         validate_teleop_v12_home_pose(infos)
         self.assertEqual(_deployment_recipe_revision(infos), MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION)

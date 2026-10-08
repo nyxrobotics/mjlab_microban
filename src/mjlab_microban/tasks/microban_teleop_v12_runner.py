@@ -23,6 +23,8 @@ from mjlab_microban.tasks.microban_policy_export import (
     validate_microban_teleop_observation_contract,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
+    TELEOP_RESIDUAL_HIDDEN_DIMS,
+    TELEOP_TRAINABLE_ACTOR_PARAMETERS,
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
     TELEOP_V12_EXTRA_OBSERVATION_COLUMNS,
     LegacyAdapterPPO,
@@ -357,8 +359,10 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
             TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
             "previous_action_semantics": "raw_actor_output",
             "action_clip": list(MICROBAN_TELEOP_V12_ACTION_CLIP),
-            "trainable_actor_parameters": ["mlp.0.weight"],
+            "trainable_actor_parameters": list(TELEOP_TRAINABLE_ACTOR_PARAMETERS),
             "trainable_actor_columns": list(TELEOP_V12_EXTRA_OBSERVATION_COLUMNS),
+            "residual_hidden_dims": list(TELEOP_RESIDUAL_HIDDEN_DIMS),
+            "residual_trainable_at_save": self._actor.residual_trainable(),
             "adapter_gradient_schedule_revision": (
                 TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION
             ),
