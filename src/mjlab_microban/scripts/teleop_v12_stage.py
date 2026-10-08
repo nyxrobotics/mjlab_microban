@@ -49,6 +49,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _scenarios as _tracking_scenarios,
+    twist_is_judged,
 )
 from mjlab_microban.twist_pass_line import twist_judgment, twist_pass_line_record
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import (
@@ -596,7 +597,7 @@ def _validate_tracking_report(
                 raise ValueError("Tracking directional response is inconsistent")
         expected_judgment = (
             None
-            if all(command == 0.0 for command in scenario.twist)
+            if not twist_is_judged(scenario)
             else twist_judgment(
                 scenario.twist,
                 [float(measured[axis]["mean"]) for axis in _VELOCITY_AXES],

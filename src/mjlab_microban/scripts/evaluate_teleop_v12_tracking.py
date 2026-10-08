@@ -247,6 +247,19 @@ MIXED_TRACKING_TWIST_SCALE = 0.5
 MIXED_TRACKING_SCENARIOS = ("mixed_forward_left", "mixed_backward_right")
 
 
+def twist_is_judged(scenario: EvaluationScenario) -> bool:
+    """Whether the scenario's walking direction is judged (twist_beats_standing).
+
+    Not for standing scenarios, and not for the mixed ones (2026-10-08): a
+    command on several axes is the walker's diagonal behaviour, which the
+    walking checks no longer judge either (the frozen walker under PICO
+    hardly walks sideways while walking forward); falls, hands, feet and
+    joints are judged there as everywhere.
+    """
+
+    return scenario.name not in MIXED_TRACKING_SCENARIOS and any(value != 0.0 for value in scenario.twist)
+
+
 def _scenarios(profile: str) -> tuple[EvaluationScenario, ...]:
     by_name = {scenario.name: scenario for scenario in default_scenarios()}
     for name in MIXED_TRACKING_SCENARIOS:
@@ -689,7 +702,7 @@ def _evaluate_scenario(
         }
     judgment = (
         None
-        if all(value == 0.0 for value in scenario.twist)
+        if not twist_is_judged(scenario)
         else twist_judgment(
             scenario.twist,
             [

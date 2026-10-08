@@ -33,6 +33,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
     _scenarios,
+    twist_is_judged,
     foot_tracking_p95_max_m,
     foot_tracking_rms_max_m,
     foot_tracking_velocity_fade_range,
@@ -326,7 +327,7 @@ def _tracking_report(
                 "directional_response": directional,
                 "twist_judgment": (
                     None
-                    if all(value == 0.0 for value in scenario.twist)
+                    if not twist_is_judged(scenario)
                     else twist_judgment(
                         scenario.twist, [0.5 * value for value in scenario.twist]
                     )
@@ -524,6 +525,14 @@ class TeleopV12StageTest(unittest.TestCase):
         standing["command"]["twist"] = [0.0, 0.0, 0.0]
         checks, _ = _acceptance([_result(), standing], FINAL_PROFILE)
         self.assertFalse(checks["foot_tracking_rms"])
+
+    def test_the_mixed_scenarios_do_not_judge_the_walking_direction(self) -> None:
+        from mjlab_microban.scripts.evaluate_teleop_v12_tracking import twist_is_judged
+
+        judged = {scenario.name: twist_is_judged(scenario) for scenario in _scenarios(FINAL_PROFILE)}
+        self.assertTrue(judged["low_forward"])
+        self.assertFalse(judged["mixed_forward_left"] or judged["mixed_backward_right"])
+        self.assertFalse(judged["max_hands_left"])  # standing
 
     def test_accuracy_limits_are_one_table(self) -> None:
         # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m;
