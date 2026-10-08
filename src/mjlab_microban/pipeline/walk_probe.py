@@ -10,24 +10,23 @@ sign), six single-axis commands and standing, three repeats each, on seeds
 twist-ratio validation (exp/twist-ratio-validation) that every walker of that
 comparison was measured with.
 
-Rules: the walking reward's own pass line (mjlab_microban/twist_pass_line.py)
-on the mean twist of each command over its 15 rollouts, and the falls
-(config/pipeline.yaml ``walk.check.w4_falls``):
+Rules (walking tracks velocity with its initial reward again, 2026-10-08;
+the ratio and speed-fraction items W1-W3 of the twist-ratio reward are gone):
 
-* W1 every diagonal command without pushes: the reward of the mean twist beats
-  standing still;
-* W2 the same with pushes;
-* W3 every single-axis command: the same;
-* W4 falls of the diagonal commands without / with pushes, none single-axis;
-* W5 standing: the drift costs less than the smallest checked command;
+* W4 falls of the diagonal commands without / with pushes
+  (config/pipeline.yaml ``walk.check.w4_falls``), none single-axis;
+* W5 every single-axis command moves its axis the commanded way by the fixed
+  minimum (mjlab_microban/twist_pass_line.py: 0.2 m/s forward 0.08, backward
+  0.04, 0.1 m/s lateral 0.02, 0.5 rad/s yaw 0.2) and standing drifts at most
+  0.05 m/s, 0.05 m/s, 0.2 rad/s;
 * W6 standing still: on the standing command without pushes, at most
   ``walk.check.still_touchdowns_per_s`` foot touchdowns per second (both feet,
   per robot, after the 1 s settle).  The reward counts stepping in place as
   motion on a standing command (its best is both feet still, 2026-10-08), so
   an undisturbed stand re-plants a foot at most now and then.
 
-The ratio angle, the speed fraction and the signed single-axis responses are
-recorded with each verdict; they are not pass lines.
+The ratio angle, the speed fraction of the diagonals and the signed
+single-axis responses are recorded with each verdict.
 
 usage: python -m mjlab_microban.pipeline.walk_probe CKPT OUT.json [--seeds 101,...]
 Prints one ``RESULT {json}`` line (the rule verdicts and their numbers).
@@ -43,7 +42,7 @@ import time
 from copy import deepcopy
 from typing import Any
 
-from mjlab_microban.twist_pass_line import twist_passes, twist_value
+from mjlab_microban.twist_pass_line import twist_passes
 
 SCALE = (0.7, 0.3, 1.5)
 DIAGONAL = {
@@ -105,42 +104,28 @@ def _cell(rows: list[dict], push: str, commands: list[str]) -> dict[str, Any]:
 
 
 def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
-    """The W1-W5 verdicts and the numbers they were taken on."""
+    """The W4-W6 verdicts and the numbers they were taken on."""
 
     none = _cell(rows, "none", list(DIAGONAL))
     pushed = _cell(rows, "p30_15", list(DIAGONAL))
     single = _cell(rows, "none", list(SINGLE))
     angle_none = max(v["angle"] for v in none["per"].values())
     angle_push = max(v["angle"] for v in pushed["per"].values())
-
-    def values(cell: dict) -> dict[str, float]:
-        return {name: twist_value(v["twist"], v["mean"]) for name, v in cell["per"].items()}
-
-    def passes(cell: dict) -> bool:
-        return len(cell["per"]) > 0 and all(twist_passes(v["twist"], v["mean"]) for v in cell["per"].values())
-
-    moving = {"per": {k: v for k, v in single["per"].items() if k != "S"}}
+    moving = {k: v for k, v in single["per"].items() if k != "S"}
     still = single["per"]["S"]["mean"]
     still_rows = [r for r in rows if r["push"] == "none" and r["cmd"] == "S" and not r["fell"]]
     still_touchdowns = _mean([r["touchdowns_per_s"] for r in still_rows if "touchdowns_per_s" in r])
     single_signed = {name: single["per"][name]["signed"][axis] for name, axis in SINGLE_AXIS.items()}
     checks = {
-        "W1": passes(none),
-        "W2": passes(pushed),
-        "W3": passes(moving) and len(moving["per"]) == len(SINGLE_AXIS),
         "W4": none["falls"] <= rules["w4_falls"][0] and pushed["falls"] <= rules["w4_falls"][1]
         and single["falls"] == 0,
-        "W5": twist_passes(SINGLE["S"], still),
+        "W5": len(moving) == len(SINGLE_AXIS) and all(twist_passes(v["twist"], v["mean"]) for v in moving.values())
+        and twist_passes(SINGLE["S"], still),
         "W6": math.isfinite(still_touchdowns) and still_touchdowns <= rules["still_touchdowns_per_s"],
     }
-    value = {"none": values(none), "pushed": values(pushed), "single": values(single)}
     return {
         "checks": checks,
         "passed": all(checks.values()),
-        "value": value,
-        "worst_value": [min(value["none"].values()), min(value["pushed"].values()),
-                        min(v for k, v in value["single"].items() if k != "S")],
-        "still_value": value["single"]["S"],
         "angle_deg": [angle_none, angle_push],
         "speed": [none["speed"], pushed["speed"]],
         "falls": [none["falls"], pushed["falls"], single["falls"]],

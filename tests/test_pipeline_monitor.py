@@ -297,37 +297,27 @@ class WalkRulesTest(unittest.TestCase):
         rules = CFG["walk"]["check"]
         good = evaluate(self.rows(), rules)
         self.assertTrue(good["passed"], good)
+        self.assertEqual(set(good["checks"]), {"W4", "W5", "W6"})
         self.assertLess(good["angle_deg"][0], 1.0)
-        self.assertAlmostEqual(good["worst_value"][0], 0.75, places=6)
-        # Off the ray as the reward judges it (squared error since
-        # 2026-10-08): 40 % of the commanded lateral part (about 23 deg off)
-        # and none of it (40-45 deg off, 0.56) still beat standing still; the
-        # lateral part the wrong way (-20 %) is worse than standing (0.45).
-        off_ray = evaluate(self.rows(scale=(0.5, 0.2, 0.5)), rules)
-        self.assertGreater(off_ray["angle_deg"][0], 20.0)
-        self.assertTrue(off_ray["checks"]["W1"] and off_ray["checks"]["W2"], off_ray)
-        self.assertTrue(evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)["checks"]["W1"])
-        given_up = evaluate(self.rows(scale=(0.5, -0.2, 0.5)), rules)
-        self.assertFalse(given_up["checks"]["W1"] or given_up["checks"]["W2"])
-        # Against the command on the diagonals: worse than standing.
-        backward = evaluate(self.rows(scale=(-0.5, -0.5, -0.5)), rules)
-        self.assertFalse(backward["checks"]["W1"] or backward["checks"]["W2"])
+        # The diagonals' ratio is recorded, not judged (no W1-W3).
+        self.assertTrue(evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)["passed"])
         fallen = evaluate(self.rows(falls=2), rules)
         self.assertFalse(fallen["checks"]["W4"])
-        # A tenth of a single-axis command still beats standing; the wrong way does not.
-        self.assertTrue(evaluate(self.rows(single=0.01), rules)["checks"]["W3"])
-        self.assertFalse(evaluate(self.rows(single=-0.01), rules)["checks"]["W3"])
-        # Standing drift below the smallest checked command (0.1 m/s forward).
-        self.assertTrue(evaluate(self.rows(still=(0.09, 0.0, 0.0)), rules)["checks"]["W5"])
+        # W5: every single-axis command at its fixed minimum (0.2 forward
+        # 0.08, backward 0.04, lateral 0.02, yaw 0.2; yaw rows get 3x).
+        self.assertTrue(evaluate(self.rows(single=0.08), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(single=0.079), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(single=-0.1), rules)["checks"]["W5"])
+        # W5: standing drifts at most 0.05, 0.05 m/s and 0.2 rad/s.
+        self.assertTrue(evaluate(self.rows(still=(0.049, -0.049, 0.19)), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(still=(0.06, 0.0, 0.0)), rules)["checks"]["W5"])
+        self.assertFalse(evaluate(self.rows(still=(0.0, 0.0, 0.25)), rules)["checks"]["W5"])
         # W6: standing with the feet still; stepping in place (8 per second) fails.
         self.assertEqual(rules["still_touchdowns_per_s"], 0.5)
         self.assertTrue(evaluate(self.rows(touchdowns=0.5), rules)["checks"]["W6"])
         stepping = evaluate(self.rows(touchdowns=7.9), rules)
         self.assertFalse(stepping["checks"]["W6"] or stepping["passed"])
         self.assertAlmostEqual(stepping["still_touchdowns_per_s"], 7.9)
-        self.assertFalse(evaluate(self.rows(still=(0.11, 0.0, 0.0)), rules)["checks"]["W5"])
-        self.assertFalse(evaluate(self.rows(still=(0.0, 0.05, 0.0)), rules)["checks"]["W5"])
-
 
 if __name__ == "__main__":
     unittest.main()

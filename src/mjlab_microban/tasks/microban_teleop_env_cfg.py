@@ -51,24 +51,27 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_SLEW_RATES_RAD_S,
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     HmdNeckTargetMotion,
-    ResetFixedFootTargetCommandCfg,
     ResetFixedHandTargetCommandCfg,
     normalized_joint_soft_limit_guard_l1_sum,
 )
-from mjlab_microban.tasks.microban_velocity_env_cfg import (
-    TWIST_AXIS_SCALE,
-    make_microban_velocity_env_cfg,
+from mjlab_microban.tasks.microban_teleop_foot_command import StationaryFootTargetCommandCfg
+from mjlab_microban.tasks.microban_teleop_velocity_rewards import (
+    commanded_planar_velocity_progress,
+    linear_velocity_tracking_error_l1,
+    planar_velocity_tracking_exp,
+    yaw_velocity_tracking_error_l1,
 )
+from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
 
-# The twist-ratio velocity term inherited from walking (weight 8 there) at four
-# times walking's weight, the ratio the replaced PICO velocity terms had to
-# walking's (16 from standing still to exact tracking).
-PICO_TWIST_RATIO_WEIGHT = 32.0
+# The velocity tracking stds of the earlier forward-lean PICO's final stages.
+MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
+MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
 MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -175,6 +178,12 @@ TELEOP_STAGES = (
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
             Setting("command", "foot_target", "rel_single_support_envs", 0.3),
+            # Half of the single-foot targets come with a standing twist (the
+            # foot reward fades out with the commanded speed): about 3.5 % ->
+            # 17 % of the samples train a single-foot target at full weight
+            # (microban_teleop_foot_command.py).
+            Setting("command", "foot_target", "single_support_stationary_probability",
+                    PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY),
             Setting("command", "foot_target", "rel_both_feet_envs", 0.05),
         ),
     ),
@@ -373,11 +382,28 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # dominated v1 and rewarded copying a saturated previous output forever.
     cfg.rewards["action_rate_l2"].weight = -0.02
 
-    # Velocity: the twist-ratio term inherited from walking, at PICO's weight.
-    twist_reward = cfg.rewards["twist_ratio_velocity"]
-    twist_reward.weight = PICO_TWIST_RATIO_WEIGHT
-    if tuple(twist_reward.params["axis_scale"]) != TWIST_AXIS_SCALE:
-        raise ValueError("PICO and walking must share the twist reward's axis scale")
+    # Velocity: the terms of the earlier forward-lean PICO (before the
+    # twist-ratio term; microban_teleop_velocity_rewards.py), with the final
+    # tracking stds from the first update (the full envelope is sampled from
+    # the first update).  User decision 2026-10-08.
+    velocity_params = {"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD}
+    cfg.rewards["track_linear_velocity"] = RewardTermCfg(
+        func=planar_velocity_tracking_exp,
+        weight=5.0,
+        params={**velocity_params, "std": MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S},
+    )
+    cfg.rewards["commanded_planar_velocity_progress"] = RewardTermCfg(
+        func=commanded_planar_velocity_progress,
+        weight=2.0,
+        params={**velocity_params, "command_threshold": 0.01},
+    )
+    cfg.rewards["track_angular_velocity"].params["std"] = MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S
+    cfg.rewards["linear_velocity_error_l1"] = RewardTermCfg(
+        func=linear_velocity_tracking_error_l1, weight=-16.0, params=dict(velocity_params)
+    )
+    cfg.rewards["yaw_velocity_error_l1"] = RewardTermCfg(
+        func=yaw_velocity_tracking_error_l1, weight=-1.0, params=dict(velocity_params)
+    )
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["threshold_min"] = 0.02
     cfg.rewards["air_time"].params["threshold_max"] = 0.30
@@ -397,7 +423,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # y left, z up), the frame the PICO bridge sends and the twist uses, so a
     # world-vertical foot lift at HOME reads (0, 0, dz).  With a vertical
     # trunk at HOME it is the trunk frame.
-    cfg.commands["foot_target"] = ResetFixedFootTargetCommandCfg(
+    cfg.commands["foot_target"] = StationaryFootTargetCommandCfg(
         resampling_time_range=(3.0, 8.0),
         rel_single_support_envs=0.0,
         rel_both_feet_envs=0.0,

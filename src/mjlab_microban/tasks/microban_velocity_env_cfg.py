@@ -49,7 +49,10 @@ from mjlab_microban.tasks.mdp import (
     reset_root_state_uniform_world_yaw,
     upright as local_upright,
 )
-from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
+from mjlab_microban.tasks.microban_velocity_tracking import (
+    track_angular_velocity_home_frame,
+    track_linear_velocity_home_frame,
+)
 
 SCENE_CFG = SceneCfg(
     terrain=TerrainEntityCfg(
@@ -88,19 +91,12 @@ WALK_COMMAND_RANGES_FINAL = {
     "lin_vel_y": (-0.3, 0.3),
     "ang_vel_z": (-1.5, 1.5),
 }
-# The twist reward's axis scale: each axis's largest commanded magnitude
-# (0.7 m/s, 0.3 m/s, 1.5 rad/s), shared with PICO.
+# Each axis's largest commanded magnitude (0.7 m/s, 0.3 m/s, 1.5 rad/s): the
+# robot's moving command limits.
 TWIST_AXIS_SCALE = tuple(
     max(abs(value) for value in WALK_COMMAND_RANGES_FINAL[axis])
     for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z")
 )
-# The twist-ratio term is in [0, 1] (1/2 standing still on a moving command,
-# 1 at exact tracking): weight 8 spans 4..8, the range of the two exp terms it
-# replaces (exp/twist-ratio-validation AB_result.md, recommendation of
-# 2026-10-07 01:15: the bounded form, direction penalty 1; since 2026-10-08 the
-# squared error on the instantaneous motion, microban_twist_ratio_mdp.py).
-WALK_TWIST_RATIO_WEIGHT = 8.0
-WALK_TWIST_RATIO_DIRECTION_PENALTY = 1.0
 
 # One stage at update 3000: widen the forward and yaw command ranges and
 # penalize standing still on a moving command.  (The command's rotation-env
@@ -224,21 +220,21 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
-    # Velocity: one twist-ratio term (microban_twist_ratio_mdp) in the
-    # HOME-levelled trunk frame, the axes scaled by the final command
-    # envelope.  It replaces mjlab's two exp tracking terms (weight 2 each).
-    del cfg.rewards["track_linear_velocity"]
-    del cfg.rewards["track_angular_velocity"]
-    cfg.rewards["twist_ratio_velocity"] = RewardTermCfg(
-        func=twist_ratio_velocity,
-        weight=WALK_TWIST_RATIO_WEIGHT,
-        params={
-            "command_name": "twist",
-            "trunk_pitch": HOME_TRUNK_PITCH_RAD,
-            "axis_scale": TWIST_AXIS_SCALE,
-            "direction_penalty": WALK_TWIST_RATIO_DIRECTION_PENALTY,
-        },
-    )
+    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.1)
+    # and sqrt(0.5), in the HOME-levelled trunk frame -- the initial walking
+    # reward (user decision 2026-10-08; microban_velocity_tracking.py).  A
+    # vertical-trunk HOME keeps mjlab's own terms.
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        for name, func in (
+            ("track_linear_velocity", track_linear_velocity_home_frame),
+            ("track_angular_velocity", track_angular_velocity_home_frame),
+        ):
+            cfg.rewards[name].func = func
+            cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
+    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
+    cfg.rewards["track_linear_velocity"].weight = 2.0
+    cfg.rewards["track_angular_velocity"].params["std"] = np.sqrt(0.5)
+    cfg.rewards["track_angular_velocity"].weight = 2.0
 
     std_standing = {
         r".*head.*": 0.3,

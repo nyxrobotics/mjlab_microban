@@ -11,36 +11,38 @@ walk:
   task: Mjlab-Velocity-Microban
   envs: 4096
   save_interval: 500
-  # Checks every 1000 updates while training (in parallel, one at a time):
-  # the held-out probe W1-W5 (pipeline/walk_probe.py, seeds 101-105) and the
-  # 9x300 probe with seed 101 (the PICO source gate's probe, which judges the
-  # adopted walker with seed 42 at the start of the PICO step).  Both judge
-  # the walking direction by the walking reward's own pass line
-  # (mjlab_microban/twist_pass_line.py: every moving command beats standing
-  # still, standing drifts less than the smallest checked command) and allow
-  # the measured joints 0.25 rad beyond the soft limits
-  # (teleop_v12_safety.py).  Two consecutive passes (N, N+1000) end the run
-  # with model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000: both checks
-  # saw 1000+ updates of the only stage).
-  # best: with no such pair by WALK_MAX_UPDATES (8000), the run ends with the
-  # best checkpoint checked at or after WALK_MIN_FINAL_UPDATES (5000, 6000,
-  # 7000 and the last, 7999): most passed items (W1-W5, 9x300), then the
-  # largest worst reward margin over standing of every moving command, then
-  # the later one (pipeline/steps.py best_walk_check; written down before the
-  # forward-lean release walk).  If that one fails an item, the step fails:
-  # the test is questioned first (a wrong test is fixed and the rerun
-  # re-judges without retraining); a valid failing test stops the release.
-  # No check stops a training before its last update.
+  # adopt: walking is not trained; this trained walker is adopted once its
+  # walking checks pass (user decision 2026-10-08: "とりあえず歩行の報酬は今まで
+  # うまく言ってた速度追従方法に戻し" -- the forward-lean walker trained with
+  # the initial velocity reward, which stands still on the standing command).
+  # Remove it to train walking (Mjlab-Velocity-Microban, the same reward).
+  adopt:
+    checkpoint: /home/rtx-server/Git-projects/mjlab_microban_lean/logs/rsl_rl/mjlab_microban_velocity/2026-10-05_06-14-02_lean_walk_cont2/model_29000.pt
+    sha256: a7c28c8abaf038d85c9c773bdaa2cc6bbe3c9bb2af6135622a4949c38a0401ff
+  # Checks (every 1000 updates while training, or once for the adopted
+  # walker): the held-out probe W4-W6 (pipeline/walk_probe.py, seeds
+  # 101-105) and the 9x300 probe with seed 101 (the PICO source gate's probe,
+  # which judges the walker with seed 42 at the start of the PICO step).  The
+  # walking direction is judged by the fixed signed-response minimums of the
+  # initial reward's checks (mjlab_microban/twist_pass_line.py); the measured
+  # joints may go 0.25 rad beyond the soft limits (teleop_v12_safety.py).
+  # While training: two consecutive passes (N, N+1000) end the run with
+  # model_<N+1000>, not before WALK_MIN_FINAL_UPDATES (5000); with no such
+  # pair by WALK_MAX_UPDATES (8000), the best checkpoint checked at or after
+  # 5000 (most passed items, then the largest 9x300 margin over its minimum,
+  # then the later one).  A failed item fails the step: the test is
+  # questioned first (a wrong test is fixed and the rerun re-judges without
+  # retraining); a valid failing test stops the release.
   check:
     stage_tolerance: 1
     seeds: "101,102,103,104,105"
     probe_seed: 101
     w4_falls: [1, 5]                # diagonal falls of 90, no push / pushed; single-axis 0
     # W6: foot touchdowns per second (both feet) on the standing command,
-    # no pushes.  The reward's best there is both feet still (1746fc5); one
-    # re-planted foot every two seconds at most.  Stepping in place is about
-    # 8 per second (walk_c1ab6dcb model_6000); the forward-lean walker that
-    # stands still (lean_walk_cont2 model_29000) 0.35.
+    # no pushes: at most one re-planted foot every two seconds (the walker
+    # should stand still there; the user saw walkers step in place).
+    # Stepping in place is about 3.5 per second (walk_c1ab6dcb model_6000);
+    # the forward-lean walker that stands still (model_29000) 0.0.
     still_touchdowns_per_s: 0.5
 
 pico:

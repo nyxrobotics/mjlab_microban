@@ -1,82 +1,66 @@
-"""The walking checks' pass line is the walking reward's own verdict."""
+"""The walking checks' pass line: the fixed signed-response minimums (2026-10-08)."""
 
 from __future__ import annotations
 
-import math
 import unittest
 
-import torch
-
-from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_reward
 from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
 from mjlab_microban.twist_pass_line import (
-    STANDING_DRIFT_VALUE_MIN,
-    STANDING_STILL_VALUE,
+    axis_minimums,
     twist_judgment,
     twist_pass_line_record,
     twist_passes,
-    twist_value,
+    worst_margin,
 )
+
+# The former fixed tables (before c0d8d49): the 9x300 probe and the PICO
+# locomotion judgment, the walk check's single-axis minimums, the PICO
+# tracking judgment's per-axis minimums.
+NINE_BY_300 = {
+    (0.1, 0.0, 0.0): 0.04, (0.2, 0.0, 0.0): 0.08, (-0.1, 0.0, 0.0): 0.02, (-0.2, 0.0, 0.0): 0.04,
+    (0.0, 0.1, 0.0): 0.02, (0.0, -0.1, 0.0): 0.02, (0.0, 0.0, 0.5): 0.2, (0.0, 0.0, -0.5): 0.2,
+}
+WALK_SINGLE = {(0.2, 0.0, 0.0): 0.08, (-0.2, 0.0, 0.0): 0.04, (0.0, 0.1, 0.0): 0.02, (0.0, 0.0, 0.5): 0.2}
 
 
 class PassLineTest(unittest.TestCase):
     def test_joint_overshoot_allowance_is_the_users_quarter_radian(self) -> None:
         self.assertEqual(ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD, 0.25)
 
-    def test_value_is_the_planar_walking_reward(self) -> None:
-        torch.manual_seed(0)
-        commands = torch.randn(64, 3, dtype=torch.float64) * torch.tensor([0.3, 0.15, 0.8], dtype=torch.float64)
-        twists = torch.randn(64, 3, dtype=torch.float64) * 0.2
-        expected = twist_ratio_reward(commands, twists, uncommanded=None, uncommanded_scale=None)
-        for c, v, want in zip(commands.tolist(), twists.tolist(), expected.tolist(), strict=True):
-            self.assertEqual(twist_value(c, v), want)
+    def test_the_former_tables_are_reproduced(self) -> None:
+        for table in (NINE_BY_300, WALK_SINGLE):
+            for command, minimum in table.items():
+                (value,) = axis_minimums(command).values()
+                self.assertAlmostEqual(value, minimum, places=12, msg=command)
+        # Commands on several axes: the former PICO tracking minimums.
+        self.assertEqual(axis_minimums((0.35, 0.15, 0.75)), {0: 0.04, 1: 0.02, 2: 0.2})
+        self.assertEqual(axis_minimums((-0.25, -0.15, 0.0)), {0: 0.04, 1: 0.02})
 
-    def test_a_moving_command_passes_exactly_when_the_reward_beats_standing_still(self) -> None:
-        torch.manual_seed(1)
-        for _ in range(512):
-            c = (torch.randn(3) * torch.tensor([0.3, 0.15, 0.8])).tolist()
-            v = (torch.randn(3) * torch.tensor([0.2, 0.1, 0.6])).tolist()
-            standing = twist_value(c, [0.0, 0.0, 0.0])
-            if math.dist(c, (0.0, 0.0, 0.0)) > 0.05:  # n >= eps: standing still is worth 1/2
-                self.assertAlmostEqual(standing, STANDING_STILL_VALUE, places=12)
-            self.assertEqual(twist_passes(c, v), twist_value(c, v) > standing)
+    def test_a_moving_command_passes_at_its_minimum_the_commanded_way(self) -> None:
+        self.assertTrue(twist_passes((0.1, 0.0, 0.0), (0.04, 0.3, -1.0)))
+        self.assertFalse(twist_passes((0.1, 0.0, 0.0), (0.0399, 0.0, 0.0)))
+        self.assertTrue(twist_passes((-0.1, 0.0, 0.0), (-0.02, 0.0, 0.0)))
+        self.assertFalse(twist_passes((-0.1, 0.0, 0.0), (0.02, 0.0, 0.0)))
+        self.assertTrue(twist_passes((0.35, -0.15, 0.75), (0.05, -0.03, 0.2)))
+        self.assertFalse(twist_passes((0.35, -0.15, 0.75), (0.05, 0.03, 0.2)))
+        self.assertAlmostEqual(worst_margin((0.0, 0.0, -0.5), (0.0, 0.0, -0.3)), 0.1, places=12)
 
-    def test_checked_commands(self) -> None:
-        # 0.1 / 0.2 m/s forward and backward, 0.1 m/s lateral, 0.5 rad/s yaw:
-        # any progress along the command passes, also at twice the command;
-        # standing still, the wrong way, or mostly sideways fails.
-        for command in ((0.1, 0, 0), (0.2, 0, 0), (-0.1, 0, 0), (-0.2, 0, 0), (0, 0.1, 0), (0, -0.1, 0),
-                        (0, 0, 0.5), (0, 0, -0.5)):
-            for k in (0.05, 0.5, 1.0, 2.0):
-                self.assertTrue(twist_passes(command, [k * x for x in command]), (command, k))
-            self.assertFalse(twist_passes(command, [0.0, 0.0, 0.0]), command)
-            self.assertFalse(twist_passes(command, [-0.3 * x for x in command]), command)
-        # The first release walker on 0.1 m/s forward: -0.0396 m/s.
-        self.assertFalse(twist_passes((0.1, 0.0, 0.0), (-0.0396, 0.0, 0.0)))
-        # Half of 0.1 m/s forward: drifting 0.15 m/s sideways still beats
-        # standing (0.584, squared error), 0.2 m/s sideways does not (0.481).
-        self.assertTrue(twist_passes((0.1, 0.0, 0.0), (0.05, 0.15, 0.0)))
-        self.assertFalse(twist_passes((0.1, 0.0, 0.0), (0.05, 0.2, 0.0)))
-
-    def test_standing_command_drift_line(self) -> None:
-        self.assertAlmostEqual(STANDING_DRIFT_VALUE_MIN, math.exp(-((1.0 / 7.0) ** 2)), places=12)
-        self.assertTrue(twist_passes((0, 0, 0), (0.0, 0.0, 0.0)))
-        self.assertTrue(twist_passes((0, 0, 0), (0.099, 0.0, 0.0)))
-        self.assertFalse(twist_passes((0, 0, 0), (0.101, 0.0, 0.0)))
-        self.assertTrue(twist_passes((0, 0, 0), (0.0, 0.042, 0.0)))
-        self.assertFalse(twist_passes((0, 0, 0), (0.0, 0.044, 0.0)))
-        self.assertTrue(twist_passes((0, 0, 0), (0.0, 0.0, 0.21)))
-        self.assertFalse(twist_passes((0, 0, 0), (0.0, 0.0, 0.22)))
+    def test_standing_command_drift_limits(self) -> None:
+        self.assertTrue(twist_passes((0, 0, 0), (0.05, -0.05, 0.2)))
+        self.assertFalse(twist_passes((0, 0, 0), (0.051, 0.0, 0.0)))
+        self.assertFalse(twist_passes((0, 0, 0), (0.0, -0.051, 0.0)))
+        self.assertFalse(twist_passes((0, 0, 0), (0.0, 0.0, 0.21)))
 
     def test_nonfinite_twist_fails(self) -> None:
         self.assertFalse(twist_passes((0.1, 0.0, 0.0), (float("nan"), 0.0, 0.0)))
         self.assertFalse(twist_judgment((0.1, 0.0, 0.0), (float("inf"), 0.0, 0.0))["passed"])
+        self.assertFalse(twist_passes((0.0, 0.0, 0.0), (float("nan"), 0.0, 0.0)))
 
     def test_record_is_reproducible(self) -> None:
         self.assertEqual(twist_pass_line_record(), twist_pass_line_record())
         record = twist_judgment((0.1, 0.0, 0.0), (0.06, 0.01, 0.05))
         self.assertEqual(record, twist_judgment([0.1, 0.0, 0.0], [0.06, 0.01, 0.05]))
-        self.assertEqual(record["line"], STANDING_STILL_VALUE)
+        self.assertEqual(record["minimum_signed_response"], {"vx_m_s": 0.04})
 
 
 if __name__ == "__main__":

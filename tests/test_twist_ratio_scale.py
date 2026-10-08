@@ -1,10 +1,12 @@
-"""The twist-ratio velocity term as walking and PICO use it.
+"""The velocity rewards of walking and PICO, and the PICO play environment.
 
-(a) PICO's command envelope peaks at the reward's axis scale on every axis;
-(b) that scale is the robot's moving command limits; (c) walking and PICO pass
-the same scale and HOME trunk pitch.  The reward term tables of both tasks are
-pinned, and the PICO play environment the 9x300 source probe and the stage
-gates build on is unchanged by the reward and schedule edits.
+Walking and PICO track velocity with their initial terms again (user
+decision 2026-10-08): walking mjlab's two exp tracking terms in the
+HOME-levelled frame, PICO the terms of the earlier forward-lean PICO.  The
+reward term tables of both tasks are pinned, PICO's command envelope peaks at
+the robot's moving command limits, and the PICO play environment the 9x300
+source probe and the stage gates build on is unchanged by the reward and
+schedule edits.
 """
 
 from __future__ import annotations
@@ -14,18 +16,23 @@ import unittest
 from pathlib import Path
 
 from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
-from mjlab_microban.tasks.microban_teleop_env_cfg import (
-    MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE,
-    PICO_TWIST_RATIO_WEIGHT,
+from mjlab_microban.tasks.microban_teleop_env_cfg import MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
+from mjlab_microban.tasks.microban_teleop_velocity_rewards import (
+    commanded_planar_velocity_progress,
+    linear_velocity_tracking_error_l1,
+    planar_velocity_tracking_exp,
+    yaw_velocity_tracking_error_l1,
 )
 from mjlab_microban.tasks.microban_teleop_v12_hand_pose_release import (
     make_microban_teleop_v12_hand_pose_release_env_cfg,
 )
-from mjlab_microban.tasks.microban_twist_ratio_mdp import twist_ratio_velocity
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     TWIST_AXIS_SCALE,
-    WALK_TWIST_RATIO_WEIGHT,
     make_microban_velocity_env_cfg,
+)
+from mjlab_microban.tasks.microban_velocity_tracking import (
+    track_angular_velocity_home_frame,
+    track_linear_velocity_home_frame,
 )
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "teleop_play_env_snapshot.json"
@@ -37,12 +44,13 @@ WALK_REWARD_WEIGHTS = {
     "action_rate_l2": -0.1, "air_time": 3.0, "angular_momentum": -0.02, "body_ang_vel": -0.05,
     "dof_pos_limits": -1.0, "feet_distance": -1000.0, "foot_clearance": -2.0, "foot_slip": -1.0,
     "foot_swing_height": -0.25, "no_stepping": 0.0, "pose": 1.0, "self_collisions": -1.0,
-    "twist_ratio_velocity": 8.0, "upright": 1.0,
+    "track_angular_velocity": 2.0, "track_linear_velocity": 2.0, "upright": 1.0,
 }
 PICO_ONLY_REWARD_WEIGHTS = {
     "action_rate_l2": -0.02, "dof_pos_limits": -10.0, "feet_distance": -100.0,
     "foot_target_tracking": 1.0, "hand_target_tracking": 0.0, "joint_soft_limit_guard": -5.0,
-    "twist_ratio_velocity": 32.0,
+    "track_linear_velocity": 5.0, "commanded_planar_velocity_progress": 2.0,
+    "linear_velocity_error_l1": -16.0, "yaw_velocity_error_l1": -1.0,
 }
 
 
@@ -94,16 +102,30 @@ class TwistRatioScaleTest(unittest.TestCase):
     def test_axis_scale_is_the_robot_moving_limits(self) -> None:
         self.assertEqual(TWIST_AXIS_SCALE, ROBOT_MOVING_COMMAND_LIMITS)
 
-    def test_walk_and_pico_share_the_term(self) -> None:
-        for cfg, weight in ((self.walk, WALK_TWIST_RATIO_WEIGHT), (self.pico, PICO_TWIST_RATIO_WEIGHT)):
-            term = cfg.rewards["twist_ratio_velocity"]
-            self.assertIs(term.func, twist_ratio_velocity)
-            self.assertEqual(term.weight, weight)
-            self.assertEqual(tuple(term.params["axis_scale"]), TWIST_AXIS_SCALE)
+    def test_the_initial_velocity_terms(self) -> None:
+        # Walking: mjlab's exp tracking at HOME, std sqrt(0.1) / sqrt(0.5),
+        # weight 2 each (lean_walk_cont2 model_29000 was trained with them).
+        linear, angular = self.walk.rewards["track_linear_velocity"], self.walk.rewards["track_angular_velocity"]
+        self.assertIs(linear.func, track_linear_velocity_home_frame)
+        self.assertIs(angular.func, track_angular_velocity_home_frame)
+        self.assertAlmostEqual(linear.params["std"] ** 2, 0.1)
+        self.assertAlmostEqual(angular.params["std"] ** 2, 0.5)
+        for term in (linear, angular):
             self.assertEqual(term.params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
-            self.assertEqual(term.params["command_name"], "twist")
-            self.assertEqual(term.params["direction_penalty"], 1.0)
-        self.assertEqual(PICO_TWIST_RATIO_WEIGHT, 4 * WALK_TWIST_RATIO_WEIGHT)
+        self.assertNotIn("twist_ratio_velocity", self.walk.rewards)
+        # PICO: the earlier forward-lean PICO's terms, final stds.
+        terms = self.pico.rewards
+        self.assertIs(terms["track_linear_velocity"].func, planar_velocity_tracking_exp)
+        self.assertEqual(terms["track_linear_velocity"].params["std"], 0.5)
+        self.assertIs(terms["track_angular_velocity"].func, track_angular_velocity_home_frame)
+        self.assertEqual(terms["track_angular_velocity"].params["std"], 1.25)
+        self.assertIs(terms["commanded_planar_velocity_progress"].func, commanded_planar_velocity_progress)
+        self.assertIs(terms["linear_velocity_error_l1"].func, linear_velocity_tracking_error_l1)
+        self.assertIs(terms["yaw_velocity_error_l1"].func, yaw_velocity_tracking_error_l1)
+        for name in ("track_linear_velocity", "commanded_planar_velocity_progress", "linear_velocity_error_l1",
+                     "yaw_velocity_error_l1"):
+            self.assertEqual(terms[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD, name)
+        self.assertNotIn("twist_ratio_velocity", terms)
 
     def test_reward_tables(self) -> None:
         self.assertEqual({k: v.weight for k, v in self.walk.rewards.items()}, WALK_REWARD_WEIGHTS)
@@ -114,12 +136,6 @@ class TwistRatioScaleTest(unittest.TestCase):
             pico.pop(name, None)
         for name, weight in pico.items():
             self.assertEqual(WALK_REWARD_WEIGHTS[name], weight, name)
-        for removed in (
-            "track_linear_velocity", "track_angular_velocity", "commanded_planar_velocity_progress",
-            "linear_velocity_error_l1", "yaw_velocity_error_l1",
-        ):
-            self.assertNotIn(removed, self.walk.rewards)
-            self.assertNotIn(removed, self.pico.rewards)
 
     def test_pico_play_env_is_unchanged(self) -> None:
         current = play_env_snapshot(make_microban_teleop_v12_hand_pose_release_env_cfg(play=True))

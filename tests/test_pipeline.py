@@ -75,17 +75,17 @@ class StateTest(unittest.TestCase):
             self.assertNotEqual(pipeline.inputs("walk"), before)
 
     def test_the_best_walking_check(self) -> None:
-        def verdict(failed=(), worst=0.6, nine=0.7):
-            checks = {name: name not in failed for name in ("W1", "W2", "W3", "W4", "W5", "W6")}
-            return {"passed": not failed, "probe": {"checks": checks, "worst_value": [worst, worst, worst]},
-                    "nine_by_300": {"ok": "9x300" not in failed, "values": {"forward_0p1": nine}}}
+        def verdict(failed=(), margin=0.03):
+            checks = {name: name not in failed for name in ("W4", "W5", "W6")}
+            return {"passed": not failed, "probe": {"checks": checks},
+                    "nine_by_300": {"ok": "9x300" not in failed, "worst_margin": margin}}
 
-        checks = {"4000": verdict(), "5000": verdict(("W1", "9x300")), "6000": verdict(("W2",), worst=0.55),
-                  "7000": verdict(("W1",), worst=0.58), "7999": verdict(("W1",), nine=0.52)}
-        # 4000 is too early; 6000, 7000, 7999 fail one item; 7000 has the largest worst margin.
+        checks = {"4000": verdict(), "5000": verdict(("W5", "9x300")), "6000": verdict(("W6",), margin=0.01),
+                  "7000": verdict(("W6",), margin=0.02), "7999": verdict(("W4",), margin=0.015)}
+        # 4000 is too early; 6000, 7000, 7999 fail one item; 7000 has the largest 9x300 margin.
         self.assertEqual(steps.best_walk_check(checks, 5000), 7000)
-        self.assertEqual(steps.walk_check_failures(checks["7000"]), ["W1"])
-        checks["7999"] = verdict(("W1",), worst=0.58)
+        self.assertEqual(steps.walk_check_failures(checks["7000"]), ["W6"])
+        checks["7999"] = verdict(("W4",), margin=0.02)
         self.assertEqual(steps.best_walk_check(checks, 5000), 7999)  # a tie: the later one
         checks["6000"] = {"passed": False, "error": "RuntimeError: boom"}
         self.assertEqual(steps.walk_check_score(checks["6000"]), (0, float("-inf")))
@@ -287,8 +287,9 @@ class JudgmentTest(unittest.TestCase):
                 self.assertEqual(len(steps.getup_gate_failures({**good, key: value}, GATE)), 1)
 
     def test_walker_probe_verdict(self) -> None:
-        # Each moving scenario passes when the walking reward of its mean
-        # twist beats standing still; the joints may overshoot 0.25 rad.
+        # Each moving scenario passes at the fixed signed-response minimum
+        # (0.1 / 0.2 forward 0.04 / 0.08, backward 0.02 / 0.04, lateral 0.02,
+        # yaw 0.2); the joints may overshoot 0.25 rad.
         commands = {
             "forward_0p1": (0.1, 0.0, 0.0), "forward_0p2": (0.2, 0.0, 0.0),
             "backward_0p1": (-0.1, 0.0, 0.0), "backward_0p2": (-0.2, 0.0, 0.0),
@@ -313,11 +314,12 @@ class JudgmentTest(unittest.TestCase):
                 + [result(name, twist, measured(twist)) for name, twist in commands.items()],
             }
 
-        # A tenth of every command, exactly along it: reward 0.55.
-        verdict = steps.probe_verdict(receipt(lambda c: [0.1 * x for x in c]))
+        # Half of every command: 0.01 above the backward / lateral minimums.
+        verdict = steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c]))
         self.assertTrue(verdict["ok"])
-        self.assertAlmostEqual(verdict["worst_margin"], 0.05, places=6)
-        # Twice the command still beats standing.
+        self.assertAlmostEqual(verdict["worst_margin"], 0.01, places=6)
+        # A tenth of every command is below them.
+        self.assertFalse(steps.probe_verdict(receipt(lambda c: [0.1 * x for x in c]))["ok"])
         self.assertTrue(steps.probe_verdict(receipt(lambda c: [2.0 * x for x in c]))["ok"])
         # The first release walker's answer to 0.1 m/s forward (-0.0396 m/s).
         bad = receipt(lambda c: [0.5 * x for x in c])
@@ -325,10 +327,10 @@ class JudgmentTest(unittest.TestCase):
         verdict = steps.probe_verdict(bad)
         self.assertFalse(verdict["ok"])
         self.assertEqual(verdict["below"], ["forward_0p1"])
-        # Along the command but drifting off it more than it moves: fails.
+        # Drift on the other axes does not count (the former tables).
         drift = receipt(lambda c: [0.5 * x for x in c])
         drift["results"][5]["measured_velocity_body"]["yaw_rad_s"]["mean"] = 1.2
-        self.assertEqual(steps.probe_verdict(drift)["below"], ["lateral_left_0p1"])
+        self.assertTrue(steps.probe_verdict(drift)["ok"])
         # The joint overshoot allowance is 0.25 rad.
         self.assertTrue(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.25))["ok"])
         self.assertFalse(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.2501))["ok"])

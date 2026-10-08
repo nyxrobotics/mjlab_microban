@@ -158,10 +158,11 @@ class WalkExportMetadataContractTest(unittest.TestCase):
         self.assertEqual(action.clip, {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)})
         self.assertEqual(cfg.scene.entities["robot"].init_state.joint_pos, HOME_FRAME.joint_pos)
         self.assertEqual(tuple(cfg.scene.entities["robot"].init_state.rot), HOME_FRAME.rot)
-        # Upright reward and the twist-ratio velocity term are centred on
+        # Upright reward and the velocity tracking terms are centred on
         # HOME's trunk lean (0 for a vertical trunk).
         self.assertEqual(cfg.rewards["upright"].params["pitch"], HOME_TRUNK_PITCH_RAD)
-        self.assertEqual(cfg.rewards["twist_ratio_velocity"].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
+        for name in ("track_linear_velocity", "track_angular_velocity"):
+            self.assertEqual(cfg.rewards[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
         self.assertEqual(tuple(cfg.observations["actor"].terms), OBSERVATION_TERMS)
         previous = cfg.observations["actor"].terms["actions"]
         self.assertIs(previous.func, last_action)

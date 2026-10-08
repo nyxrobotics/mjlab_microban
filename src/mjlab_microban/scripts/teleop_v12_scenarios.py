@@ -543,6 +543,10 @@ def _set_scenario(env: ManagerBasedRlEnv, scenario: EvaluationScenario) -> None:
     foot_value = torch.tensor(scenario.foot_target, device=env.device).unsqueeze(0)
     foot.foot_target_offset_b.copy_(foot_value)
     foot.is_single_support_env.copy_(foot_value.norm(dim=-1).gt(0.0).any(dim=-1))
+    # The scenario's own twist is kept: no training-time stationary mask.
+    foot.is_both_feet_env.fill_(False)
+    if hasattr(foot, "is_stationary_single_support_env"):
+        foot.is_stationary_single_support_env.fill_(False)
     foot.lifted_foot_idx.copy_(foot_value.norm(dim=-1).argmax(dim=-1))
     foot.time_left.fill_(float("inf"))
 

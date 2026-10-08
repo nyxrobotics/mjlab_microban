@@ -23,6 +23,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,7 @@ DRY_RUN_POLICY_ALLOW_ENV = "MICROBAN_ALLOW_DRYRUN_POLICY"
 
 # The keys of a step's config/pipeline.yaml section the training reads (the
 # rest configures its checks and judgment and is not a training input).
-TRAINING_KEYS = ("task", "envs", "save_interval")
+TRAINING_KEYS = ("task", "envs", "save_interval", "adopt")
 # The schedule entries (Pipeline._schedules) a step's training reads, besides
 # its stage table; early-stop minimums and check intervals judge, not train.
 STEP_SCHEDULE_KEYS = {
@@ -363,6 +364,9 @@ class Pipeline:
         if not self.begin("walk", inputs):
             return
         c = self.cfg["walk"]
+        if c.get("adopt") and not self.dry:
+            self.adopt_walker(Path(c["adopt"]["checkpoint"]), c["adopt"]["sha256"])
+            return
         label = self.state.step("walk")["label"]
         every, total = self.sched["check_every"], self.sched["walk_max"]
         monitor = self.monitor(
@@ -395,6 +399,35 @@ class Pipeline:
                              "passed": not failures, "failures": failures, "check": verdict.get("summary")},
                     [walker])
 
+    def adopt_walker(self, checkpoint: Path, expected_sha256: str) -> None:
+        """Adopt a trained walker instead of training one (config/pipeline.yaml ``walk.adopt``).
+
+        Its walking checks run once, as they would at a checkpoint of a
+        training; every item must pass.
+        """
+
+        if not checkpoint.is_file() or sha256(checkpoint) != expected_sha256:
+            raise PipelineError(f"walk.adopt: {checkpoint} is missing or not sha256 {expected_sha256}",
+                                EXIT_INPUT)
+        self.log(f"[walk] adopting {checkpoint} (config/pipeline.yaml walk.adopt): checking it")
+        check = self.walk_check(checkpoint)
+        while check.process.poll() is None:
+            time.sleep(10)
+        verdict = check.verdict(check.log)
+        record = self.state.step("walk")
+        record.setdefault("checks", {})[checkpoint.stem.split("_")[1]] = verdict
+        record.update(adopted=str(checkpoint), adopted_by="adopt")
+        self.state.save()
+        failures = walk_check_failures(verdict)
+        self.log(f"check {checkpoint.name}: {'PASS' if not failures else 'FAIL'} "
+                 f"{json.dumps(verdict.get('summary', verdict.get('error')), default=str)[:1500]}")
+        if failures:
+            raise PipelineError(f"walking: the adopted {checkpoint} fails {failures}")
+        walker = self.install_walker(checkpoint)
+        self.finish("walk", {"checkpoint": str(walker), "sha256": sha256(walker), "run": checkpoint.parent.name,
+                             "iteration": int(checkpoint.stem.split("_")[1]), "adopted_by": "adopt",
+                             "passed": True, "failures": [], "check": verdict.get("summary")}, [walker])
+
     def walk_check(self, checkpoint: Path) -> Check:
         """Held-out W1-W5 (seeds 101-105) and the 9x300 source probe with a held-out seed."""
 
@@ -417,8 +450,8 @@ class Pipeline:
             probe.pop("rows", None)
             nine = probe_verdict(json.loads(receipt.read_text()))
             return {"passed": bool(probe["passed"] and nine["ok"]), "probe": probe, "nine_by_300": nine,
-                    "summary": {"W": probe["checks"], "worst_value": [round(v, 3) for v in probe["worst_value"]],
-                                "still_value": round(probe["still_value"], 3),
+                    "summary": {"W": probe["checks"],
+                                "single_signed": {k: round(v, 3) for k, v in probe["single_signed"].items()},
                                 # mean twist (v_x m/s, v_y m/s, w_z rad/s) on the standing command
                                 "still_twist": [round(v, 3) for v in probe["still"]],
                                 "still_touchdowns_per_s": round(probe["still_touchdowns_per_s"], 2),
@@ -426,7 +459,8 @@ class Pipeline:
                                 "speed": [round(v, 3) for v in probe["speed"]],
                                 "falls": probe["falls"], "9x300": nine["ok"],
                                 # reward of the mean twist minus standing still on it (not a velocity)
-                                "9x300_worst_reward_minus_standing": [nine["worst"], round(nine["worst_margin"], 4)],
+                                # signed response minus its fixed minimum (m/s or rad/s)
+                                "9x300_worst_margin": [nine["worst"], round(nine["worst_margin"], 4)],
                                 # signed response along the command (m/s or rad/s)
                                 "9x300_signed": {k: round(v, 4) for k, v in nine["responses"].items()},
                                 "9x300_twist": {k: [round(x, 4) for x in nine["twists"][k]]
@@ -460,8 +494,8 @@ class Pipeline:
                                         "--output", str(receipt), "--force"], "eval", env=self.env)
         verdict = probe_verdict(json.loads(receipt.read_text()))
         self.log(f"walker 9x300 probe (seed 42): {'PASS' if verdict['ok'] else 'FAIL'} "
-                 f"worst reward margin over standing {verdict['worst_margin']:+.4f} ({verdict['worst']}), "
-                 f"rewards { {k: round(v, 3) for k, v in verdict['values'].items()} }, signed responses "
+                 f"worst margin over the fixed minimum {verdict['worst_margin']:+.4f} ({verdict['worst']}), "
+                 f"minimums { {k: round(v, 3) for k, v in verdict['minimums'].items()} }, signed responses "
                  f"{ {k: round(v, 3) for k, v in verdict['responses'].items()} }, falls {verdict['falls']}, "
                  f"soft-limit overshoot {verdict['soft_limit_overshoot_rad']:.3f} rad")
         self.state.step("pico")["walker_probe"] = {**verdict, "receipt": str(receipt),
@@ -946,19 +980,20 @@ def commit(repo: Path, paths: list[str], message: str) -> str:
 def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
     """Pass/fail and worst margin of one 9x300 walker probe receipt.
 
-    Each moving scenario passes when the walking reward of its mean body twist
-    beats standing still on it (mjlab_microban/twist_pass_line.py; the margin
-    is the reward minus that of standing still, not a velocity); the measured
-    joints may overshoot the soft limits by
-    ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.  The neutral scenario is
-    checked for completion only, as the PICO source gate does.
+    Each moving scenario passes when its mean body twist moves the commanded
+    axis the commanded way by the fixed minimum (mjlab_microban/twist_pass_line.py:
+    0.1 / 0.2 m/s forward 0.04 / 0.08, backward 0.02 / 0.04, lateral 0.02,
+    yaw 0.2; the margin is the signed response minus it); the measured joints
+    may overshoot the soft limits by ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.
+    The neutral scenario is checked for completion only, as the PICO source
+    gate does.
     """
 
     from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
-    from mjlab_microban.twist_pass_line import twist_passes, twist_value
+    from mjlab_microban.twist_pass_line import axis_minimums, twist_passes, worst_margin
 
     summary = receipt["summary"]
-    responses, values, twists, command_of, below = {}, {}, {}, {}, []
+    responses, minimums, margins, twists, below = {}, {}, {}, {}, []
     for result in receipt["results"]:
         name = result.get("scenario", result.get("name"))
         command = [float(result["command"][axis]) for axis in ("vx_m_s", "vy_m_s", "yaw_rad_s")]
@@ -968,18 +1003,17 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
         twists[name] = twist
         if all(x == 0.0 for x in command):
             continue
-        command_of[name] = command
-        values[name] = twist_value(command, twist)
+        minimums[name] = min(axis_minimums(command).values())
+        margins[name] = worst_margin(command, twist)
         response = result.get("directional_response") or {}
         if response.get("signed_response") is not None:
             responses[name] = float(response["signed_response"])
         if not twist_passes(command, twist):
             below.append(name)
-    margins = {key: value - twist_value(command_of[key], (0.0, 0.0, 0.0)) for key, value in values.items()}
     worst = min(margins, key=lambda key: margins[key] if margins[key] == margins[key] else float("-inf"))
     overshoot = float(summary.get("maximum_actual_soft_limit_violation_rad", float("inf")))
     ok = (
-        not below and len(values) == 8
+        not below and len(margins) == 8
         and summary.get("completed_scenario_count") == 9 and summary.get("fall_scenario_count") == 0
         and summary.get("nonfinite_scenario_count", 0) == 0
         and summary.get("directionally_correct_scenario_count") == 8
@@ -987,17 +1021,15 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
         and overshoot <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
     )
     return {"ok": ok, "worst_margin": margins[worst], "worst": worst, "below": below,
-            "falls": summary.get("fall_scenario_count"), "responses": responses, "values": values,
-            "twists": twists,
-            "soft_limit_overshoot_rad": overshoot}
+            "falls": summary.get("fall_scenario_count"), "responses": responses, "minimums": minimums,
+            "margins": margins, "twists": twists, "soft_limit_overshoot_rad": overshoot}
 
 
 def walk_check_items(verdict: dict[str, Any]) -> dict[str, bool]:
-    """The seven items of one walking check: W1-W6 and the 9x300 probe."""
+    """The four items of one walking check: W4-W6 and the 9x300 probe."""
 
     probe, nine = verdict.get("probe") or {}, verdict.get("nine_by_300") or {}
-    items = {name: bool((probe.get("checks") or {}).get(name))
-             for name in ("W1", "W2", "W3", "W4", "W5", "W6")}
+    items = {name: bool((probe.get("checks") or {}).get(name)) for name in ("W4", "W5", "W6")}
     items["9x300"] = bool(nine.get("ok"))
     return items
 
@@ -1009,17 +1041,12 @@ def walk_check_failures(verdict: dict[str, Any]) -> list[str]:
 
 
 def walk_check_score(verdict: dict[str, Any]) -> tuple[int, float]:
-    """(passed items, the worst reward margin over standing of every moving command).
+    """(passed items, the 9x300's worst signed response minus its minimum)."""
 
-    The margin is the twist-ratio reward of the measured mean twist minus 1/2
-    (standing still), the lowest over W1-W3's commands and the 9x300's.
-    """
-
-    probe, nine = verdict.get("probe") or {}, verdict.get("nine_by_300") or {}
-    values = [*(probe.get("worst_value") or []), *(nine.get("values") or {}).values()]
-    finite = [float(v) for v in values if isinstance(v, (int, float)) and v == v]
-    margin = min(finite) - 0.5 if finite and len(finite) == len(values) else float("-inf")
-    return sum(walk_check_items(verdict).values()), margin
+    nine = verdict.get("nine_by_300") or {}
+    margin = nine.get("worst_margin")
+    finite = isinstance(margin, (int, float)) and margin == margin
+    return sum(walk_check_items(verdict).values()), float(margin) if finite else float("-inf")
 
 
 def best_walk_check(checks: dict[str, dict[str, Any]], min_update: int) -> int | None:
