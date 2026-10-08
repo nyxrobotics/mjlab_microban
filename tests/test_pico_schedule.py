@@ -44,20 +44,22 @@ REPO = Path(__file__).resolve().parents[1]
 class PicoScheduleTest(unittest.TestCase):
     def test_the_table(self) -> None:
         self.assertEqual(PICO_CRITIC_WARMUP, 1000)
+        # No foot stage (user decision 2026-10-08): the foot keys equal
+        # hand_tighten; 3000 updates with everything active and tightened.
         self.assertEqual(
-            PICO_SCHEDULE, {"hand": 1000, "hand_tighten": 2500, "foot": 4000, "foot_tighten": 6000}
+            PICO_SCHEDULE, {"hand": 1000, "hand_tighten": 2500, "foot": 2500, "foot_tighten": 2500}
         )
-        self.assertEqual(PICO_TOTAL_UPDATES, 9000)
+        self.assertEqual(PICO_TOTAL_UPDATES, 5500)
         # Early stop: at least half of the last stage.
-        self.assertEqual(PICO_MIN_FINAL_UPDATES, 7500)
+        self.assertEqual(PICO_MIN_FINAL_UPDATES, 4000)
         self.assertEqual(MicrobanTeleopV12RlCfg.max_iterations, PICO_TOTAL_UPDATES)
         self.assertEqual(MicrobanTeleopV12RlCfg.num_steps_per_env, PICO_STEPS_PER_UPDATE)
-        self.assertEqual(PICO_ADAPTER_SCHEDULE_REVISION, "freeze_extra_to1000_then_hmd_hand_to4000_then_all_v2")
+        self.assertEqual(PICO_ADAPTER_SCHEDULE_REVISION, "freeze_extra_to1000_then_hmd_hand_to2500_then_all_v2")
 
     def test_curriculum_stages_switch_at_the_table(self) -> None:
         self.assertEqual(
             [stage.iteration for stage in TELEOP_STAGES],
-            [PICO_SCHEDULE[name] for name in ("hand", "hand_tighten", "foot", "foot_tighten")],
+            [PICO_SCHEDULE[name] for name in ("hand", "hand_tighten")],
         )
 
     def test_adapter_columns_open_with_the_stages(self) -> None:
@@ -72,16 +74,19 @@ class PicoScheduleTest(unittest.TestCase):
             teleop_v12_active_adapter_columns(foot * steps + steps), TELEOP_V12_EXTRA_OBSERVATION_COLUMNS
         )
 
-    def test_packaged_foot_ranges_are_the_trained_final_ranges(self) -> None:
+    def test_feet_stay_neutral_and_the_packaged_ranges_are_unchanged(self) -> None:
+        # No foot tracking (2026-10-08): the trained foot targets stay zero and
+        # the foot reward is off; the package keeps the robot's foot-target
+        # bounds (the observation columns and the robot's input are unchanged).
         cfg = make_microban_teleop_v12_hand_pose_release_env_cfg()
         apply_to_cfg(cfg, final_settings(TELEOP_STAGES))
         foot = cfg.commands["foot_target"]
-        reach, lift = foot.reach_xy_range, foot.lift_height_range
-        self.assertEqual(contract.PICO_FOOT_TARGET_LOWER, [reach[0], reach[0], 0.0] * 2)
-        self.assertEqual(contract.PICO_FOOT_TARGET_UPPER, [reach[1], reach[1], lift[1]] * 2)
-        both_reach, both_lift = foot.both_feet_reach_xy_range, foot.both_feet_lift_height_range
-        self.assertEqual(contract.PICO_BOTH_FEET_TARGET_LOWER, [both_reach[0], both_reach[0], 0.0] * 2)
-        self.assertEqual(contract.PICO_BOTH_FEET_TARGET_UPPER, [both_reach[1], both_reach[1], both_lift[1]] * 2)
+        self.assertEqual((foot.rel_single_support_envs, foot.rel_both_feet_envs), (0.0, 0.0))
+        self.assertEqual(cfg.rewards["foot_target_tracking"].weight, 0.0)
+        self.assertEqual(contract.PICO_FOOT_TARGET_LOWER, [-0.03, -0.03, 0.0] * 2)
+        self.assertEqual(contract.PICO_FOOT_TARGET_UPPER, [0.03, 0.03, 0.05] * 2)
+        self.assertEqual(contract.PICO_BOTH_FEET_TARGET_LOWER, [-0.01, -0.01, 0.0] * 2)
+        self.assertEqual(contract.PICO_BOTH_FEET_TARGET_UPPER, [0.01, 0.01, 0.02] * 2)
         self.assertEqual(contract.PICO_HAND_TARGET_UPPER, list(MICROBAN_HAND_TARGET_WIRE_ABS_BOUND_M) * 2)
         self.assertEqual(contract.PICO_HAND_TARGET_LOWER, [-v for v in contract.PICO_HAND_TARGET_UPPER])
         self.assertEqual(cfg.commands["hand_target"].rel_active, 0.7)
@@ -93,7 +98,9 @@ class PicoScheduleTest(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
         schedule, total, minimum = json.loads(out.stdout)
         values = [schedule[name] for name in ("hand", "hand_tighten", "foot", "foot_tighten")] + [total]
-        self.assertEqual(values, sorted(set(values)))
+        self.assertEqual(values, sorted(values))
+        self.assertLess(schedule["hand"], schedule["hand_tighten"])
+        self.assertLess(schedule["foot_tighten"], total)
         self.assertLessEqual(minimum, total)
 
 

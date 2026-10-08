@@ -147,7 +147,7 @@ class CenteredHomeIsReproducedTest(unittest.TestCase):
                 "v12_hand_pose_release_recipe_revision": (
                     "centered_home_velocity_source_staged_mask_reachable_fk_elbow_minus10_"
                     "raw_prev_action_servo_range_pi_active_hand_arm_pose_release_twist_ratio_"
-                    "one_run_warmup1000_total9000_v1"
+                    "one_run_warmup1000_total5500_v1"
                 ),
                 "v12_packager_revision": (
                     "microban_pico_packager_one_run_v1_centered_home_servo_range"

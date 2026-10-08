@@ -164,7 +164,8 @@ class MonitorTest(unittest.TestCase):
 
         tables = stage_tables()
         self.assertEqual(tables["walk"], {"penalize stepping + increase velocity": WALK_WIDEN_UPDATE})
-        self.assertEqual(sorted(tables["pico"].values()), sorted(PICO_SCHEDULE.values()))
+        # No foot stage (2026-10-08): the hand stages only.
+        self.assertEqual(sorted(tables["pico"].values()), [PICO_SCHEDULE["hand"], PICO_SCHEDULE["hand_tighten"]])
         self.assertEqual(tables["getup"]["refine exploration (std, Adam, learning rate, entropy)"],
                          GETUP_SCHEDULE["refine"])
         self.assertEqual(set(tables["getup"]), {"start without IMU latency", *GETUP_SCHEDULE,
@@ -255,7 +256,8 @@ class MonitorTest(unittest.TestCase):
 
         tables = stage_tables()
         self.assertEqual(tables["walk"], {"penalize stepping + increase velocity": WALK_WIDEN_UPDATE})
-        self.assertEqual(sorted(tables["pico"].values()), sorted(PICO_SCHEDULE.values()))
+        # No foot stage (2026-10-08): the hand stages only.
+        self.assertEqual(sorted(tables["pico"].values()), [PICO_SCHEDULE["hand"], PICO_SCHEDULE["hand_tighten"]])
         self.assertEqual(tables["getup"]["refine exploration (std, Adam, learning rate, entropy)"],
                          GETUP_SCHEDULE["refine"])
         self.assertEqual(set(tables["getup"]), {"start without IMU latency", *GETUP_SCHEDULE,

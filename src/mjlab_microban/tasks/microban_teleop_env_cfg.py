@@ -43,7 +43,6 @@ from mjlab_microban.tasks.mdp import (
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
-    MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RETARGET_INTERVAL_S,
@@ -67,8 +66,9 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
 PICO_TWIST_RATIO_WEIGHT = 32.0
 MICROBAN_TELEOP_HAND_TRACKING_STD_M = 0.08
 MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M = 0.05
-MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
-MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+# No foot tracking (user decision, 2026-10-08; mjlab_microban/schedules.py):
+# the foot targets stay neutral and the foot reward is off.
+MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 0.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -137,7 +137,8 @@ def _materialize_rotation_command_cfg(
 
 
 # Hand targets (and the moving HMD and the no-step guard) after the critic
-# warm-up, foot targets later, each tightened later (mjlab_microban/schedules.py).  The
+# warm-up, tightened later (mjlab_microban/schedules.py).  No foot stage: the
+# foot targets stay neutral (zero) and the foot reward is off.  The
 # adapter columns of the frozen walker open at the same updates
 # (microban_teleop_v12_actor); before the hands no actor column trains.
 TELEOP_STAGES = (
@@ -164,34 +165,6 @@ TELEOP_STAGES = (
             Setting("reward", "hand_target_tracking", "weight", 2.0),
             Setting(
                 "reward", "hand_target_tracking", "params.std", MICROBAN_TELEOP_HAND_TRACKING_FINAL_STD_M
-            ),
-        ),
-    ),
-    Stage(
-        "enable broad stationary foot tracking",
-        PICO_SCHEDULE["foot"],
-        (
-            Setting("reward", "foot_target_tracking", "weight", 2.0),
-            Setting("reward", "foot_target_tracking", "params.std", 0.05),
-            Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
-            Setting("command", "foot_target", "rel_single_support_envs", 0.3),
-            Setting("command", "foot_target", "rel_both_feet_envs", 0.05),
-        ),
-    ),
-    Stage(
-        "tighten foot tracking",
-        PICO_SCHEDULE["foot_tighten"],
-        (
-            Setting("reward", "foot_target_tracking", "weight", 3.0),
-            Setting(
-                "reward", "foot_target_tracking", "params.std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
-            ),
-            Setting("command", "foot_target", "rel_both_feet_envs", 0.1),
-            Setting(
-                "command",
-                "foot_target",
-                "both_feet_lift_height_range",
-                (MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M, MICROBAN_TELEOP_FINAL_BOTH_FEET_LIFT_UPPER_M),
             ),
         ),
     ),
@@ -336,10 +309,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"command_name": "hand_target"},
     )
 
-    # Exact-zero standing receives a small foot anchor from the first update.
-    # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
-    # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
-    # rad/s), so it cannot reward the stationary local optimum on moving tasks.
+    # The foot reward term stays registered at weight 0 (no foot tracking).
     # Hand targets remain independent of walking and their two active flags
     # mask inactive hands.
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(

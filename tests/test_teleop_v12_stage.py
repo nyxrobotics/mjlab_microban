@@ -33,14 +33,11 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _active_foot_tracking_error,
     _aggregate_action_envelopes,
     _scenarios,
-    foot_tracking_p95_max_m,
-    foot_tracking_rms_max_m,
-    foot_tracking_velocity_fade_range,
-    foot_tracking_weight,
     hand_tracking_p95_max_m,
     hand_tracking_rms_max_m,
     required_target_column_ablation_targets,
     required_tracking_check_names,
+    required_tracking_scenario_names,
     required_tracking_profile,
     target_column_ablated_observation,
     target_column_ablation_observation_columns,
@@ -393,9 +390,6 @@ def _tracking_report(
             "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
             "hand_rms_m_max": hand_tracking_rms_max_m(profile),
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
-            "foot_rms_m_max": foot_tracking_rms_max_m(profile),
-            "foot_p95_m_max": foot_tracking_p95_max_m(profile),
-            "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
             "twist_pass_line": twist_pass_line_record(),
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
@@ -485,52 +479,22 @@ class TeleopV12StageTest(unittest.TestCase):
             "full_body_reachable_performance_perturbation_v2_deployed_accuracy_v1",
         )
 
-    def test_foot_error_is_weighted_as_the_reward_weighs_foot_tracking(self) -> None:
-        # The PICO reward fades foot tracking out with the velocity command
-        # (mdp.foot_target_tracking_error_exp, final range (0, 0.15)): the
-        # judgment weighs the foot error the same way.
-        self.assertEqual(foot_tracking_velocity_fade_range(), (0.0, 0.15))
-        fade = foot_tracking_velocity_fade_range()
-        self.assertEqual(foot_tracking_weight((0.0, 0.0, 0.0), fade), 1.0)
-        self.assertAlmostEqual(foot_tracking_weight((0.03, 0.04, 0.0), fade), 1.0 - 0.05 / 0.15)
-        self.assertAlmostEqual(foot_tracking_weight((0.0, 0.0, -0.075), fade), 0.5)
-        self.assertEqual(foot_tracking_weight((0.7, 0.3, 1.5), fade), 0.0)
+    def test_no_foot_tracking_is_judged(self) -> None:
+        # User decision (2026-10-08): PICO is completed without foot tracking
+        # first.  No judged scenario has a foot target, no foot check is
+        # required, and only the hand columns must respond.
         for scenario in _scenarios(FINAL_PROFILE):
-            if scenario.name.startswith("mixed_"):
-                self.assertEqual(foot_tracking_weight(scenario.twist, fade), 0.0, scenario.name)
-            elif any(value != 0.0 for target in scenario.foot_target for value in target):
-                self.assertEqual(foot_tracking_weight(scenario.twist, fade), 1.0, scenario.name)
-        # The reward's own fade at a zero tracking error is this weight.
-        from types import SimpleNamespace
-
-        from mjlab_microban.tasks.mdp import foot_target_tracking_error_exp
-
-        for twist in ((0.0, 0.0, 0.0), (0.03, 0.04, 0.0), (0.0, 0.0, -0.075), (0.7, 0.3, 1.5)):
-            command = SimpleNamespace(current_foot_pos_b=lambda: torch.zeros(1, 2, 3),
-                                      _default_foot_pos_b=torch.zeros(1, 2, 3),
-                                      foot_target_offset_b=torch.zeros(1, 2, 3))
-            env = SimpleNamespace(command_manager=SimpleNamespace(
-                get_term=lambda _name: command, get_command=lambda _name: torch.tensor([twist])))
-            reward = foot_target_tracking_error_exp(env, "foot_target", 0.05, velocity_fade_range=fade)
-            self.assertAlmostEqual(float(reward[0]), foot_tracking_weight(twist, fade), places=6)
-        # A walking scenario's foot error is recorded, not judged.
-        walking = _result(command={"twist": [0.7, 0.3, 1.5], "foot_target": [[0.0, 0.0, 0.02], [0.0] * 3],
-                                   "hand_active": [True, True]},
-                          target_error={"active_hand": {"sample_count": 1, "rms": 0.01, "p95": 0.02},
-                                        "foot": {"sample_count": 1, "rms": 0.30, "p95": 0.40}})
-        checks, _ = _acceptance([_result(), walking], FINAL_PROFILE)
-        self.assertTrue(checks["foot_tracking_rms"] and checks["foot_tracking_p95"])
-        standing = deepcopy(walking)
-        standing["command"]["twist"] = [0.0, 0.0, 0.0]
-        checks, _ = _acceptance([_result(), standing], FINAL_PROFILE)
-        self.assertFalse(checks["foot_tracking_rms"])
+            self.assertEqual(scenario.foot_target, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), scenario.name)
+        self.assertEqual(
+            required_tracking_scenario_names(FINAL_PROFILE),
+            ("low_forward", "max_hands_left", "max_hands_right", "mixed_forward_left", "mixed_backward_right"),
+        )
+        self.assertFalse({name for name in required_tracking_check_names(FINAL_PROFILE) if "foot" in name})
+        self.assertEqual(required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand",)))
 
     def test_accuracy_limits_are_one_table(self) -> None:
-        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m;
-        # foot 0.05/0.08 m.
+        # User decision: hand RMS 0.040 m at every HOME; hand P95 0.07 m.
         self.assertEqual(hand_tracking_rms_max_m(FINAL_PROFILE), 0.040)
-        self.assertEqual(foot_tracking_rms_max_m(FINAL_PROFILE), 0.05)
-        self.assertEqual(foot_tracking_p95_max_m(FINAL_PROFILE), 0.08)
         self.assertEqual(hand_tracking_p95_max_m(FINAL_PROFILE), 0.07)
         self.assertTrue(tracking_profile_uses_perturbation(FINAL_PROFILE))
         with self.assertRaises(ValueError):
@@ -726,7 +690,7 @@ class TeleopV12StageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\[batch, 83\]"):
             target_column_ablated_observation(torch.zeros((1, 82)), "hand")
         self.assertEqual(
-            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand", "foot"))
+            required_target_column_ablation_targets(FINAL_PROFILE), frozenset(("hand",))
         )
 
         unresponsive = _result(
@@ -750,13 +714,10 @@ class TeleopV12StageTest(unittest.TestCase):
         hand_only["target_column_ablation"]["hand"] = _ablation(
             target="hand", expected=True
         )
+        # Only the hand columns must respond (no foot tracking is judged).
         checks, status = _acceptance([hand_only], FINAL_PROFILE)
-        self.assertEqual(status, "fail")
-        self.assertFalse(checks["target_column_ablation_response"])
-        both = deepcopy(hand_only)
-        both["target_column_ablation"]["foot"] = _ablation(target="foot", expected=True)
-        checks, status = _acceptance([both], FINAL_PROFILE)
         self.assertEqual(status, "pass")
+        self.assertTrue(checks["target_column_ablation_response"])
 
     def test_tracking_ablation_evidence_is_exact_and_fail_closed(self) -> None:
         identity = {
@@ -770,7 +731,7 @@ class TeleopV12StageTest(unittest.TestCase):
             set(required_tracking_check_names(FINAL_PROFILE)),
         )
         self.assertIn("hand_tracking_rms", report["checks"])
-        self.assertIn("foot_tracking_rms", report["checks"])
+        self.assertNotIn("foot_tracking_rms", report["checks"])
         _validate_tracking_report(report, identity)
         active_index = next(
             index

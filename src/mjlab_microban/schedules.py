@@ -66,18 +66,22 @@ GETUP_MIN_FINAL_UPDATES = GETUP_SCHEDULE["push"] + (
 
 # PICO: the critic of the frozen walker's adapter warms up for
 # PICO_WARMUP_UPDATES (no actor column trains before hand targets open), then
-# hands (tightened after 1500), feet (3000 after the hands, tightened 2000
-# later) and 3000 more updates with everything active and tightened.
+# hands (tightened after 1500) and 3000 more updates with everything active
+# and tightened.  No foot stage (user decision, 2026-10-08: complete PICO
+# without foot tracking first; no v12 PICO ever lifted a foot, the frozen
+# walker's adapter is a separate piece of work): the foot keys equal
+# hand_tighten, the packaged curriculum keeps its keys, and the foot targets
+# stay neutral (zero), so the adapter's foot columns open but never train.
 PICO_STEPS_PER_UPDATE = 24
 PICO_WARMUP_UPDATES = 1000
 PICO_CRITIC_WARMUP = scaled(PICO_WARMUP_UPDATES)
 PICO_SCHEDULE = {
     "hand": PICO_CRITIC_WARMUP,
     "hand_tighten": scaled(PICO_WARMUP_UPDATES + 1500),
-    "foot": scaled(PICO_WARMUP_UPDATES + 3000),
-    "foot_tighten": scaled(PICO_WARMUP_UPDATES + 5000),
+    "foot": scaled(PICO_WARMUP_UPDATES + 1500),
+    "foot_tighten": scaled(PICO_WARMUP_UPDATES + 1500),
 }
-PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 8000)
+PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 4500)
 PICO_MIN_FINAL_UPDATES = PICO_SCHEDULE["foot_tighten"] + (
     PICO_TOTAL_UPDATES - PICO_SCHEDULE["foot_tighten"]
 ) // 2
