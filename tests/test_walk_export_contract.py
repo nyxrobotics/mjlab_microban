@@ -172,7 +172,7 @@ class WalkExportMetadataContractTest(unittest.TestCase):
     def test_metadata_is_the_walk_contract(self) -> None:
         metadata = _build()
         self.assertEqual(metadata["microban_policy_kind"], "walk")
-        self.assertEqual(metadata["microban_recipe"], "microban-walk-twist-ratio-1")
+        self.assertEqual(metadata["microban_recipe"], "microban-walk-track-velocity-1")
         names = metadata["joint_names"].split(",")
         self.assertEqual(names, list(JOINT_NAMES))
         default = dict(zip(names, (float(v) for v in metadata["default_joint_pos"].split(","))))

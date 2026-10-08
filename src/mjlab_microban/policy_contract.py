@@ -39,9 +39,9 @@ POLICY_CONTRACT = "microban-policy-1"
 # id changes with the reward family or a target meaning; fixing a failed run
 # inside the family (weights, switch updates) does not change it.
 RECIPES: Mapping[str, str] = {
-    "walk": "microban-walk-twist-ratio-1",
+    "walk": "microban-walk-track-velocity-1",
     "getup": "microban-getup-single-run-1",
-    "pico": "microban-pico-pose-release-twist-ratio-1",
+    "pico": "microban-pico-pose-release-track-velocity-1",
 }
 KINDS = tuple(RECIPES)
 POLICY_FILES: Mapping[str, str] = {
