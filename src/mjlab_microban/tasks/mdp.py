@@ -17,14 +17,24 @@ from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.math import (
+    quat_apply_inverse,
+    quat_from_euler_xyz,
+    quat_mul,
+    sample_uniform,
+)
 from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommand,
     UniformVelocityCommandCfg,
 )
 
+from mjlab_microban.robot.home_pose import HOME
+
+# HOME forward trunk lean (rad); 0 = vertical trunk (config/home_pose.yaml).
+HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad
 
 ############################ COMMANDS #############################
+
 
 class UniformVelocityCommandWithRotation(UniformVelocityCommand):
     """Extends UniformVelocityCommand with a `rel_rotation_envs` fraction.
@@ -76,6 +86,7 @@ class UniformVelocityCommandWithRotation(UniformVelocityCommand):
             ang[too_small] = signs * min_abs_ang
         self.vel_command_b[rot_ids, 2] = ang
 
+
 @dataclass(kw_only=True)
 class UniformVelocityCommandWithRotationCfg(UniformVelocityCommandCfg):
     """Configuration for UniformVelocityCommandWithRotation."""
@@ -93,7 +104,7 @@ class UniformVelocityCommandWithRotationCfg(UniformVelocityCommandCfg):
 
     def build(self, env: ManagerBasedRlEnv) -> UniformVelocityCommandWithRotation:
         return UniformVelocityCommandWithRotation(self, env)
-    
+
 
 ############################ REWARDS ##############################
 
@@ -150,6 +161,64 @@ class upright:
         del env_ids  # Unused.
 
 
+def _home_levelled_quat(quat_w: torch.Tensor, trunk_pitch: float) -> torch.Tensor:
+    """The trunk frame with the HOME forward lean taken out.
+
+    At HOME (trunk pitched ``trunk_pitch`` forward) this frame is level and
+    faces the robot's heading, so velocities expressed in it read like the
+    body-frame velocities of an upright-trunk HOME.
+    """
+
+    if trunk_pitch == 0.0:
+        return quat_w
+    half = -0.5 * trunk_pitch
+    unpitch = torch.tensor(
+        (math.cos(half), 0.0, math.sin(half), 0.0), device=quat_w.device, dtype=quat_w.dtype
+    ).expand_as(quat_w)
+    return quat_mul(quat_w, unpitch)
+
+
+def reset_root_state_uniform_world_yaw(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """mjlab's reset_root_state_uniform, with the yaw turned about world z.
+
+    mjlab composes default_rot * R(roll, pitch, yaw), i.e. it turns the yaw
+    about the DEFAULT body's z axis. With an upright HOME that is the world
+    z axis; with a HOME trunk leaning forward it is the tilted trunk axis, so
+    a reset yawed by 180 deg would lean the robot backward relative to its
+    heading with both soles tipped. Here orientation = R_z(yaw) * default_rot
+    * R(roll, pitch): the roll/pitch noise is applied in the HOME trunk frame
+    and the whole HOME stance is then turned about world z, so every yaw
+    keeps the soles flat and the lean forward. With an identity default it
+    equals mjlab's term up to the order of yaw and roll/pitch noise.
+    """
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+    asset: Entity = env.scene[asset_cfg.name]
+    keys = ("x", "y", "z", "roll", "pitch", "yaw")
+    ranges = torch.tensor([pose_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device)
+    root_states = asset.data.default_root_state[env_ids].clone()
+    positions = root_states[:, 0:3] + samples[:, 0:3] + env.scene.env_origins[env_ids]
+    zeros = torch.zeros_like(samples[:, 0])
+    tilt = quat_from_euler_xyz(samples[:, 3], samples[:, 4], zeros)
+    heading = quat_from_euler_xyz(zeros, zeros, samples[:, 5])
+    orientations = quat_mul(heading, quat_mul(root_states[:, 3:7], tilt))
+    velocity_range = velocity_range or {}
+    ranges = torch.tensor([velocity_range.get(key, (0.0, 0.0)) for key in keys], device=env.device)
+    velocities = root_states[:, 7:13] + sample_uniform(
+        ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=env.device
+    )
+    asset.write_root_link_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
+
+
 def feet_distance_penalty(
     env: ManagerBasedRlEnv,
     min_dist: float,
@@ -201,44 +270,6 @@ def no_stepping_penalty(
 
 ########################## CURRICULUM #############################
 
-class step_based_staged_curriculum:
-    """
-    Curriculum based on step count stages. Each stage is applied once when
-    env.common_step_counter reaches the stage's step threshold.
-
-    Stage definitions example:
-    stages = [
-        {
-            "name": "stage 1",
-            "step": 10_000 * 24,
-            "apply": lambda env: env.reward_manager.get_term_cfg("term_name").weight = 1.0,
-        },
-        ...
-    ]
-    """
-
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.current_stage = 0
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor,
-        stages: list[dict],
-    ) -> dict[str, torch.Tensor]:
-        del env_ids
-        if (
-            self.current_stage < len(stages)
-            and env.common_step_counter >= stages[self.current_stage]["step"]
-        ):
-            stage = stages[self.current_stage]
-            print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter}"
-            )
-            stage["apply"](env)
-            self.current_stage += 1
-
-        return {"stage": self.current_stage}
 
 class reward_based_staged_curriculum:
     """
@@ -290,134 +321,8 @@ class reward_based_staged_curriculum:
 
         return {"stage": self.current_stage}
 
-class reward_based_curriculum:
-    """
-    Curriculum based on the mean episode reward of a specific term accross all environments.
-    Once the mean reward across envs exceeds a threshold, a new curriculum stage is applied.
-    """
 
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRlEnv):
-        self.rewards = torch.zeros(env.num_envs, device=env.device)
-        self.current_stage = 0
-        self.stage_first_step = 0
-        
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        env_ids: torch.Tensor,
-        reward_term_name: str,
-        stages: list[dict],
-    ) -> dict[str, torch.Tensor]:
-        self.rewards[env_ids] = (
-            env.reward_manager._episode_sums[reward_term_name][env_ids]
-            / env.max_episode_length_s
-        )
-        mean_reward = self.rewards.mean().item()
+        # step right after a reset is harmless, since is_standing gates the whole
+        # term to 0 right at that moment anyway (a just-reset env starts fallen).
 
-        if (
-            self.current_stage < len(stages)
-            and mean_reward >= stages[self.current_stage]["threshold"]
-            and env.common_step_counter >= self.stage_first_step + 100 * 24
-        ):
-            stage = stages[self.current_stage]
-            print(
-                f"Curriculum stage {self.current_stage + 1}: {stage['name']} at step {env.common_step_counter} (mean episode reward: {mean_reward:.4f})"
-            )
-            stage["apply"](env)
-            self.current_stage += 1
-            self.stage_first_step = env.common_step_counter
-        
-        return {"stage": self.current_stage}
 
-def set_command_velocity(
-        env, 
-        lin_vel_x=None, 
-        lin_vel_y=None, 
-        ang_vel_z=None, 
-        rotation_env_ang_vel_z=None,
-) -> None:
-    """
-    Helper function to set the command velocity parameters in the environment.
-    """
-    cmd = env.command_manager.get_term_cfg("twist")
-    if lin_vel_x is not None:
-        cmd.ranges.lin_vel_x = lin_vel_x
-    if lin_vel_y is not None:
-        cmd.ranges.lin_vel_y = lin_vel_y
-    if ang_vel_z is not None:
-        cmd.ranges.ang_vel_z = ang_vel_z
-    if rotation_env_ang_vel_z is not None:
-        cmd.rotation_env_ang_vel_range = rotation_env_ang_vel_z
-
-def set_stepping_parameters(
-    env,
-    air_time_weight: float | None = None,
-    no_stepping_penalty_weight: float | None = None,
-    rel_standing_envs: float | None = None,
-    rel_rotation_envs: float | None = None,
-) -> None:
-    """
-    Helper function to set stepping/standing curriculum parameters.
-    """
-    if air_time_weight is not None:
-        env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-    if no_stepping_penalty_weight is not None:
-        env.reward_manager.get_term_cfg("no_stepping").weight = no_stepping_penalty_weight
-    if rel_standing_envs is not None:
-        env.command_manager.get_term_cfg("twist").rel_standing_envs = rel_standing_envs
-    if rel_rotation_envs is not None:
-        env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
-
-def set_push_parameters(
-    env,
-    velocity_range: dict[str, tuple[float, float]] | None = None,
-    interval_range: tuple[float, float] | None = None,
-) -> None:
-    """
-    Helper function to set push event parameters.
-    Returns a dict of the current (post-update) values for wandb logging.
-    """
-    push_event_cfg = env.event_manager.get_term_cfg("push_robot")
-    if velocity_range is not None:
-        push_event_cfg.params["velocity_range"] = velocity_range
-    if interval_range is not None:
-        push_event_cfg.params["interval_range"] = interval_range
-
-def penalize_stepping_while_standing(
-    env: ManagerBasedRlEnv,
-    air_time_weight: float,
-    no_stepping_penalty_weight: float,
-) -> torch.Tensor:
-    """
-    Updating the air_time and no_stepping reward weights to penalize stepping while standing.
-    """
-    env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-    env.reward_manager.get_term_cfg("no_stepping").weight = no_stepping_penalty_weight
-
-def stepping_curriculum(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    air_time_weight: float,
-    no_stepping_penalty_weight: float,
-    rel_standing_envs: float = 0.0,
-    rel_rotation_envs: float = 0.0,
-    step: int = 10000 * 24,
-) -> dict[str, torch.Tensor]:
-    """
-    Updating the air_time and no_stepping reward weights to penalize stepping while standing
-    after a certain number of iterations.
-    """
-    del env_ids  # Unused.
-
-    if env.common_step_counter >= step: 
-        env.reward_manager.get_term_cfg("air_time").weight = air_time_weight
-        env.reward_manager.get_term_cfg("no_stepping").weight = no_stepping_penalty_weight
-        env.command_manager.get_term_cfg("twist").rel_standing_envs = rel_standing_envs
-        env.command_manager.get_term_cfg("twist").rel_rotation_envs = rel_rotation_envs
-
-    return {
-        "air_time_weight": torch.tensor(env.reward_manager.get_term_cfg("air_time").weight),
-        "no_stepping_penalty_weight": torch.tensor(env.reward_manager.get_term_cfg("no_stepping").weight),
-        "rel_standing_envs": torch.tensor(env.command_manager.get_term_cfg("twist").rel_standing_envs),
-        "rel_rotation_envs": torch.tensor(env.command_manager.get_term_cfg("twist").rel_rotation_envs),
-    }

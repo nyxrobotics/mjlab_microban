@@ -7,6 +7,7 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 import os
+import numpy as np
 from pathlib import Path
 
 import mujoco
@@ -38,6 +39,14 @@ HOME_ROOT_POS = HOME.root_pos
 HOME_ROOT_QUAT_WXYZ = HOME.root_quat_wxyz
 # Unit gravity in the trunk frame while standing at HOME: (sin p, 0, -cos p).
 HOME_PROJECTED_GRAVITY = HOME.projected_gravity
+# Every policy commands target = HOME + action on all body joints, with no
+# software clip, and observes its own raw previous output. The only bound is
+# the servo's own goal-position range: one turn, [-pi, pi) rad. The robot
+# saturates goals there when it writes them, and training models the same
+# saturation as an absolute target clip. (A narrower clip, such as +-1.57
+# rad, caps the XC330's torque: its current limit saturates only at a 2.0-2.8
+# rad target error.)
+SERVO_TARGET_RANGE_RAD = float(np.pi)
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     # The lowest sole collision corner is on the ground at this z.

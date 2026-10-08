@@ -22,6 +22,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from home_cases import forward_lean_home_only  # noqa: E402
@@ -31,6 +32,7 @@ from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
     get_spec,
 )
+from mjlab_microban.tasks.mdp import _home_levelled_quat
 
 _SOLES = tuple(f"{side}_foot_collision_{i}" for side in ("left", "right") for i in range(1, 7))
 
@@ -91,6 +93,13 @@ class ForwardLeanHomeTest(unittest.TestCase):
         self.assertLess(abs(com_x - 0.5 * (heel + toe)), 1e-7)
         self.assertGreater(com_x - heel, 0.030)
         self.assertGreater(toe - com_x, 0.030)
+
+    def test_levelled_frame_removes_the_home_lean(self) -> None:
+        home = torch.tensor([HOME_FRAME.rot], dtype=torch.float64)
+        levelled = _home_levelled_quat(home, HOME_TRUNK_PITCH_RAD)
+        torch.testing.assert_close(levelled, torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float64))
+        self.assertIs(_home_levelled_quat(home, 0.0), home)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,11 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 
-from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG
+from mjlab_microban.robot.microban_constants import (
+    HOME_TRUNK_PITCH_RAD,
+    MICROBAN_ROBOT_CFG,
+    SERVO_TARGET_RANGE_RAD,
+)
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -58,19 +62,18 @@ from mjlab.rl import (
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, ObjRef, TerrainHeightSensorCfg, RingPatternCfg
 
+from mjlab_microban.schedules import WALK_TOTAL_UPDATES, WALK_WIDEN_UPDATE
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
 from mjlab_microban.tasks.mdp import (
-    reward_based_staged_curriculum,
-    reward_based_curriculum,
-    step_based_staged_curriculum,
-    set_command_velocity,
-    set_stepping_parameters,
-    set_push_parameters,
     no_stepping_penalty,
     feet_distance_penalty,
-    penalize_stepping_while_standing,
-    stepping_curriculum,
     UniformVelocityCommandWithRotation,
+    reset_root_state_uniform_world_yaw,
     upright as local_upright,
+)
+from mjlab_microban.tasks.microban_velocity_tracking import (
+    track_angular_velocity_home_frame,
+    track_linear_velocity_home_frame,
 )
 
 SCENE_CFG = SceneCfg(
@@ -103,6 +106,31 @@ SIM_CFG = SimulationCfg(
     # nconmax=256,
     # njmax=1024,
 )
+
+# The command envelope after the update-3000 stage (forward, lateral, yaw).
+WALK_COMMAND_RANGES_FINAL = {
+    "lin_vel_x": (-0.7, 0.7),
+    "lin_vel_y": (-0.3, 0.3),
+    "ang_vel_z": (-1.5, 1.5),
+}
+
+# One stage at update 3000: widen the forward and yaw command ranges and
+# penalize standing still on a moving command.  (The command's rotation-env
+# extensions below are instance attributes that the train CLI's config
+# reconstruction drops, so training samples mjlab's UniformVelocityCommand and
+# the stage writes only its fields.)
+WALK_STAGES = (
+    Stage(
+        "penalize stepping + increase velocity",
+        WALK_WIDEN_UPDATE,
+        (
+            Setting("command", "twist", "ranges.lin_vel_x", WALK_COMMAND_RANGES_FINAL["lin_vel_x"]),
+            Setting("command", "twist", "ranges.ang_vel_z", WALK_COMMAND_RANGES_FINAL["ang_vel_z"]),
+            Setting("reward", "no_stepping", "weight", -1.0),
+        ),
+    ),
+)
+
 
 def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_velocity_env_cfg()
@@ -167,6 +195,10 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     assert isinstance(joint_pos_action, JointPositionActionCfg)
     joint_pos_action.scale = 1.0
     cfg.actions["joint_pos"].actuator_names = (dofs_filter,)
+    # No software clip: the target saturates only at the servo's +-pi goal
+    # range, as on the robot. The "actions" observation and action_rate_l2
+    # see the raw policy output.
+    joint_pos_action.clip = {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
 
     #---------------------------- Observations ----------------------
     del cfg.observations["actor"].terms["base_lin_vel"]
@@ -204,6 +236,17 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
+    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.1)
+    # and sqrt(0.5), in the HOME-levelled trunk frame
+    # (microban_velocity_tracking.py).  A vertical-trunk HOME keeps mjlab's own
+    # terms.
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        for name, func in (
+            ("track_linear_velocity", track_linear_velocity_home_frame),
+            ("track_angular_velocity", track_angular_velocity_home_frame),
+        ):
+            cfg.rewards[name].func = func
+            cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
     cfg.rewards["track_linear_velocity"].weight = 2.0
 
@@ -250,7 +293,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     cfg.rewards["upright"].func = local_upright
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk",)
-    cfg.rewards["upright"].params["pitch"] = np.deg2rad(10.0)
+    # Peak at HOME's trunk pitch (config/home_pose.yaml; 0 = vertical).
+    cfg.rewards["upright"].params["pitch"] = HOME_TRUNK_PITCH_RAD
     cfg.rewards["upright"].params["std"] = np.sqrt(0.1)
     cfg.rewards["upright"].weight = 1.0
     
@@ -296,7 +340,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"sensor_name": self_collision_sensor_cfg.name},
     )
 
-    # Foot-site separation is 0.072 m when standing straight
+    # Foot-site separation is about 0.094 m at HOME; min_dist must stay below
+    # the HOME separation.
     cfg.rewards["feet_distance"] = RewardTermCfg(
         func=feet_distance_penalty,
         weight=-1000.0,
@@ -323,6 +368,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.rotation_min_ang_vel = 0.5
 
     #---------------------------- Events ----------------------------
+    # A leaning HOME turns the random reset yaw about world z: mjlab's term
+    # turns it about the HOME trunk's own axis, which would tip the soles and
+    # the lean.  With a vertical trunk the two axes coincide (mjlab's term).
+    if HOME_TRUNK_PITCH_RAD != 0.0:
+        cfg.events["reset_base"].func = reset_root_state_uniform_world_yaw
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.01)
 
     cfg.events["push_robot"].params["velocity_range"] = {
@@ -363,34 +413,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     #---------------------------- Curriculum ------------------------
-    cfg.curriculum = {}
-
-    cfg.curriculum["staged_curriculum"] = CurriculumTermCfg(
-        func=step_based_staged_curriculum,
-        params={
-            "stages": [
-                {
-                    "name": "penalize stepping + increase velocity",
-                    "step": 3000 * 24,
-                    "apply": lambda env: {
-                        set_command_velocity(
-                            env,
-                            lin_vel_x=(-0.7, 0.7),
-                            ang_vel_z=(-1.5, 1.5),
-                            rotation_env_ang_vel_z=(-3.0, 3.0),
-                        ),
-                        set_stepping_parameters(
-                            env,
-                            air_time_weight=3.0,
-                            no_stepping_penalty_weight=-1.0,
-                            rel_standing_envs=0.1,
-                            rel_rotation_envs=0.1,
-                        ),
-                    },
-                },
-            ],
-        },
-    )
+    cfg.curriculum = {
+        "staged_curriculum": CurriculumTermCfg(
+            func=StagedCurriculum, params={"stages": WALK_STAGES}
+        )
+    }
 
     #---------------------------- Terminations ----------------------
     cfg.terminations["fell_over"] = TerminationTermCfg(
@@ -399,6 +426,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     #---------------------------- Play mode -------------------------
+    # No curriculum, standing or rotation-only commands, pushes or observation
+    # noise.  The command ranges stay the initial ones.
     if play:
         cfg.curriculum = {}
         
@@ -497,5 +526,5 @@ MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
     experiment_name="mjlab_microban_velocity",
     save_interval=500,
     num_steps_per_env=24,
-    max_iterations=15_000,
+    max_iterations=WALK_TOTAL_UPDATES,
 )
