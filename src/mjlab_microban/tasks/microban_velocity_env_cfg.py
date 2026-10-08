@@ -159,7 +159,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.scene.terrain.terrain_generator = None
 
     #---------------------------- Actions ---------------------------
-    dofs_filter = r".*(?<!head)$"
+    # Excludes head, neck_roll and neck_pitch: the neck holds its default pose
+    # independently of the walking policy and is not used for balance.
+    dofs_filter = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
 
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -210,6 +212,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     std_standing = {
         r".*head.*": 0.3,
+        r".*neck_roll.*": 0.3,
+        r".*neck_pitch.*": 0.3,
         r".*shoulder_pitch.*": 0.1,
         r".*shoulder_roll.*": 0.1,
         r".*elbow.*": 0.1,
@@ -223,6 +227,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     std_walking = {
         r".*head.*": 0.3,
+        r".*neck_roll.*": 0.3,
+        r".*neck_pitch.*": 0.3,
         r".*shoulder_pitch.*": 0.4,
         r".*shoulder_roll.*": 0.2,
         r".*elbow.*": 0.2,
