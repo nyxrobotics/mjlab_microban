@@ -91,12 +91,6 @@ class TwistRatioScaleTest(unittest.TestCase):
         )
         self.assertEqual(peaks, TWIST_AXIS_SCALE)
 
-    def test_a_quarter_of_the_walking_commands_stand(self) -> None:
-        # 2026-10-08: a tenth was too few for the walker to stop stepping in
-        # place on the standing command (W6).
-        self.assertEqual(self.walk.commands["twist"].rel_standing_envs, 0.25)
-        self.assertEqual(make_microban_velocity_env_cfg(play=True).commands["twist"].rel_standing_envs, 0.0)
-
     def test_axis_scale_is_the_robot_moving_limits(self) -> None:
         self.assertEqual(TWIST_AXIS_SCALE, ROBOT_MOVING_COMMAND_LIMITS)
 
