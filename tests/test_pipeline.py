@@ -422,5 +422,33 @@ class StatusTest(unittest.TestCase):
             self.assertIn(json.dumps(None), text)
 
 
+class DryPackageRowsTest(unittest.TestCase):
+    def test_forced_tracking_report_keeps_late_arm_rows(self) -> None:
+        import tempfile
+
+        from mjlab_microban.pipeline import dry
+
+        def row(foot: float, arm: float) -> list[float]:
+            values = [0.0] * 81
+            values[5] = -1.0
+            values[71] = foot
+            values[75] = arm
+            return values
+
+        probe = {"summary": {}, "results": [{} for _ in range(9)]}
+        for count, expected in ((40, 40), (5, dry.SMOKE_ROWS)):
+            rows = [row(0.01, 0.0)] * (count // 2) + [row(0.0, 0.2)] * (count - count // 2)
+            with tempfile.TemporaryDirectory() as directory:
+                prefix = Path(directory) / "run"
+                Path(f"{prefix}_9x300.json").write_text(json.dumps(probe))
+                Path(f"{prefix}_tracking.json").write_text(
+                    json.dumps({"status": "fail", "runtime_smoke_observations": rows})
+                )
+                _locomotion, tracking = dry.forced_reports(str(prefix), Path(directory), 0.25)
+                kept = json.loads(tracking.read_text())["runtime_smoke_observations"]
+            self.assertEqual(len(kept), expected)
+            self.assertTrue(any(value[75] != 0.0 for value in kept))
+
+
 if __name__ == "__main__":
     unittest.main()

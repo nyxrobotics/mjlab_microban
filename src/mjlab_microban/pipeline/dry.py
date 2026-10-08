@@ -24,8 +24,9 @@ from pathlib import Path
 
 FORCED_PREFIX = "DRYRUN_FORCED_PASS_"
 # The robot's startup self-test needs at least 8 possible-state rows; a
-# fallen DRYRUN policy records fewer, so its possible ones are cycled to this
-# many.
+# fallen DRYRUN policy may record fewer, so its possible ones are cycled to
+# this many.  With enough of them all are kept, so the packager's even spread
+# still reaches the late arm-target rows (the PICO self-test needs one).
 SMOKE_ROWS = 16
 # Fields the v12 source-probe validator requires of a passing receipt
 # (microban_teleop_v12_bootstrap.validate_legacy_teleop_probe_receipt).
@@ -107,7 +108,11 @@ def forced_reports(report_prefix: str, out_dir: Path, max_overshoot_rad: float) 
             if not possible:
                 raise ValueError("the dry PICO policy recorded no possible-state observation")
             report["dry_run_smoke_rows_original_count"] = len(rows)
-            report["runtime_smoke_observations"] = [possible[i % len(possible)] for i in range(SMOKE_ROWS)]
+            report["runtime_smoke_observations"] = (
+                possible
+                if len(possible) >= SMOKE_ROWS
+                else [possible[i % len(possible)] for i in range(SMOKE_ROWS)]
+            )
         copy_path = out_dir / f"{FORCED_PREFIX}{source.name}"
         copy_path.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
         forced.append(copy_path)
