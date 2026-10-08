@@ -67,16 +67,17 @@ def twist_judgment(command: Sequence[float], twist: Sequence[float]) -> dict[str
     if len(c) != 3 or len(v) != 3:
         raise ValueError("a twist and its command are (v_x, v_y, w_z)")
     finite = all(math.isfinite(x) for x in v)
+    recorded = [x if math.isfinite(x) else None for x in v]  # JSON has no NaN
     if is_standing(c):
         passed = finite and all(abs(v[i]) <= STANDING_DRIFT_MAX[i] for i in range(3))
-        return {"command": c, "mean_twist": v, "standing_drift_max": list(STANDING_DRIFT_MAX),
+        return {"command": c, "mean_twist": recorded, "standing_drift_max": list(STANDING_DRIFT_MAX),
                 "passed": passed}
     minimums = axis_minimums(c)
-    signed = {AXES[i]: v[i] * (1.0 if c[i] > 0 else -1.0) for i in minimums}
+    signed = {AXES[i]: (v[i] * (1.0 if c[i] > 0 else -1.0) if finite else None) for i in minimums}
     minimum = {AXES[i]: value for i, value in minimums.items()}
     passed = finite and all(signed[axis] >= minimum[axis] for axis in minimum)
-    return {"command": c, "mean_twist": v, "signed_response": signed, "minimum_signed_response": minimum,
-            "passed": passed}
+    return {"command": c, "mean_twist": recorded, "signed_response": signed,
+            "minimum_signed_response": minimum, "passed": passed}
 
 
 def twist_passes(command: Sequence[float], twist: Sequence[float]) -> bool:
@@ -89,6 +90,8 @@ def worst_margin(command: Sequence[float], twist: Sequence[float]) -> float:
     judgment = twist_judgment(command, twist)
     if "signed_response" not in judgment:
         raise ValueError("worst_margin is for moving commands")
+    if not all(math.isfinite(float(x)) for x in twist):
+        return float("nan")
     margins = [judgment["signed_response"][a] - judgment["minimum_signed_response"][a]
                for a in judgment["minimum_signed_response"]]
     return min(margins)

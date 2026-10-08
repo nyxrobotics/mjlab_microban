@@ -43,7 +43,7 @@ MICROBAN_TELEOP_V12_RECIPE_REVISION = home_contracts.V12_RECIPE_REVISION
 # canonical recipe except that the inherited HOME pose reward drops the
 # shoulder-pitch/shoulder-roll/elbow joints of every hand whose target is
 # active (an inactive hand's arm and every other joint keep the canonical
-# term), with the twist-ratio velocity term and the one-run schedule.
+# term), with the one-run schedule.
 MICROBAN_TELEOP_V12_HAND_POSE_RELEASE_RECIPE_REVISION = (
     home_contracts.V12_HAND_POSE_RELEASE_RECIPE_REVISION
 )

@@ -1,13 +1,9 @@
-"""PICO's velocity reward terms before the twist-ratio term (8595c2e).
+"""PICO's velocity reward terms.
 
-The user (2026-10-08): "とりあえず歩行の報酬は今までうまく言ってた速度追従方法に
-戻し、止まってたら足踏みしなくなってる状態で手足のトラッキングを頑張る".  PICO
-tracks velocity with the terms the earlier forward-lean PICO was trained with:
 planar_velocity_tracking_exp (weight 5, std 0.5 m/s), commanded planar
 progress (2), the inherited track_angular_velocity (2, std 1.25 rad/s) and the
-two L1 errors (-16 linear, -1 yaw), all read in the HOME-levelled trunk frame.
-These are the functions 8595c2e removed from microban_teleop_mdp.py, restored
-here as they were (microban_teleop_mdp.py is a get-up training input).
+two L1 errors (-16 linear, -1 yaw), all read in the HOME-levelled trunk frame:
+the terms the earlier forward-lean PICO was trained with.
 """
 
 from __future__ import annotations

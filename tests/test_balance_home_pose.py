@@ -19,7 +19,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from home_cases import CENTERED_HOME_YAML, home_tag  # noqa: E402
 
-from mjlab_microban.robot import home_pose
 from mjlab_microban.robot.home_pose import (
     HOME_JOINT_NAMES,
     home_joint_hash,

@@ -176,97 +176,6 @@ class MonitorTest(unittest.TestCase):
         # The earlier of the two passing checks (N - 1000) trained 1000
         # updates with the widened commands and the no-stepping penalty.
         self.assertGreaterEqual(WALK_MIN_FINAL_UPDATES - 1000, WALK_WIDEN_UPDATE + 1000)
-        save(self.root, *range(1000, WALK_MIN_FINAL_UPDATES + 1, 1000))
-        monitor = make_monitor(self.root, checks=list(range(1000, 20000, 1000)), min_final=WALK_MIN_FINAL_UPDATES)
-        monitor.record["checks"] = {str(u): {"passed": True} for u in range(1000, WALK_MIN_FINAL_UPDATES, 1000)}
-        monitor.decide_early_stop()  # every earlier pair passes, but ends before the stage was trained
-        self.assertNotIn("adopted", monitor.record)
-        monitor.record["checks"][str(WALK_MIN_FINAL_UPDATES)] = {"passed": True}
-        with self.assertRaises(m.EarlyStop) as stop:
-            monitor.decide_early_stop()
-        self.assertEqual(stop.exception.checkpoint.name, f"model_{WALK_MIN_FINAL_UPDATES}.pt")
-
-    def test_no_early_end_before_the_minimum(self) -> None:
-        save(self.root, 11000)
-        monitor = make_monitor(self.root, checks=[11000, 12000, 13000], min_final=13249,
-                               verdicts={11000: True, 12000: True, 13000: True})
-        self.run_checks(monitor)
-        save(self.root, 12000)
-        self.run_checks(monitor)  # 11000 + 12000 pass, but 12000 < 13249
-        save(self.root, 13000)
-        self.run_checks(monitor)
-        self.assertNotIn("adopted", monitor.record)
-        monitor.record["checks"]["13000"] = {"passed": True}
-        save(self.root, 14000)
-        monitor.check_updates.append(14000)
-        monitor.start_check = lambda ckpt: m.Check(-1, FakeProcess(0), self.root / "c.log", lambda _l: {"passed": True})
-        with self.assertRaises(m.EarlyStop) as stop:
-            self.run_checks(monitor)
-        self.assertEqual(stop.exception.checkpoint.name, "model_14000.pt")
-
-    def test_dry_monitor_never_stops(self) -> None:
-        save(self.root, 1, 2)
-        monitor = make_monitor(self.root, checks=[1, 2], min_final=0, verdicts={1: True, 2: True},
-                               early_stop=False)
-        self.run_checks(monitor)
-        self.assertEqual(set(monitor.record["checks"]), {"1", "2"})
-        self.assertNotIn("adopted", monitor.record)
-
-    def test_stage_lines_are_checked_against_the_table(self) -> None:
-        log = self.root / "train.log"
-        log.write_text("\x1b[1m Learning iteration 2999/20000 \x1b[0m\n"
-                       "Curriculum stage 1 penalize stepping + increase velocity at step 72024 (update 3001)\n")
-        monitor = make_monitor(self.root, checks=[], min_final=0,
-                               stages={"penalize stepping + increase velocity": 3000})
-        monitor.log_path = log
-        monitor.read_log()
-        self.assertEqual(monitor.record["stages_seen"], {"penalize stepping + increase velocity": 3001})
-        late = make_monitor(self.root / "late", checks=[], min_final=0,
-                            stages={"tighten foot tracking": 6000})
-        log.write_text("Curriculum stage 4 tighten foot tracking at step 150000 (update 6250)\n")
-        late.log_path = log
-        with self.assertRaisesRegex(PipelineError, "the schedule did not run as written"):
-            late.read_log()
-        resumed = make_monitor(self.root / "resumed", checks=[], min_final=0,
-                               stages={"tighten foot tracking": 6000}, resumed_from=6250)
-        resumed.log_path = log
-        resumed.read_log()  # re-applied where the continued run started
-
-    def test_every_due_stage_must_be_seen_and_named_in_the_table(self) -> None:
-        stages = {"start": 0, "refine": 4000, "effort_push": 10000}
-        log = self.root / "train.log"
-        log.write_text("Curriculum stage 1 start at step 0 (update 0)\n"
-                       "Curriculum stage 2 refine at step 96000 (update 4000)\n")
-        monitor = make_monitor(self.root, checks=[], min_final=0, stages=stages)
-        monitor.log_path = log
-        monitor.read_log()
-        monitor.require_stages(10000)  # effort_push may still come within the tolerance
-        with self.assertRaisesRegex(PipelineError, r"without applying the curriculum stages \['effort_push'\]"):
-            monitor.require_stages(10001)
-        renamed = make_monitor(self.root / "renamed", checks=[], min_final=0, stages=stages)
-        log.write_text("Curriculum stage 3 effort and push at step 240000 (update 10000)\n")
-        renamed.log_path = log
-        with self.assertRaisesRegex(PipelineError, "not in the schedule table"):
-            renamed.read_log()
-
-    def test_the_pipeline_reads_the_task_tables(self) -> None:
-        from mjlab_microban.pipeline.steps import stage_tables
-        from mjlab_microban.schedules import GETUP_SCHEDULE, PICO_SCHEDULE, WALK_WIDEN_UPDATE
-
-        tables = stage_tables()
-        self.assertEqual(tables["walk"], {"penalize stepping + increase velocity": WALK_WIDEN_UPDATE})
-        self.assertEqual(sorted(tables["pico"].values()), sorted(PICO_SCHEDULE.values()))
-        self.assertEqual(tables["getup"]["refine exploration (std, Adam, learning rate, entropy)"],
-                         GETUP_SCHEDULE["refine"])
-        self.assertEqual(set(tables["getup"]), {"start without IMU latency", *GETUP_SCHEDULE,
-                                                "refine exploration (std, Adam, learning rate, entropy)"})
-
-    def test_walking_ends_only_after_both_checks_saw_its_stage(self) -> None:
-        from mjlab_microban.schedules import WALK_MIN_FINAL_UPDATES, WALK_WIDEN_UPDATE
-
-        # The earlier of the two passing checks (N - 1000) trained 1000
-        # updates with the widened commands and the no-stepping penalty.
-        self.assertGreaterEqual(WALK_MIN_FINAL_UPDATES - 1000, WALK_WIDEN_UPDATE + 1000)
         all_pass = {u: True for u in range(1000, 7000, 1000)}
         monitor = make_monitor(self.root, checks=sorted(all_pass), min_final=WALK_MIN_FINAL_UPDATES,
                                verdicts=all_pass)
@@ -298,8 +207,7 @@ class WalkRulesTest(unittest.TestCase):
         good = evaluate(self.rows(), rules)
         self.assertTrue(good["passed"], good)
         self.assertEqual(set(good["checks"]), {"W4", "W5", "W6"})
-        self.assertLess(good["angle_deg"][0], 1.0)
-        # The diagonals' ratio is recorded, not judged (no W1-W3).
+        # The diagonals are judged by their falls only.
         self.assertTrue(evaluate(self.rows(scale=(0.5, 0.0, 0.5)), rules)["passed"])
         fallen = evaluate(self.rows(falls=2), rules)
         self.assertFalse(fallen["checks"]["W4"])

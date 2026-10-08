@@ -86,13 +86,13 @@ def play_env_snapshot(cfg) -> dict:
     return json.loads(json.dumps(snapshot, default=list))
 
 
-class TwistRatioScaleTest(unittest.TestCase):
+class VelocityRewardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.walk = make_microban_velocity_env_cfg()
         cls.pico = make_microban_teleop_v12_hand_pose_release_env_cfg()
 
-    def test_pico_envelope_peaks_at_the_axis_scale(self) -> None:
+    def test_pico_envelope_peaks_at_the_robot_moving_limits(self) -> None:
         envelope = MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
         peaks = tuple(
             max(abs(value) for value in envelope[axis]) for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z")
@@ -112,7 +112,6 @@ class TwistRatioScaleTest(unittest.TestCase):
         self.assertAlmostEqual(angular.params["std"] ** 2, 0.5)
         for term in (linear, angular):
             self.assertEqual(term.params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
-        self.assertNotIn("twist_ratio_velocity", self.walk.rewards)
         # PICO: the earlier forward-lean PICO's terms, final stds.
         terms = self.pico.rewards
         self.assertIs(terms["track_linear_velocity"].func, planar_velocity_tracking_exp)
@@ -125,7 +124,7 @@ class TwistRatioScaleTest(unittest.TestCase):
         for name in ("track_linear_velocity", "commanded_planar_velocity_progress", "linear_velocity_error_l1",
                      "yaw_velocity_error_l1"):
             self.assertEqual(terms[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD, name)
-        self.assertNotIn("twist_ratio_velocity", terms)
+
 
     def test_reward_tables(self) -> None:
         self.assertEqual({k: v.weight for k, v in self.walk.rewards.items()}, WALK_REWARD_WEIGHTS)

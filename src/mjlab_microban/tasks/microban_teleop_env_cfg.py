@@ -76,9 +76,8 @@ MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S = 0.12
-# The PICO command envelope (the robot's moving scale_velocity limits; each
-# axis's largest magnitude is the twist reward's axis scale, see
-# tests/test_twist_ratio_scale.py).  Training samples it from the first update.
+# The PICO command envelope (the robot's moving scale_velocity limits, see
+# tests/test_velocity_rewards.py).  Training samples it from the first update.
 MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE = {
     "lin_vel_x": (-0.5, 0.7),
     "lin_vel_y": (-0.3, 0.3),
@@ -382,10 +381,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # dominated v1 and rewarded copying a saturated previous output forever.
     cfg.rewards["action_rate_l2"].weight = -0.02
 
-    # Velocity: the terms of the earlier forward-lean PICO (before the
-    # twist-ratio term; microban_teleop_velocity_rewards.py), with the final
-    # tracking stds from the first update (the full envelope is sampled from
-    # the first update).  User decision 2026-10-08.
+    # Velocity: the terms of the earlier forward-lean PICO
+    # (microban_teleop_velocity_rewards.py), with the final tracking stds from
+    # the first update (the full envelope is sampled from the first update).
     velocity_params = {"command_name": "twist", "trunk_pitch": HOME_TRUNK_PITCH_RAD}
     cfg.rewards["track_linear_velocity"] = RewardTermCfg(
         func=planar_velocity_tracking_exp,

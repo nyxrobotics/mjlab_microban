@@ -1,13 +1,8 @@
 """The walking task's velocity reward: mjlab's two exp tracking terms at HOME.
 
-The user (2026-10-08): "もう歩行の速度の報酬はmicrobanの初期状態でいいや" --
-walking tracks velocity with the reward it had before the twist-ratio term
-(8595c2e), the reward the forward-lean walker lean_walk_cont2 model_29000
-was trained with: mjlab's track_linear_velocity (std sqrt(0.1)) and
-track_angular_velocity (std sqrt(0.5)), weight 2 each, read in the
-HOME-levelled trunk frame.  These are the functions 8595c2e removed from
-mdp.py, restored here as they were (mdp.py is an input of every step; this
-module is a walking input only).
+mjlab's track_linear_velocity (std sqrt(0.1)) and track_angular_velocity
+(std sqrt(0.5)), weight 2 each, read in the HOME-levelled trunk frame: the
+reward the forward-lean walker lean_walk_cont2 model_29000 was trained with.
 """
 
 from __future__ import annotations

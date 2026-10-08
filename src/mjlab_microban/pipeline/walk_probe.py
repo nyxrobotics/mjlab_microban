@@ -6,12 +6,9 @@ mean HOME-levelled twist over steps 50..299 while up is compared with the
 command.  Six diagonal commands with and without pushes (world-frame kicks
 every 1.0 s: +0.30 m/s forward and 0.15 m/s against the commanded lateral
 sign), six single-axis commands and standing, three repeats each, on seeds
-101-105 -- never the judgment's seed 42.  This is the probe of the
-twist-ratio validation (exp/twist-ratio-validation) that every walker of that
-comparison was measured with.
+101-105 -- never the judgment's seed 42.
 
-Rules (walking tracks velocity with its initial reward again, 2026-10-08;
-the ratio and speed-fraction items W1-W3 of the twist-ratio reward are gone):
+Rules:
 
 * W4 falls of the diagonal commands without / with pushes
   (config/pipeline.yaml ``walk.check.w4_falls``), none single-axis;
@@ -25,8 +22,7 @@ the ratio and speed-fraction items W1-W3 of the twist-ratio reward are gone):
   motion on a standing command (its best is both feet still, 2026-10-08), so
   an undisturbed stand re-plants a foot at most now and then.
 
-The ratio angle, the speed fraction of the diagonals and the signed
-single-axis responses are recorded with each verdict.
+The signed single-axis responses are recorded with each verdict.
 
 usage: python -m mjlab_microban.pipeline.walk_probe CKPT OUT.json [--seeds 101,...]
 Prints one ``RESULT {json}`` line (the rule verdicts and their numbers).
@@ -64,26 +60,20 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else float("nan")
 
 
-def ratio_angle(command: tuple[float, ...], motion: list[float]) -> float:
-    c = [command[i] / SCALE[i] for i in range(3)]
-    w = [motion[i] / SCALE[i] for i in range(3)]
-    n = math.sqrt(sum(x * x for x in c))
-    norm = math.sqrt(sum(x * x for x in w))
-    if n == 0.0:
-        return float("nan")
-    if norm < 1e-9:
-        return 180.0
-    return math.degrees(math.acos(max(-1.0, min(1.0, sum(c[i] * w[i] for i in range(3)) / (n * norm)))))
+def _home_levelled_twist(data, trunk_pitch: float):
+    """(N, 3) twist (v_x, v_y, w_z) in the trunk frame with the HOME lean rotated out."""
 
+    import torch
+    from mjlab.utils.lab_api.math import quat_apply_inverse, quat_mul
 
-def speed_fraction(command: tuple[float, ...], motion: list[float]) -> float | None:
-    c = [command[i] / SCALE[i] for i in range(3)]
-    w = [motion[i] / SCALE[i] for i in range(3)]
-    n = math.sqrt(sum(x * x for x in c))
-    if n == 0.0:
-        return None
-    along = sum(w[i] * c[i] / n for i in range(3))
-    return min(max(along, 0.0), n) / n
+    quat_w = data.root_link_quat_w
+    half = -0.5 * trunk_pitch
+    unpitch = torch.tensor((math.cos(half), 0.0, math.sin(half), 0.0), device=quat_w.device,
+                           dtype=quat_w.dtype).expand_as(quat_w)
+    frame = quat_mul(quat_w, unpitch)
+    linear = quat_apply_inverse(frame, data.root_link_lin_vel_w)
+    angular = quat_apply_inverse(frame, data.root_link_ang_vel_w)
+    return torch.stack((linear[:, 0], linear[:, 1], angular[:, 2]), dim=-1)
 
 
 def _cell(rows: list[dict], push: str, commands: list[str]) -> dict[str, Any]:
@@ -96,11 +86,8 @@ def _cell(rows: list[dict], push: str, commands: list[str]) -> dict[str, Any]:
         twist = rr[0]["twist"]
         mean = [_mean([r["mean"][i] for r in rr]) for i in range(3)]
         signed = [mean[i] * (1 if twist[i] > 0 else -1 if twist[i] < 0 else 0) for i in range(3)]
-        speeds = [s for s in (speed_fraction(twist, r["mean"]) for r in rr) if s is not None]
-        per[name] = {"falls": sum(r["fell"] for r in rr), "twist": twist, "mean": mean, "signed": signed,
-                     "angle": ratio_angle(twist, mean), "speed": _mean(speeds)}
-    speeds = [s for s in (speed_fraction(r["twist"], r["mean"]) for r in selected) if s is not None]
-    return {"falls": sum(r["fell"] for r in selected), "speed": _mean(speeds), "per": per}
+        per[name] = {"falls": sum(r["fell"] for r in rr), "twist": twist, "mean": mean, "signed": signed}
+    return {"falls": sum(r["fell"] for r in selected), "per": per}
 
 
 def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
@@ -109,8 +96,6 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
     none = _cell(rows, "none", list(DIAGONAL))
     pushed = _cell(rows, "p30_15", list(DIAGONAL))
     single = _cell(rows, "none", list(SINGLE))
-    angle_none = max(v["angle"] for v in none["per"].values())
-    angle_push = max(v["angle"] for v in pushed["per"].values())
     moving = {k: v for k, v in single["per"].items() if k != "S"}
     still = single["per"]["S"]["mean"]
     still_rows = [r for r in rows if r["push"] == "none" and r["cmd"] == "S" and not r["fell"]]
@@ -126,8 +111,6 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
     return {
         "checks": checks,
         "passed": all(checks.values()),
-        "angle_deg": [angle_none, angle_push],
-        "speed": [none["speed"], pushed["speed"]],
         "falls": [none["falls"], pushed["falls"], single["falls"]],
         "single_signed": single_signed,
         "still": still,
@@ -145,7 +128,6 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
     from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
     from mjlab_microban.scripts.teleop_v12_bootstrap_gate import _legacy_model
     from mjlab_microban.tasks.microban_teleop_v12_bootstrap import inspect_legacy_velocity_checkpoint
-    from mjlab_microban.tasks.microban_twist_ratio_mdp import home_levelled_twist
     from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
     if set(seeds) & {42, 43, 44}:
@@ -220,7 +202,7 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
                     now_down = feet.data.found.reshape(n, -1)[:, :2] > 0
                     if step >= SETTLE:
                         up = (~fell).float()
-                        total += home_levelled_twist(env, HOME_TRUNK_PITCH_RAD) * up[:, None]
+                        total += _home_levelled_twist(robot.data, HOME_TRUNK_PITCH_RAD) * up[:, None]
                         count += up
                         touchdowns += (now_down & ~down).sum(dim=-1).float() * up
                     down = now_down
