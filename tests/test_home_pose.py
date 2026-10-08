@@ -279,6 +279,58 @@ class YamlEditTest(unittest.TestCase):
             load_home_pose(self.path)
 
 
+class RobotYamlTest(unittest.TestCase):
+    def test_robot_document_round_trips_through_yaml(self):
+        from mjlab_microban.robot.home_pose_robot import (
+            render_robot_home_pose_yaml,
+            robot_home_pose_document,
+        )
+        from mjlab_microban.robot.microban_hand_fk import microban_hand_fk_metadata
+
+        document = robot_home_pose_document()
+        parsed = yaml.safe_load(render_robot_home_pose_yaml(document))
+        self.assertEqual(parsed, json.loads(json.dumps(document)))
+        self.assertEqual(parsed["joint_pos_rad"], dict(HOME.joint_pos_rad))
+        self.assertEqual(parsed["root_pos_m"], list(HOME.root_pos))
+        self.assertEqual(parsed["hand_target_fk"], json.loads(json.dumps(microban_hand_fk_metadata())))
+        self.assertEqual(parsed["fk"]["com_m"][1], HOME.analysis.com[1])
+
+    def test_exponent_floats_stay_yaml_floats(self):
+        from mjlab_microban.robot.home_pose_robot import render_robot_home_pose_yaml
+
+        text = render_robot_home_pose_yaml({"a": 1e-05, "b": [2.5e-17, -3e20]})
+        self.assertIn("a: 1.0e-05", text)
+        self.assertEqual(yaml.safe_load(text), {"a": 1e-05, "b": [2.5e-17, -3e20]})
+        with self.assertRaises(ValueError):
+            render_robot_home_pose_yaml({"a": float("nan")})
+
+    def test_write_and_check(self):
+        from mjlab_microban.robot.home_pose_robot import write_robot_home_pose
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "src").mkdir()
+            (repo / "src" / "constants.py").write_text("")
+            # A robot tree that does not read the YAML is refused before
+            # anything is written.
+            with self.assertRaisesRegex(FileNotFoundError, "does not read config/home_pose.yaml"):
+                write_robot_home_pose(repo)
+            self.assertFalse((repo / "config").exists())
+            (repo / "src" / "home_pose.py").write_text("")
+            (repo / "src" / "constants.py").write_text("from home_pose import (\n)\n")
+            path, up_to_date = write_robot_home_pose(repo, check=True)
+            self.assertFalse(up_to_date)
+            self.assertFalse(path.exists())
+            write_robot_home_pose(repo)
+            self.assertTrue(write_robot_home_pose(repo, check=True)[1])
+            root_z = repr(HOME.root_pos[2])
+            self.assertIn(root_z, path.read_text())
+            path.write_text(path.read_text().replace(root_z, "0.17"))
+            self.assertFalse(write_robot_home_pose(repo, check=True)[1])
+            with self.assertRaises(FileNotFoundError):
+                write_robot_home_pose(repo / "src")
+
+
 class WalkHomeStampTest(unittest.TestCase):
     def test_stamp_rules(self):
         from mjlab_microban.tasks.microban_getup_runner import getup_home_pose

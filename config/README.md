@@ -7,7 +7,7 @@
 | ファイル | 役割 |
 | --- | --- |
 | `home_pose.yaml` | 唯一の入力。21関節の角度（度）、体幹ピッチ、名前、ラベル |
-| `home_pose_tool.py` | `show`: 派生値と「この学習ラインで再学習できるか」の表示 |
+| `home_pose_tool.py` | `show`: 派生値と「この学習ラインで再学習できるか」の表示。`write-robot`: ロボット側 `config/home_pose.yaml` の生成 |
 | `balance_home_pose.py` | 股・足首ピッチだけを動かして重心を足裏の前後中央に合わせ、`home_pose.yaml` を書き換える |
 
 ## yamlから計算される値
@@ -59,7 +59,7 @@ root z は FK 値を 1e-12 m に丸めて公開する。前傾HOMEは公開済�
 ## HOMEを変える手順
 
 ```text
-home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.py show → 全ポリシー再学習
+home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.py show → 全ポリシー再学習 → home_pose_tool.py write-robot
 ```
 
 1. `home_pose.yaml` を編集する（膝など。変えられる値は上の表）。
@@ -69,6 +69,11 @@ home_pose.yaml を編集 → balance_home_pose.py（任意）→ home_pose_tool.
 3. `name` と `label` を新しい姿勢に合わせて直し（ツールは変えない。`tag` は `<label>_<hash>` になる）、
    `uv run python config/home_pose_tool.py show` で根元高さ・余裕・頭高さ・`tag`・`training_line` を確認する
    （学習タスクが受け付けないHOME、足裏が水平でないyamlは `error: ...` の1行で終了コード1）。
+4. `uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_home-<label>` でロボット側の
+   `config/home_pose.yaml`（`schema_version: 2`、HOMEごとの契約文字列は持たない）を書き出す（`--check` で
+   最新か確認できる）。学習タスクが受け付けないHOMEは書き出せない（手先FKはその学習タスクのコードが作るため。
+   `--force` はない）。
+   `config/home_pose.yaml` を読まないロボットのチェックアウトも拒否する。失敗はどれも `error: ...` の1行。
 
 ## 重心合わせツール（`balance_home_pose.py`）
 
@@ -142,7 +147,7 @@ a.flat_sole_trunk_pitch_rad    # 足裏が水平になる体幹ピッチ
 
 テスト一式はどのHOMEのチェックアウトでも通る（`tests/home_cases.py`）:
 
-- ツール（重心合わせ・yaml 編集）のテストは、チェックアウトの `config/home_pose.yaml` ではなく
+- ツール（重心合わせ・yaml 編集・ロボット yaml）のテストは、チェックアウトの `config/home_pose.yaml` ではなく
   `tests/fixtures/home_pose_centered.yaml`（体幹 0°）/ `home_pose_forward_lean.yaml`（体幹 +10°）を入力にする。
 - 1つの fixture HOME の値を固定するテストは `centered_home_only` / `forward_lean_home_only` で
   そのHOMEでだけ実行し、pytest マーカー（`centered_home_pinned` / `forward_lean_home_pinned`）を付ける。

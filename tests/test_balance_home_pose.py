@@ -629,6 +629,7 @@ class HomePoseToolTest(unittest.TestCase):
             cases = (
                 (("show", "--yaml", str(path), "--no-training-check"), "soles are not flat"),
                 (("show", "--yaml", str(Path(directory) / "nope.yaml")), "no such file"),
+                (("write-robot", "--microban-repo", directory), "not a microban robot checkout"),
             )
             for argv, message in cases:
                 with self.subTest(argv=argv[0]):

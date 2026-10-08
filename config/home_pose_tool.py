@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Inspect config/home_pose.yaml.
+"""Inspect config/home_pose.yaml and publish it to the robot repository.
 
 Usage (from the training repository root)::
 
     uv run python config/home_pose_tool.py show
+    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_homecfg
+    uv run python config/home_pose_tool.py write-robot --microban-repo ../microban_homecfg --check
 
 ``show`` prints the HOME inputs and everything derived from them by MuJoCo FK
 (root pose, projected gravity, COM and sole contact area, heel/toe margins,
-head standing height, feet distance, identity hash/tag), plus
-``training_line``: whether this checkout's training tasks load at the HOME
-(``mjlab_microban.robot.home_pose_training``; exit 1 if they do not).
+head standing height, feet distance, identity hash/tag),
+plus ``training_line``: whether this checkout's training tasks load at the
+HOME (``mjlab_microban.robot.home_pose_training``; exit 1 if they do not).
+``write-robot`` writes ``<microban-repo>/config/home_pose.yaml``, the robot's
+copy (NEUTRAL_POSE, root pose, gravity, contract identifiers, hand FK
+contract); it refuses a HOME the training tasks refuse (such a HOME cannot
+be published: the contract strings and the hand FK are built by those same
+tasks) and a robot checkout that does not read the YAML (no
+src/home_pose.py).  ``--check`` exits 1 if that file is
+missing or stale instead.
 
-Every failure (unreadable or unbalanced YAML, ...) is one ``error: ...`` line
-and exit status 1.
+Every failure (unreadable or unbalanced YAML, not a robot checkout, ...) is
+one ``error: ...`` line and exit status 1.
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
 
 import yaml
@@ -78,6 +88,44 @@ def _show(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _write_robot(arguments: argparse.Namespace) -> int:
+    home = _load(HOME_POSE_YAML)
+    warnings.filterwarnings("ignore")
+    try:
+        from mjlab_microban.robot.home_pose_robot import (
+            NotHomeYamlRobotCheckout,
+            require_home_yaml_robot_checkout,
+            write_robot_home_pose,
+        )
+    except Exception as error:  # noqa: BLE001 - the training code refused this HOME
+        raise ToolError(
+            f"cannot write the robot HOME: this checkout's training code refuses the HOME in "
+            f"{HOME_POSE_YAML.name}: {' '.join(str(error).split())}"
+        ) from error
+    try:
+        require_home_yaml_robot_checkout(arguments.microban_repo)
+    except NotHomeYamlRobotCheckout as error:
+        raise ToolError(str(error)) from error
+    if not arguments.check:
+        training = _training_line(home)
+        if not training.ok:
+            raise ToolError(
+                f"this checkout cannot retrain at the HOME in {HOME_POSE_YAML.name}: "
+                f"{training.error} (its contract strings and hand FK cannot be built here)"
+            )
+    try:
+        path, up_to_date = write_robot_home_pose(arguments.microban_repo, check=arguments.check)
+    except FileNotFoundError as error:
+        raise ToolError(str(error)) from error
+    except Exception as error:  # noqa: BLE001 - one-line failure
+        raise ToolError(f"cannot write the robot HOME: {' '.join(str(error).split())}") from error
+    if arguments.check:
+        print(f"{path}: {'up to date' if up_to_date else 'STALE or missing'}")
+        return 0 if up_to_date else 1
+    print(f"{path}: {'unchanged' if up_to_date else 'written'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -89,6 +137,10 @@ def main(argv: list[str] | None = None) -> int:
         help="skip importing the training tasks at this HOME (a few seconds)",
     )
     show.set_defaults(handler=_show)
+    write = commands.add_parser("write-robot", help="write the robot repo's config/home_pose.yaml")
+    write.add_argument("--microban-repo", type=Path, required=True)
+    write.add_argument("--check", action="store_true", help="only report whether it is up to date")
+    write.set_defaults(handler=_write_robot)
     arguments = parser.parse_args(argv)
     try:
         return arguments.handler(arguments)
