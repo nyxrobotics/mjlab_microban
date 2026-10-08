@@ -789,33 +789,78 @@ def _acceptance(
             for value in active_hand
         )
     if "foot_tracking_rms" in required:
+        fade = foot_tracking_velocity_fade_range()
+        # Foot error weighted as the reward weighs foot tracking: a scenario
+        # walking at or beyond the fade end (the mixed ones) has weight 0.
         active_foot = [
-            item["target_error"]["foot"]
+            (item["target_error"]["foot"], weight)
             for item in results
             if any(
                 abs(value) > 0.0
                 for xyz in item["command"]["foot_target"]
                 for value in xyz
             )
+            and (weight := foot_tracking_weight(item["command"]["twist"], fade)) > 0.0
         ]
         # A commanded foot scenario that measured no sample (the robot fell
         # before the target phase) fails the check instead of crashing.
         checks["foot_tracking_rms"] = bool(active_foot) and all(
-            _measured_within(value, "rms", foot_tracking_rms_max_m(profile))
-            for value in active_foot
+            _measured_within(value, "rms", foot_tracking_rms_max_m(profile), weight)
+            for value, weight in active_foot
         )
         checks["foot_tracking_p95"] = bool(active_foot) and all(
-            _measured_within(value, "p95", foot_tracking_p95_max_m(profile))
-            for value in active_foot
+            _measured_within(value, "p95", foot_tracking_p95_max_m(profile), weight)
+            for value, weight in active_foot
         )
     return checks, "pass" if all(checks.values()) else "fail"
 
 
-def _measured_within(error: dict[str, Any], key: str, limit: float) -> bool:
-    """``error[key] <= limit``; an unmeasured (None) error is not within it."""
+def _measured_within(
+    error: dict[str, Any], key: str, limit: float, weight: float = 1.0
+) -> bool:
+    """``weight * error[key] <= limit``; an unmeasured (None) error is not within it."""
 
     value = error.get(key)
-    return value is not None and float(value) <= limit
+    return value is not None and weight * float(value) <= limit
+
+
+def foot_tracking_velocity_fade_range() -> tuple[float, float]:
+    """The velocity fade of the PICO foot-tracking reward at the end of training.
+
+    Read from the training stage table (TELEOP_STAGES), the one place it is
+    set, so the judgment weighs foot error as the reward does.
+    """
+
+    from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+
+    value = None
+    for stage in TELEOP_STAGES:
+        for setting in stage.settings:
+            if (setting.manager, setting.term, setting.path) == (
+                "reward",
+                "foot_target_tracking",
+                "params.velocity_fade_range",
+            ):
+                value = setting.value
+    if value is None:
+        raise ValueError("TELEOP_STAGES sets no foot-tracking velocity fade")
+    return float(value[0]), float(value[1])
+
+
+def foot_tracking_weight(twist: Any, fade_range: tuple[float, float]) -> float:
+    """The weight the PICO reward gives foot tracking under a velocity command.
+
+    The same continuous fade as mdp.foot_target_tracking_error_exp: speed
+    ``|(v_x, v_y)| + |w_z|``, full weight at ``fade_range[0]`` and below,
+    zero at ``fade_range[1]`` and above, linear in between.  The policy is
+    trained not to hold a foot target while walking; the judgment counts the
+    foot error with this weight (a walking scenario's is 0: recorded, not
+    judged).
+    """
+
+    lo, hi = fade_range
+    speed = math.hypot(float(twist[0]), float(twist[1])) + abs(float(twist[2]))
+    return 1.0 - min(max((speed - lo) / (hi - lo), 0.0), 1.0)
 
 
 def _aggregate_action_envelopes(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -930,6 +975,7 @@ def run_evaluation(
             "hand_p95_m_max": hand_tracking_p95_max_m(profile),
             "foot_rms_m_max": foot_tracking_rms_max_m(profile),
             "foot_p95_m_max": foot_tracking_p95_max_m(profile),
+            "foot_tracking_velocity_fade_range": list(foot_tracking_velocity_fade_range()),
             "twist_pass_line": twist_pass_line_record(),
             "target_column_ablation_action_delta_min": (
                 TARGET_COLUMN_ABLATION_ACTION_DELTA_MIN
