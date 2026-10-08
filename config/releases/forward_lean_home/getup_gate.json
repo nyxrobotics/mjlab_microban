@@ -1,0 +1,22 @@
+{
+ "checkpoint_sha256": "e115a8cd2b6e191a436922a2932e52c9747d4c713ab985f24c627ac5b6f3568a",
+ "contract": "microban-policy-1",
+ "dry_run": false,
+ "evidence": {
+  "failures": [],
+  "judgment_sha256": "df027d1e9389aa361708723167ea57d71ff45cbd9479ea566902925713402a5a",
+  "passed": true,
+  "summary": {
+   "final_tilt_deg": 2.6781277656555176,
+   "min_fallen_standing_fraction": 0.9649122807017544,
+   "posture_standing_fraction": 0.96875,
+   "push_fall_fraction": 0.0,
+   "standing_joint_abs_vel_rad_s": 0.08805691450834274,
+   "standing_targets_beyond_1p57": 0.03937757760286331,
+   "standing_targets_on_clip": 0.02710503153502941
+  }
+ },
+ "kind": "getup",
+ "passed": true,
+ "status": "pass"
+}

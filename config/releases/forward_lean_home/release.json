@@ -1,0 +1,642 @@
+{
+ "robot": {
+  "branch": "runtime-cleanup",
+  "commit": "ed23c559cda90677bf5a648c3e05f58bbe5ba747"
+ },
+ "steps": {
+  "commit": {
+   "inputs": "042cd3247e403dae43e6e7cda4da92fccf0cd2db452655c184b325a755da5354",
+   "judge_inputs": "8751ecf7299cd69e315a80baf21bc42f3f0c5e6dec258e46d2f9dd374d94d3f5",
+   "label": "home_481503d292_commit_042cd324",
+   "started": "2026-10-08 23:25:46",
+   "status": "running"
+  },
+  "export": {
+   "ended": "2026-10-08 23:25:38",
+   "files": {
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/getup.onnx": "adcb8db1a46fda5cb64383e48057f7d908ee0801632c16f84871873f48d659df",
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/getup_gate.json": "5c96561ad9870f8749fea8c1d39e89c3229e835251ec5520a24d9b9102626958",
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/manifest.json": "eb9fe5cb2fe282f888eec02dc2aa998b27d79f677f38def7cb2d9fa11228a6ce",
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/pico_teleop.onnx": "8b6467f53b2dc2a2cd1f3d1557016a45c157349a55034005d9c3edf74087f77f",
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/walk.onnx": "3eb45da7581cfd680d1a2e93795ced368e9d18cbc5a34560f01ab72147414056",
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release/walk_gate.json": "d488b031764792d6e8b32736037516c281124b59e4575ee41ec188fb9cc9cd08"
+   },
+   "inputs": "df6eab608588b40cfca0e4174149617591bc71d4a49672c8a6e9008d576bd88d",
+   "judge_inputs": "8751ecf7299cd69e315a80baf21bc42f3f0c5e6dec258e46d2f9dd374d94d3f5",
+   "label": "home_481503d292_export_df6eab60",
+   "outputs": {
+    "dir": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/release",
+    "manifest_sha256": "eb9fe5cb2fe282f888eec02dc2aa998b27d79f677f38def7cb2d9fa11228a6ce"
+   },
+   "started": "2026-10-08 23:24:48",
+   "status": "done"
+  },
+  "getup": {
+   "adopted": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_getup/2026-10-08_06-23-55_home_481503d292_getup_35b54c87/model_17999.pt",
+   "adopted_by": "run_end",
+   "checks": {
+    "11000": {
+     "failures": [
+      "standing targets on the +-pi clip 0.14 > 0.05"
+     ],
+     "passed": false,
+     "summary": {
+      "final_tilt_deg": 2.3459856510162354,
+      "min_fallen_standing_fraction": 0.9830508474576272,
+      "posture_standing_fraction": 0.984375,
+      "push_fall_fraction": 0.015873015873015872,
+      "standing_joint_abs_vel_rad_s": 0.15233582258224487,
+      "standing_targets_beyond_1p57": 0.15997853875160217,
+      "standing_targets_on_clip": 0.14161564409732819
+     }
+    },
+    "12000": {
+     "failures": [
+      "standing targets on the +-pi clip 0.13 > 0.05"
+     ],
+     "passed": false,
+     "summary": {
+      "final_tilt_deg": 2.3913021087646484,
+      "min_fallen_standing_fraction": 0.9830508474576272,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.0,
+      "standing_joint_abs_vel_rad_s": 0.11937574297189713,
+      "standing_targets_beyond_1p57": 0.14894893765449524,
+      "standing_targets_on_clip": 0.13396988809108734
+     }
+    },
+    "13000": {
+     "failures": [
+      "standing targets on the +-pi clip 0.09 > 0.05"
+     ],
+     "passed": false,
+     "summary": {
+      "final_tilt_deg": 0.791781485080719,
+      "min_fallen_standing_fraction": 1.0,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.0,
+      "standing_joint_abs_vel_rad_s": 0.09799033403396606,
+      "standing_targets_beyond_1p57": 0.13371965289115906,
+      "standing_targets_on_clip": 0.09343761205673218
+     }
+    },
+    "14000": {
+     "failures": [],
+     "passed": true,
+     "summary": {
+      "final_tilt_deg": 0.3448740839958191,
+      "min_fallen_standing_fraction": 1.0,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.0,
+      "standing_joint_abs_vel_rad_s": 0.10287529975175858,
+      "standing_targets_beyond_1p57": 0.10665632784366608,
+      "standing_targets_on_clip": 0.03824254870414734
+     }
+    },
+    "15000": {
+     "failures": [],
+     "passed": true,
+     "summary": {
+      "final_tilt_deg": 0.6318970322608948,
+      "min_fallen_standing_fraction": 1.0,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.015873015873015872,
+      "standing_joint_abs_vel_rad_s": 0.09577597677707672,
+      "standing_targets_beyond_1p57": 0.04850667342543602,
+      "standing_targets_on_clip": 0.029700463637709618
+     }
+    },
+    "16000": {
+     "failures": [],
+     "passed": true,
+     "summary": {
+      "final_tilt_deg": 0.7030344605445862,
+      "min_fallen_standing_fraction": 1.0,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.0,
+      "standing_joint_abs_vel_rad_s": 0.09419780969619751,
+      "standing_targets_beyond_1p57": 0.04320766404271126,
+      "standing_targets_on_clip": 0.028880048543214798
+     }
+    },
+    "17000": {
+     "failures": [],
+     "passed": true,
+     "summary": {
+      "final_tilt_deg": 0.6023280620574951,
+      "min_fallen_standing_fraction": 1.0,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.0,
+      "standing_joint_abs_vel_rad_s": 0.08621793240308762,
+      "standing_targets_beyond_1p57": 0.037592511624097824,
+      "standing_targets_on_clip": 0.025360869243741035
+     }
+    },
+    "3500": {
+     "failures": [
+      "standing tremble 1.19 rad/s > 0.3",
+      "standing targets on the +-pi clip 0.67 > 0.05"
+     ],
+     "passed": false,
+     "summary": {
+      "final_tilt_deg": 3.4226865768432617,
+      "min_fallen_standing_fraction": 0.9830508474576272,
+      "posture_standing_fraction": 1.0,
+      "push_fall_fraction": 0.031746031746031744,
+      "standing_joint_abs_vel_rad_s": 1.1923271417617798,
+      "standing_targets_beyond_1p57": 0.8372155427932739,
+      "standing_targets_on_clip": 0.6749090552330017
+     }
+    },
+    "9500": {
+     "failures": [
+      "standing targets on the +-pi clip 0.15 > 0.05"
+     ],
+     "passed": false,
+     "summary": {
+      "final_tilt_deg": 2.676192045211792,
+      "min_fallen_standing_fraction": 0.9830508474576272,
+      "posture_standing_fraction": 0.984375,
+      "push_fall_fraction": 0.031746031746031744,
+      "standing_joint_abs_vel_rad_s": 0.26915663480758667,
+      "standing_targets_beyond_1p57": 0.21230366826057434,
+      "standing_targets_on_clip": 0.15415464341640472
+     }
+    }
+   },
+   "ended": "2026-10-08 23:21:46",
+   "files": {
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_getup/2026-10-08_06-23-55_home_481503d292_getup_35b54c87/model_17999.pt": "e115a8cd2b6e191a436922a2932e52c9747d4c713ab985f24c627ac5b6f3568a"
+   },
+   "inputs": "35b54c87f954c14e065548fd770a3382e1f4cf92958cd2b6295b275c5aa2cc14",
+   "judge_inputs": "5bdaebe7a91dfd12a20eb1de9aae51ed98d2f76f5de09406b5c6978acc04a6ee",
+   "label": "home_481503d292_getup_35b54c87",
+   "outputs": {
+    "checkpoint": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_getup/2026-10-08_06-23-55_home_481503d292_getup_35b54c87/model_17999.pt",
+    "failures": [],
+    "passed": true,
+    "sha256": "e115a8cd2b6e191a436922a2932e52c9747d4c713ab985f24c627ac5b6f3568a",
+    "summary": {
+     "final_tilt_deg": 2.6781277656555176,
+     "min_fallen_standing_fraction": 0.9649122807017544,
+     "posture_standing_fraction": 0.96875,
+     "push_fall_fraction": 0.0,
+     "standing_joint_abs_vel_rad_s": 0.08805691450834274,
+     "standing_targets_beyond_1p57": 0.03937757760286331,
+     "standing_targets_on_clip": 0.02710503153502941
+    }
+   },
+   "stages_seen": {
+    "effort": 10000,
+    "imu_delay": 2500,
+    "push": 15000,
+    "refine": 4000,
+    "refine exploration (std, Adam, learning rate, entropy)": 4000,
+    "start without IMU latency": 0
+   },
+   "started": "2026-10-08 23:20:39",
+   "status": "done"
+  },
+  "home": {
+   "ended": "2026-10-08 23:24:48",
+   "files": {},
+   "inputs": "2e9f319d4f496646ac3dd32221f1e5dc45c1a844dabff604d858d6eabaec1270",
+   "judge_inputs": "8751ecf7299cd69e315a80baf21bc42f3f0c5e6dec258e46d2f9dd374d94d3f5",
+   "label": "home_481503d292_home_2e9f319d",
+   "outputs": {
+    "joint_hash": "481503d292",
+    "suite": "253 passed, 10 skipped, 3 warnings, 129 subtests passed in 83.12s (0:01:23)",
+    "tag": "forward_lean_home",
+    "training_line": {
+     "error": null,
+     "ok": true
+    },
+    "yaml_sha256": "db382ae3596ecdff473bcd1be183df09c3e8e6210a7491a57e59280977073c68"
+   },
+   "started": "2026-10-08 23:23:19",
+   "status": "done"
+  },
+  "install": {
+   "ended": "2026-10-08 23:25:46",
+   "files": {},
+   "inputs": "dd3f39288b0ffad3dd7c3d1c0543a3ff31f7ee709e56e009552efaaa15568c3c",
+   "judge_inputs": "8751ecf7299cd69e315a80baf21bc42f3f0c5e6dec258e46d2f9dd374d94d3f5",
+   "label": "home_481503d292_install_dd3f3928",
+   "outputs": {
+    "robot_tests": "248 passed, 1 skipped, 1 warning, 627 subtests passed in 3.30s"
+   },
+   "started": "2026-10-08 23:25:38",
+   "status": "done"
+  },
+  "pico": {
+   "adopted": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_teleop_v12/2026-10-08_19-29-54_home_481503d292_pico_21a5d220/model_8999.pt",
+   "adopted_by": "run_end",
+   "checks": {
+    "7000": {
+     "failures": [],
+     "passed": true,
+     "summary": "all checks pass"
+    },
+    "8000": {
+     "failures": [],
+     "passed": true,
+     "summary": "all checks pass"
+    }
+   },
+   "ended": "2026-10-08 23:10:06",
+   "files": {
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_teleop_v12/2026-10-08_19-29-54_home_481503d292_pico_21a5d220/model_8999.pt": "11179373bb04e30eed7a75fe95cb87f0f5cd878b85ea219ff20aa97169dfe7e9"
+   },
+   "inputs": "68e64940d538efaa2dad7b28934e3beaae82f19f5ca81389a6cb376c230abaab",
+   "inputs_before_cleanup": "21a5d220c38aab564f7f5dcc70fbb17e0ddd884432d39ef5d04e9dd56bcca0e2",
+   "judge_inputs": "5bdaebe7a91dfd12a20eb1de9aae51ed98d2f76f5de09406b5c6978acc04a6ee",
+   "label": "home_481503d292_pico_21a5d220",
+   "outputs": {
+    "checkpoint": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/logs/rsl_rl/mjlab_microban_teleop_v12/2026-10-08_19-29-54_home_481503d292_pico_21a5d220/model_8999.pt",
+    "failures": [],
+    "passed": true,
+    "report_prefix": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/artifacts/home_pipeline/home_481503d292_forward_lean_home/pico_judgment/2026-10-08_19-29-54_home_481503d292_pico_21a5d220_model_8999",
+    "sha256": "11179373bb04e30eed7a75fe95cb87f0f5cd878b85ea219ff20aa97169dfe7e9"
+   },
+   "stages_seen": {
+    "enable broad stationary foot tracking": 4000,
+    "enable moving-HMD, stationary no-step guard, and broad hand tracking": 1000,
+    "tighten foot tracking": 6000,
+    "tighten hand tracking": 2500
+   },
+   "started": "2026-10-08 23:08:26",
+   "status": "done",
+   "walker_probe": {
+    "below": [],
+    "falls": 0,
+    "margins": {
+     "backward_0p1": 0.08326632845401763,
+     "backward_0p2": 0.08622550863027573,
+     "forward_0p1": 0.06604238507151602,
+     "forward_0p2": 0.07097962027788161,
+     "lateral_left_0p1": 0.03616367182129761,
+     "lateral_right_0p1": 0.04698094688728452,
+     "yaw_left_0p5": 0.25753507101535794,
+     "yaw_right_0p5": 0.3087544803023338
+    },
+    "minimums": {
+     "backward_0p1": 0.02,
+     "backward_0p2": 0.04,
+     "forward_0p1": 0.04,
+     "forward_0p2": 0.08,
+     "lateral_left_0p1": 0.02,
+     "lateral_right_0p1": 0.02,
+     "yaw_left_0p5": 0.2,
+     "yaw_right_0p5": 0.2
+    },
+    "ok": true,
+    "receipt": "artifacts/legacy_teleop_probe/velocity_a7c28c8abaf038d8_teleop83_raw_9x300.json",
+    "receipt_sha256": "c6516ff07409cbfbfb19740d2c4cdb235a8033535a346fc2ce23913c57969870",
+    "responses": {
+     "backward_0p1": 0.10326632845401763,
+     "backward_0p2": 0.12622550863027573,
+     "forward_0p1": 0.10604238507151603,
+     "forward_0p2": 0.15097962027788162,
+     "lateral_left_0p1": 0.05616367182129761,
+     "lateral_right_0p1": 0.06698094688728452,
+     "yaw_left_0p5": 0.45753507101535795,
+     "yaw_right_0p5": 0.5087544803023338
+    },
+    "soft_limit_overshoot_rad": 0.0,
+    "twists": {
+     "backward_0p1": [
+      -0.10326632845401763,
+      0.03147453646222129,
+      -0.053274241933599115
+     ],
+     "backward_0p2": [
+      -0.12622550863027573,
+      -0.007601479652803392,
+      0.008105740906205028
+     ],
+     "forward_0p1": [
+      0.10604238507151603,
+      -0.026510598507942632,
+      -0.03448284509393852
+     ],
+     "forward_0p2": [
+      0.15097962027788162,
+      -0.012174064025166444,
+      -0.008333288453170098
+     ],
+     "lateral_left_0p1": [
+      -0.025815468606189825,
+      0.05616367182129761,
+      -0.03623170984908938
+     ],
+     "lateral_right_0p1": [
+      -0.005703939314000308,
+      -0.06698094688728452,
+      -0.03480954546690918
+     ],
+     "neutral": [
+      0.00043171294983983445,
+      0.000382055561701236,
+      -0.0039413608948816545
+     ],
+     "yaw_left_0p5": [
+      0.0207177772782743,
+      0.016547891879454255,
+      0.45753507101535795
+     ],
+     "yaw_right_0p5": [
+      -0.0029348742589354517,
+      -0.04901166117750108,
+      -0.5087544803023338
+     ]
+    },
+    "worst": "lateral_left_0p1",
+    "worst_margin": 0.03616367182129761
+   }
+  },
+  "walk": {
+   "adopted": "/home/rtx-server/Git-projects/mjlab_microban_lean/logs/rsl_rl/mjlab_microban_velocity/2026-10-05_06-14-02_lean_walk_cont2/model_29000.pt",
+   "adopted_by": "adopt",
+   "checks": {
+    "29000": {
+     "nine_by_300": {
+      "below": [],
+      "falls": 0,
+      "margins": {
+       "backward_0p1": 0.08776625961065292,
+       "backward_0p2": 0.09213110819458961,
+       "forward_0p1": 0.07569274243712426,
+       "forward_0p2": 0.08229601782560349,
+       "lateral_left_0p1": 0.03764436468109489,
+       "lateral_right_0p1": 0.00777404806157574,
+       "yaw_left_0p5": 0.2550343180373311,
+       "yaw_right_0p5": 0.31992192995548246
+      },
+      "minimums": {
+       "backward_0p1": 0.02,
+       "backward_0p2": 0.04,
+       "forward_0p1": 0.04,
+       "forward_0p2": 0.08,
+       "lateral_left_0p1": 0.02,
+       "lateral_right_0p1": 0.02,
+       "yaw_left_0p5": 0.2,
+       "yaw_right_0p5": 0.2
+      },
+      "ok": true,
+      "responses": {
+       "backward_0p1": 0.10776625961065292,
+       "backward_0p2": 0.13213110819458962,
+       "forward_0p1": 0.11569274243712425,
+       "forward_0p2": 0.1622960178256035,
+       "lateral_left_0p1": 0.057644364681094885,
+       "lateral_right_0p1": 0.02777404806157574,
+       "yaw_left_0p5": 0.45503431803733113,
+       "yaw_right_0p5": 0.5199219299554825
+      },
+      "soft_limit_overshoot_rad": 0.0020779073238372803,
+      "twists": {
+       "backward_0p1": [
+        -0.10776625961065292,
+        0.03006941558420658,
+        -0.07421702347323299
+       ],
+       "backward_0p2": [
+        -0.13213110819458962,
+        0.033457132175564765,
+        -0.032313472917303444
+       ],
+       "forward_0p1": [
+        0.11569274243712425,
+        -0.016812799260020255,
+        -0.0377163531659171
+       ],
+       "forward_0p2": [
+        0.1622960178256035,
+        -0.01576639476418495,
+        -0.0025154349440708757
+       ],
+       "lateral_left_0p1": [
+        -0.03084665247052908,
+        0.057644364681094885,
+        -0.05468993657268584
+       ],
+       "lateral_right_0p1": [
+        -0.0037624841160140933,
+        -0.02777404806157574,
+        -0.03351346994563937
+       ],
+       "neutral": [
+        0.00035957774232520025,
+        0.00046567799931654006,
+        -0.003450407928554341
+       ],
+       "yaw_left_0p5": [
+        0.02047464071540162,
+        0.013695005307905376,
+        0.45503431803733113
+       ],
+       "yaw_right_0p5": [
+        -0.00016564351273700594,
+        -0.04192023947928101,
+        -0.5199219299554825
+       ]
+      },
+      "worst": "lateral_right_0p1",
+      "worst_margin": 0.00777404806157574
+     },
+     "passed": true,
+     "probe": {
+      "angle_deg": [
+       48.36696450015858,
+       49.59998126796135
+      ],
+      "checkpoint": "/home/rtx-server/Git-projects/mjlab_microban_lean/logs/rsl_rl/mjlab_microban_velocity/2026-10-05_06-14-02_lean_walk_cont2/model_29000.pt",
+      "checks": {
+       "W4": true,
+       "W5": true,
+       "W6": true
+      },
+      "falls": [
+       0,
+       1,
+       0
+      ],
+      "passed": true,
+      "seconds": 38.20208168029785,
+      "single_signed": {
+       "BK": 0.13418097694714864,
+       "F": 0.16374241908391315,
+       "LL": 0.06275936340292294,
+       "LR": 0.05916786566376686,
+       "YL": 0.45451447168986003,
+       "YR": 0.5204574704170227
+      },
+      "speed": [
+       0.39726728041785364,
+       0.3563177924086633
+      ],
+      "still": [
+       0.0004909694932090739,
+       0.00046490640670526773,
+       -0.004656569535533587
+      ],
+      "still_touchdowns_per_s": 0.0
+     },
+     "summary": {
+      "9x300": true,
+      "9x300_signed": {
+       "backward_0p1": 0.1078,
+       "backward_0p2": 0.1321,
+       "forward_0p1": 0.1157,
+       "forward_0p2": 0.1623,
+       "lateral_left_0p1": 0.0576,
+       "lateral_right_0p1": 0.0278,
+       "yaw_left_0p5": 0.455,
+       "yaw_right_0p5": 0.5199
+      },
+      "9x300_soft_limit_rad": 0.002,
+      "9x300_twist": {
+       "backward_0p1": [
+        -0.1078,
+        0.0301,
+        -0.0742
+       ],
+       "backward_0p2": [
+        -0.1321,
+        0.0335,
+        -0.0323
+       ],
+       "neutral": [
+        0.0004,
+        0.0005,
+        -0.0035
+       ]
+      },
+      "9x300_worst_margin": [
+       "lateral_right_0p1",
+       0.0078
+      ],
+      "W": {
+       "W4": true,
+       "W5": true,
+       "W6": true
+      },
+      "angle": [
+       48.4,
+       49.6
+      ],
+      "falls": [
+       0,
+       1,
+       0
+      ],
+      "single_signed": {
+       "BK": 0.134,
+       "F": 0.164,
+       "LL": 0.063,
+       "LR": 0.059,
+       "YL": 0.455,
+       "YR": 0.52
+      },
+      "speed": [
+       0.397,
+       0.356
+      ],
+      "still_touchdowns_per_s": 0.0,
+      "still_twist": [
+       0.0,
+       0.0,
+       -0.005
+      ]
+     }
+    }
+   },
+   "ended": "2026-10-08 19:28:55",
+   "files": {
+    "/home/rtx-server/Git-projects/mjlab_microban_homecfg/checkpoints/home_481503d292_walk_a7c28c8abaf0/model_29000.pt": "a7c28c8abaf038d85c9c773bdaa2cc6bbe3c9bb2af6135622a4949c38a0401ff"
+   },
+   "inputs": "ee4fd0373cb8c8283eca7481d544a103315184789268e1bdc0f9da58afe2b20b",
+   "inputs_before_cleanup": "deff67c2c9d4d6484db5d9c8c774c2e752a92026662e71c13621a435c889809d",
+   "judge_inputs": "0a7d3bb226c128eaf82ec74c6ff2b7b855440c865dbeadc53dafc8d4256bd1ac",
+   "label": "home_481503d292_walk_deff67c2",
+   "outputs": {
+    "adopted_by": "adopt",
+    "check": {
+     "9x300": true,
+     "9x300_signed": {
+      "backward_0p1": 0.1078,
+      "backward_0p2": 0.1321,
+      "forward_0p1": 0.1157,
+      "forward_0p2": 0.1623,
+      "lateral_left_0p1": 0.0576,
+      "lateral_right_0p1": 0.0278,
+      "yaw_left_0p5": 0.455,
+      "yaw_right_0p5": 0.5199
+     },
+     "9x300_soft_limit_rad": 0.002,
+     "9x300_twist": {
+      "backward_0p1": [
+       -0.1078,
+       0.0301,
+       -0.0742
+      ],
+      "backward_0p2": [
+       -0.1321,
+       0.0335,
+       -0.0323
+      ],
+      "neutral": [
+       0.0004,
+       0.0005,
+       -0.0035
+      ]
+     },
+     "9x300_worst_margin": [
+      "lateral_right_0p1",
+      0.0078
+     ],
+     "W": {
+      "W4": true,
+      "W5": true,
+      "W6": true
+     },
+     "angle": [
+      48.4,
+      49.6
+     ],
+     "falls": [
+      0,
+      1,
+      0
+     ],
+     "single_signed": {
+      "BK": 0.134,
+      "F": 0.164,
+      "LL": 0.063,
+      "LR": 0.059,
+      "YL": 0.455,
+      "YR": 0.52
+     },
+     "speed": [
+      0.397,
+      0.356
+     ],
+     "still_touchdowns_per_s": 0.0,
+     "still_twist": [
+      0.0,
+      0.0,
+      -0.005
+     ]
+    },
+    "checkpoint": "/home/rtx-server/Git-projects/mjlab_microban_homecfg/checkpoints/home_481503d292_walk_a7c28c8abaf0/model_29000.pt",
+    "failures": [],
+    "iteration": 29000,
+    "passed": true,
+    "run": "2026-10-05_06-14-02_lean_walk_cont2",
+    "sha256": "a7c28c8abaf038d85c9c773bdaa2cc6bbe3c9bb2af6135622a4949c38a0401ff"
+   },
+   "started": "2026-10-08 19:27:25",
+   "status": "done"
+  }
+ }
+}
