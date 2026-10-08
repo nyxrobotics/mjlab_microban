@@ -19,7 +19,12 @@ on the mean twist of each command over its 15 rollouts, and the falls
 * W2 the same with pushes;
 * W3 every single-axis command: the same;
 * W4 falls of the diagonal commands without / with pushes, none single-axis;
-* W5 standing: the drift costs less than the smallest checked command.
+* W5 standing: the drift costs less than the smallest checked command;
+* W6 standing still: on the standing command without pushes, at most
+  ``walk.check.still_touchdowns_per_s`` foot touchdowns per second (both feet,
+  per robot, after the 1 s settle).  The reward counts stepping in place as
+  motion on a standing command (its best is both feet still, 2026-10-08), so
+  an undisturbed stand re-plants a foot at most now and then.
 
 The ratio angle, the speed fraction and the signed single-axis responses are
 recorded with each verdict; they are not pass lines.
@@ -116,6 +121,8 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
 
     moving = {"per": {k: v for k, v in single["per"].items() if k != "S"}}
     still = single["per"]["S"]["mean"]
+    still_rows = [r for r in rows if r["push"] == "none" and r["cmd"] == "S" and not r["fell"]]
+    still_touchdowns = _mean([r["touchdowns_per_s"] for r in still_rows if "touchdowns_per_s" in r])
     single_signed = {name: single["per"][name]["signed"][axis] for name, axis in SINGLE_AXIS.items()}
     checks = {
         "W1": passes(none),
@@ -124,6 +131,7 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
         "W4": none["falls"] <= rules["w4_falls"][0] and pushed["falls"] <= rules["w4_falls"][1]
         and single["falls"] == 0,
         "W5": twist_passes(SINGLE["S"], still),
+        "W6": math.isfinite(still_touchdowns) and still_touchdowns <= rules["still_touchdowns_per_s"],
     }
     value = {"none": values(none), "pushed": values(pushed), "single": values(single)}
     return {
@@ -138,6 +146,7 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
         "falls": [none["falls"], pushed["falls"], single["falls"]],
         "single_signed": single_signed,
         "still": still,
+        "still_touchdowns_per_s": still_touchdowns,
     }
 
 
@@ -204,6 +213,7 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
         env = ManagerBasedRlEnv(cfg=cfg, device=device)
         wrapped = RslRlVecEnvWrapper(env, clip_actions=None)
         robot = env.scene["robot"]
+        feet = env.scene.sensors["feet_ground_contact"]
         fall_height = float(env.termination_manager.get_term_cfg("fell_over").params["minimum_height"])
         try:
             for seed in seeds:
@@ -213,6 +223,8 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
                 fell = torch.zeros(n, dtype=torch.bool, device=device)
                 total = torch.zeros(n, 3, device=device)
                 count = torch.zeros(n, device=device)
+                down = feet.data.found.reshape(n, -1)[:, :2] > 0
+                touchdowns = torch.zeros(n, device=device)
                 for step in range(STEPS):
                     set_command(env)
                     with torch.inference_mode():
@@ -220,14 +232,19 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
                     obs, _reward, done, _extras = wrapped.step(action)
                     fell = fell | done.bool().reshape(-1) | env.termination_manager.get_term("fell_over").bool() \
                         | (robot.data.root_link_pos_w[:, 2] < fall_height)
+                    now_down = feet.data.found.reshape(n, -1)[:, :2] > 0
                     if step >= SETTLE:
                         up = (~fell).float()
                         total += home_levelled_twist(env, HOME_TRUNK_PITCH_RAD) * up[:, None]
                         count += up
+                        touchdowns += (now_down & ~down).sum(dim=-1).float() * up
+                    down = now_down
                 mean = (total / count.clamp(min=1)[:, None]).tolist()
+                rate = (touchdowns / (count.clamp(min=1) * env.step_dt)).tolist()
                 for i, name in enumerate(conds):
                     rows.append({"push": push, "seed": seed, "cmd": name, "twist": commands[name],
-                                 "fell": bool(fell[i]), "up_steps": int(count[i]), "mean": mean[i]})
+                                 "fell": bool(fell[i]), "up_steps": int(count[i]), "mean": mean[i],
+                                 "touchdowns_per_s": rate[i]})
         finally:
             wrapped.close()
     return rows

@@ -276,7 +276,7 @@ class MonitorTest(unittest.TestCase):
 
 
 class WalkRulesTest(unittest.TestCase):
-    def rows(self, *, scale=(0.5, 0.5, 0.5), falls=0, single=0.1, still=(0.0, 0.0, 0.0)):
+    def rows(self, *, scale=(0.5, 0.5, 0.5), falls=0, single=0.1, still=(0.0, 0.0, 0.0), touchdowns=0.0):
         rows = []
         for push in ("none", "p30_15"):
             for name, twist in DIAGONAL.items():
@@ -287,6 +287,7 @@ class WalkRulesTest(unittest.TestCase):
         for name, twist in SINGLE.items():
             for _ in range(3):
                 rows.append({"push": "none", "cmd": name, "twist": twist, "fell": False,
+                             "touchdowns_per_s": touchdowns if name == "S" else 8.0,
                              "mean": list(still) if name == "S" else [
                                  (single * 3 if i == 2 else single) * (1 if v > 0 else -1 if v < 0 else 0)
                                  for i, v in enumerate(twist)]})
@@ -316,6 +317,12 @@ class WalkRulesTest(unittest.TestCase):
         self.assertFalse(evaluate(self.rows(single=-0.01), rules)["checks"]["W3"])
         # Standing drift below the smallest checked command (0.1 m/s forward).
         self.assertTrue(evaluate(self.rows(still=(0.09, 0.0, 0.0)), rules)["checks"]["W5"])
+        # W6: standing with the feet still; stepping in place (8 per second) fails.
+        self.assertEqual(rules["still_touchdowns_per_s"], 0.5)
+        self.assertTrue(evaluate(self.rows(touchdowns=0.5), rules)["checks"]["W6"])
+        stepping = evaluate(self.rows(touchdowns=7.9), rules)
+        self.assertFalse(stepping["checks"]["W6"] or stepping["passed"])
+        self.assertAlmostEqual(stepping["still_touchdowns_per_s"], 7.9)
         self.assertFalse(evaluate(self.rows(still=(0.11, 0.0, 0.0)), rules)["checks"]["W5"])
         self.assertFalse(evaluate(self.rows(still=(0.0, 0.05, 0.0)), rules)["checks"]["W5"])
 

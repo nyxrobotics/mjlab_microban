@@ -403,7 +403,7 @@ class Pipeline:
         out.mkdir(exist_ok=True)
         probe_out = out / f"{checkpoint.parent.name}_{checkpoint.stem}_walk_probe.json"
         receipt = out / f"{checkpoint.parent.name}_{checkpoint.stem}_9x300_seed{chk['probe_seed']}.json"
-        rules = {"w4_falls": chk["w4_falls"]}
+        rules = {"w4_falls": chk["w4_falls"], "still_touchdowns_per_s": chk["still_touchdowns_per_s"]}
         commands = [
             [*UV, "python", "-m", "mjlab_microban.pipeline.walk_probe", str(checkpoint), str(probe_out),
              "--seeds", chk["seeds"], "--rules", json.dumps(rules)],
@@ -421,6 +421,7 @@ class Pipeline:
                                 "still_value": round(probe["still_value"], 3),
                                 # mean twist (v_x m/s, v_y m/s, w_z rad/s) on the standing command
                                 "still_twist": [round(v, 3) for v in probe["still"]],
+                                "still_touchdowns_per_s": round(probe["still_touchdowns_per_s"], 2),
                                 "angle": [round(v, 1) for v in probe["angle_deg"]],
                                 "speed": [round(v, 3) for v in probe["speed"]],
                                 "falls": probe["falls"], "9x300": nine["ok"],
@@ -992,10 +993,11 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def walk_check_items(verdict: dict[str, Any]) -> dict[str, bool]:
-    """The six items of one walking check: W1-W5 and the 9x300 probe."""
+    """The seven items of one walking check: W1-W6 and the 9x300 probe."""
 
     probe, nine = verdict.get("probe") or {}, verdict.get("nine_by_300") or {}
-    items = {name: bool((probe.get("checks") or {}).get(name)) for name in ("W1", "W2", "W3", "W4", "W5")}
+    items = {name: bool((probe.get("checks") or {}).get(name))
+             for name in ("W1", "W2", "W3", "W4", "W5", "W6")}
     items["9x300"] = bool(nine.get("ok"))
     return items
 

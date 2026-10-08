@@ -76,7 +76,7 @@ class StateTest(unittest.TestCase):
 
     def test_the_best_walking_check(self) -> None:
         def verdict(failed=(), worst=0.6, nine=0.7):
-            checks = {name: name not in failed for name in ("W1", "W2", "W3", "W4", "W5")}
+            checks = {name: name not in failed for name in ("W1", "W2", "W3", "W4", "W5", "W6")}
             return {"passed": not failed, "probe": {"checks": checks, "worst_value": [worst, worst, worst]},
                     "nine_by_300": {"ok": "9x300" not in failed, "values": {"forward_0p1": nine}}}
 

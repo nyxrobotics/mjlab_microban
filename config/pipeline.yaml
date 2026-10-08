@@ -36,6 +36,12 @@ walk:
     seeds: "101,102,103,104,105"
     probe_seed: 101
     w4_falls: [1, 5]                # diagonal falls of 90, no push / pushed; single-axis 0
+    # W6: foot touchdowns per second (both feet) on the standing command,
+    # no pushes.  The reward's best there is both feet still (1746fc5); one
+    # re-planted foot every two seconds at most.  Stepping in place is about
+    # 8 per second (walk_c1ab6dcb model_6000); the forward-lean walker that
+    # stands still (lean_walk_cont2 model_29000) 0.35.
+    still_touchdowns_per_s: 0.5
 
 pico:
   task: Mjlab-Teleop-V12-HandPoseRelease-Microban
