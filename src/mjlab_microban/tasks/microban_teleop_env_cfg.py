@@ -147,7 +147,9 @@ TELEOP_STAGES = (
         "enable moving-HMD, moving arms and the stationary no-step guard",
         PICO_SCHEDULE["arm"],
         (
-            Setting("reward", "no_stepping", "weight", -1.0),
+            # Stepping on a stop costs more than standing earns: 6.52/s on stop rows besides
+            # this term, 2.5 touchdowns/s x 0.175 s = 0.44 feet up -> 6.52 / 0.44 = 15.
+            Setting("reward", "no_stepping", "weight", -15.0),
             Setting(
                 "event",
                 "hmd_neck_target_motion",
