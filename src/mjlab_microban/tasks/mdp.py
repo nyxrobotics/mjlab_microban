@@ -1122,31 +1122,16 @@ def no_stepping_penalty(
     sensor_name: str,
     command_name: str = "twist",
     command_threshold: float = 0.01,
-    foot_target_command_name: str | None = None,
 ) -> torch.Tensor:
     """Penalize feet in the air when the commanded speed is below threshold.
 
     Discourages marching in place when the robot should stand still.
-    When ``foot_target_command_name`` is provided, rows whose target moves one
-    foot relative to the other are exempt: a single-foot target is drawn, or
-    the two published feet differ (a target that moves at a bounded speed
-    takes a moment to come back down).  Lifting a commanded foot must not
-    simultaneously incur the stationary no-stepping cost.  A two-foot target
-    moves both feet by the same offset, which the trunk reaches by lowering
-    and shifting with both feet down, so it stays penalized.
 
     Returns the count of airborne feet per environment (use with a negative weight).
     """
     command = env.command_manager.get_command(command_name)  # (N, 3)
     cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
     below_threshold = cmd_speed < command_threshold
-    if foot_target_command_name is not None:
-        foot_target = env.command_manager.get_term(foot_target_command_name)
-        published = foot_target.command.reshape(env.num_envs, 2, 3)
-        one_foot = foot_target.is_single_support_env.bool() | (
-            published[:, 0] != published[:, 1]
-        ).any(dim=-1)
-        below_threshold &= ~one_foot
 
     sensor = env.scene.sensors[sensor_name]
     found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)
@@ -1155,6 +1140,52 @@ def no_stepping_penalty(
     in_air = ~found.bool()
 
     return in_air.float().sum(dim=-1) * below_threshold.float()
+
+
+def planted_feet(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    foot_target_command_name: str,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+    sensor_foot_ids: tuple[int, int] = (0, 1),
+) -> torch.Tensor:
+    """Reward feet on the ground that should be, when the commanded speed is below threshold.
+
+    The foot-target task's form of ``no_stepping_penalty``: lifting a foot
+    that should stay down loses the weight, as the penalty would cost, but a
+    standing row never earns less than zero, so ending the episode never
+    pays.  The feet that should be down:
+      no foot target: both;
+      a single-foot target: the support foot;
+      a two-foot target (both feet by one offset, the trunk lowers): both;
+      published feet apart without a single-foot target (a target coming
+      back down, or handing over to a two-foot one): all but the foot whose
+      published target is higher.
+    ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
+    right) feet.
+
+    Returns the count of those feet on the ground per environment, 0 when the
+    commanded speed is at or above threshold (use with a positive weight).
+    """
+    command = env.command_manager.get_command(command_name)  # (N, 3)
+    cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
+    below_threshold = cmd_speed < command_threshold
+
+    foot_target = env.command_manager.get_term(foot_target_command_name)
+    height = foot_target.command.reshape(env.num_envs, 2, 3)[..., 2]
+    should_be_down = height <= height.flip(-1)  # (N, 2): not the higher foot
+    support = torch.arange(2, device=height.device) != foot_target.lifted_foot_idx[:, None]
+    single = foot_target.is_single_support_env.bool()[:, None]
+    should_be_down = torch.where(single, support, should_be_down)
+
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)
+    if found.dim() == 3:
+        found = found.any(dim=-1)  # (N, num_feet)
+    down = found.bool()[:, list(sensor_foot_ids)]
+
+    return (down & should_be_down).float().sum(dim=-1) * below_threshold.float()
 
 
 ########################## CURRICULUM #############################

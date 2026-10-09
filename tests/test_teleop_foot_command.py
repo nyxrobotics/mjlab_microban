@@ -3,14 +3,16 @@ standing twist, the 0.12 m/s target speed and the floor band."""
 
 from __future__ import annotations
 
+import re
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
 
 from mjlab_microban.tasks import microban_teleop_foot_command as fc
-from mjlab_microban.tasks.mdp import FootTargetCommand, no_stepping_penalty
+from mjlab_microban.tasks.mdp import FootTargetCommand, planted_feet
 from mjlab_microban.tasks.microban_teleop_mdp import ResetFixedFootTargetCommand
 
 
@@ -133,24 +135,73 @@ class StationaryFootTargetTest(unittest.TestCase):
         self.assertGreater(float(offsets[:, 0, :2].std()), 0.004)  # still spread over +-10 mm
         self.assertTrue(bool(((offsets[..., 2] >= 0.0025) & (offsets[..., 2] <= 0.012)).all()))
 
-    def test_no_stepping_is_waived_only_when_one_foot_moves_against_the_other(self) -> None:
-        # Rows: no target, single target drawn, single target coming down,
-        # both feet by one offset, both feet still apart (a single target
-        # handing over to a two-foot one).
-        published = torch.zeros(5, 2, 3)
-        published[2, 0, 2] = 0.02
-        published[3] = torch.tensor([0.005, -0.004, 0.01])
-        published[4] = torch.tensor([[0.0, 0.0, 0.03], [0.0, 0.0, 0.01]])
-        single = torch.tensor([False, True, False, False, False])
-        foot = SimpleNamespace(command=published.view(5, 6), is_single_support_env=single,
-                               is_both_feet_env=torch.tensor([False, False, False, True, True]))
-        twist = torch.zeros(5, 3)
+    def test_planted_feet_counts_the_feet_that_should_be_down(self) -> None:
+        # Rows (feet in the foot target's order, left then right): no target,
+        # single target on the left (right supports), single target on the
+        # right drawn but still in the floor band, single target on the left
+        # coming down, both feet by one offset, a single target on the right
+        # handing over to a two-foot one.
+        published = torch.zeros(6, 2, 3)
+        published[3, 0, 2] = 0.02
+        published[4] = torch.tensor([0.005, -0.004, 0.01])
+        published[5] = torch.tensor([[0.0, 0.0, 0.01], [0.0, 0.0, 0.03]])
+        single = torch.tensor([False, True, True, False, False, False])
+        lifted = torch.tensor([0, 0, 1, 0, 0, 1])
+        published[1, 0] = torch.tensor([0.01, 0.0, 0.04])
+        foot = SimpleNamespace(command=published.view(6, 6), is_single_support_env=single,
+                               lifted_foot_idx=lifted)
+        twist = torch.zeros(6, 3)
         terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
         manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
-        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.zeros(5, 2)))  # both feet in the air
-        env = SimpleNamespace(num_envs=5, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
-        penalty = no_stepping_penalty(env, "feet", foot_target_command_name="foot_target")
-        self.assertEqual(penalty.tolist(), [2.0, 0.0, 0.0, 2.0, 0.0])
+        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(6, 2)))
+        env = SimpleNamespace(num_envs=6, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
+
+        def count(found_left_right):  # the sensor lists right before left
+            sensor.data.found = torch.tensor(found_left_right, dtype=torch.float32).flip(-1)
+            return planted_feet(env, "feet", "foot_target", sensor_foot_ids=(1, 0)).tolist()
+
+        both_down = [[1, 1]] * 6
+        self.assertEqual(count(both_down), [2.0, 1.0, 1.0, 1.0, 2.0, 1.0])
+        # Only the support foot or the lower target's foot counts.
+        self.assertEqual(count([[1, 0]] * 6), [1.0, 0.0, 1.0, 0.0, 1.0, 1.0])
+        self.assertEqual(count([[0, 1]] * 6), [1.0, 1.0, 0.0, 1.0, 1.0, 0.0])
+        self.assertEqual(count([[0, 0]] * 6), [0.0] * 6)
+        # A walking command earns nothing, a slow one below 1 cm/s still counts.
+        twist[:3] = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.0, 0.4], [0.004, 0.0, 0.004]])
+        self.assertEqual(count(both_down), [0.0, 0.0, 1.0, 1.0, 2.0, 1.0])
+
+    def test_pico_rewards_planted_feet_from_the_arm_stage_instead_of_no_stepping(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_env_cfg import (
+            MICROBAN_TELEOP_PLANTED_FEET_WEIGHT,
+            TELEOP_STAGES,
+        )
+        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+            make_microban_teleop_v13_arm_overlay_env_cfg,
+        )
+
+        settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
+                    if s.manager == "reward" and s.term in ("planted_feet", "no_stepping")]
+        self.assertEqual(settings, [(TELEOP_STAGES[0].name, "weight", MICROBAN_TELEOP_PLANTED_FEET_WEIGHT)])
+        self.assertEqual([s.term for s in TELEOP_STAGES[0].settings if s.path == "weight"], ["planted_feet"])
+        rewards = make_microban_teleop_v13_arm_overlay_env_cfg().rewards
+        self.assertEqual(rewards["no_stepping"].weight, 0.0)
+        term = rewards["planted_feet"]
+        self.assertIs(term.func, planted_feet)
+        self.assertEqual(term.params["sensor_name"], "feet_ground_contact")
+        self.assertEqual(term.params["sensor_foot_ids"], (1, 0))
+
+    def test_the_contact_sensor_lists_the_right_foot_first(self) -> None:
+        import mujoco
+
+        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+
+        sensor = next(s for s in make_microban_velocity_env_cfg().scene.sensors if s.name == "feet_ground_contact")
+        xml = Path(fc.__file__).resolve().parents[1] / "robot" / "microban" / "robot.xml"
+        model = mujoco.MjModel.from_xml_path(str(xml))
+        bodies = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(model.nbody)]
+        sensed = [b for b in bodies if re.fullmatch(sensor.primary.pattern, b)]  # model order
+        site_body = {s: bodies[model.site_bodyid[model.site(s).id]] for s in ("left_foot", "right_foot")}
+        self.assertEqual([sensed.index(site_body[s]) for s in ("left_foot", "right_foot")], [1, 0])
 
     def test_the_foot_stage_sets_half(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES

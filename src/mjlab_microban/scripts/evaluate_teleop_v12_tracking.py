@@ -120,7 +120,7 @@ SUPPORT_FOOT_MOVE_MAX_M = 0.010
 # J2.  The adapter keeps the walker's velocity and survival rewards and its
 # pushes (+-0.5 m/s): it may fall at most 5 points more often than the walker.
 PUSH_FALL_RATE_MARGIN = 0.05
-# J3.  The no-stepping penalty counts airborne feet on a standing command; the
+# J3.  The planted-feet reward counts the feet down on a standing command; the
 # walking judgment allows 0.5 touchdowns per second (config/pipeline.yaml).
 STILL_TOUCHDOWNS_PER_S_MAX = 0.5
 # J4.  No reward depends on the arm pose, and the arms are driven from outside:
