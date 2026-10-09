@@ -68,8 +68,10 @@ def teleop_v12_action_clip_cfg() -> dict[str, tuple[float, float]]:
 
     return {r".*": (-SERVO_TARGET_RANGE_RAD, SERVO_TARGET_RANGE_RAD)}
 
-# 3e-4 (was 1e-4): with the foot stage's 50 % standing single-foot samples,
-# the unload reward grew 33 % in 200 updates against 8 % at 1e-4.
+# 3e-4 (was 1e-4): with the foot stage's 48 % standing single-foot samples,
+# the unload reward grew 33 % in 200 updates against 8 % at 1e-4.  Measured
+# only in the foot stage (resumed at update 4000 of a 1e-4 run); the warm-up
+# and arm stages before it ran at 1e-4 there and run at 3e-4 here.
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 3.0e-4
 
 

@@ -74,11 +74,14 @@ MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
-# The foot stage's single-foot targets: 60 % of the foot targets (rel_both_feet_envs
-# takes its share first), 85 % of them with a standing twist, so about 50 % of
-# the samples train one at full weight (30 % x 50 %: 15 %).  With the unload
-# reward the 50 % run gained 8 % of its unload reward in 200 updates, 33 % with
-# the learning rate also tripled (MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE).
+# The foot stage's single-foot targets: 60 % of the foot targets, 85 % of them
+# with a standing twist.  The command draws the single-foot rows first and
+# rel_both_feet_envs then turns its share of all rows into both-feet targets,
+# so 0.6 x 0.95 x 0.85 = 48 % of the samples train a standing single-foot
+# target at full weight (46 % from the tighten stage's 0.1; it was 0.3 x 0.5:
+# 15 %).  Resumed at update 4000 of a 1e-4 run, the unload reward grew 8 % in
+# 200 updates with these shares and 33 % with the learning rate also tripled
+# (MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE).
 PICO_SINGLE_SUPPORT_ENV_SHARE = 0.6
 PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # The lifted-support-feet penalty (mdp.lifted_support_feet) on a standing
@@ -125,12 +128,19 @@ MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 # lower foot is down.  With the unload reward alone the policy took the weight
 # off the higher foot and stopped there (lift 2 mm): the foot reward's exp
 # form, far from a 40 mm target, pays about 0.05 /s for each 1 mm.  This term
-# pays w / dz per metre all the way up (w = 10: 0.25 /s per mm at 40 mm) and
-# lifting started (11-13 mm at update 7000).  Paid on the height alone, a
-# heel raised with the toes down scored too, hence only off the floor; with
-# that the foot left the floor in every judged single-foot case, 22-39 mm up,
-# no falls (model_8999).  The same weight as the unload reward: both pay the
-# same rows up to w, the largest positive term there.
+# pays w / dz per metre all the way up (w = 10: 0.25 /s per mm at 40 mm).
+# The evidence comes from one chain of resumed runs, not from this recipe
+# trained from scratch: updates 0-4000 at 1e-4 with the old shares and no
+# lift term, 4000-6000 with the shares above at 3e-4 (still no lift term),
+# 6000-7000 with the lift paid on the height alone (trial C: lifting started,
+# 11-13 mm at update 7000, but a heel raised with the toes down scored too,
+# hence only off the floor), 7000-8999 with the lift paid only while the
+# higher foot touches nothing (trial D, model_8999: the foot left the floor
+# in every judged single-foot case, 22-39 mm up, no falls).  Here the term
+# is on from the foot stage.  The lower-foot-down condition is not D's; on
+# D's model_8999 the lower foot was never up while the higher one was off the
+# floor, so it changes no row D trained on.  The same weight as the unload
+# reward: both pay the same rows up to w, the largest positive term there.
 MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
