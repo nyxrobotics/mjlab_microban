@@ -29,6 +29,8 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     arm_walk_min_speed,
     _acceptance,
     canonical_settings,
+    _cfg,
+    feet_on_floor,
     foot_error_limit_m,
     required_tracking_check_names,
     required_tracking_profile,
@@ -327,6 +329,19 @@ class TeleopV12StageTest(unittest.TestCase):
         toes = _results()
         _find(toes["feet"], "right_up20")["air_share_median"][1] = 0.89
         self.assertFalse(_acceptance(toes)[0]["foot_lift"])
+
+    def test_the_judgment_reads_the_feet_left_then_right_as_the_training_does(self) -> None:
+        from types import SimpleNamespace
+
+        term = _cfg(0, 10)[0].rewards["lifted_support_feet"]
+        sensor = SimpleNamespace(data=SimpleNamespace())
+        env = SimpleNamespace(reward_manager=SimpleNamespace(get_term_cfg={"lifted_support_feet": term}.__getitem__),
+                              scene=SimpleNamespace(sensors={term.params["sensor_name"]: sensor}))
+        # The contact sensor lists the right foot (body foot) first.
+        sensor.data.found = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        self.assertEqual(feet_on_floor(env).tolist(), [[False, True], [True, False], [True, True]])
+        sensor.data.found = torch.tensor([[[0.0, 2.0], [0.0, 0.0]]])  # per contact slot
+        self.assertEqual(feet_on_floor(env).tolist(), [[False, True]])
 
     def test_the_support_foot_stays(self) -> None:
         moved = _results()

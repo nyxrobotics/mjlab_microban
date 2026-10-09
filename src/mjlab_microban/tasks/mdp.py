@@ -1220,12 +1220,18 @@ def _standing_and_feet_down(
     single = foot_target.is_single_support_env.bool()[:, None]
     should_be_down = torch.where(single, support & should_be_down, should_be_down)
 
-    sensor = env.scene.sensors[sensor_name]
+    down = feet_down(env.scene.sensors[sensor_name], sensor_foot_ids)
+    return standing, height, should_be_down, down
+
+
+def feet_down(sensor, sensor_foot_ids: tuple[int, int]) -> torch.Tensor:
+    """Per foot (N, 2), in the foot target's (left, right) order, whether the
+    contact ``sensor`` finds it touching; ``sensor_foot_ids`` are the sensor's
+    indices of those feet."""
     found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)
     if found.dim() == 3:
         found = found.any(dim=-1)  # (N, num_feet)
-    down = found.bool()[:, list(sensor_foot_ids)]
-    return standing, height, should_be_down, down
+    return found.bool()[:, list(sensor_foot_ids)]
 
 
 def lifted_support_feet(

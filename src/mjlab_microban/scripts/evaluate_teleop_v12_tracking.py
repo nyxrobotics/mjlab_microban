@@ -83,6 +83,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
+from mjlab_microban.tasks.mdp import feet_down
 from mjlab_microban.tasks.microban_teleop_mdp import HmdNeckTargetMotion
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -117,11 +118,9 @@ SEED_COUNT = 2
 # dz (the feet stay on the floor).  Either way 0.7 x dz:
 FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
 # ... and off the floor (no pushes): a foot held up by its toes reaches the
-# height on the floor.  upper_foot_unload does not ask this: it reads only the
-# floor's push, so above its 10 mm threshold (every J1 single-foot target is
-# 20 mm or more) a foot touching the floor with no weight on it scores in full
-# there.  This check catches that.  The foot may touch down for a tenth of the
-# scored time.
+# height on the floor.  upper_foot_unload does not ask this (it reads only the
+# floor's push); upper_foot_lift pays only off the floor.  The foot may touch
+# down for a tenth of the scored time.
 FOOT_AIR_MIN_SHARE = 0.9
 FOOT_ERROR_SHARE = 0.3
 FOOT_ERROR_FLOOR_M = 0.008  # the floor for small targets: still scores 0.93
@@ -377,6 +376,15 @@ def _leg_joint_ids(term: Any) -> list[int]:
     return [int(i) for i in term.target_ids[term.policy_columns]]
 
 
+def feet_on_floor(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Per foot (N, 2), left and right, whether it touches the floor: the
+    sensor and feet the training's lifted_support_feet reads (the contact
+    sensor lists the right foot first)."""
+
+    params = env.reward_manager.get_term_cfg("lifted_support_feet").params
+    return feet_down(env.scene.sensors[params["sensor_name"]], params["sensor_foot_ids"])
+
+
 def _cfg(seed: int, steps: int) -> tuple[Any, float]:
     cfg = make_microban_teleop_v12_env_cfg(play=True)
     training = make_microban_teleop_v12_env_cfg(play=False)
@@ -412,7 +420,6 @@ def _rollout(
     spec = per_env(scenarios, index)
     foot_term = env.command_manager.get_term("foot_target")
     sites = foot_term._foot_asset_cfg.site_ids
-    contact = env.scene.sensors["feet_ground_contact"]
     hmd = env.event_manager.get_term_cfg("hmd_neck_target_motion").func
     if not isinstance(hmd, HmdNeckTargetMotion) or tuple(hmd.joint_names) != MICROBAN_HMD_JOINT_NAMES:
         raise TypeError("The PICO judgment needs the HmdNeckTargetMotion step event")
@@ -443,7 +450,7 @@ def _rollout(
     support_move = torch.zeros(n, device=device)
     twist_sum = torch.zeros(n, 3, device=device)
     touchdowns = torch.zeros(n, device=device)
-    down = contact.data.found.reshape(n, -1)[:, :2] > 0
+    down = feet_on_floor(env)
     hmd_min = torch.full((n, 3, 2), math.inf, device=device)
     hmd_max = torch.full((n, 3, 2), -math.inf, device=device)
     reference: dict[str, torch.Tensor] = {}
@@ -501,7 +508,7 @@ def _rollout(
                 ctx.soft_limit_joint = robot.joint_names[ctx.leg_ids[int(worst.argmax())]]
         feet_w = robot.data.site_pos_w[:, sites, :]
         relative = foot_term.left_from_right_level()
-        now_down = contact.data.found.reshape(n, -1)[:, :2] > 0
+        now_down = feet_on_floor(env)
         if step + 1 == FOOT_TARGET_STEP:
             # The lifted foot's reference is the one the reward uses: the feet at reset (HOME).
             default = foot_term._default_foot_pos_b
