@@ -342,6 +342,13 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertEqual(feet_on_floor(env).tolist(), [[False, True], [True, False], [True, True]])
         sensor.data.found = torch.tensor([[[0.0, 2.0], [0.0, 0.0]]])  # per contact slot
         self.assertEqual(feet_on_floor(env).tolist(), [[False, True]])
+        # The rollout reads the feet only through it, never the sensor's columns.
+        import inspect
+
+        import mjlab_microban.scripts.evaluate_teleop_v12_tracking as judgment
+
+        self.assertNotIn(".found", inspect.getsource(judgment).replace(inspect.getsource(feet_on_floor), ""))
+        self.assertEqual(inspect.getsource(judgment._rollout).count("feet_on_floor(env)"), 2)
 
     def test_the_support_foot_stays(self) -> None:
         moved = _results()
