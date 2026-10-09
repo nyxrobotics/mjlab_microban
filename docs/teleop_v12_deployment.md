@@ -1,7 +1,7 @@
 # PICO package (`export_teleop_v12_deployment`)
 
 The PICO policy of a release is the last checkpoint of its one training run,
-`model_8999` (9000 updates, `PICO_TOTAL_UPDATES` in
+`model_14999` (15000 updates, `PICO_TOTAL_UPDATES` in
 `mjlab_microban/schedules.py`).  It is judged once
 (`scripts/retrain_all_for_home.py`, step pico): the 9x300 locomotion
 evaluation, the tracking evaluation under the one final profile and the ONNX
@@ -12,8 +12,8 @@ packages it:
 ```bash
 uv run --locked python -m \
   mjlab_microban.scripts.export_teleop_v12_deployment \
-  --checkpoint logs/rsl_rl/mjlab_microban_teleop_v12/<run>/model_8999.pt \
-  --stage-gate <state>/pico_judgment/<run>_model_8999_gate.json \
+  --checkpoint logs/rsl_rl/mjlab_microban_teleop_v12/<run>/model_14999.pt \
+  --stage-gate <state>/pico_judgment/<run>_model_14999_gate.json \
   --output <state>/release/pico_teleop.onnx --force
 ```
 

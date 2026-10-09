@@ -58,7 +58,7 @@ GETUP_TOTAL_UPDATES = scaled(18000)
 # PICO: the critic of the frozen walker's adapter warms up for
 # PICO_WARMUP_UPDATES (no actor column trains before the arms move), then the
 # externally driven arms and the moving HMD (with their columns), feet 3000
-# updates later (tightened 2000 later) and 3000 more updates with everything
+# updates later (tightened 2000 later) and 9000 more updates with everything
 # active and tightened.
 PICO_STEPS_PER_UPDATE = 24
 PICO_WARMUP_UPDATES = 1000
@@ -68,7 +68,7 @@ PICO_SCHEDULE = {
     "foot": scaled(PICO_WARMUP_UPDATES + 3000),
     "foot_tighten": scaled(PICO_WARMUP_UPDATES + 5000),
 }
-PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 8000)
+PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 14000)
 # Recorded in every PICO checkpoint and package: the adapter's gradient
 # schedule (which actor columns train after which update; the residual MLP
 # trains with the HMD and arm columns).

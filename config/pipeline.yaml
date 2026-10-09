@@ -6,7 +6,7 @@
 # to --dry-run only.
 #
 # Each policy trains once from scratch for its fixed number of updates
-# (walking 30000, PICO 9000, get-up 18000) and its last checkpoint is judged
+# (walking 30000, PICO 15000, get-up 18000) and its last checkpoint is judged
 # once.  A failed item fails the step: the test is questioned first (a wrong
 # test is fixed and the rerun re-judges without retraining); a valid failing
 # test stops the release.  stage_tolerance: a curriculum stage may start at

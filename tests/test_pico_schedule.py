@@ -46,7 +46,7 @@ class PicoScheduleTest(unittest.TestCase):
         self.assertEqual(
             PICO_SCHEDULE, {"arm": 1000, "foot": 4000, "foot_tighten": 6000}
         )
-        self.assertEqual(PICO_TOTAL_UPDATES, 9000)
+        self.assertEqual(PICO_TOTAL_UPDATES, 15000)
         self.assertEqual(MicrobanTeleopV12RlCfg.max_iterations, PICO_TOTAL_UPDATES)
         self.assertEqual(MicrobanTeleopV12RlCfg.num_steps_per_env, PICO_STEPS_PER_UPDATE)
         self.assertEqual(PICO_ADAPTER_SCHEDULE_REVISION, "freeze_extra_residual_to1000_then_hmd_arm_residual_to4000_then_all_v4")

@@ -72,14 +72,14 @@ normalizer 全体は親 module が train mode になっても更新されない�
 ## 1本の学習と判定
 
 `scripts/retrain_all_for_home.py` の PICO 段階が、歩行器の probe と bootstrap ゲートのあと、
-`Mjlab-Teleop-V13-ArmOverlay-Microban` を1つのプロセスで 9000 回学習する（2048 env、seed 42）。
+`Mjlab-Teleop-V13-ArmOverlay-Microban` を1つのプロセスで 15000 回学習する（2048 env、seed 42）。
 
 | 回数 | 段 |
 | --- | --- |
 | 0-999 | critic の準備（歩行器は凍結、追加列は 0。全指令範囲・押し ±0.5 m/s） |
 | 1000- | 腕を動かす、動く HMD、立ち止まりの足踏み罰 |
 | 4000- | 足先の目標 |
-| 6000-8999 | 足先を絞る |
+| 6000-14999 | 足先を絞る |
 
 同じことを手で回すときは、次のとおり（`W` は歩行器の checkpoint）:
 
@@ -98,7 +98,7 @@ uv run --locked train Mjlab-Teleop-V13-ArmOverlay-Microban --env.scene.num-envs 
   --agent.save-pristine-checkpoint True
 ```
 
-途中で止まったら最初から学習し直す。判定は学習の最後の保存点（`model_8999`）で1回だけ、9x300・最終
+途中で止まったら最初から学習し直す。判定は学習の最後の保存点（`model_14999`）で1回だけ、9x300・最終
 プロファイルの追従評価・ONNX パリティ（どれも seed 42）（docs/teleop_v12_deployment.md）。
 
 どの report でも status/check/hash/schema/必要 scenario/evidence が欠けたら停止する。空の `checks={}` は pass と
