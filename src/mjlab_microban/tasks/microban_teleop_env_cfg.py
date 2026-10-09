@@ -118,8 +118,9 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # or more (the old +3: -2.8 to -3.4) and pays the first 10 % of the weight
 # moved 2 /s.  Those costs were taken over lifts of 0.26 s or less, while the
 # trunk moved; a foot held up for a 3-8 s target pays the move once, so the
-# margin is larger.  10 /s is the largest positive term on these rows
-# (track_linear 5 + track_angular 2 + upright 1 + pose 1 = 9).
+# margin is larger.  10 /s is the largest positive weight on these rows,
+# shared with the lift and the foot reward's single-foot rows (track_linear
+# 5 + track_angular 2 + upright 1 + pose 1 = 9).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 # The lift reward (mdp.upper_foot_lift), on a standing row whose published
@@ -140,7 +141,8 @@ MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 # is on from the foot stage.  The lower-foot-down condition is not D's; on
 # D's model_8999 the lower foot was never up while the higher one was off the
 # floor, so it changes no row D trained on.  The same weight as the unload
-# reward: both pay the same rows up to w, the largest positive term there.
+# reward: both pay the same rows up to w, the largest positive weight there,
+# shared with the foot reward's single-foot rows.
 MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
 # The foot reward's weight on those rows, as the lift's.  At weight 3 its exp
 # paid 0.05-0.09 /s per mm far from the target (lift: 0.25), the lifted foot
