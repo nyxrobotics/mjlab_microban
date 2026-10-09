@@ -389,6 +389,33 @@ class StationaryFootTargetTest(unittest.TestCase):
         for share in both.values():
             self.assertAlmostEqual(0.6 * (1.0 - share) * 0.85, 0.5, delta=0.05)
 
+    def test_pico_feet_distance_is_below_every_single_foot_target(self) -> None:
+        import mujoco
+
+        from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+            make_microban_teleop_v13_arm_overlay_env_cfg,
+        )
+        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+
+        cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
+        xml = Path(fc.__file__).resolve().parents[1] / "robot" / "microban" / "robot.xml"
+        model = mujoco.MjModel.from_xml_path(str(xml))
+        data = mujoco.MjData(model)
+        for name, value in cfg.scene.entities["robot"].init_state.joint_pos.items():
+            data.qpos[model.jnt_qposadr[model.joint(name).id]] = value
+        mujoco.mj_kinematics(model, data)
+        home = float(abs(data.site("left_foot").xpos[1] - data.site("right_foot").xpos[1]))
+        self.assertAlmostEqual(home, 0.0928, delta=0.0005)
+        # The lifted foot reaches at most this far in; the two-foot targets
+        # move both feet by one offset.
+        reach_in = max(abs(v) for v in cfg.commands["foot_target"].reach_xy_range)
+        self.assertNotIn("reach_xy_range", [s.path for stage in TELEOP_STAGES for s in stage.settings])
+        min_dist = cfg.rewards["feet_distance"].params["min_dist"]
+        self.assertEqual(min_dist, 0.06)
+        self.assertLess(min_dist, home - reach_in)
+        self.assertEqual(make_microban_velocity_env_cfg().rewards["feet_distance"].params["min_dist"], 0.08)
+
 
 if __name__ == "__main__":
     unittest.main()

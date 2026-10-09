@@ -495,9 +495,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # V2 converged to a wide static stance because the inherited term penalized
     # the 72 mm neutral foot spacing below an 80 mm threshold with weight -1000.
     # Keep a collision-avoidance margin, but do not make neutral stance itself a
-    # dominant violation in this task.
+    # dominant violation in this task.  60 mm, below the narrowest single-foot
+    # target (HOME 92.8 mm less the 30 mm reach in): at 70 mm 8.3 % of them were
+    # narrower, and the best place for the lifted foot was up to 7.2 mm off it.
     cfg.rewards["feet_distance"].weight = -100.0
-    cfg.rewards["feet_distance"].params["min_dist"] = 0.07
+    cfg.rewards["feet_distance"].params["min_dist"] = 0.06
     cfg.rewards["dof_pos_limits"].weight = -10.0
     # The walking task's no_stepping stays at 0 here: on a standing command
     # PICO penalizes the feet in the air that should be down instead (weight
