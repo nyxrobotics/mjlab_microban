@@ -38,6 +38,7 @@ from mjlab_microban.tasks.mdp import (
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
+    single_support,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -82,6 +83,19 @@ PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
 # r / |w| = 0.9, so a fall does not pay; a stop/walk switch steps the 2 s value
 # by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
 MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
+# The single-stance reward (mdp.single_support): 1 on a standing row whose
+# published foot targets differ in z by the threshold or more, while the lower
+# foot is down and the higher one in the air.  Threshold 10 mm: 4x the 2.5 mm
+# floor band, reached by 84 % of the single-foot targets (z ~ U(2.5, 50) mm).
+# Weight (from the foot stage), per second on such a row, model_8999 standing
+# rows (stochastic): lifting a foot costs at most L = 0.55 + 0.25 + 0.52 + 0.09
+# = 1.4 (the linear and yaw velocity errors and the action rate doubled,
+# upright 0.99 -> 0.90; the leg pose is 1.0 on foot-target rows, the lifted
+# foot is not a support foot) and the foot reward pays 0.04-0.79 for it (std
+# 0.05, w 2, 10-50 mm).  w = 2 L = 2.8 -> 3 makes even a 10 mm lift pay
+# 3 + 0.04 - 1.4 = 1.6 more than standing on both feet (17 % of the 9.3 /s).
+MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
+MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT = 3.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -173,6 +187,7 @@ TELEOP_STAGES = (
         "enable broad stationary foot tracking",
         PICO_SCHEDULE["foot"],
         (
+            Setting("reward", "single_support", "weight", MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
@@ -435,6 +450,16 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "command_name": "twist",
             "command_threshold": cfg.rewards["no_stepping"].params["command_threshold"],
             "sensor_foot_ids": (1, 0),
+        },
+    )
+    # Standing on the lower foot with the higher one up (weight in the foot
+    # stage), the same rows and feet as lifted_support_feet.
+    cfg.rewards["single_support"] = RewardTermCfg(
+        func=single_support,
+        weight=0.0,
+        params={
+            **cfg.rewards["lifted_support_feet"].params,
+            "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
         },
     )
 

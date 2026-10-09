@@ -1142,18 +1142,18 @@ def no_stepping_penalty(
     return in_air.float().sum(dim=-1) * below_threshold.float()
 
 
-def lifted_support_feet(
+def _standing_and_feet_down(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     foot_target_command_name: str,
-    command_name: str = "twist",
-    command_threshold: float = 0.01,
-    sensor_foot_ids: tuple[int, int] = (0, 1),
-) -> torch.Tensor:
-    """Penalize feet in the air that should be down, when the commanded speed is below threshold.
+    command_name: str,
+    command_threshold: float,
+    sensor_foot_ids: tuple[int, int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The standing rows and, per foot of the foot target (left, right), its
+    published target height, whether it should be down and whether it is.
 
-    The foot-target task's form of ``no_stepping_penalty``.  The feet that
-    should be down:
+    The feet that should be down:
       no foot target: both;
       a single-foot target: the support foot, unless its published target is
       still the higher one (handing over from a target on that foot);
@@ -1164,12 +1164,11 @@ def lifted_support_feet(
     ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
     right) feet.
 
-    Returns the count of those feet in the air per environment, 0 when the
-    commanded speed is at or above threshold (use with a negative weight).
+    Returns (standing (N,), height (N, 2), should_be_down (N, 2), down (N, 2)).
     """
     command = env.command_manager.get_command(command_name)  # (N, 3)
     cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
-    below_threshold = cmd_speed < command_threshold
+    standing = cmd_speed < command_threshold
 
     foot_target = env.command_manager.get_term(foot_target_command_name)
     height = foot_target.command.reshape(env.num_envs, 2, 3)[..., 2]
@@ -1183,8 +1182,55 @@ def lifted_support_feet(
     if found.dim() == 3:
         found = found.any(dim=-1)  # (N, num_feet)
     down = found.bool()[:, list(sensor_foot_ids)]
+    return standing, height, should_be_down, down
 
-    return (~down & should_be_down).float().sum(dim=-1) * below_threshold.float()
+
+def lifted_support_feet(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    foot_target_command_name: str,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+    sensor_foot_ids: tuple[int, int] = (0, 1),
+) -> torch.Tensor:
+    """Penalize feet in the air that should be down, when the commanded speed is below threshold.
+
+    The foot-target task's form of ``no_stepping_penalty``; the feet that
+    should be down are those of ``_standing_and_feet_down``.
+
+    Returns the count of those feet in the air per environment, 0 when the
+    commanded speed is at or above threshold (use with a negative weight).
+    """
+    standing, _, should_be_down, down = _standing_and_feet_down(
+        env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
+    )
+    return (~down & should_be_down).float().sum(dim=-1) * standing.float()
+
+
+def single_support(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    foot_target_command_name: str,
+    lift_threshold: float,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+    sensor_foot_ids: tuple[int, int] = (0, 1),
+) -> torch.Tensor:
+    """Reward standing on the lower foot with the higher one in the air.
+
+    On a standing command (as ``lifted_support_feet``) whose two published
+    foot targets differ in height by ``lift_threshold`` or more: 1 when the
+    foot that should be down (``_standing_and_feet_down``, the lower one) is
+    down and the higher one is in the air, else 0.  A row with no foot that
+    should be down (a single-foot target handing over from a target on its
+    support foot) gets 0.
+    """
+    standing, height, should_be_down, down = _standing_and_feet_down(
+        env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
+    )
+    apart = (height[:, 0] - height[:, 1]).abs() >= lift_threshold
+    stance = should_be_down.any(dim=-1) & (down == should_be_down).all(dim=-1)
+    return (standing & apart & stance).float()
 
 
 ########################## CURRICULUM #############################

@@ -12,7 +12,7 @@ from unittest import mock
 import torch
 
 from mjlab_microban.tasks import microban_teleop_foot_command as fc
-from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet
+from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, single_support
 from mjlab_microban.tasks.microban_teleop_mdp import ResetFixedFootTargetCommand
 
 
@@ -172,6 +172,87 @@ class StationaryFootTargetTest(unittest.TestCase):
         # A walking command costs nothing, a slow one below 1 cm/s still counts.
         twist[:3] = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.0, 0.4], [0.004, 0.0, 0.004]])
         self.assertEqual(count(both_up), [0.0, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0])
+
+    def test_single_support_pays_the_lower_foot_down_and_the_higher_one_up(self) -> None:
+        # Rows (feet left, right): no target; single target on the left at
+        # 30 mm; single target on the right at 30 mm; single target on the
+        # right at 9.9 mm (below the 10 mm threshold); single target on the
+        # left at exactly 10 mm; a left target coming down (no single
+        # target); both feet by one offset; a single target on the right
+        # drawn while the left one (40 mm) is still coming down from above.
+        published = torch.zeros(8, 2, 3)
+        published[1, 0] = torch.tensor([0.01, 0.0, 0.03])
+        published[2, 1, 2] = 0.03
+        published[3, 1, 2] = 0.0099
+        published[4, 0, 2] = 0.010
+        published[5, 0, 2] = 0.02
+        published[6] = torch.tensor([0.0, 0.0, 0.012])
+        published[7] = torch.tensor([[0.0, 0.0, 0.04], [0.0, 0.0, 0.01]])
+        single = torch.tensor([False, True, True, True, True, False, False, True])
+        lifted = torch.tensor([0, 0, 1, 1, 0, 0, 0, 1])
+        foot = SimpleNamespace(command=published.view(8, 6), is_single_support_env=single,
+                               lifted_foot_idx=lifted)
+        twist = torch.zeros(8, 3)
+        terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
+        manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
+        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(8, 2)))
+        env = SimpleNamespace(num_envs=8, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
+
+        def value(found_left_right, term=single_support, **kw):  # the sensor lists right before left
+            sensor.data.found = torch.tensor(found_left_right, dtype=torch.float32).flip(-1) * 3.0
+            return term(env, "feet", "foot_target", sensor_foot_ids=(1, 0), **kw).tolist()
+
+        def reward(found_left_right):
+            return value(found_left_right, lift_threshold=0.01)
+
+        self.assertEqual(reward([[1, 1]] * 8), [0.0] * 8)
+        self.assertEqual(reward([[0, 0]] * 8), [0.0] * 8)
+        # Right foot down, left up: the left targets 30 mm, 10 mm and the
+        # one coming down pay; a right target never pays for it.
+        self.assertEqual(reward([[0, 1]] * 8), [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
+        # Left foot down, right up: only the 30 mm right target pays; 9.9 mm
+        # is below the threshold, and a right target still below the left
+        # one coming down has no foot that should be down.
+        self.assertEqual(reward([[1, 0]] * 8), [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        # A paying row is one where lifted_support_feet counts no foot.
+        for found in ([[0, 1]] * 8, [[1, 0]] * 8):
+            penalty = value(found, term=lifted_support_feet)
+            for paid, count in zip(reward(found), penalty):
+                if paid:
+                    self.assertEqual(count, 0.0)
+        # A walking command pays nothing; a slow one below 1 cm/s still pays.
+        twist[1] = torch.tensor([0.1, 0.0, 0.0])
+        twist[2] = torch.tensor([0.0, 0.0, 0.4])
+        twist[4] = torch.tensor([0.004, 0.0, 0.004])
+        self.assertEqual(reward([[0, 1]] * 8), [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
+        self.assertEqual(reward([[1, 0]] * 8), [0.0] * 8)
+
+    def test_pico_rewards_single_support_from_the_foot_stage(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_env_cfg import (
+            MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+            MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT,
+            TELEOP_STAGES,
+        )
+        from mjlab_microban.tasks.microban_teleop_mdp import MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
+        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+            make_microban_teleop_v13_arm_overlay_env_cfg,
+        )
+
+        settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
+                    if s.manager == "reward" and s.term == "single_support"]
+        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT)])
+        self.assertGreater(MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT, 0.0)
+        cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
+        term = cfg.rewards["single_support"]
+        self.assertIs(term.func, single_support)
+        self.assertEqual(term.weight, 0.0)
+        penalty = cfg.rewards["lifted_support_feet"].params
+        self.assertEqual({k: v for k, v in term.params.items() if k != "lift_threshold"}, penalty)
+        threshold = term.params["lift_threshold"]
+        self.assertEqual(threshold, MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M)
+        # Above the floor band, below the highest single-foot target.
+        self.assertGreater(threshold, MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M)
+        self.assertLess(threshold, cfg.commands["foot_target"].lift_height_range[1])
 
     def test_pico_penalizes_lifted_support_feet_from_the_arm_stage_instead_of_no_stepping(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
