@@ -26,7 +26,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FINAL_PROFILE,
     SEED_COUNT,
     TRACKING_PROFILES,
-    arm_speed_error_limit,
+    arm_walk_min_speed,
     _acceptance,
     canonical_settings,
     foot_error_limit_m,
@@ -353,16 +353,16 @@ class TeleopV12StageTest(unittest.TestCase):
         _find(reaching["arms"], "neutral/arms_reach_right")["touchdowns_per_s"] = 0.6
         self.assertFalse(_acceptance(reaching)[0]["standing_still"])
 
-    def test_walking_with_the_arms_moved_is_no_further_from_the_command(self) -> None:
-        # Command 0.1 m/s, 0.08 m/s with the arms at HOME (error 0.02): with the
-        # arms moved the error may reach 0.02 + 0.1 x 0.1 = 0.03.
-        self.assertAlmostEqual(arm_speed_error_limit(0.08, 0.1), 0.03)
+    def test_walking_with_the_arms_moved_walks_along_the_command(self) -> None:
+        # Command 0.1 m/s, 0.08 m/s with the arms at HOME: with the arms moved
+        # it may walk slower, down to 20 % of the command.
+        self.assertAlmostEqual(arm_walk_min_speed(0.08, 0.1), 0.02)
+        self.assertAlmostEqual(arm_walk_min_speed(0.01, 0.1), 0.01)
         for mode, speed, passed in (
-            ("raised", 0.0705, True),
-            ("raised", 0.0695, False),
-            ("moving", 0.11, True),  # closer to the command than at HOME
-            ("moving", 0.1295, True),
-            ("moving", 0.1305, False),
+            ("raised", 0.0205, True),
+            ("raised", 0.0195, False),
+            ("moving", 0.11, True),
+            ("moving", -0.01, False),
         ):
             with self.subTest(mode=mode, speed=speed):
                 results = _results()

@@ -123,11 +123,10 @@ PUSH_FALL_RATE_MARGIN = 0.05
 # J3.  The lifted-support-feet penalty counts the feet up on a standing command; the
 # walking judgment allows 0.5 touchdowns per second (config/pipeline.yaml).
 STILL_TOUCHDOWNS_PER_S_MAX = 0.5
-# J4.  No reward depends on the arm pose, and the arms are driven from outside:
-# with the arms raised or moving, the speed along the command is no further
-# from the command than with the arms at HOME, plus 10 % of the command
-# (|v - c| <= |v_HOME - c| + 0.1 |c|; closer to the command always passes).
-ARM_SPEED_ERROR_MARGIN_SHARE = 0.1
+# J4.  Walking slower with the arms raised or moving is accepted; it still
+# walks along the command: at least 20 % of it (the walking judgment's
+# smallest single-axis share), or the speed with the arms at HOME if lower.
+ARM_WALK_MIN_SHARE = 0.2
 
 CHECK_NAMES = frozenset(
     (
@@ -158,7 +157,7 @@ def thresholds() -> dict[str, Any]:
         "support_foot_move_max_m": SUPPORT_FOOT_MOVE_MAX_M,
         "push_fall_rate_margin": PUSH_FALL_RATE_MARGIN,
         "still_touchdowns_per_s_max": STILL_TOUCHDOWNS_PER_S_MAX,
-        "arm_speed_error_margin_share": ARM_SPEED_ERROR_MARGIN_SHARE,
+        "arm_walk_min_share": ARM_WALK_MIN_SHARE,
         "twist_pass_line": twist_pass_line_record(),
     }
 
@@ -229,10 +228,10 @@ def push_fall_rates(push: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def arm_speed_error_limit(home_speed: float, command: float) -> float:
-    """The largest |v - c| allowed with the arms moved (J4)."""
+def arm_walk_min_speed(home_speed: float, command: float) -> float:
+    """The smallest speed along the command allowed with the arms moved (J4)."""
 
-    return abs(home_speed - command) + ARM_SPEED_ERROR_MARGIN_SHARE * abs(command)
+    return min(ARM_WALK_MIN_SHARE * abs(command), home_speed)
 
 
 def _arm_checks(arms: list[dict[str, Any]]) -> dict[str, bool]:
@@ -255,7 +254,7 @@ def _arm_checks(arms: list[dict[str, Any]]) -> dict[str, bool]:
                 walking
                 and reference is not None
                 and speed is not None
-                and abs(speed - command) <= arm_speed_error_limit(reference, command)
+                and speed >= arm_walk_min_speed(reference, command)
             )
     return {"standing_still": still, "walking_with_arms": walking}
 

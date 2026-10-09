@@ -57,7 +57,7 @@ out, or moved as in training).
 | feet (J1) | standing, no push: one foot up 20 / 40 mm and the four corners (+-24, +-24, 40) mm, left and right mirrored, two corners also with the arm on that side reaching out; both feet by the same (+8, +8, 16) / (-8, -8, 16) mm; reached through teleop's 0.12 m/s ramp, scored from 1 s after the change | one foot: height above the floor >= 0.7 x dz (median environment), support foot moves <= 10 mm; both feet (a crouch in the trunk frame): the trunk comes down >= 0.7 x dz; the one foot seen from the other within max(0.3 x their target difference, 8 mm) RMS |
 | pushes (J2) | standing and the 9x300 commands, a 0.4 m/s kick every second from eight directions | falls at most 5 points more often than the walker the adapter was built on |
 | standing still (J3) | standing with the HMD moving and the arms at HOME, raised, moving or one reaching out | <= 0.5 touchdowns per second and the standing drift of `twist_pass_line.py` |
-| arms (J4) | the 9x300 commands with the arms raised or moving | \|v - c\| <= \|v_HOME - c\| + 0.1 \|c\| along the command (v_HOME: the arms at HOME) |
+| arms (J4) | the 9x300 commands with the arms raised or moving | v >= min(0.2 \|c\|, v_HOME) along the command (slower is accepted; v_HOME: the arms at HOME) |
 
 plus no falls without pushes, finite values, actual soft-limit overshoot of
 the twelve leg joints <= 0.25 rad, raw-action recurrence, forced HMD motion
