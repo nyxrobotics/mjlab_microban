@@ -90,7 +90,13 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # of the single-foot targets (z ~ U(2.5, 50) mm); from it up the higher foot
 # carries nothing.  On the same rows the foot reward measures the lifted foot
 # from the support foot (mdp.foot_target_tracking_error_exp), so how high it
-# goes is the foot reward's.
+# goes is the foot reward's: this term reads only the floor's push, and a
+# higher foot touching the floor with no weight on it scores in full (the
+# evaluation's air share watches that).  No contact test: it would pay again
+# the sub-millimetre contact flicker that took 57 % of the old reward.
+# Below the threshold the foot reward measures the feet in the trunk frame, so
+# moving the trunk over the lower foot costs there: s* at dz = 5 mm moves it
+# ~18 mm, -0.24 /s (foot stage), against +5 to +9 /s here.
 # Weight (from the foot stage), per second: from both feet down evenly (s =
 # 0.5, reward 0 at dz >= 10 mm) to all the weight on the lower foot pays w;
 # each 10 % of the weight moved pays w / 5.  What it costs, in the other terms
@@ -100,7 +106,10 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # or more, over 80 % of it the velocity terms (the trunk moving over the
 # support foot on a standing command).  w = 10 leaves +3.8 to +4.4 /s at 10 mm
 # or more (the old +3: -2.8 to -3.4) and pays the first 10 % of the weight
-# moved 2 /s.
+# moved 2 /s.  Those costs were taken over lifts of 0.26 s or less, while the
+# trunk moved; a foot held up for a 3-8 s target pays the move once, so the
+# margin is larger.  10 /s is the largest positive term on these rows
+# (track_linear 5 + track_angular 2 + upright 1 + pose 1 = 9).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
