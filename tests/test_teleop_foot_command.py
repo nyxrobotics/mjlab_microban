@@ -12,7 +12,7 @@ from unittest import mock
 import torch
 
 from mjlab_microban.tasks import microban_teleop_foot_command as fc
-from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, single_support
+from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, upper_foot_unload
 from mjlab_microban.tasks.microban_teleop_mdp import ResetFixedFootTargetCommand
 
 
@@ -173,19 +173,19 @@ class StationaryFootTargetTest(unittest.TestCase):
         twist[:3] = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.0, 0.4], [0.004, 0.0, 0.004]])
         self.assertEqual(count(both_up), [0.0, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0])
 
-    def test_single_support_pays_the_lower_foot_down_and_the_higher_one_up(self) -> None:
+    def test_upper_foot_unload_pays_the_higher_foot_off_its_share_of_the_weight(self) -> None:
         # Rows (feet left, right): no target; single target on the left at
         # 30 mm; single target on the right at 30 mm; single target on the
-        # right at 9.9 mm (below the 10 mm threshold); single target on the
+        # right at 5 mm (half the 10 mm threshold); single target on the
         # left at exactly 10 mm; a left target coming down (no single
-        # target); both feet by one offset; a single target on the right
-        # drawn while the left one (40 mm) is still coming down from above.
+        # target) at 2 mm; both feet by one offset; a single target on the
+        # right drawn while the left one (40 mm) is still coming down.
         published = torch.zeros(8, 2, 3)
         published[1, 0] = torch.tensor([0.01, 0.0, 0.03])
         published[2, 1, 2] = 0.03
-        published[3, 1, 2] = 0.0099
+        published[3, 1, 2] = 0.005
         published[4, 0, 2] = 0.010
-        published[5, 0, 2] = 0.02
+        published[5, 0, 2] = 0.002
         published[6] = torch.tensor([0.0, 0.0, 0.012])
         published[7] = torch.tensor([[0.0, 0.0, 0.04], [0.0, 0.0, 0.01]])
         single = torch.tensor([False, True, True, True, True, False, False, True])
@@ -195,42 +195,55 @@ class StationaryFootTargetTest(unittest.TestCase):
         twist = torch.zeros(8, 3)
         terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
         manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
-        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(8, 2)))
+        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(8, 2), force=torch.zeros(8, 2, 3)))
         env = SimpleNamespace(num_envs=8, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
 
-        def value(found_left_right, term=single_support, **kw):  # the sensor lists right before left
-            sensor.data.found = torch.tensor(found_left_right, dtype=torch.float32).flip(-1) * 3.0
-            return term(env, "feet", "foot_target", sensor_foot_ids=(1, 0), **kw).tolist()
+        def reward(load_left_right):  # newtons up from the floor; the sensor lists right before left
+            load = torch.tensor(load_left_right, dtype=torch.float32).flip(-1)
+            sensor.data.force = torch.zeros(8, 2, 3)
+            sensor.data.force[..., 0] = 0.3  # a sideways push does not count
+            sensor.data.force[..., 2] = -load  # the sensor reports the foot's push on the floor
+            sensor.data.found = (load > 0).float()
+            values = upper_foot_unload(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01)
+            return [round(v, 4) for v in values.tolist()]
 
-        def reward(found_left_right):
-            return value(found_left_right, lift_threshold=0.01)
-
-        self.assertEqual(reward([[1, 1]] * 8), [0.0] * 8)
-        self.assertEqual(reward([[0, 0]] * 8), [0.0] * 8)
-        # Right foot down, left up: the left targets 30 mm, 10 mm and the
-        # one coming down pay; a right target never pays for it.
-        self.assertEqual(reward([[0, 1]] * 8), [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
-        # Left foot down, right up: only the 30 mm right target pays; 9.9 mm
-        # is below the threshold, and a right target still below the left
-        # one coming down has no foot that should be down.
-        self.assertEqual(reward([[1, 0]] * 8), [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        # A paying row is one where lifted_support_feet counts no foot.
-        for found in ([[0, 1]] * 8, [[1, 0]] * 8):
-            penalty = value(found, term=lifted_support_feet)
-            for paid, count in zip(reward(found), penalty):
-                if paid:
-                    self.assertEqual(count, 0.0)
+        # Target shares of the higher foot: 0, 0, 0, 0.25, 0, 0.4, (none), 0;
+        # the higher foot is left, right, right, right, left, left, -, left.
+        # Even weight: 1 - 2 x 0.5 = 0 from the threshold up, 0.5 at 5 mm,
+        # 0.8 at 2 mm; no row without a height difference pays.
+        self.assertEqual(reward([[5.5, 5.5]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.8, 0.0, 0.0])
+        # All on the right foot: the higher left foot carries nothing.
+        self.assertEqual(reward([[0.0, 11.0]] * 8), [0.0, 1.0, 0.0, 0.0, 1.0, 0.2, 0.0, 1.0])
+        # All on the left foot: the higher right foot carries nothing.
+        self.assertEqual(reward([[11.0, 0.0]] * 8), [0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0])
+        # A quarter on the higher foot: 1 - 2 x 0.25 above the threshold,
+        # exactly the 5 mm target, 1 - 2 x 0.15 at 2 mm.
+        self.assertEqual(reward([[2.75, 8.25]] * 8), [0.0, 0.5, 0.0, 0.0, 0.5, 0.7, 0.0, 0.5])
+        self.assertEqual(reward([[8.25, 2.75]] * 8), [0.0, 0.0, 0.5, 1.0, 0.0, 0.3, 0.0, 0.0])
+        # Both feet in the air (or all but a trace): 0.
+        self.assertEqual(reward([[0.0, 0.0]] * 8), [0.0] * 8)
+        self.assertEqual(reward([[0.0, 0.05]] * 8), [0.0] * 8)
+        # The higher foot is never one lifted_support_feet asks down: all the
+        # weight on the other foot pays in full from the threshold up and
+        # lifted_support_feet counts no foot.
+        higher_left = [[0.0, 11.0]] * 8
+        for row in (2, 3):
+            higher_left[row] = [11.0, 0.0]
+        self.assertEqual(reward(higher_left), [0.0, 1.0, 1.0, 0.5, 1.0, 0.2, 0.0, 1.0])
+        sensor.data.found[0] = 1.0
+        sensor.data.found[6] = 1.0
+        self.assertEqual(lifted_support_feet(env, "feet", "foot_target", sensor_foot_ids=(1, 0)).tolist(), [0.0] * 8)
         # A walking command pays nothing; a slow one below 1 cm/s still pays.
         twist[1] = torch.tensor([0.1, 0.0, 0.0])
         twist[2] = torch.tensor([0.0, 0.0, 0.4])
         twist[4] = torch.tensor([0.004, 0.0, 0.004])
-        self.assertEqual(reward([[0, 1]] * 8), [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
-        self.assertEqual(reward([[1, 0]] * 8), [0.0] * 8)
+        self.assertEqual(reward([[0.0, 11.0]] * 8), [0.0, 0.0, 0.0, 0.0, 1.0, 0.2, 0.0, 1.0])
+        self.assertEqual(reward([[11.0, 0.0]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
 
-    def test_pico_rewards_single_support_from_the_foot_stage(self) -> None:
+    def test_pico_rewards_unloading_the_higher_foot_from_the_foot_stage(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
             MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
-            MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT,
+            MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT,
             TELEOP_STAGES,
         )
         from mjlab_microban.tasks.microban_teleop_mdp import MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
@@ -239,12 +252,14 @@ class StationaryFootTargetTest(unittest.TestCase):
         )
 
         settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
-                    if s.manager == "reward" and s.term == "single_support"]
-        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT)])
-        self.assertGreater(MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT, 0.0)
+                    if s.manager == "reward" and s.term == "upper_foot_unload"]
+        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT)])
+        # Above the 6.2 /s the measured shift to one foot costs in the other terms.
+        self.assertGreater(MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT, 6.2)
         cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
-        term = cfg.rewards["single_support"]
-        self.assertIs(term.func, single_support)
+        self.assertNotIn("single_support", cfg.rewards)
+        term = cfg.rewards["upper_foot_unload"]
+        self.assertIs(term.func, upper_foot_unload)
         self.assertEqual(term.weight, 0.0)
         penalty = cfg.rewards["lifted_support_feet"].params
         self.assertEqual({k: v for k, v in term.params.items() if k != "lift_threshold"}, penalty)

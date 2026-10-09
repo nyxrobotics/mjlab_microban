@@ -116,8 +116,9 @@ SEED_COUNT = 2
 # both feet raised by dz in the trunk frame reach it by lowering the trunk by
 # dz (the feet stay on the floor).  Either way 0.7 x dz:
 FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
-# ... and off the floor, as single_support pays it (every J1 single-foot target
-# is 20 mm or more, above its 10 mm threshold; no pushes): a foot held up by
+# ... and off the floor, as upper_foot_unload pays it in full (every J1
+# single-foot target is 20 mm or more, above its 10 mm threshold, where the
+# higher foot carries no weight; no pushes): a foot held up by
 # its toes reaches the height on the floor.  It may touch down for a tenth of
 # the scored time, a tenth of that pay.
 FOOT_AIR_MIN_SHARE = 0.9

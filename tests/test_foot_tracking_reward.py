@@ -168,7 +168,7 @@ class FootTrackingRewardTest(unittest.TestCase):
         values = rows.reward(twist, velocity_fade_range=(0.0, 0.15))
         torch.testing.assert_close(values, torch.tensor([0.5, 0.0], dtype=torch.float64), rtol=0.0, atol=1e-12)
 
-    def test_pico_uses_the_single_support_threshold(self) -> None:
+    def test_pico_uses_the_unload_threshold(self) -> None:
         from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
             make_microban_teleop_v13_arm_overlay_env_cfg,
         )
@@ -176,7 +176,7 @@ class FootTrackingRewardTest(unittest.TestCase):
         cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
         term = cfg.rewards["foot_target_tracking"]
         self.assertIs(term.func, foot_target_tracking_error_exp)
-        self.assertEqual(term.params["lift_threshold"], cfg.rewards["single_support"].params["lift_threshold"])
+        self.assertEqual(term.params["lift_threshold"], cfg.rewards["upper_foot_unload"].params["lift_threshold"])
 
 
 if __name__ == "__main__":

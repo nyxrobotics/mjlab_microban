@@ -38,7 +38,7 @@ from mjlab_microban.tasks.mdp import (
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
-    single_support,
+    upper_foot_unload,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -83,37 +83,26 @@ PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
 # r / |w| = 0.9, so a fall does not pay; a stop/walk switch steps the 2 s value
 # by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
 MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
-# The single-stance reward (mdp.single_support): 1 on a standing row whose
-# published foot targets differ in z by the threshold or more, while the lower
-# foot is down and the higher one in the air.  Threshold 10 mm: 4x the 2.5 mm
-# floor band, reached by 84 % of the single-foot targets (z ~ U(2.5, 50) mm).
-# On the same rows the foot reward measures the lifted foot from the support
-# foot (mdp.foot_target_tracking_error_exp), so how high it pays is the foot
-# reward's: 1 mm in the air is all this term asks.
-# Weight (from the foot stage), per second on such a row, foot stage /
-# tightened: standing on the lower foot with the other at its target pays
-# w + G - L more than both feet down.
-#   G, the foot reward's gain, static poses (the support foot where it stood,
-#   the lifted one at its target from it), mean over the training targets:
-#   0.91 (w 2, std 0.05) / 2.31 (w 3, std 0.03), of which a 1 mm lift gets
-#   0.02-0.04.  These are upper bounds: they leave out what the pose itself
-#   costs.  With the trunk level the lifted hip roll sits at its soft limit
-#   (0.393 rad), inside joint_soft_limit_guard's 5 % margin (from 0.353):
-#   -0.5 /s straight up, -2.0 to -2.5 at the inner front corner.  Rolling the
-#   trunk over the support foot keeps the guard at 0, for upright 0.025 (1-10
-#   mm), 0.095 (20-30), 0.20 (40-50), 0.46 (outer corners).  Net of that, the
-#   target pays over a 1 mm lift: 10 mm +0.06 / +0.26, 20 mm +0.20 / +0.92,
-#   40 mm +0.74 / +2.27, front outer corner +0.88 / +2.42.
-#   L, what one foot down costs in the other terms (model_8999, stochastic,
-#   paid rows against both feet down): 1.26 / 1.02 without pushes, 1.18 /
-#   1.03 a second or more after a push; 2.01 / 1.87 with the second after a
-#   push (20-23 % of the time) counted at its whole difference, 4.8-5.2 (a push
-#   lifts a foot and adds the velocity errors at once: over all rows 4.5-4.7).
-# w = 3: w + G - L = 3 + 0.91 - 2.01 = 1.9 / 3 + 2.31 - 1.87 = 3.4 with
-# pushes and the upper-bound G, w = 1.5 L; at the least net G (10 mm, 0.09 /
-# 0.29 with the 1 mm share) still 3 + 0.09 - 2.01 = 1.1 / 3 + 0.29 - 1.87 = 1.4.
+# The unload reward (mdp.upper_foot_unload), on a standing row whose published
+# foot targets differ in z by dz > 0: clamp(1 - 2 |s - s*|, 0, 1), s the higher
+# foot's share of the floor's vertical push on the feet, s* = 0.5 max(0, 1 -
+# dz / threshold).  Threshold 10 mm: 4x the 2.5 mm floor band, reached by 84 %
+# of the single-foot targets (z ~ U(2.5, 50) mm); from it up the higher foot
+# carries nothing.  On the same rows the foot reward measures the lifted foot
+# from the support foot (mdp.foot_target_tracking_error_exp), so how high it
+# goes is the foot reward's.
+# Weight (from the foot stage), per second: from both feet down evenly (s =
+# 0.5, reward 0 at dz >= 10 mm) to all the weight on the lower foot pays w;
+# each 10 % of the weight moved pays w / 5.  What it costs, in the other terms
+# (model_5000 of the +3 single-stance reward, training noise or mean actions,
+# with or without pushes, a second or more after a push, rows with the higher
+# foot up against both feet down): 3.0-3.8 /s at 5-10 mm up, 5.7-6.2 at 10 mm
+# or more, over 80 % of it the velocity terms (the trunk moving over the
+# support foot on a standing command).  w = 10 leaves +3.8 to +4.4 /s at 10 mm
+# or more (the old +3: -2.8 to -3.4) and pays the first 10 % of the weight
+# moved 2 /s.
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
-MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT = 3.0
+MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -205,7 +194,7 @@ TELEOP_STAGES = (
         "enable broad stationary foot tracking",
         PICO_SCHEDULE["foot"],
         (
-            Setting("reward", "single_support", "weight", MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT),
+            Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
@@ -400,8 +389,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
     # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
-    # On the rows single_support counts as one foot up (the same threshold) it
-    # measures the lifted foot from the support foot (mdp docstring).
+    # On the rows upper_foot_unload asks the higher foot to carry nothing (the
+    # same threshold) it measures the lifted foot from the support foot (mdp
+    # docstring).
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
         weight=MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
@@ -473,10 +463,12 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "sensor_foot_ids": (1, 0),
         },
     )
-    # Standing on the lower foot with the higher one up (weight in the foot
-    # stage), the same rows and feet as lifted_support_feet.
-    cfg.rewards["single_support"] = RewardTermCfg(
-        func=single_support,
+    # The higher foot's share of the weight (weight in the foot stage), the
+    # same standing rows and feet as lifted_support_feet.  Not faded with the
+    # foot reward's velocity_fade_range (0.15 m/s from the foot stage): on a
+    # walking command (6 cm/s and up) the walker steps on both feet in turn.
+    cfg.rewards["upper_foot_unload"] = RewardTermCfg(
+        func=upper_foot_unload,
         weight=0.0,
         params={
             **cfg.rewards["lifted_support_feet"].params,

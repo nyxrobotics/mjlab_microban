@@ -1179,6 +1179,12 @@ def _single_foot_rows(height: torch.Tensor, lift_threshold: float) -> torch.Tens
     return (height[:, 0] - height[:, 1]).abs() >= lift_threshold
 
 
+def _higher_foot(height: torch.Tensor) -> torch.Tensor:
+    """Per foot (N, 2), whether its published target (heights (N, 2), left and
+    right) is higher than the other one's: none on a row with equal heights."""
+    return height > height.flip(-1)
+
+
 def _standing_and_feet_down(
     env: ManagerBasedRlEnv,
     sensor_name: str,
@@ -1209,7 +1215,7 @@ def _standing_and_feet_down(
 
     foot_target = env.command_manager.get_term(foot_target_command_name)
     height = foot_target.command.reshape(env.num_envs, 2, 3)[..., 2]
-    should_be_down = height <= height.flip(-1)  # (N, 2): not the higher foot
+    should_be_down = ~_higher_foot(height)  # (N, 2)
     support = torch.arange(2, device=height.device) != foot_target.lifted_foot_idx[:, None]
     single = foot_target.is_single_support_env.bool()[:, None]
     should_be_down = torch.where(single, support & should_be_down, should_be_down)
@@ -1244,7 +1250,7 @@ def lifted_support_feet(
     return (~down & should_be_down).float().sum(dim=-1) * standing.float()
 
 
-def single_support(
+def upper_foot_unload(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     foot_target_command_name: str,
@@ -1252,22 +1258,36 @@ def single_support(
     command_name: str = "twist",
     command_threshold: float = 0.01,
     sensor_foot_ids: tuple[int, int] = (0, 1),
+    min_force: float = 0.1,
 ) -> torch.Tensor:
-    """Reward standing on the lower foot with the higher one in the air.
+    """Reward the higher foot carrying the share of the weight its target asks.
 
     On a standing command (as ``lifted_support_feet``) whose two published
-    foot targets differ in height by ``lift_threshold`` or more: 1 when the
-    foot that should be down (``_standing_and_feet_down``, the lower one) is
-    down and the higher one is in the air, else 0.  A row with no foot that
-    should be down (a single-foot target handing over from a target on its
-    support foot) gets 0.
+    foot targets differ in height by dz > 0, the higher foot
+    (``_higher_foot``, never one ``lifted_support_feet`` asks down) carries
+    the share s = Fz_up / (Fz_up + Fz_down) of the floor's vertical push on
+    the feet.  The target share s* = 0.5 max(0, 1 - dz / lift_threshold) is
+    even at dz = 0 and 0 (the higher foot carries nothing) from the
+    threshold up, so a partial shift of the weight pays below and above it.
+    Returns clamp(1 - 2 |s - s*|, 0, 1); 0 on other rows and when the feet
+    carry less than ``min_force`` newtons together (both in the air).
+    ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
+    right) feet; the sensor's net force (world frame) is the foot's push on
+    the floor, so the floor's push up on a foot is -z.
     """
-    standing, height, should_be_down, down = _standing_and_feet_down(
+    standing, height, _, _ = _standing_and_feet_down(
         env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
     )
-    apart = _single_foot_rows(height, lift_threshold)
-    stance = should_be_down.any(dim=-1) & (down == should_be_down).all(dim=-1)
-    return (standing & apart & stance).float()
+    upper = _higher_foot(height)
+    dz = (height[:, 0] - height[:, 1]).abs()
+    target = 0.5 * torch.clamp(1.0 - dz / lift_threshold, min=0.0)
+
+    force = env.scene.sensors[sensor_name].data.force[:, list(sensor_foot_ids), 2]
+    load = torch.clamp(-force, min=0.0)  # (N, 2)
+    total = load.sum(dim=-1)
+    share = (load * upper).sum(dim=-1) / torch.clamp(total, min=min_force)
+    reward = torch.clamp(1.0 - 2.0 * (share - target).abs(), 0.0, 1.0)
+    return reward * (standing & (dz > 0.0) & (total >= min_force)).float()
 
 
 ########################## CURRICULUM #############################
