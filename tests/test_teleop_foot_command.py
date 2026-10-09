@@ -374,12 +374,20 @@ class StationaryFootTargetTest(unittest.TestCase):
         site_body = {s: bodies[model.site_bodyid[model.site(s).id]] for s in ("left_foot", "right_foot")}
         self.assertEqual([sensed.index(site_body[s]) for s in ("left_foot", "right_foot")], [1, 0])
 
-    def test_the_foot_stage_sets_half(self) -> None:
+    def test_the_foot_stage_trains_half_the_samples_on_one_foot_standing(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
 
-        values = [s.value for stage in TELEOP_STAGES for s in stage.settings
-                  if s.path == "single_support_stationary_probability"]
-        self.assertEqual(values, [0.5])
+        def values(path):
+            return {stage.name: s.value for stage in TELEOP_STAGES for s in stage.settings
+                    if s.manager == "command" and s.term == "foot_target" and s.path == path}
+
+        foot = TELEOP_STAGES[1].name
+        self.assertEqual(values("rel_single_support_envs"), {foot: 0.6})
+        self.assertEqual(values("single_support_stationary_probability"), {foot: 0.85})
+        # The two-foot targets are drawn first; the rest are single-foot ones.
+        both = values("rel_both_feet_envs")
+        for share in both.values():
+            self.assertAlmostEqual(0.6 * (1.0 - share) * 0.85, 0.5, delta=0.05)
 
 
 if __name__ == "__main__":

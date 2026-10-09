@@ -74,7 +74,13 @@ MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
-PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
+# The foot stage's single-foot targets: 60 % of the foot targets (rel_both_feet_envs
+# takes its share first), 85 % of them with a standing twist, so about 50 % of
+# the samples train one at full weight (30 % x 50 %: 15 %).  With the unload
+# reward the 50 % run gained 8 % of its unload reward in 200 updates, 33 % with
+# the learning rate also tripled (MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE).
+PICO_SINGLE_SUPPORT_ENV_SHARE = 0.6
+PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # The lifted-support-feet penalty (mdp.lifted_support_feet) on a standing
 # command, per foot that should be down and is in the air (mjlab multiplies by
 # dt: weight * value is a rate per second).  Measured on standing rows: r =
@@ -222,11 +228,10 @@ TELEOP_STAGES = (
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
-            Setting("command", "foot_target", "rel_single_support_envs", 0.3),
-            # Half of the single-foot targets come with a standing twist (the
-            # foot reward fades out with the commanded speed): about 3.5 % ->
-            # 17 % of the samples train a single-foot target at full weight
-            # (microban_teleop_foot_command.py).
+            Setting("command", "foot_target", "rel_single_support_envs", PICO_SINGLE_SUPPORT_ENV_SHARE),
+            # Most single-foot targets come with a standing twist (the foot
+            # reward fades out with the commanded speed; see
+            # microban_teleop_foot_command.py).
             Setting("command", "foot_target", "single_support_stationary_probability",
                     PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY),
             Setting("command", "foot_target", "rel_both_feet_envs", 0.05),
