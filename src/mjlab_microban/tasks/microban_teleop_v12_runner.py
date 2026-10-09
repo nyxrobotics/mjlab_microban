@@ -13,7 +13,12 @@ from mjlab.envs.mdp.actions import JointPositionAction
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.velocity import mdp as velocity_mdp
 
-from mjlab_microban.tasks.curriculum import bind_update_clock, refuse_resume
+from mjlab_microban.tasks.curriculum import (
+    CURRICULUM_STATE_INFO_KEY,
+    bind_update_clock,
+    curriculum_state,
+    resume_run,
+)
 from mjlab_microban.tasks.mdp import MICROBAN_BILATERAL_SITE_ORDER_REVISION
 from mjlab_microban.schedules import PICO_STEPS_PER_UPDATE
 from mjlab_microban.tasks.microban_policy_export import (
@@ -218,6 +223,10 @@ def validate_teleop_v12_environment_contract(env) -> None:
         raise ValueError("Contract-v12 action target bound drifted from the servo goal range (+-pi)")
 
 
+# Contract infos that follow the run's clock; every other one must match to resume.
+_CLOCK_INFO_KEYS = {"residual_trainable_at_save", "active_actor_columns_at_save"}
+
+
 def _atomic_torch_save(payload: object, destination: Path) -> None:
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -239,7 +248,7 @@ def _atomic_torch_save(payload: object, destination: Path) -> None:
 
 
 class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
-    """Fresh legacy bootstrap and invariant-checked saves; never resumed or reloaded."""
+    """Fresh legacy bootstrap and invariant-checked saves; resumable from its own checkpoints."""
 
     def __init__(
         self,
@@ -262,7 +271,6 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         save_pristine = cfg.pop("save_pristine_checkpoint", False)
         if type(save_pristine) is not bool:
             raise TypeError("Contract-v12 runner flags must be booleans")
-        refuse_resume(cfg)
         source_values = (source_path, source_sha256, probe_path, probe_sha256)
         if any(value is None for value in source_values):
             raise ValueError(
@@ -406,9 +414,19 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
         strict: bool = True,
         map_location: str | None = None,
     ) -> dict:
-        raise ValueError(
-            "A contract-v12 run starts from its bootstrapped walker and loads no other checkpoint"
-        )
+        """Resume a run of this contract and walker (curriculum.resume_run); nothing else loads."""
+
+        if load_cfg is not None:
+            raise ValueError("A contract-v12 run loads only whole checkpoints, to resume them")
+        infos = torch.load(path, map_location="cpu", weights_only=False).get("infos") or {}
+        expected = self._contract_infos()
+        for key in expected.keys() - _CLOCK_INFO_KEYS:
+            if infos.get(key) != expected[key]:
+                raise ValueError(f"Checkpoint {key} differs from this run; it cannot be resumed here")
+        infos = super().load(path, strict=strict, map_location=map_location)
+        resume_run(self, infos)
+        self._validate_live_invariants()
+        return infos
 
     def save(self, path: str, infos=None) -> None:
         self._validate_live_invariants()
@@ -420,6 +438,7 @@ class MicrobanTeleopV12OnPolicyRunner(MjlabOnPolicyRunner):
                 "env_state": {
                     "common_step_counter": self.env.unwrapped.common_step_counter
                 },
+                CURRICULUM_STATE_INFO_KEY: curriculum_state(self.env.unwrapped),
             }
         )
         destination = Path(path).expanduser().resolve()

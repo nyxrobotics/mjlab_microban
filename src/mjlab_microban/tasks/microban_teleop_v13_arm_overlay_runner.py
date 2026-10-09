@@ -1,7 +1,7 @@
 """Runner for the v13 arm-overlay recipe.
 
 It trains and records the arm-overlay recipe revision (every run starts
-fresh from a walker).
+from a walker and may resume from its own checkpoints).
 """
 
 from __future__ import annotations

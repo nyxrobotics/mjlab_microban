@@ -1366,6 +1366,19 @@ class reward_based_staged_curriculum:
 
         return {"stage": self.current_stage}
 
+    def state(self) -> dict[str, int]:
+        return {"stage": self.current_stage, "stage_first_step": int(self.stage_first_step)}
+
+    def resume(self, env: ManagerBasedRlEnv, state: dict[str, int] | None, stages: list[dict]) -> None:
+        """Replay the stages a checkpoint passed (its ``state``); the reward means refill as episodes end."""
+
+        if state is None:
+            raise ValueError("Checkpoint does not record the reward-gated curriculum state")
+        for stage in stages[: state["stage"]]:
+            stage["apply"](env)
+        self.current_stage = state["stage"]
+        self.stage_first_step = state["stage_first_step"]
+
 
 class home_stillness_reward:
     """Reward the commanded joint TARGET (asset.data.joint_pos_target, not the

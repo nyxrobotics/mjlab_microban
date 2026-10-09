@@ -17,8 +17,9 @@ from mjlab_microban.tasks.curriculum import (
     apply_to_cfg,
     bind_update_clock,
     final_settings,
-    refuse_resume,
+    resume_run,
 )
+from mjlab_microban.tasks.mdp import reward_based_staged_curriculum
 
 STAGES = (
     Stage("start", 0, (Setting("reward", "a", "weight", 0.0),)),
@@ -77,10 +78,47 @@ class StagedCurriculumTest(unittest.TestCase):
         # Idempotent afterwards.
         self.assertEqual(term_(env, None, STAGES), {"stage": 3})
 
-    def test_a_resume_is_refused(self) -> None:
-        refuse_resume({"resume": False})
-        with self.assertRaisesRegex(ValueError, "train it again from update 0"):
-            refuse_resume({"resume": True})
+    def test_a_resumed_run_continues_its_clock_and_curriculum(self) -> None:
+        # A checkpoint of update 14 (15 updates done) from a run whose
+        # reward-gated term had passed its first stage.
+        env = FakeEnv()
+        bind_update_clock(env, 24)
+        gated_stages = [
+            {"name": "a up", "reward_term_name": "a", "threshold": 1.0,
+             "apply": lambda e: setattr(e.rewards["a"], "weight", 5.0)},
+            {"name": "never", "reward_term_name": "a", "threshold": 1.0,
+             "apply": lambda e: setattr(e.rewards["a"], "weight", -1.0)},
+        ]
+        staged, gated = make_term(), reward_based_staged_curriculum(None, env)
+        env.curriculum_manager = SimpleNamespace(
+            active_terms=["staged", "gated"],
+            _term_cfgs=[
+                SimpleNamespace(func=staged, params={"stages": STAGES}),
+                SimpleNamespace(func=gated, params={"stages": gated_stages}),
+            ],
+        )
+        staged(env, None, STAGES)  # the fresh env's reset
+        env.common_step_counter = 15 * 24  # restored by mjlab's load
+        optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=2.5e-4)
+        runner = SimpleNamespace(
+            env=SimpleNamespace(unwrapped=env), current_learning_iteration=14,
+            alg=SimpleNamespace(learning_rate=1e-3, optimizer=optimizer),
+        )
+        saved = {"staged": {"stage": 2}, "gated": {"stage": 1, "stage_first_step": 200}}
+        resume_run(runner, {curriculum.CURRICULUM_STATE_INFO_KEY: saved})
+        self.assertEqual(runner.current_learning_iteration, 15)
+        self.assertEqual(runner.alg.learning_rate, 2.5e-4)
+        self.assertEqual(curriculum.curriculum_state(env), saved)
+        self.assertEqual(env.commands["twist"].ranges.lin_vel_x, (-0.7, 0.7))
+        self.assertEqual(env.rewards["a"].weight, 5.0)
+        # A checkpoint whose step is not its update count is refused.
+        runner.current_learning_iteration = 15
+        with self.assertRaisesRegex(ValueError, "is not 16 updates"):
+            resume_run(runner, {})
+        # The clock-driven term needs no recorded state; the reward-gated one does.
+        runner.current_learning_iteration = 14
+        with self.assertRaisesRegex(ValueError, "reward-gated"):
+            resume_run(runner, {})
 
     def test_unbound_clock_after_start_is_an_error(self) -> None:
         env = FakeEnv()

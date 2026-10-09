@@ -9,7 +9,12 @@ import torch
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.tasks.curriculum import bind_update_clock, refuse_resume
+from mjlab_microban.tasks.curriculum import (
+    CURRICULUM_STATE_INFO_KEY,
+    bind_update_clock,
+    curriculum_state,
+    resume_run,
+)
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose, home_pose_stamps_match
 
 # Checkpoint marker: the full training HOME (joints, root position and root
@@ -46,7 +51,6 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
     """mjlab's velocity runner plus the update clock, the HOME stamp on save and its check on load."""
 
     def __init__(self, env, train_cfg: dict, *args, **kwargs) -> None:
-        refuse_resume(train_cfg)
         bind_update_clock(env.unwrapped, int(train_cfg["num_steps_per_env"]))
         super().__init__(env, train_cfg, *args, **kwargs)
 
@@ -56,6 +60,7 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
             {
                 **(infos or {}),
                 WALK_HOME_POSE_INFO_KEY: getup_home_pose(),
+                CURRICULUM_STATE_INFO_KEY: curriculum_state(self.env.unwrapped),
             },
         )
 
@@ -67,4 +72,7 @@ class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
         map_location: str | None = None,
     ) -> dict:
         require_walk_checkpoint_home_stamp(path)
-        return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        infos = super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        if load_cfg is None:
+            resume_run(self, infos)
+        return infos

@@ -8,10 +8,16 @@ environment's ``common_step_counter`` has reached.  It advances in a loop, so
 stages that start at the same update (as in a scaled dry run) apply in one
 call.
 
-A run is never resumed from a checkpoint (``refuse_resume``): a resumed run
-would not replay its curriculum, its adaptive learning rate and its
-reward-gated stages as one uninterrupted run does.  A run that stopped is
-trained again from update 0.
+A run resumed from a checkpoint (``--agent.resume``) continues as the
+uninterrupted run would: mjlab restores ``common_step_counter`` and rsl_rl the
+models, the observation normalizers and the optimizer, and ``resume_run``
+(called by every Microban runner after a full ``load``) starts at the update
+after the checkpoint, takes the adaptive learning rate back from the
+optimizer and brings every curriculum term back to its state: a
+``StagedCurriculum`` applies at once every stage its clock has reached, a
+reward-gated term replays the stages the checkpoint records
+(``curriculum_state``).  A partial load (``load_cfg``, as the exporters do)
+resumes nothing.
 
 The update clock is ``iteration * steps_per_update``.  The runner binds
 ``steps_per_update`` (its ``num_steps_per_env``) to the environment
@@ -32,6 +38,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, NamedTuple
 
 STEPS_PER_UPDATE_ATTR = "microban_steps_per_update"
+CURRICULUM_STATE_INFO_KEY = "microban_curriculum_state"
 
 
 class Setting(NamedTuple):
@@ -154,11 +161,32 @@ def bind_update_clock(env: Any, steps_per_update: int) -> None:
     setattr(env, STEPS_PER_UPDATE_ATTR, steps_per_update)
 
 
-def refuse_resume(train_cfg: Mapping[str, Any]) -> None:
-    """Refuse ``--agent.resume`` (see module doc)."""
+def _curriculum_terms(env: Any) -> dict[str, Any]:
+    manager = env.curriculum_manager
+    return dict(zip(manager.active_terms, getattr(manager, "_term_cfgs", ()), strict=True))
 
-    if train_cfg.get("resume"):
-        raise ValueError("A Microban run is not resumed from a checkpoint: train it again from update 0")
+
+def curriculum_state(env: Any) -> dict[str, Any]:
+    """Every curriculum term's state, as a checkpoint records it (CURRICULUM_STATE_INFO_KEY)."""
+
+    return {name: cfg.func.state() for name, cfg in _curriculum_terms(env).items()}
+
+
+def resume_run(runner: Any, infos: Mapping[str, Any] | None) -> None:
+    """Continue ``runner`` after the checkpoint its full ``load`` read (see module doc)."""
+
+    env = runner.env.unwrapped
+    steps = getattr(env, STEPS_PER_UPDATE_ATTR)
+    completed = runner.current_learning_iteration + 1
+    if int(env.common_step_counter) != completed * steps:
+        raise ValueError(
+            f"Checkpoint step {env.common_step_counter} is not {completed} updates of {steps} steps"
+        )
+    runner.current_learning_iteration = completed
+    runner.alg.learning_rate = runner.alg.optimizer.param_groups[0]["lr"]
+    saved = (infos or {}).get(CURRICULUM_STATE_INFO_KEY, {})
+    for name, cfg in _curriculum_terms(env).items():
+        cfg.func.resume(env, saved.get(name), **cfg.params)
 
 
 def stage_log_line(index: int, name: str, step: int, steps_per_update: int) -> str:
@@ -193,3 +221,12 @@ class StagedCurriculum:
             self.current_stage += 1
             print(stage_log_line(self.current_stage, stage.name, counter, steps or 1), flush=True)
         return {"stage": self.current_stage}
+
+    def state(self) -> dict[str, int]:
+        return {"stage": self.current_stage}
+
+    def resume(self, env: Any, state: Any, stages: Sequence[Stage]) -> None:
+        """Apply every stage the restored clock has reached (``state`` is not needed)."""
+
+        del state
+        self(env, None, stages)

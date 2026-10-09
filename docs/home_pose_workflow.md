@@ -71,8 +71,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 - `state.json` に、段階ごとの状態（done / running / failed）、入力のハッシュ、出力のハッシュを持つ。
   - done で入力も出力ファイルも変わっていない段階は飛ばす。
   - running の段階（学習のプロセスが落ちた、評価器が報告を書かなかった、ジョブが停滞して止めた、Ctrl-C・SIGTERM）は、学習が終わって
-    いなければ最初から学習し直す（途中のチェックポイントから続けると、カリキュラムの段が1本の学習と同じに
-    ならない）。学習が終わっていれば、判定からやり直す。これらは判定ではないので failed にしない
+    いなければ最初から学習し直す（本番のモデルは1本の学習で作る）。学習が終わっていれば、判定からやり直す。これらは判定ではないので failed にしない
     （`core.JobStopped`）。判定の不合格、中止の規則、書き出しやゲートの拒否は failed にする。
   - failed の段階は、入力も判定（`src` と `config/pipeline.yaml`）も変わっていなければ理由を表示して止まる。
     入力が同じで判定だけが変わったとき（テストを直したとき）は、学習はそのままで判定をやり直す。
@@ -81,7 +80,10 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
     直しても歩行はやり直しにならず、判定の設定を直しても学習はやり直しにならない。
   - 段階の学習と同じ run 名の学習が動いていれば（同じコマンドで手で始めたもの。出力は
     `<状態>/logs/<時刻>_train_<段階>.log`）、新しく始めずにそれを見守り、段の切り替えをそのログで照らす。
-    学習を途中のチェックポイントから再開することはできない（`--agent.resume` は runner が拒否する）。
+- 試しの学習は、途中のチェックポイント `model_<k>.pt` から続けられる。同じ `train` のコマンドに
+  `--agent.resume True --agent.load-run '<run ディレクトリ名>' --agent.load-checkpoint model_<k>.pt` を足し、
+  `--agent.max-iterations` を「総回数 − (k+1)」にする。新しい run ディレクトリに `model_<k+1>` から書かれ、段、PICO の
+  補正の網と列の学習、適応学習率、起き上がりの refine は止めずに回したときと同じ回から効く（`tasks/curriculum.py` の `resume_run`）。
 - GPU の学習と評価は1本ずつ。本番は、別の学習（`train` コマンド、または 1024 env 以上）が GPU を使っている
   あいだは次の GPU ジョブを始めずに待ち、待った時間を `STATUS.log` に書く（ドライランは待たない）。この本番の
   run 名（`<prefix>_`）の学習は別の学習に数えない。

@@ -24,8 +24,10 @@ from mjlab_microban.robot.microban_constants import (
 )
 from mjlab_microban.tasks.curriculum import (
     STEPS_PER_UPDATE_ATTR,
+    CURRICULUM_STATE_INFO_KEY,
     bind_update_clock,
-    refuse_resume,
+    curriculum_state,
+    resume_run,
     stage_log_line,
 )
 from mjlab_microban.tasks.microban_getup_action import (
@@ -225,8 +227,8 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
     GETUP_REFINE_ACTION_STD, clears the Adam moments, puts the adaptive
     learning rate back to its configured start and lowers the entropy
     coefficient to GETUP_REFINE_ENTROPY_COEF -- once.  The switch prints a
-    curriculum-format line for the pipeline monitor.  A run is never resumed
-    (curriculum.refuse_resume).
+    curriculum-format line for the pipeline monitor.  A resumed run past that
+    update keeps the refined state its checkpoint holds (curriculum.resume_run).
     """
 
     def __init__(self, env, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
@@ -262,7 +264,6 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
                 f"Get-up {GETUP_CONTRACT_VERSION} requires P{SERVO_KP_POLICY} on every servo and the "
                 "XC330 0.91 A current limit"
             )
-        refuse_resume(train_cfg)
         bind_update_clock(unwrapped, int(train_cfg["num_steps_per_env"]))
         super().__init__(env, train_cfg, log_dir, device)
         self.exploration_refined = False
@@ -304,6 +305,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
             "microban_getup_contract": GETUP_CONTRACT_VERSION,
             "microban_getup_angular_velocity_frame": GETUP_ANGULAR_VELOCITY_FRAME,
             "microban_getup_home_pose": getup_home_pose(),
+            CURRICULUM_STATE_INFO_KEY: curriculum_state(self.env.unwrapped),
         }
         super().save(path, infos)
 
@@ -312,4 +314,12 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
         require_getup_checkpoint_contract(
             Path(path), checkpoint.get("infos"), require_recorded_env=False
         )
-        return super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        infos = super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        if load_cfg is None:
+            resume_run(self, infos)
+            env = self.env.unwrapped
+            if int(env.common_step_counter) >= GETUP_SCHEDULE["refine"] * getattr(env, STEPS_PER_UPDATE_ATTR):
+                # The std, Adam moments and learning rate come from the checkpoint.
+                self.alg.entropy_coef = GETUP_REFINE_ENTROPY_COEF
+                self.exploration_refined = True
+        return infos
