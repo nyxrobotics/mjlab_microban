@@ -141,7 +141,7 @@ class StateTest(unittest.TestCase):
             proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)", "train", "--agent.run-name",
                                      "lbl_x", "end"], start_new_session=True)
             try:
-                self.assertEqual(core.running_training("lbl_x"), os.getpgid(proc.pid))
+                self.assertEqual(core.running_training("lbl_x")[0], os.getpgid(proc.pid))
                 self.assertIsNone(core.running_training("lbl"))
                 jobs = core.Jobs(state, stall_minutes={"train": 20, "eval": 30}, wait_for_gpu=False,
                                  external_min_envs=1024, own_prefix="lbl")
@@ -232,7 +232,8 @@ class StateTest(unittest.TestCase):
                 kwargs["on_start"](log)
                 kwargs["poll"]()
                 fresh = root / "logs" / "exp" / "2026-10-07_02-00-00_lbl"
-                fresh.mkdir()
+                (fresh / "params").mkdir(parents=True)
+                (fresh / "params" / "agent.yaml").write_text("resume: false\n")
                 (fresh / "model_9.pt").write_bytes(b"x")
                 return 0, log
 
@@ -249,6 +250,33 @@ class StateTest(unittest.TestCase):
                 # The finished run is kept: a rerun judges it again without training.
                 pipeline.jobs = SimpleNamespace(run=lambda *a, **k: self.fail("trained again"))
                 self.assertEqual(pipeline.train("walk", "exp", "lbl", "T", 10, 64, []), final)
+
+    def test_a_resumed_run_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = fake_pipeline(root / "state")
+            pipeline.sched = {"stages": {"walk": {}}}
+            pipeline.jobs = SimpleNamespace(run=lambda *a, **k: self.fail("trained"),
+                                            watch=lambda *a, **k: self.fail("watched"))
+            run = root / "logs" / "exp" / "2026-10-07_01-00-00_lbl"
+            (run / "params").mkdir(parents=True)
+            (run / "model_9.pt").write_bytes(b"x")
+            self.assertTrue(core.resumed_run(run))  # no params/agent.yaml: not known to start at update 0
+            (run / "params" / "agent.yaml").write_text("resume: true\nload_run: x\n")
+            self.assertTrue(core.resumed_run(run))
+            with mock.patch.object(core, "LOG_ROOT", root / "logs"):
+                with self.assertRaisesRegex(core.JobStopped, "resumed from a checkpoint") as raised:
+                    pipeline.train("walk", "exp", "lbl", "T", 10, 64, [])
+                self.assertEqual(raised.exception.code, core.EXIT_INPUT)
+                (run / "model_9.pt").unlink()
+                cmd = "uv run --locked train T --agent.run-name lbl --agent.resume True --agent.load-run x "
+                with mock.patch.object(steps, "running_training", lambda label: (1, cmd)):
+                    with self.assertRaisesRegex(core.JobStopped, "running training lbl is resumed"):
+                        pipeline.train("walk", "exp", "lbl", "T", 10, 64, [])
+            (run / "params" / "agent.yaml").write_text("resume: false\n")
+            self.assertFalse(core.resumed_run(run))
+            self.assertTrue(core.resumes("train T --agent.resume=true"))
+            self.assertFalse(core.resumes("train T --agent.resume False --agent.run-name lbl"))
 
     def test_one_instance_per_state_dir(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

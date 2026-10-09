@@ -1366,11 +1366,16 @@ class reward_based_staged_curriculum:
 
         return {"stage": self.current_stage}
 
-    def state(self) -> dict[str, int]:
-        return {"stage": self.current_stage, "stage_first_step": int(self.stage_first_step)}
+    def state(self) -> dict:
+        return {"stage": self.current_stage, "stage_first_step": int(self.stage_first_step),
+                "rewards": {name: r.detach().cpu().clone() for name, r in self.rewards.items()}}
 
-    def resume(self, env: ManagerBasedRlEnv, state: dict[str, int] | None, stages: list[dict]) -> None:
-        """Replay the stages a checkpoint passed (its ``state``); the reward means refill as episodes end."""
+    def resume(self, env: ManagerBasedRlEnv, state: dict | None, stages: list[dict]) -> None:
+        """Replay the stages a checkpoint passed and take back its per-env episode rewards.
+
+        The rewards come back only with the same number of environments; with
+        another, they start at 0 and refill as episodes end.
+        """
 
         if state is None:
             raise ValueError("Checkpoint does not record the reward-gated curriculum state")
@@ -1378,6 +1383,9 @@ class reward_based_staged_curriculum:
             stage["apply"](env)
         self.current_stage = state["stage"]
         self.stage_first_step = state["stage_first_step"]
+        saved = state.get("rewards", {})
+        if all(r.shape == (env.num_envs,) for r in saved.values()):
+            self.rewards = {name: r.to(env.device).clone() for name, r in saved.items()}
 
 
 class home_stillness_reward:

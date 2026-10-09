@@ -47,6 +47,8 @@ from mjlab_microban.pipeline.core import (
     last_json_line,
     load_config,
     record_files,
+    resumed_run,
+    resumes,
     running_training,
     sha256,
 )
@@ -217,23 +219,35 @@ class Pipeline:
 
         Every curriculum stage must start at its update of the table
         (``Monitor``).  A training that stopped is trained again from update 0.
+        A run resumed from a checkpoint (``--agent.resume``, for trials only) is
+        refused: a release model is one training from update 0.
         """
+
+        def refuse_resumed(what: str) -> None:
+            raise JobStopped(f"[{step}] {what} resumed from a checkpoint: a release model is trained from "
+                             f"update 0 in one run. Move it out of {LOG_ROOT / experiment} (or stop it); a "
+                             "trial resume takes another --agent.run-name", EXIT_INPUT)
 
         record = self.state.step(step)
         monitor = Monitor(state=self.state, record=record, expected_stages=self.sched["stages"][step],
                           stage_tolerance=int(self.cfg[step]["stage_tolerance"]))
         final = find_checkpoint(experiment, label, total - 1)
         if final is not None:
+            if resumed_run(final.parent):
+                refuse_resumed(f"run {final.parent.name} was")
             self.log(f"[{step}] {final.parent.name}/{final.name} exists")
             monitor.log_path = self.training_log(step, label)
             monitor.read_log()
         elif (running := running_training(label)) is not None:
             # Started by hand with this step's command (same run name): watch it.
             # Its stages are checked from its own log only.
+            pgid, cmdline = running
+            if resumes(cmdline):
+                refuse_resumed(f"the running training {label} is")
             record["stages_seen"] = {}
             monitor.log_path = self.training_log(step, label)
             self.check_home_yaml()
-            self.jobs.watch(f"train_{step}", running, monitor.log_path, poll=monitor.poll)
+            self.jobs.watch(f"train_{step}", pgid, monitor.log_path, poll=monitor.poll)
             self.check_home_yaml()
         else:
             record["stages_seen"] = {}

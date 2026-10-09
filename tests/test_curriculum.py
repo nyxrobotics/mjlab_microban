@@ -47,6 +47,7 @@ class FakeEnv:
             _group_obs_term_delay_buffer={"actor": {"gyro": self.buffer}},
         )
         self.common_step_counter = 0
+        self.num_envs, self.device = 4, "cpu"
 
 
 def make_term(stages=STAGES) -> StagedCurriculum:
@@ -104,11 +105,20 @@ class StagedCurriculumTest(unittest.TestCase):
             env=SimpleNamespace(unwrapped=env), current_learning_iteration=14,
             alg=SimpleNamespace(learning_rate=1e-3, optimizer=optimizer),
         )
-        saved = {"staged": {"stage": 2}, "gated": {"stage": 1, "stage_first_step": 200}}
+        means = torch.tensor([0.9, 0.8, 0.0, 0.7])  # per-env episode rewards toward the next stage
+        saved = {"staged": {"stage": 2}, "gated": {"stage": 1, "stage_first_step": 200, "rewards": {"a": means}}}
         resume_run(runner, {curriculum.CURRICULUM_STATE_INFO_KEY: saved})
         self.assertEqual(runner.current_learning_iteration, 15)
         self.assertEqual(runner.alg.learning_rate, 2.5e-4)
-        self.assertEqual(curriculum.curriculum_state(env), saved)
+        state = curriculum.curriculum_state(env)
+        self.assertEqual(state["staged"], saved["staged"])
+        self.assertEqual({k: v for k, v in state["gated"].items() if k != "rewards"},
+                         {"stage": 1, "stage_first_step": 200})
+        self.assertTrue(torch.equal(state["gated"]["rewards"]["a"], means))
+        # With another number of environments the rewards start again at 0.
+        other = reward_based_staged_curriculum(None, env)
+        other.resume(env, {"stage": 1, "stage_first_step": 200, "rewards": {"a": torch.ones(8)}}, gated_stages)
+        self.assertEqual(other.rewards, {})
         self.assertEqual(env.commands["twist"].ranges.lin_vel_x, (-0.7, 0.7))
         self.assertEqual(env.rewards["a"].weight, 5.0)
         # A checkpoint whose step is not its update count is refused.

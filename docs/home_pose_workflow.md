@@ -83,7 +83,11 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 - 試しの学習は、途中のチェックポイント `model_<k>.pt` から続けられる。同じ `train` のコマンドに
   `--agent.resume True --agent.load-run '<run ディレクトリ名>' --agent.load-checkpoint model_<k>.pt` を足し、
   `--agent.max-iterations` を「総回数 − (k+1)」にする。新しい run ディレクトリに `model_<k+1>` から書かれ、段、PICO の
-  補正の網と列の学習、適応学習率、起き上がりの refine は止めずに回したときと同じ回から効く（`tasks/curriculum.py` の `resume_run`）。
+  補正の網と列の学習、適応学習率、起き上がりの refine、起き上がりの報酬で進む段（環境の数が同じなら、環境ごとのエピソード報酬も）は
+  止めずに回したときと同じ回から効く（`tasks/curriculum.py` の `resume_run`）。
+  - 試しの再開では、本番の段階とは別の `--agent.run-name` を使う。本番は1本の学習で作るので、パイプラインは段階の run 名で
+    再開した run（`params/agent.yaml` が `resume: false` でないもの）や `--agent.resume True` で動いている学習を採らず、
+    理由を出して止まる（段階は running のまま。その run を移せば、次の実行で進む）。
 - GPU の学習と評価は1本ずつ。本番は、別の学習（`train` コマンド、または 1024 env 以上）が GPU を使っている
   あいだは次の GPU ジョブを始めずに待ち、待った時間を `STATUS.log` に書く（ドライランは待たない）。この本番の
   run 名（`<prefix>_`）の学習は別の学習に数えない。

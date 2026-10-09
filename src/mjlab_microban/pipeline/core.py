@@ -46,6 +46,8 @@ class JobStopped(PipelineError):
 
     The step stays ``running`` (not ``failed``): the rerun enters it again and
     trains it from update 0 (or evaluates its finished training again).  A
+    resumed run under the step's run name is refused the same way: the rerun
+    checks again once that run is moved away.  A
     judgment, a stop rule and a refusing tool raise a plain ``PipelineError``
     and mark the step ``failed``.
     """
@@ -372,8 +374,22 @@ def kill_group(pgid: int) -> None:
             return
 
 
-def running_training(label: str) -> int | None:
-    """The process group of a running ``train`` process with run name ``label`` (None: none runs)."""
+def resumed_run(run: Path) -> bool:
+    """True unless ``run``'s params/agent.yaml records ``resume: false`` (trained from update 0)."""
+
+    agent = run / "params" / "agent.yaml"
+    return not agent.is_file() or (yaml.safe_load(agent.read_text()) or {}).get("resume") is not False
+
+
+def resumes(cmdline: str) -> bool:
+    """A ``train`` command line that continues a checkpoint (``--agent.resume True``)."""
+
+    return re.search(r"--agent\.resume[ =](?i:true|1)\b", cmdline) is not None
+
+
+def running_training(label: str) -> tuple[int, str] | None:
+    """The process group and command line of a running ``train`` process with run name ``label``
+    (None: none runs)."""
 
     marker = f"--agent.run-name {label} "
     for entry in Path("/proc").iterdir():
@@ -385,7 +401,7 @@ def running_training(label: str) -> int | None:
             continue
         if marker in cmdline + " " and is_training_command(cmdline, 1 << 30):
             try:
-                return os.getpgid(int(entry.name))
+                return os.getpgid(int(entry.name)), cmdline
             except ProcessLookupError:
                 continue
     return None
