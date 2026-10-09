@@ -142,6 +142,10 @@ MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 # floor, so it changes no row D trained on.  The same weight as the unload
 # reward: both pay the same rows up to w, the largest positive term there.
 MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
+# The foot reward's weight on those rows, as the lift's.  At weight 3 its exp
+# paid 0.05-0.09 /s per mm far from the target (lift: 0.25), the lifted foot
+# stayed 25 mm off over 14 cases; 1000 updates at 10 took it to 18.5 mm.
+MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT = MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -236,6 +240,8 @@ TELEOP_STAGES = (
             Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
             Setting("reward", "upper_foot_lift", "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
+            Setting("reward", "foot_target_tracking", "params.single_foot_weight",
+                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
             Setting("command", "foot_target", "rel_single_support_envs", PICO_SINGLE_SUPPORT_ENV_SHARE),
@@ -252,6 +258,8 @@ TELEOP_STAGES = (
         PICO_SCHEDULE["foot_tighten"],
         (
             Setting("reward", "foot_target_tracking", "weight", 3.0),
+            Setting("reward", "foot_target_tracking", "params.single_foot_weight",
+                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 3.0),
             Setting(
                 "reward", "foot_target_tracking", "params.std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
             ),
@@ -430,7 +438,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
     # On the rows upper_foot_unload asks the higher foot to carry nothing (the
     # same threshold) it measures the lifted foot from the support foot (mdp
-    # docstring).
+    # docstring) and pays MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT whatever
+    # the term's weight (single_foot_weight = it / weight at every stage).
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
         weight=MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
@@ -440,6 +449,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             "velocity_command_name": "twist",
             "velocity_fade_range": (0.0, 0.01),
+            "single_foot_weight": (
+                MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT
+            ),
         },
     )
     cfg.rewards["joint_soft_limit_guard"] = RewardTermCfg(

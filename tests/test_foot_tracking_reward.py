@@ -168,6 +168,37 @@ class FootTrackingRewardTest(unittest.TestCase):
         values = rows.reward(twist, velocity_fade_range=(0.0, 0.15))
         torch.testing.assert_close(values, torch.tensor([0.5, 0.0], dtype=torch.float64), rtol=0.0, atol=1e-12)
 
+    def test_single_foot_weight_scales_only_the_one_foot_up_rows(self) -> None:
+        rows = _Rows()
+        rows.add(LEFT_UP, feet=_moved(FEET, d_left=(0.012, 0.006, 0.02)), trunk=(0.0, -0.04, 0.168))
+        rows.add(((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), feet=_moved(FEET, d_left=(0.004, 0.0, 0.0)))
+        rows.add(((0.01, 0.0, 0.0099), (0.0, 0.0, 0.0)))  # below the threshold
+        plain = rows.reward()
+        torch.testing.assert_close(rows.reward(single_foot_weight=5.0), plain * torch.tensor(
+            [5.0, 1.0, 1.0], dtype=torch.float64), rtol=0.0, atol=1e-12)
+
+    def test_pico_pays_the_one_foot_up_rows_as_the_lift_at_every_stage(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_env_cfg import (
+            MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT,
+            MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT,
+            TELEOP_STAGES,
+        )
+        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+            make_microban_teleop_v13_arm_overlay_env_cfg,
+        )
+
+        self.assertEqual(MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT)
+        term = make_microban_teleop_v13_arm_overlay_env_cfg().rewards["foot_target_tracking"]
+        weight, single = term.weight, term.params["single_foot_weight"]
+        self.assertAlmostEqual(weight * single, MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, places=12)
+        for stage in TELEOP_STAGES:
+            for s in stage.settings:
+                if s.manager == "reward" and s.term == "foot_target_tracking":
+                    weight = s.value if s.path == "weight" else weight
+                    single = s.value if s.path == "params.single_foot_weight" else single
+            self.assertAlmostEqual(weight * single, MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, places=12,
+                                   msg=stage.name)
+
     def test_pico_uses_the_unload_threshold(self) -> None:
         from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
             make_microban_teleop_v13_arm_overlay_env_cfg,

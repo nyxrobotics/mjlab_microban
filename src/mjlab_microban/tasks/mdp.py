@@ -1085,6 +1085,7 @@ def foot_target_tracking_error_exp(
     lift_threshold: float,
     velocity_command_name: str = "twist",
     velocity_fade_range: tuple[float, float] = (0.0, 0.15),
+    single_foot_weight: float = 1.0,
 ) -> torch.Tensor:
     """Reward for matching the commanded per-foot target offset (FootTargetCommand),
     exp(-error / std^2), faded out smoothly as the velocity command grows so legs
@@ -1105,6 +1106,8 @@ def foot_target_tracking_error_exp(
       the target;
       otherwise (no target, both feet by one offset, or below the threshold):
       each foot from the trunk, mean_feet |p_b - d - o|^2.
+
+    The one-foot-up rows are paid ``single_foot_weight`` times the others.
     """
     command: FootTargetCommand = env.command_manager.get_term(command_name)
     offset = command.foot_target_offset_b  # (N, 2, 3)
@@ -1116,10 +1119,9 @@ def foot_target_tracking_error_exp(
     relative_error = torch.sum(
         torch.square(command.left_from_right_level() - relative_target), dim=-1
     )
-    error = torch.where(
-        _single_foot_rows(offset[..., 2], lift_threshold), relative_error, error
-    )
-    tracking_reward = torch.exp(-error / std**2)
+    single = _single_foot_rows(offset[..., 2], lift_threshold)
+    error = torch.where(single, relative_error, error)
+    tracking_reward = torch.exp(-error / std**2) * torch.where(single, single_foot_weight, 1.0)
 
     velocity_command = env.command_manager.get_command(velocity_command_name)
     speed = torch.norm(velocity_command[:, :2], dim=-1) + torch.abs(
