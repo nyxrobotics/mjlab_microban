@@ -1326,7 +1326,7 @@ def upper_foot_lift(
     rise = torch.where(upper[:, 0], left_over_right, -left_over_right)
     lift = torch.clamp(rise / torch.clamp(dz, min=1e-6), 0.0, 1.0)
     stance = ~(down & upper).any(dim=-1) & (down & ~upper).any(dim=-1)
-    return lift * (standing & (dz >= lift_threshold) & stance).float()
+    return lift * (standing & _single_foot_rows(height, lift_threshold) & stance).float()
 
 
 ########################## CURRICULUM #############################
