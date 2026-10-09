@@ -38,6 +38,7 @@ from mjlab_microban.tasks.mdp import (
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
+    upper_foot_lift,
     upper_foot_unload,
 )
 from mjlab_microban.tasks.microban_policy_export import (
@@ -112,6 +113,19 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # (track_linear 5 + track_angular 2 + upright 1 + pose 1 = 9).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
+# The lift reward (mdp.upper_foot_lift), on a standing row whose published
+# foot targets differ in z by dz >= the threshold: the higher foot's height
+# over the lower one / dz, clamped to [0, 1], while it touches nothing and the
+# lower foot is down.  With the unload reward alone the policy took the weight
+# off the higher foot and stopped there (lift 2 mm): the foot reward's exp
+# form, far from a 40 mm target, pays about 0.05 /s for each 1 mm.  This term
+# pays w / dz per metre all the way up (w = 10: 0.25 /s per mm at 40 mm) and
+# lifting started (11-13 mm at update 7000).  Paid on the height alone, a
+# heel raised with the toes down scored too, hence only off the floor; with
+# that the foot left the floor in every judged single-foot case, 22-39 mm up,
+# no falls (model_8999).  The same weight as the unload reward: both pay the
+# same rows up to w, the largest positive term there.
+MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -204,6 +218,7 @@ TELEOP_STAGES = (
         PICO_SCHEDULE["foot"],
         (
             Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
+            Setting("reward", "upper_foot_lift", "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
             Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
@@ -478,6 +493,16 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # walking command (6 cm/s and up) the walker steps on both feet in turn.
     cfg.rewards["upper_foot_unload"] = RewardTermCfg(
         func=upper_foot_unload,
+        weight=0.0,
+        params={
+            **cfg.rewards["lifted_support_feet"].params,
+            "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+        },
+    )
+    # The higher foot's lift over the lower one (weight in the foot stage), on
+    # the same rows and feet from the same threshold as upper_foot_unload.
+    cfg.rewards["upper_foot_lift"] = RewardTermCfg(
+        func=upper_foot_lift,
         weight=0.0,
         params={
             **cfg.rewards["lifted_support_feet"].params,

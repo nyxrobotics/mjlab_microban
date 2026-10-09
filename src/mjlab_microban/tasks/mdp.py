@@ -1290,6 +1290,39 @@ def upper_foot_unload(
     return reward * (standing & (dz > 0.0) & (total >= min_force)).float()
 
 
+def upper_foot_lift(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    foot_target_command_name: str,
+    lift_threshold: float,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+    sensor_foot_ids: tuple[int, int] = (0, 1),
+) -> torch.Tensor:
+    """Reward the higher foot's height over the lower one, in proportion to its target's.
+
+    On a standing command (as ``lifted_support_feet``) whose two published
+    foot targets differ in height by dz >= ``lift_threshold``: the higher
+    foot (``_higher_foot``) above the lower one, measured as the foot reward
+    measures it (``left_from_right_level``, z), over dz, clamped to [0, 1],
+    while the higher foot touches nothing and the lower one is down.  Each
+    millimetre of lift pays the same; a heel raised with the toes on the
+    floor and a hop on both feet pay nothing; 0 on other rows.
+    ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
+    right) feet.
+    """
+    standing, height, _, down = _standing_and_feet_down(
+        env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
+    )
+    upper = _higher_foot(height)
+    dz = (height[:, 0] - height[:, 1]).abs()
+    left_over_right = env.command_manager.get_term(foot_target_command_name).left_from_right_level()[:, 2]
+    rise = torch.where(upper[:, 0], left_over_right, -left_over_right)
+    lift = torch.clamp(rise / torch.clamp(dz, min=1e-6), 0.0, 1.0)
+    stance = ~(down & upper).any(dim=-1) & (down & ~upper).any(dim=-1)
+    return lift * (standing & (dz >= lift_threshold) & stance).float()
+
+
 ########################## CURRICULUM #############################
 
 

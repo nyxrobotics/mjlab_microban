@@ -12,7 +12,7 @@ from unittest import mock
 import torch
 
 from mjlab_microban.tasks import microban_teleop_foot_command as fc
-from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, upper_foot_unload
+from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, upper_foot_lift, upper_foot_unload
 from mjlab_microban.tasks.microban_teleop_mdp import ResetFixedFootTargetCommand
 
 
@@ -239,6 +239,78 @@ class StationaryFootTargetTest(unittest.TestCase):
         twist[4] = torch.tensor([0.004, 0.0, 0.004])
         self.assertEqual(reward([[0.0, 11.0]] * 8), [0.0, 0.0, 0.0, 0.0, 1.0, 0.2, 0.0, 1.0])
         self.assertEqual(reward([[11.0, 0.0]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
+
+    def test_upper_foot_lift_pays_the_higher_foot_off_the_floor_by_its_height(self) -> None:
+        # Rows (feet left, right): no target; single target on the left at
+        # 40 mm; single target on the right at 40 mm; single target on the
+        # right at 5 mm (below the 10 mm threshold); single target on the
+        # left at exactly 10 mm; both feet by one offset.
+        published = torch.zeros(6, 2, 3)
+        published[1, 0] = torch.tensor([0.01, 0.0, 0.04])
+        published[2, 1, 2] = 0.04
+        published[3, 1, 2] = 0.005
+        published[4, 0, 2] = 0.010
+        published[5] = torch.tensor([0.0, 0.0, 0.012])
+        single = torch.tensor([False, True, True, True, True, False])
+        lifted = torch.tensor([0, 0, 1, 1, 0, 0])
+        rise = torch.zeros(6)  # left foot z minus right foot z
+        foot = SimpleNamespace(command=published.view(6, 6), is_single_support_env=single, lifted_foot_idx=lifted,
+                               left_from_right_level=lambda: torch.nn.functional.pad(rise[:, None], (2, 0)))
+        twist = torch.zeros(6, 3)
+        terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
+        manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
+        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(6, 2)))
+        env = SimpleNamespace(num_envs=6, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
+
+        def reward(left_minus_right_m, found_left_right):  # the sensor lists right before left
+            rise[:] = left_minus_right_m
+            sensor.data.found = torch.tensor(found_left_right, dtype=torch.float32).flip(-1)
+            values = upper_foot_lift(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01)
+            return [round(v, 4) for v in values.tolist()]
+
+        left_up, right_up = [[0, 1]] * 6, [[1, 0]] * 6
+        # The left foot 20 mm up and off the floor: half the 40 mm target,
+        # all of the 10 mm one; not on the rows whose higher target is the
+        # right foot, below the threshold, without a height difference.
+        self.assertEqual(reward(0.02, left_up), [0.0, 0.5, 0.0, 0.0, 1.0, 0.0])
+        self.assertEqual(reward(0.002, left_up), [0.0, 0.05, 0.0, 0.0, 0.2, 0.0])
+        # The right foot 30 mm up and off the floor (left minus right -30 mm).
+        self.assertEqual(reward(-0.03, right_up), [0.0, 0.0, 0.75, 0.0, 0.0, 0.0])
+        # The same heights with the higher foot touching the floor (a heel
+        # raised on the toes): nothing.
+        self.assertEqual(reward(0.02, [[1, 1]] * 6), [0.0] * 6)
+        self.assertEqual(reward(-0.03, [[1, 1]] * 6), [0.0] * 6)
+        # Both feet in the air (a hop): nothing.
+        self.assertEqual(reward(0.02, [[0, 0]] * 6), [0.0] * 6)
+        # The wrong foot up, or the higher foot below the lower one: nothing.
+        self.assertEqual(reward(0.02, right_up), [0.0] * 6)
+        self.assertEqual(reward(-0.01, left_up), [0.0] * 6)
+        # Higher than the target: capped at 1.
+        self.assertEqual(reward(0.06, left_up), [0.0, 1.0, 0.0, 0.0, 1.0, 0.0])
+        # A walking command pays nothing; a slow one below 1 cm/s still pays.
+        twist[1] = torch.tensor([0.1, 0.0, 0.0])
+        twist[4] = torch.tensor([0.004, 0.0, 0.004])
+        self.assertEqual(reward(0.02, left_up), [0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+
+    def test_pico_rewards_the_higher_foot_lift_from_the_foot_stage(self) -> None:
+        from mjlab_microban.tasks.microban_teleop_env_cfg import (
+            MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT,
+            MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT,
+            TELEOP_STAGES,
+        )
+        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
+            make_microban_teleop_v13_arm_overlay_env_cfg,
+        )
+
+        settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
+                    if s.manager == "reward" and s.term == "upper_foot_lift"]
+        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT)])
+        self.assertEqual(MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT, MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT)
+        rewards = make_microban_teleop_v13_arm_overlay_env_cfg().rewards
+        term = rewards["upper_foot_lift"]
+        self.assertIs(term.func, upper_foot_lift)
+        self.assertEqual(term.weight, 0.0)
+        self.assertEqual(term.params, rewards["upper_foot_unload"].params)
 
     def test_pico_rewards_unloading_the_higher_foot_from_the_foot_stage(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
