@@ -37,7 +37,7 @@ from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotationCfg,
     foot_target_offset_b,
     foot_target_tracking_error_exp,
-    planted_feet,
+    lifted_support_feet,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -73,18 +73,15 @@ MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
 MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
 PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.5
-# The planted-feet reward (mdp.planted_feet) on a standing command, per foot
-# that should be down and is (mjlab multiplies by dt: weight * value is a rate
-# per second).  Measured on standing rows: r = 6.32 /s of the other terms and
-# n = 0.25 feet up (residual run, update 1000); the v13 run stepped with
-# n = 0.44-0.63 at update 3000.  Stepping costs w n of r: w = r / (2 x 0.44)
-# = 7.2 -> 7 gives 28 % (n = 0.25) to 70 % (n = 0.63), half at n = 0.44.
-# A standing row never earns below r, so a fall never pays; one capture step
-# (one foot up 0.2 s) costs 7 x 0.2 = 1.4 against a fall's (6.32 + 2 x 7) x 2 s
-# = 41 (dt / (1 - gamma) = 2 s).  Standing rows then earn up to 20 /s against
-# 2.45 /s walking, on 6-32 % of the rows; a stop/walk switch (twist resampled
-# every 4-8 s) steps the 2 s value by (20 - 2.45) x 2 = 36 (7.7 at -1.0).
-MICROBAN_TELEOP_PLANTED_FEET_WEIGHT = 7.0
+# The lifted-support-feet penalty (mdp.lifted_support_feet) on a standing
+# command, per foot that should be down and is in the air (mjlab multiplies by
+# dt: weight * value is a rate per second).  Measured on standing rows: r =
+# 6.32 /s of the other terms, n = 0.25 feet up (update 1000) to 0.44-0.63
+# (stepping v13 run, update 3000).  Stepping costs w n: |w| = r / (2 x 0.44)
+# = 7.2 -> 7 makes it 28-70 % of r.  A standing row stays above zero while n <
+# r / |w| = 0.9, so a fall does not pay; a stop/walk switch steps the 2 s value
+# by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
+MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -151,16 +148,16 @@ def _materialize_rotation_command_cfg(
     return UniformVelocityCommandWithRotationCfg(**values)
 
 
-# The arms (and the moving HMD and the planted-feet reward) after the critic
+# The arms (and the moving HMD and the lifted-support-feet penalty) after the critic
 # warm-up, foot targets later, tightened later (mjlab_microban/schedules.py).
 # The adapter columns of the frozen walker open at the same updates
 # (microban_teleop_v12_actor); before the arms move no actor column trains.
 TELEOP_STAGES = (
     Stage(
-        "enable moving-HMD, moving arms and the planted-feet reward",
+        "enable moving-HMD, moving arms and the lifted-support-feet penalty",
         PICO_SCHEDULE["arm"],
         (
-            Setting("reward", "planted_feet", "weight", MICROBAN_TELEOP_PLANTED_FEET_WEIGHT),
+            Setting("reward", "lifted_support_feet", "weight", MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT),
             Setting(
                 "event",
                 "hmd_neck_target_motion",
@@ -426,11 +423,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["feet_distance"].params["min_dist"] = 0.07
     cfg.rewards["dof_pos_limits"].weight = -10.0
     # The walking task's no_stepping stays at 0 here: on a standing command
-    # PICO rewards the feet that should be down instead (weight in the arm
-    # stage).  The contact sensor lists body foot (right) before foot_2
+    # PICO penalizes the feet in the air that should be down instead (weight
+    # in the arm stage).  The contact sensor lists body foot (right) before foot_2
     # (left); the foot target is (left, right).
-    cfg.rewards["planted_feet"] = RewardTermCfg(
-        func=planted_feet,
+    cfg.rewards["lifted_support_feet"] = RewardTermCfg(
+        func=lifted_support_feet,
         weight=0.0,
         params={
             "sensor_name": cfg.rewards["no_stepping"].params["sensor_name"],

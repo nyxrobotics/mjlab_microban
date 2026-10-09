@@ -1142,7 +1142,7 @@ def no_stepping_penalty(
     return in_air.float().sum(dim=-1) * below_threshold.float()
 
 
-def planted_feet(
+def lifted_support_feet(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     foot_target_command_name: str,
@@ -1150,14 +1150,13 @@ def planted_feet(
     command_threshold: float = 0.01,
     sensor_foot_ids: tuple[int, int] = (0, 1),
 ) -> torch.Tensor:
-    """Reward feet on the ground that should be, when the commanded speed is below threshold.
+    """Penalize feet in the air that should be down, when the commanded speed is below threshold.
 
-    The foot-target task's form of ``no_stepping_penalty``: lifting a foot
-    that should stay down loses the weight, as the penalty would cost, but a
-    standing row never earns less than zero, so ending the episode never
-    pays.  The feet that should be down:
+    The foot-target task's form of ``no_stepping_penalty``.  The feet that
+    should be down:
       no foot target: both;
-      a single-foot target: the support foot;
+      a single-foot target: the support foot, unless its published target is
+      still the higher one (handing over from a target on that foot);
       a two-foot target (both feet by one offset, the trunk lowers): both;
       published feet apart without a single-foot target (a target coming
       back down, or handing over to a two-foot one): all but the foot whose
@@ -1165,8 +1164,8 @@ def planted_feet(
     ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
     right) feet.
 
-    Returns the count of those feet on the ground per environment, 0 when the
-    commanded speed is at or above threshold (use with a positive weight).
+    Returns the count of those feet in the air per environment, 0 when the
+    commanded speed is at or above threshold (use with a negative weight).
     """
     command = env.command_manager.get_command(command_name)  # (N, 3)
     cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
@@ -1177,7 +1176,7 @@ def planted_feet(
     should_be_down = height <= height.flip(-1)  # (N, 2): not the higher foot
     support = torch.arange(2, device=height.device) != foot_target.lifted_foot_idx[:, None]
     single = foot_target.is_single_support_env.bool()[:, None]
-    should_be_down = torch.where(single, support, should_be_down)
+    should_be_down = torch.where(single, support & should_be_down, should_be_down)
 
     sensor = env.scene.sensors[sensor_name]
     found = sensor.data.found  # (N, num_feet) or (N, num_feet, num_slots)
@@ -1185,7 +1184,7 @@ def planted_feet(
         found = found.any(dim=-1)  # (N, num_feet)
     down = found.bool()[:, list(sensor_foot_ids)]
 
-    return (down & should_be_down).float().sum(dim=-1) * below_threshold.float()
+    return (~down & should_be_down).float().sum(dim=-1) * below_threshold.float()
 
 
 ########################## CURRICULUM #############################
