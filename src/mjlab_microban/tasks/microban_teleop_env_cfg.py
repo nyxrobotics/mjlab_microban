@@ -87,13 +87,24 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # published foot targets differ in z by the threshold or more, while the lower
 # foot is down and the higher one in the air.  Threshold 10 mm: 4x the 2.5 mm
 # floor band, reached by 84 % of the single-foot targets (z ~ U(2.5, 50) mm).
-# Weight (from the foot stage), per second on such a row, model_8999 standing
-# rows (stochastic): lifting a foot costs at most L = 0.55 + 0.25 + 0.52 + 0.09
-# = 1.4 (the linear and yaw velocity errors and the action rate doubled,
-# upright 0.99 -> 0.90; the leg pose is 1.0 on foot-target rows, the lifted
-# foot is not a support foot) and the foot reward pays 0.04-0.79 for it (std
-# 0.05, w 2, 10-50 mm).  w = 2 L = 2.8 -> 3 makes even a 10 mm lift pay
-# 3 + 0.04 - 1.4 = 1.6 more than standing on both feet (17 % of the 9.3 /s).
+# On the same rows the foot reward measures the lifted foot from the support
+# foot (mdp.foot_target_tracking_error_exp), so how high it pays is the foot
+# reward's: 1 mm in the air is all this term asks.
+# Weight (from the foot stage), per second on such a row, foot stage /
+# tightened: standing on the lower foot with the other at its target pays
+# w + G - L more than both feet down.
+#   G, the foot reward's gain, static poses (the support foot where it stood,
+#   the lifted one at its target from it, reachable within the soft joint
+#   limits with the trunk rolled at most 0.1 rad, upright -0.1), mean over the
+#   training targets: 0.91 (w 2, std 0.05) / 2.31 (w 3, std 0.03).  A 1 mm
+#   lift gets 0.02-0.04 of it: the target pays 0.88 / 2.28 more.
+#   L, what one foot down costs in the other terms (model_8999, stochastic,
+#   paid rows against both feet down): 1.26 / 1.02 without pushes, 1.18 /
+#   1.03 a second or more after a push; 2.01 / 1.87 with the second after a
+#   push (20-23 % of the time) counted at its whole difference, 4.8-5.2 (a push
+#   lifts a foot and adds the velocity errors at once: over all rows 4.5-4.7).
+# w = 3: w + G - L = 3 + 0.91 - 2.01 = 1.9 / 3 + 2.31 - 1.87 = 3.4 with
+# pushes, w = 1.5 L.
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT = 3.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
@@ -382,12 +393,15 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
     # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
+    # On the rows single_support counts as one foot up (the same threshold) it
+    # measures the lifted foot from the support foot (mdp docstring).
     cfg.rewards["foot_target_tracking"] = RewardTermCfg(
         func=foot_target_tracking_error_exp,
         weight=MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT,
         params={
             "command_name": "foot_target",
             "std": 0.05,
+            "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             "velocity_command_name": "twist",
             "velocity_fade_range": (0.0, 0.01),
         },

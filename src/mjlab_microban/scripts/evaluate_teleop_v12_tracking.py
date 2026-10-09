@@ -106,16 +106,21 @@ FINAL_PROFILE = "pico_feet_push_still_arms_v1"
 TRACKING_PROFILES = (FINAL_PROFILE,)
 SEED_COUNT = 2
 
-# J1.  The foot reward is exp(-mean_feet |e|^2 / 0.03^2) at the end of
-# training, each foot against its own reset position in the HOME-levelled
-# trunk frame: a foot 0.3 x 52 mm off scores 0.87, a foot that stays down 0.22.
-# One lifted foot (the other on the floor) reaches the target height above
-# the floor; both feet raised by dz in the trunk frame reach it by lowering
-# the trunk by dz (the feet stay on the floor).  Either way 0.7 x dz:
-FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.92
+# J1, measured as the foot reward measures it at the end of training
+# (mdp.foot_target_tracking_error_exp, exp(-|e|^2 / 0.03^2)).  One foot up:
+# e is the lifted foot from the support foot in the trunk's heading frame
+# levelled by gravity, so a trunk moving over the support foot or tilting does
+# not count: a foot 0.3 x 52 mm off scores 0.76, a 40 mm target with the foot
+# left down 0.17.  The lifted foot reaches the target height above the floor;
+# both feet raised by dz in the trunk frame reach it by lowering the trunk by
+# dz (the feet stay on the floor).  Either way 0.7 x dz:
+FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
 FOOT_ERROR_SHARE = 0.3
-FOOT_ERROR_FLOOR_M = 0.008  # the floor for small targets: still scores 0.965
-# A support foot 10 mm off costs 5 % of the reward.
+FOOT_ERROR_FLOOR_M = 0.008  # the floor for small targets: still scores 0.93
+# The support foot is not in the foot reward (it is the lifted foot's
+# reference): it stays down (lifted_support_feet) and where it stood (the
+# standing command).  It may move (3-D, on the floor) the lifted foot's error
+# floor, rounded up.
 SUPPORT_FOOT_MOVE_MAX_M = 0.010
 # J2.  The adapter keeps the walker's velocity and survival rewards and its
 # pushes (+-0.5 m/s): it may fall at most 5 points more often than the walker.
@@ -482,12 +487,11 @@ def _rollout(
                 ctx.soft_limit = float(worst.max())
                 ctx.soft_limit_joint = robot.joint_names[ctx.leg_ids[int(worst.argmax())]]
         feet_w = robot.data.site_pos_w[:, sites, :]
-        feet_b = foot_term.current_foot_pos_b()
+        relative = foot_term.left_from_right_level()
         now_down = contact.data.found.reshape(n, -1)[:, :2] > 0
         if step + 1 == FOOT_TARGET_STEP:
-            reference = {"z": feet_w[..., 2].clone(), "xy": feet_w[..., :2].clone(),
-                         "trunk_z": robot.data.root_link_pos_w[:, 2].clone(),
-                         "relative": (feet_b[:, 0] - feet_b[:, 1]).clone()}
+            reference = {"feet": feet_w.clone(), "trunk_z": robot.data.root_link_pos_w[:, 2].clone(),
+                         "relative": relative.clone()}
         if step >= score_from:
             count += up
             twist_sum += _home_levelled_twist(robot.data, HOME_TRUNK_PITCH_RAD) * up[:, None]
@@ -497,13 +501,13 @@ def _rollout(
                 ctx.home_nonzero_steps += int((arm_nonzero & (spec["arms"] == 0) & (index >= 0)).sum())
                 ctx.posed_zero_steps += int((~arm_nonzero & posed & (index >= 0)).sum())
             if reference:
-                lift_sum += (feet_w[..., 2] - reference["z"]) * up[:, None]
+                lift_sum += (feet_w[..., 2] - reference["feet"][..., 2]) * up[:, None]
                 drop_sum += (reference["trunk_z"] - robot.data.root_link_pos_w[:, 2]) * up
                 target = ramp.observed[:, 0] - ramp.observed[:, 1]
-                error = feet_b[:, 0] - feet_b[:, 1] - reference["relative"] - target
+                error = relative - reference["relative"] - target
                 error_sq_sum += torch.square(error).sum(dim=-1) * up
                 moved = torch.linalg.vector_norm(
-                    feet_w[rows, support_foot, :2] - reference["xy"][rows, support_foot], dim=-1
+                    feet_w[rows, support_foot] - reference["feet"][rows, support_foot], dim=-1
                 )
                 support_move = torch.maximum(support_move, moved * up * support.float())
         down = now_down
@@ -577,7 +581,7 @@ def _feet(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> li
                 _median(m["lift"][up, foot]) if lifted[foot] and not all(lifted) else None for foot in (0, 1)
             ],
             "trunk_drop_median_m": _median(m["trunk_drop"][up]) if all(lifted) else None,
-            # The lifted foot seen from the other foot (HOME-levelled trunk frame).
+            # The lifted foot seen from the other foot (heading frame levelled by gravity).
             "relative_target_m": float(torch.linalg.vector_norm(goal[0] - goal[1])),
             "relative_error_rms_m": float(torch.sqrt(m["error_sq_sum"][up].sum() / samples)) if samples > 0 else None,
             "support_move_median_m": _median(m["support_move"][up]) if sum(lifted) == 1 else None,

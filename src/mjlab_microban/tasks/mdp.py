@@ -487,6 +487,17 @@ class FootTargetCommand(CommandTerm):
         )
         return pos_b.view(self.num_envs, num_feet, 3)
 
+    def left_from_right_level(self) -> torch.Tensor:
+        """The left foot's position from the right one, in the trunk's heading
+        frame levelled by gravity: the yaw of the HOME-levelled trunk frame
+        (x forward, y left, z up), so the trunk's roll and pitch do not turn
+        it.  Shape (N, 3).  At HOME it is the HOME-levelled trunk frame."""
+        feet_w = self.robot.data.site_pos_w[:, self._foot_asset_cfg.site_ids, :]
+        heading = yaw_quat(
+            _home_levelled_quat(self.robot.data.root_link_quat_w, self.cfg.trunk_pitch)
+        )
+        return quat_apply_inverse(heading, feet_w[:, 0] - feet_w[:, 1])
+
     def _update_metrics(self) -> None:
         error = torch.sum(
             torch.square(
@@ -1071,24 +1082,43 @@ def foot_target_tracking_error_exp(
     env: ManagerBasedRlEnv,
     command_name: str,
     std: float,
+    lift_threshold: float,
     velocity_command_name: str = "twist",
     velocity_fade_range: tuple[float, float] = (0.0, 0.15),
 ) -> torch.Tensor:
     """Reward for matching the commanded per-foot target offset (FootTargetCommand),
-    faded out smoothly as the velocity command grows so legs prioritize walking over
-    holding a static foot target once actually moving. This is a continuous weight
-    (no hard cutoff/mode switch): at velocity_fade_range[0] and below, full weight;
-    at velocity_fade_range[1] and above, zero; linear in between.
+    exp(-error / std^2), faded out smoothly as the velocity command grows so legs
+    prioritize walking over holding a static foot target once actually moving. This
+    is a continuous weight (no hard cutoff/mode switch): at velocity_fade_range[0]
+    and below, full weight; at velocity_fade_range[1] and above, zero; linear in
+    between.
+
+    error, with d the feet at reset (HOME) and o the published offsets, in the
+    command's HOME-levelled trunk frame:
+      one foot up (``_single_foot_rows``: the published targets differ in z by
+      ``lift_threshold`` or more): the lifted foot from the support foot, in the
+      trunk's heading frame levelled by gravity (``left_from_right_level``),
+      |p_L - p_R - (d_L - d_R + o_L - o_R)|^2.  To stand on one foot the trunk
+      moves over the support foot (36-52 mm at Microban's size), so the support
+      foot's place under the trunk is not part of it (that it stays down is
+      ``lifted_support_feet``'s), and the trunk's roll and pitch do not move
+      the target;
+      otherwise (no target, both feet by one offset, or below the threshold):
+      each foot from the trunk, mean_feet |p_b - d - o|^2.
     """
     command: FootTargetCommand = env.command_manager.get_term(command_name)
+    offset = command.foot_target_offset_b  # (N, 2, 3)
+    default = command._default_foot_pos_b
     error = torch.sum(
-        torch.square(
-            command.current_foot_pos_b()
-            - command._default_foot_pos_b
-            - command.foot_target_offset_b
-        ),
-        dim=-1,
+        torch.square(command.current_foot_pos_b() - default - offset), dim=-1
     ).mean(-1)
+    relative_target = default[:, 0] - default[:, 1] + offset[:, 0] - offset[:, 1]
+    relative_error = torch.sum(
+        torch.square(command.left_from_right_level() - relative_target), dim=-1
+    )
+    error = torch.where(
+        _single_foot_rows(offset[..., 2], lift_threshold), relative_error, error
+    )
     tracking_reward = torch.exp(-error / std**2)
 
     velocity_command = env.command_manager.get_command(velocity_command_name)
@@ -1140,6 +1170,13 @@ def no_stepping_penalty(
     in_air = ~found.bool()
 
     return in_air.float().sum(dim=-1) * below_threshold.float()
+
+
+def _single_foot_rows(height: torch.Tensor, lift_threshold: float) -> torch.Tensor:
+    """Rows (N,) whose published foot targets (heights (N, 2), left and right)
+    differ in z by ``lift_threshold`` or more: the higher foot is up, the lower
+    one supports."""
+    return (height[:, 0] - height[:, 1]).abs() >= lift_threshold
 
 
 def _standing_and_feet_down(
@@ -1228,7 +1265,7 @@ def single_support(
     standing, height, should_be_down, down = _standing_and_feet_down(
         env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
     )
-    apart = (height[:, 0] - height[:, 1]).abs() >= lift_threshold
+    apart = _single_foot_rows(height, lift_threshold)
     stance = should_be_down.any(dim=-1) & (down == should_be_down).all(dim=-1)
     return (standing & apart & stance).float()
 
