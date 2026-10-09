@@ -6,8 +6,9 @@ driven from outside as on the robot (pico_arms): the evaluator writes the arm
 goal of the arm-overlay action, the policy's arm outputs are not used.
 
 * J1 feet: a policy that does not lift the foot fails ``foot_lift`` and
-  ``foot_error``; a single lifted foot is measured above the floor and from
-  the support foot, so a moving trunk does not count as a tracked foot.  Both
+  ``foot_error``; a single lifted foot is measured above and off the floor
+  and from the support foot against their HOME places, as the foot reward
+  measures it, so a moving trunk does not count as a tracked foot.  Both
   feet raised in the trunk frame is a crouch: the trunk must come down.
 * J2 pushes: falls are compared with the walker the adapter was built on.
 * J3 standing still: standing with the HMD and the arms moving or held out.
@@ -115,6 +116,11 @@ SEED_COUNT = 2
 # both feet raised by dz in the trunk frame reach it by lowering the trunk by
 # dz (the feet stay on the floor).  Either way 0.7 x dz:
 FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
+# ... and off the floor, as single_support pays it (every J1 single-foot target
+# is 20 mm or more, above its 10 mm threshold; no pushes): a foot held up by
+# its toes reaches the height on the floor.  It may touch down for a tenth of
+# the scored time, a tenth of that pay.
+FOOT_AIR_MIN_SHARE = 0.9
 FOOT_ERROR_SHARE = 0.3
 FOOT_ERROR_FLOOR_M = 0.008  # the floor for small targets: still scores 0.93
 # The support foot is not in the foot reward (it is the lifted foot's
@@ -157,6 +163,7 @@ def thresholds() -> dict[str, Any]:
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
         "hmd_actual_peak_to_peak_rad_min": HMD_ACTUAL_PEAK_TO_PEAK_MIN_RAD,
         "foot_lift_min_share": FOOT_LIFT_MIN_SHARE,
+        "foot_air_min_share": FOOT_AIR_MIN_SHARE,
         "foot_error_share": FOOT_ERROR_SHARE,
         "foot_error_floor_m": FOOT_ERROR_FLOOR_M,
         "support_foot_move_max_m": SUPPORT_FOOT_MOVE_MAX_M,
@@ -215,9 +222,12 @@ def _feet_checks(feet: list[dict[str, Any]]) -> dict[str, bool]:
             dz = float(item["foot_goal"][0][2])
             lift = lift and _at_least(item["trunk_drop_median_m"], FOOT_LIFT_MIN_SHARE * dz)
         else:
-            for lifted, goal, median in zip(item["lifted"], item["foot_goal"], item["lift_median_m"], strict=True):
+            for lifted, goal, median, air in zip(
+                item["lifted"], item["foot_goal"], item["lift_median_m"], item["air_share_median"], strict=True
+            ):
                 if lifted:
                     lift = lift and _at_least(median, FOOT_LIFT_MIN_SHARE * float(goal[2]))
+                    lift = lift and _at_least(air, FOOT_AIR_MIN_SHARE)
             support = support and _at_most(item["support_move_median_m"], SUPPORT_FOOT_MOVE_MAX_M)
         error = error and _at_most(
             item["relative_error_rms_m"], foot_error_limit_m(float(item["relative_target_m"]))
@@ -425,6 +435,7 @@ def _rollout(
     fell = torch.zeros(n, dtype=torch.bool, device=device)
     count = torch.zeros(n, device=device)
     lift_sum = torch.zeros(n, 2, device=device)
+    air_sum = torch.zeros(n, 2, device=device)
     drop_sum = torch.zeros(n, device=device)
     error_sq_sum = torch.zeros(n, device=device)
     support_move = torch.zeros(n, device=device)
@@ -490,8 +501,10 @@ def _rollout(
         relative = foot_term.left_from_right_level()
         now_down = contact.data.found.reshape(n, -1)[:, :2] > 0
         if step + 1 == FOOT_TARGET_STEP:
+            # The lifted foot's reference is the one the reward uses: the feet at reset (HOME).
+            default = foot_term._default_foot_pos_b
             reference = {"feet": feet_w.clone(), "trunk_z": robot.data.root_link_pos_w[:, 2].clone(),
-                         "relative": relative.clone()}
+                         "relative": (default[:, 0] - default[:, 1]).clone()}
         if step >= score_from:
             count += up
             twist_sum += _home_levelled_twist(robot.data, HOME_TRUNK_PITCH_RAD) * up[:, None]
@@ -502,6 +515,7 @@ def _rollout(
                 ctx.posed_zero_steps += int((~arm_nonzero & posed & (index >= 0)).sum())
             if reference:
                 lift_sum += (feet_w[..., 2] - reference["feet"][..., 2]) * up[:, None]
+                air_sum += (~now_down).float() * up[:, None]
                 drop_sum += (reference["trunk_z"] - robot.data.root_link_pos_w[:, 2]) * up
                 target = ramp.observed[:, 0] - ramp.observed[:, 1]
                 error = relative - reference["relative"] - target
@@ -524,6 +538,7 @@ def _rollout(
         "fell": fell,
         "count": count,
         "lift": lift_sum / counted[:, None],
+        "air": air_sum / counted[:, None],
         "trunk_drop": drop_sum / counted,
         "error_sq_sum": error_sq_sum,
         "support_move": support_move,
@@ -579,6 +594,10 @@ def _feet(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> li
             # (one lifted foot), or of the mean trunk drop (both feet).
             "lift_median_m": [
                 _median(m["lift"][up, foot]) if lifted[foot] and not all(lifted) else None for foot in (0, 1)
+            ],
+            # ... and of the share of the time that foot is off the floor.
+            "air_share_median": [
+                _median(m["air"][up, foot]) if lifted[foot] and not all(lifted) else None for foot in (0, 1)
             ],
             "trunk_drop_median_m": _median(m["trunk_drop"][up]) if all(lifted) else None,
             # The lifted foot seen from the other foot (heading frame levelled by gravity).

@@ -94,17 +94,24 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # tightened: standing on the lower foot with the other at its target pays
 # w + G - L more than both feet down.
 #   G, the foot reward's gain, static poses (the support foot where it stood,
-#   the lifted one at its target from it, reachable within the soft joint
-#   limits with the trunk rolled at most 0.1 rad, upright -0.1), mean over the
-#   training targets: 0.91 (w 2, std 0.05) / 2.31 (w 3, std 0.03).  A 1 mm
-#   lift gets 0.02-0.04 of it: the target pays 0.88 / 2.28 more.
+#   the lifted one at its target from it), mean over the training targets:
+#   0.91 (w 2, std 0.05) / 2.31 (w 3, std 0.03), of which a 1 mm lift gets
+#   0.02-0.04.  These are upper bounds: they leave out what the pose itself
+#   costs.  With the trunk level the lifted hip roll sits at its soft limit
+#   (0.393 rad), inside joint_soft_limit_guard's 5 % margin (from 0.353):
+#   -0.5 /s straight up, -2.0 to -2.5 at the inner front corner.  Rolling the
+#   trunk over the support foot keeps the guard at 0, for upright 0.025 (1-10
+#   mm), 0.095 (20-30), 0.20 (40-50), 0.46 (outer corners).  Net of that, the
+#   target pays over a 1 mm lift: 10 mm +0.06 / +0.26, 20 mm +0.20 / +0.92,
+#   40 mm +0.74 / +2.27, front outer corner +0.88 / +2.42.
 #   L, what one foot down costs in the other terms (model_8999, stochastic,
 #   paid rows against both feet down): 1.26 / 1.02 without pushes, 1.18 /
 #   1.03 a second or more after a push; 2.01 / 1.87 with the second after a
 #   push (20-23 % of the time) counted at its whole difference, 4.8-5.2 (a push
 #   lifts a foot and adds the velocity errors at once: over all rows 4.5-4.7).
 # w = 3: w + G - L = 3 + 0.91 - 2.01 = 1.9 / 3 + 2.31 - 1.87 = 3.4 with
-# pushes, w = 1.5 L.
+# pushes and the upper-bound G, w = 1.5 L; at the least net G (10 mm, 0.09 /
+# 0.29 with the 1 mm share) still 3 + 0.09 - 2.01 = 1.1 / 3 + 0.29 - 1.87 = 1.4.
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_SINGLE_SUPPORT_WEIGHT = 3.0
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0

@@ -92,6 +92,7 @@ def _results() -> dict[str, object]:
             "lift_median_m": [
                 goal[2] if up and not all(lifted) else None for goal, up in zip(scenario.foot_goal, lifted)
             ],
+            "air_share_median": [1.0 if up and not all(lifted) else None for up in lifted],
             "trunk_drop_median_m": scenario.foot_goal[0][2] if all(lifted) else None,
             "relative_target_m": math.dist(scenario.foot_goal[0], scenario.foot_goal[1]),
             "relative_error_rms_m": 0.006,
@@ -322,6 +323,10 @@ class TeleopV12StageTest(unittest.TestCase):
         low = _results()
         _find(low["feet"], "left_up40")["lift_median_m"][0] = 0.7 * 0.04 - 1.0e-4
         self.assertFalse(_acceptance(low)[0]["foot_lift"])
+        # A foot raised on its toes reaches the height on the floor.
+        toes = _results()
+        _find(toes["feet"], "right_up20")["air_share_median"][1] = 0.89
+        self.assertFalse(_acceptance(toes)[0]["foot_lift"])
 
     def test_the_support_foot_stays(self) -> None:
         moved = _results()
