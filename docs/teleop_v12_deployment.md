@@ -44,6 +44,65 @@ It does not run or hash the robot's sources: the robot checks a release when
 it is installed (`tools/validate_policies.py src/agents` and its tests) and at
 every start (the self-test).
 
+## Finalize a PICO run started outside the release pipeline
+
+Normally `scripts/retrain_all_for_home.py` runs the three judgments, creates
+the stage gate and packages the policy.  If the same production training was
+started by hand, run the identical sequence below from this repository after
+its final `model_14999.pt` exists.  The first two commands use the GPU; the
+remaining commands are CPU-only.  Keep the checkpoint's `model_14999.pt`
+name: the packager verifies it against iteration 14999.
+
+```bash
+set -euo pipefail
+
+CKPT=logs/rsl_rl/mjlab_microban_teleop_v12/<run>/model_14999.pt
+RUN=$(basename -- "$(dirname -- "$CKPT")")
+OUT="artifacts/pico_release/$RUN"
+PREFIX="$OUT/model_14999"
+mkdir -p -- "$OUT"
+test "$(basename -- "$CKPT")" = model_14999.pt
+CHECKPOINT_SHA=$(sha256sum -- "$CKPT" | awk '{print $1}')
+
+uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_v12_checkpoint \
+  "$CKPT" --expected-sha256 "$CHECKPOINT_SHA" --device cuda:0 \
+  --seed 42 --steps 300 --settle-steps 50 \
+  --output "${PREFIX}_9x300.json" --force
+
+uv run --locked python -m mjlab_microban.scripts.evaluate_teleop_v12_tracking \
+  "$CKPT" --expected-sha256 "$CHECKPOINT_SHA" --device cuda:0 \
+  --seed 42 --output "${PREFIX}_tracking.json" --force
+
+CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
+  mjlab_microban.scripts.teleop_v12_onnx_gate \
+  "$CKPT" --expected-sha256 "$CHECKPOINT_SHA" \
+  --onnx "${PREFIX}.onnx" --output "${PREFIX}_onnx.json" --force
+
+CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
+  mjlab_microban.scripts.teleop_v12_stage create \
+  "$CKPT" "${PREFIX}_9x300.json" "${PREFIX}_tracking.json" \
+  "${PREFIX}_onnx.json" "${PREFIX}_gate.json" --force
+
+CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
+  mjlab_microban.scripts.teleop_v12_stage validate \
+  "${PREFIX}_gate.json" "$CKPT"
+
+CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
+  mjlab_microban.scripts.export_teleop_v12_deployment \
+  --checkpoint "$CKPT" --stage-gate "${PREFIX}_gate.json" \
+  --output "$OUT/pico_teleop.onnx" --force
+sha256sum -- "$CKPT" "$OUT/pico_teleop.onnx" "${PREFIX}"*.json
+```
+
+`set -e` is intentional: a judgment writes its failed report and exits 1, so
+the gate must not be created after a failed judgment.  `--force` makes this
+sequence safe to repeat at the same paths; every JSON and ONNX publication is
+atomic, and the gate and packager re-hash all of their inputs.  Do not change
+the canonical seed, step counts or tracking profile: `teleop_v12_stage`
+rejects non-canonical evidence.  The parity ONNX (`${PREFIX}.onnx`) and its
+JSON report are one evidence pair; if either is regenerated, run the ONNX
+gate and the stage-gate creation again before packaging.
+
 ## PICO judgment
 
 One profile, `pico_feet_push_still_arms_v1`, the same at every HOME
