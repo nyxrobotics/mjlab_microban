@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
@@ -21,6 +21,16 @@ from mjlab_microban.tasks.microban_teleop_env_cfg import (
 )
 
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "13"
+# Weight of the left-right mirror loss (MicrobanMirrorLossCfg).  Measured on
+# the trainable actor weights over training rollouts, the loss's gradient is
+# 0.6 times PPO's surrogate gradient at the pristine walker (loss 0.36) and
+# 1.8 times at the asymmetric v13b policy of update 14999 (loss 1.43), both at
+# weight 1.  At 0.1 it is a tenth to a fifth of the surrogate's: in 300-update
+# trials (schedule x0.02, 512 envs) it kept the loss at 0.30-0.34 against
+# 0.44-0.49 without it, at the same reward and episode length through the foot
+# stage.  At 1.0 it slowed learning from the arm stage on and the raw outputs
+# diverged at update 107.
+MICROBAN_TELEOP_MIRROR_LOSS_COEFF = 0.1
 # HOME-bound identities (robot/home_contracts.py, from config/home_pose.yaml):
 # the forward-lean HOME (trunk 10 deg forward; the root quaternion is part of
 # the marker) keeps
@@ -92,6 +102,27 @@ def make_microban_teleop_v12_env_cfg(
 
 
 @dataclass
+class MicrobanMirrorLossCfg:
+    """rsl_rl's ``symmetry_cfg``: the mirror loss only, no mirrored samples.
+
+    microban_teleop_mirror has the mirror; LegacyAdapterPPO keeps the loss
+    to the leg outputs.
+    """
+
+    use_data_augmentation: bool = False
+    use_mirror_loss: bool = True
+    mirror_loss_coeff: float = MICROBAN_TELEOP_MIRROR_LOSS_COEFF
+    data_augmentation_func: str = (
+        "mjlab_microban.tasks.microban_teleop_mirror:mirror_augmentation"
+    )
+
+
+@dataclass
+class MicrobanTeleopPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    symmetry_cfg: MicrobanMirrorLossCfg = field(default_factory=MicrobanMirrorLossCfg)
+
+
+@dataclass
 class MicrobanTeleopV12RunnerCfg(RslRlOnPolicyRunnerCfg):
     """The pinned legacy-source bootstrap of a fresh run."""
 
@@ -121,7 +152,7 @@ MicrobanTeleopV12RlCfg = MicrobanTeleopV12RunnerCfg(
         activation="elu",
         obs_normalization=True,
     ),
-    algorithm=RslRlPpoAlgorithmCfg(
+    algorithm=MicrobanTeleopPpoAlgorithmCfg(
         class_name=("mjlab_microban.tasks.microban_teleop_v12_actor:LegacyAdapterPPO"),
         value_loss_coef=1.0,
         use_clipped_value_loss=True,

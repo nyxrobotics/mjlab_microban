@@ -86,6 +86,15 @@ TELEOP_TRAINABLE_ACTOR_PARAMETERS = ("mlp.0.weight", *sorted(TELEOP_RESIDUAL_STA
 # The residual's hidden layers are drawn from their own generator, so adding
 # them leaves the global random stream (critic init, environment) as it was.
 TELEOP_RESIDUAL_INIT_SEED = 20261009
+# The action columns of the mirror loss (microban_teleop_mirror): the twelve
+# legs.  The arm servos take the outside IK's targets
+# (PicoArmOverlayJointPositionAction), so the six arm outputs drive nothing,
+# and their raw values (the walker's, far from HOME) would dominate the loss.
+TELEOP_MIRROR_LOSS_ACTION_COLUMNS = tuple(
+    index
+    for index, name in enumerate(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+    if name not in PICO_ARM_JOINT_NAMES
+)
 
 
 def _semantic_observation_names(*, include_teleop_features: bool) -> tuple[str, ...]:
@@ -461,6 +470,8 @@ class LegacyAdapterTeleopActor(MLPModel):
         ]
         self._frozen_reference: dict[str, torch.Tensor] | None = None
         self._common_step_provider: Callable[[], int] | None = None
+        # Set by LegacyAdapterPPO.update only: the deterministic output keeps these columns.
+        self.mirror_loss_columns: tuple[int, ...] | None = None
 
     def forward(
         self,
@@ -477,6 +488,10 @@ class LegacyAdapterTeleopActor(MLPModel):
         if stochastic_output:
             self.distribution.update(mean)
             return self.distribution.sample()
+        if self.mirror_loss_columns is not None:
+            kept = torch.zeros_like(mean)
+            kept[:, self.mirror_loss_columns] = mean[:, self.mirror_loss_columns]
+            mean = kept
         return self.distribution.deterministic_output(mean)
 
     def as_jit(self) -> torch.nn.Module:
@@ -681,6 +696,16 @@ class LegacyAdapterPPO(PPO):
 
     def update(self) -> dict[str, float]:
         self._validate_legacy_adapter()
-        result = super().update()
+        # rsl_rl's mirror loss MSE(pi(M o), M pi(o)) takes both sides from the
+        # actor's deterministic output, its only deterministic actor call in
+        # update.  Zeroing the arm columns there drops them from the loss and
+        # its gradient (M maps the legs to the legs); the logged value is the
+        # leg MSE times 12/18.
+        if self.symmetry:
+            self.actor.mirror_loss_columns = TELEOP_MIRROR_LOSS_ACTION_COLUMNS
+        try:
+            result = super().update()
+        finally:
+            self.actor.mirror_loss_columns = None
         self._validate_legacy_adapter()
         return result
