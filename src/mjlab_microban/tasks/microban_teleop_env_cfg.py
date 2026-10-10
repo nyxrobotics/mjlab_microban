@@ -245,10 +245,9 @@ TELEOP_STAGES = (
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
                     MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 2.0),
             Setting("reward", "foot_target_tracking", "params.std", 0.05),
-            Setting("reward", "foot_target_tracking", "params.velocity_fade_range", (0.0, 0.15)),
             Setting("command", "foot_target", "rel_single_support_envs", PICO_SINGLE_SUPPORT_ENV_SHARE),
             # Most single-foot targets come with a standing twist (the foot
-            # reward fades out with the commanded speed; see
+            # reward is zero on a moving command; see
             # microban_teleop_foot_command.py).
             Setting("command", "foot_target", "single_support_stationary_probability",
                     PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY),
@@ -438,6 +437,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
     # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
+    # The fade stays at 1 cm/s in every stage, the standing threshold of
+    # upper_foot_unload and upper_foot_lift: with a 0.15 m/s fade from the
+    # foot stage, the single-foot rows' weight (10) paid more for standing on
+    # one foot than for following a slow walking command (0.1 m/s), and slow
+    # walking broke down after the foot stage even with the arms down.
     # On the rows upper_foot_unload asks the higher foot to carry nothing (the
     # same threshold) it measures the lifted foot from the support foot (mdp
     # docstring) and pays MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT whatever
@@ -519,9 +523,9 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     # The higher foot's share of the weight (weight in the foot stage), the
-    # same standing rows and feet as lifted_support_feet.  Not faded with the
-    # foot reward's velocity_fade_range (0.15 m/s from the foot stage): on a
-    # walking command (6 cm/s and up) the walker steps on both feet in turn.
+    # same standing rows and feet as lifted_support_feet (the foot reward's
+    # 1 cm/s fade): on a walking command (6 cm/s and up) the walker steps on
+    # both feet in turn.
     cfg.rewards["upper_foot_unload"] = RewardTermCfg(
         func=upper_foot_unload,
         weight=0.0,

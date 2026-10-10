@@ -1,7 +1,7 @@
 """PICO foot targets, some single-foot ones with a standing twist.
 
 The foot-tracking reward fades out with the commanded speed
-(mdp.foot_target_tracking_error_exp, 0 at 0.15 and above): a foot target
+(mdp.foot_target_tracking_error_exp, 0 at 0.01 and above): a foot target
 under a moving command trains only that walking ignores it.  Two-foot
 targets always come with a standing twist (ResetFixedFootTargetCommand);
 here a single-foot target does with ``single_support_stationary_probability``
