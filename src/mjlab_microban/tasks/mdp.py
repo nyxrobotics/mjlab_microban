@@ -1264,31 +1264,48 @@ def lifted_support_feet(
     return (~down & should_be_down).float().sum(dim=-1) * standing.float()
 
 
-def planted_feet_motion(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    foot_target_command_name: str,
-    command_name: str = "twist",
-    command_threshold: float = 0.01,
-    sensor_foot_ids: tuple[int, int] = (0, 1),
-) -> torch.Tensor:
-    """Penalize the feet that should be down moving over the floor, when the commanded speed is below threshold.
+class planted_feet_motion:
+    """Penalize the planted feet that should stay down moving, when the commanded speed is below threshold.
 
     The feet that should be down are those of ``_standing_and_feet_down`` (as
-    ``lifted_support_feet``); each counts with its foot site's horizontal
-    speed (``FootTargetCommand.foot_speed_xy``, m/s) whether it is down or
-    not, so a foot lifted and set down elsewhere and a foot sliding both
-    count, by the distance they move.
+    ``lifted_support_feet``).  Such a foot is planted from the step the
+    contact sensor finds it down until it stops being one of them (or the
+    command walks, or the episode resets); a planted foot counts with its
+    foot site's horizontal speed (``FootTargetCommand.foot_speed_xy``, m/s)
+    whether it is down or not, so a foot lifted and set down elsewhere and a
+    foot sliding both count, by the distance they move.  A foot still in the
+    air when it becomes one of them (coming back down from a target, the last
+    step of a walk) counts only after it lands, so it is free to come back to
+    where it belongs.
 
     Returns the sum of those speeds per environment, 0 when the commanded
     speed is at or above threshold (use with a negative weight: mjlab
     multiplies by dt, so over a move the penalty is weight x the distance).
+    A class only to remember which feet are planted.
     """
-    standing, _, should_be_down, _ = _standing_and_feet_down(
-        env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
-    )
-    speed = env.command_manager.get_term(foot_target_command_name).foot_speed_xy()
-    return (speed * should_be_down).sum(dim=-1) * standing.float()
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        self._planted = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        foot_target_command_name: str,
+        command_name: str = "twist",
+        command_threshold: float = 0.01,
+        sensor_foot_ids: tuple[int, int] = (0, 1),
+    ) -> torch.Tensor:
+        standing, _, should_be_down, down = _standing_and_feet_down(
+            env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
+        )
+        self._planted = (self._planted | down) & should_be_down & standing[:, None]
+        speed = env.command_manager.get_term(foot_target_command_name).foot_speed_xy()
+        return (speed * self._planted).sum(dim=-1)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        self._planted[slice(None) if env_ids is None else env_ids] = False
 
 
 def upper_foot_unload(

@@ -95,25 +95,29 @@ PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
 MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # The planted-feet motion penalty (mdp.planted_feet_motion) on the same rows
-# and feet: the feet that should be down, each by its site's horizontal
-# speed, down or not (a foot set down elsewhere, a slide); over a move,
-# weight x value is |w| x the distance.  Measured on v13c model_12000 (the
-# training env with every stage, 1024 envs x 30 s; m/s of the term, the
-# other terms' reward per second):
-#   no pushes, mean actions (the evaluation's conditions): single-foot rows
-#   0.0074 (reward 33.6), standing rows 0.0089; 56 % of the one-foot
-#   stances of 1 s or more moved the support foot over 10 mm (median 34.5
-#   mm, 0.042 m of the term), the still ones 0.0009;
-#   training (+-0.5 m/s pushes every 1-3 s, sampled actions): single-foot
-#   rows 0.082 (reward 22.2), standing rows 0.093 (16.4); the second after a
-#   push on one foot 0.16 m (p90 0.29).
+# and feet, from the foot stage: each foot to keep down, once it has touched
+# down, by its site's horizontal speed, down or not (a foot set down
+# elsewhere, a slide); over a move, weight x value is |w| x the distance.
+# Measured on v13c checkpoints in the training env with the stages each one
+# trained under (1024 envs x 30 s; m/s of the term, the other terms' reward
+# per second):
+#   no pushes, mean actions (the evaluation's conditions), model_12000:
+#   single-foot rows 0.0063 (reward 33.7), standing rows 0.0069; 55 % of the
+#   one-foot stances of 1 s or more moved the support foot over 10 mm
+#   (median 35.8 mm, 0.038 m of the term), the still ones 0.0008;
+#   training (+-0.5 m/s pushes every 1-3 s, sampled actions), standing rows
+#   (reward) and single-foot rows (reward):
+#     model_4000 (the foot stage's start)     0.075 (10.5)  0.066 (11.9)
+#     model_6000 (the tighten stage's start)  0.103 (14.0)  0.092 (19.0)
+#     model_12000                             0.091 (16.3)  0.082 (22.1)
 # |w| = 100: a 30 mm re-step costs 3, 9 % of a second of the single-foot
 # rows' reward (30 % of one of their weight-10 terms), the measured median
-# re-step 4.2, a still foot 0.09 /s.  A larger weight would make falling
-# pay: a row stays above zero while |w| < 16.4 / 0.093 = 176 (standing) and
-# 22.2 / 0.082 = 270 (single foot); at 100 they keep +7.1 and +14 /s.  A
-# recovery on one foot after a p90 push (-6 /s for a second, then +14 /s)
-# is worth -6 x 0.79 + 14 x 1.21 = +12 at gamma 0.99 (50 Hz), a fall 0.
+# re-step 3.8, a still foot 0.08 /s.  A row stays above zero, so a fall does
+# not pay, while |w| < 141 / 180 (standing / single foot) at the foot stage's
+# start, 136 / 206 at the tighten stage's and 180 / 270 at model_12000; at
+# 100 the foot stage starts with +3.0 and +5.3 /s.  From the arm stage the
+# limit would be 9 (model_1000: 0.166 m/s against 1.5 /s), so the term waits
+# for the foot targets, whose one-foot stances it is for.
 MICROBAN_TELEOP_PLANTED_FEET_MOTION_WEIGHT = -100.0
 # The unload reward (mdp.upper_foot_unload), on a standing row whose published
 # foot targets differ in z by dz > 0: clamp(1 - 2 |s - s*|, 0, 1), s the higher
@@ -236,17 +240,16 @@ def _materialize_rotation_command_cfg(
     return UniformVelocityCommandWithRotationCfg(**values)
 
 
-# The arms (and the moving HMD and the support-feet penalties) after the critic
+# The arms (and the moving HMD and the lifted-support-feet penalty) after the critic
 # warm-up, foot targets later, tightened later (mjlab_microban/schedules.py).
 # The adapter columns of the frozen walker open at the same updates
 # (microban_teleop_v12_actor); before the arms move no actor column trains.
 TELEOP_STAGES = (
     Stage(
-        "enable moving-HMD, moving arms and the support-feet penalties",
+        "enable moving-HMD, moving arms and the lifted-support-feet penalty",
         PICO_SCHEDULE["arm"],
         (
             Setting("reward", "lifted_support_feet", "weight", MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT),
-            Setting("reward", "planted_feet_motion", "weight", MICROBAN_TELEOP_PLANTED_FEET_MOTION_WEIGHT),
             Setting(
                 "event",
                 "hmd_neck_target_motion",
@@ -263,6 +266,7 @@ TELEOP_STAGES = (
         PICO_SCHEDULE["foot"],
         (
             Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
+            Setting("reward", "planted_feet_motion", "weight", MICROBAN_TELEOP_PLANTED_FEET_MOTION_WEIGHT),
             Setting("reward", "upper_foot_lift", "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
@@ -546,7 +550,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     # The horizontal motion of the same feet on the same rows (weight in the
-    # arm stage): a support foot set down elsewhere or sliding.
+    # foot stage): a planted support foot set down elsewhere or sliding.
     cfg.rewards["planted_feet_motion"] = RewardTermCfg(
         func=planted_feet_motion,
         weight=0.0,
