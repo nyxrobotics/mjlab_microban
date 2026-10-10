@@ -53,6 +53,14 @@ LEGACY_VELOCITY_CHECKPOINT_SHA256 = "1" * 64
 PINNED_LEGACY_TELEOP_PROBE_SHA256 = "2" * 64
 
 
+def _git_provenance() -> dict[str, str]:
+    return {
+        "training_git_commit": "a" * 40,
+        "training_git_branch": "tracking-v13c",
+        "training_git_record_sha256": "b" * 64,
+    }
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -249,17 +257,25 @@ def test_metadata_is_the_pico_contract_and_derives_guard(tmp_path: Path) -> None
         tracking=tracking,
         self_test_observations=rows,
         self_test_actions=[[0.5] * 18 for _ in rows],
+        training_git_provenance=_git_provenance(),
         dry_run=False,
     )
     from test_policy_contract import ROBOT_COMMON_KEYS, ROBOT_PICO_KEYS
 
-    assert set(metadata) == ROBOT_COMMON_KEYS | ROBOT_PICO_KEYS | {"run_path"}
+    assert set(metadata) == (
+        ROBOT_COMMON_KEYS
+        | ROBOT_PICO_KEYS
+        | {"run_path", *deployment.TRAINING_GIT_METADATA_KEYS}
+    )
     assert all(isinstance(value, str) for value in metadata.values())
     assert metadata["microban_policy_contract"] == POLICY_CONTRACT
     assert metadata["microban_policy_kind"] == "pico"
     assert metadata["gate_report_sha256"] == _sha(gate_path)
     assert metadata["checkpoint_iteration"] == str(PICO_TOTAL_UPDATES - 1)
     assert metadata["previous_action_semantics"] == "raw_policy_output"
+    assert {
+        key: metadata[key] for key in deployment.TRAINING_GIT_METADATA_KEYS
+    } == _git_provenance()
     assert json.loads(metadata["pico_raw_action_guard_json"]) == [24.0] * 18
     assert json.loads(metadata["pico_curriculum_json"]) == pico_schedule_record()
     assert metadata["pico_walk_checkpoint_sha256"] == LEGACY_VELOCITY_CHECKPOINT_SHA256
@@ -290,6 +306,32 @@ def test_hashed_report_loader_rejects_changed_evidence(tmp_path: Path) -> None:
     report.write_text('{"status":"fail"}', encoding="utf-8")
     with pytest.raises(ValueError, match="JSON SHA-256 mismatch"):
         deployment._load_json(report, expected_sha256=expected)
+
+
+def test_training_git_provenance_is_bound_to_the_run_record(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "run" / FINAL_NAME
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    record = checkpoint.parent / "git" / "mjlab_microban.diff"
+    record.parent.mkdir()
+    record.write_text(
+        "--- git commit ---\n"
+        + "a" * 40
+        + "\n\n--- git status ---\n"
+        + "On branch tracking-v13c\n"
+        + "nothing to commit, working tree clean\n\n",
+        encoding="utf-8",
+    )
+    provenance = deployment._training_git_provenance(checkpoint)
+    assert provenance == {
+        "training_git_commit": "a" * 40,
+        "training_git_branch": "tracking-v13c",
+        "training_git_record_sha256": _sha(record),
+    }
+
+    record.write_text(record.read_text() + "\ndiff --git a/x b/x\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="tracked Git changes"):
+        deployment._training_git_provenance(checkpoint)
 
 
 def test_output_cannot_replace_checkpoint_or_validator_source(tmp_path: Path) -> None:
@@ -325,6 +367,9 @@ def test_a_failed_final_check_preserves_last_known_good_output(
         report_path.write_text(json.dumps(value), encoding="utf-8")
         gate["report_sha256"][name] = _sha(report_path)
     gate_path.write_text(json.dumps(gate), encoding="utf-8")
+    monkeypatch.setattr(
+        deployment, "_training_git_provenance", lambda _path: _git_provenance()
+    )
     class FakeActor:
         pass
 

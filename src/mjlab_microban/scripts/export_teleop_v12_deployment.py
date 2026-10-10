@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -80,6 +81,46 @@ PACKAGER_REVISION = home_contracts.V12_PACKAGER_REVISION
 # Raw-action guard: max(v12_absmax, source_absmax + delta_absmax) * 6 over the
 # final tracking rollouts; the robot stops when an output exceeds it.
 RUNTIME_GUARD_MULTIPLIER = 6.0
+TRAINING_GIT_METADATA_KEYS = (
+    "training_git_commit",
+    "training_git_branch",
+    "training_git_record_sha256",
+)
+_GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _training_git_provenance(checkpoint: Path) -> dict[str, str]:
+    """Read the Git state captured by the logger when this run started."""
+
+    record = checkpoint.parent / "git" / "mjlab_microban.diff"
+    if not record.is_file() or record.is_symlink():
+        raise ValueError(f"Training run lacks its regular Git record: {record}")
+    data = record.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Training run Git record is not UTF-8") from exc
+    commit = re.search(
+        r"(?m)^--- git commit ---\r?$\n([0-9a-f]{40})\r?$", text
+    )
+    branch = re.search(r"(?m)^On branch ([^\r\n]+)\r?$", text)
+    if commit is None or _GIT_COMMIT_RE.fullmatch(commit.group(1)) is None:
+        raise ValueError("Training run Git record lacks its exact commit")
+    if branch is None or not branch.group(1).strip():
+        raise ValueError("Training run Git record lacks its branch")
+    if (
+        "\ndiff --git " in text
+        or "\nChanges not staged for commit:" in text
+        or "\nChanges to be committed:" in text
+    ):
+        raise ValueError(
+            "Training started with tracked Git changes; its commit is not exact"
+        )
+    return {
+        "training_git_commit": commit.group(1),
+        "training_git_branch": branch.group(1),
+        "training_git_record_sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 def _load_json(path: Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
@@ -231,6 +272,7 @@ def build_v12_deployment_metadata(
     tracking: Mapping[str, Any],
     self_test_observations: list[list[float]],
     self_test_actions: list[list[float]],
+    training_git_provenance: Mapping[str, str],
     dry_run: bool,
 ) -> dict[str, str]:
     """Translate the already-validated gate evidence to microban-policy-1."""
@@ -293,6 +335,20 @@ def build_v12_deployment_metadata(
     except policy_contract.PolicyContractError as exc:
         raise ValueError(str(exc)) from exc
     metadata["run_path"] = checkpoint.parent.name
+    if (
+        set(training_git_provenance) != set(TRAINING_GIT_METADATA_KEYS)
+        or _GIT_COMMIT_RE.fullmatch(
+            training_git_provenance.get("training_git_commit", "")
+        )
+        is None
+        or not training_git_provenance.get("training_git_branch", "").strip()
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            training_git_provenance.get("training_git_record_sha256", ""),
+        )
+    ):
+        raise ValueError("Training Git provenance is malformed")
+    metadata.update(dict(training_git_provenance))
     return metadata
 
 
@@ -455,6 +511,7 @@ def package_v12_deployment(
 
     gate_snapshot = _load_json(gate_path)
     gate_sha256 = sha256_file(gate_path)
+    training_git_provenance = _training_git_provenance(checkpoint)
     gate = validate_gate(gate_path, checkpoint)
     if gate != gate_snapshot or sha256_file(gate_path) != gate_sha256:
         raise RuntimeError("V12 stage gate changed while it was validated")
@@ -537,6 +594,7 @@ def package_v12_deployment(
             tracking=tracking,
             self_test_observations=rows,
             self_test_actions=_actor_outputs(actor, rows),
+            training_git_provenance=training_git_provenance,
             dry_run=dry_run,
         )
         existing = _read_onnx_metadata(temporary)
@@ -570,6 +628,8 @@ def package_v12_deployment(
             raise RuntimeError("V12 stage gate changed while deployment was packaged")
         if validate_gate(gate_path, checkpoint) != gate:
             raise RuntimeError("V12 gate/report evidence changed before publication")
+        if _training_git_provenance(checkpoint) != training_git_provenance:
+            raise RuntimeError("Training run Git provenance changed before publication")
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, output)
@@ -588,6 +648,7 @@ def package_v12_deployment(
             "output_sha256": sha256_file(output),
             "checkpoint_sha256": checkpoint_sha256,
             "stage_gate_sha256": gate_sha256,
+            **training_git_provenance,
             "completed_updates": gate["completed_updates"],
             "parity": final_parity,
             "self_test_rows": len(rows),

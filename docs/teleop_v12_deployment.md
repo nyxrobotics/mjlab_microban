@@ -34,7 +34,9 @@ The packager, on CPU:
    frame, the arm-target box and slew, the curriculum, the per-joint raw-action guard derived from the final tracking
    envelope, and the startup self-test: the final tracking rollouts' actor
    observations (possible states only) with the actor's deterministic output
-   for each;
+   for each.  It also reads the run logger's `git/mjlab_microban.diff`, refuses
+   a run that started with tracked changes, and embeds the exact training
+   commit, branch and SHA-256 of that Git record in the ONNX metadata;
 5. checks parity of PyTorch, ONNX `ReferenceEvaluator` and ONNX Runtime
    `CPUExecutionProvider` on a deterministic 64-sample corpus before and after
    the metadata is attached, runs the robot's self-test rule on the final
@@ -43,6 +45,10 @@ The packager, on CPU:
 It does not run or hash the robot's sources: the robot checks a release when
 it is installed (`tools/validate_policies.py src/agents` and its tests) and at
 every start (the self-test).
+
+The Git identity is the state captured when training started, not the branch
+tip at packaging time.  In particular, documentation-only commits made while
+a run is executing do not relabel the trained policy.
 
 ## Finalize a PICO run started outside the release pipeline
 
