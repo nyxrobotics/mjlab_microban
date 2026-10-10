@@ -435,7 +435,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Exact-zero standing receives a small foot anchor from the first update.
     # Its 1 cm/s fade makes the reward exactly zero for every signed locomotion
-    # sample (the smallest commanded translation is 6 cm/s and yaw is 0.4
+    # sample (the smallest commanded translation is 8 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
     # The fade stays at 1 cm/s in every stage, the standing threshold of
     # upper_foot_unload and upper_foot_lift: with a 0.15 m/s fade from the
@@ -524,7 +524,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     # The higher foot's share of the weight (weight in the foot stage), the
     # same standing rows and feet as lifted_support_feet (the foot reward's
-    # 1 cm/s fade): on a walking command (6 cm/s and up) the walker steps on
+    # 1 cm/s fade): on a walking command (8 cm/s and up) the walker steps on
     # both feet in turn.
     cfg.rewards["upper_foot_unload"] = RewardTermCfg(
         func=upper_foot_unload,
