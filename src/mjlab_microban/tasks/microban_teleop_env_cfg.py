@@ -158,8 +158,10 @@ MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT = MICROBAN_TELEOP_UPPER_FOOT_LIFT_WE
 # run (15000 updates from scratch) dropped -0.5 to -0.8 mm against the 0.7 dz
 # pass line. The foot reward measures those rows as the mean of the feet's
 # squared errors from the trunk, exp(-e / 0.03^2), so the legs left straight
-# still score 75 % of it at 16 mm, and the two-foot rows are 5-10 % of the
-# foot targets with dz up to 20 mm: lowering the trunk paid at most a quarter
+# still score 75 % of it at 16 mm, and the two-foot rows are 5-10 % of all
+# rows (rel_both_feet_envs is drawn over every row: about 8 % of the
+# foot-target rows at the foot stage, 16 % at the final one) with dz up to
+# 20 mm: lowering the trunk paid at most a quarter
 # of weight 3 (0.75 /s), and the policy did not learn to bend both knees. The
 # same form as upper_foot_lift, which took the lifted foot from 2 mm to 22-39
 # mm: each millimetre pays w / dz (w = 10: 0.6 /s per mm at 16 mm), and past
