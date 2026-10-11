@@ -1258,43 +1258,86 @@ def lifted_support_feet(
     return (~down & should_be_down).float().sum(dim=-1) * standing.float()
 
 
-def upper_foot_unload(
+def feet_zmp(sensor, sensor_foot_ids: tuple[int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+    """The floor's centre of pressure under the feet (the ZMP on a flat floor)
+    and the floor's vertical push on each foot.
+
+    The contact ``sensor`` (reduce="netforce", fields force, torque and pos)
+    reports per foot, in the world frame, the net force F of its floor
+    contacts, their |F|-weighted centroid c and the net torque tau about c
+    (mujoco_warp's netforce reduction).  The point p of the floor about which
+    that wrench has no horizontal moment is p_x = c_x - tau_y / F_z, p_y = c_y
+    + tau_x / F_z (the contacts and p on one horizontal plane), so with L =
+    -F_z the floor's push up (the sensor reports the foot's push on the
+    floor) L p = (c_x L + tau_y, c_y L - tau_x), and the two feet's centre of
+    pressure is sum(L p) / sum(L): the vertical-force-weighted mean of all the
+    contact points.  A foot off the floor reports zeros and adds nothing.
+    ``sensor_foot_ids`` are the sensor's indices of the (left, right) feet.
+
+    Returns (zmp_xy (N, 2), world x and y; load (N, 2), L per foot in
+    newtons).  zmp_xy means nothing where the loads sum to about zero.
+    """
+    ids = list(sensor_foot_ids)
+    force = sensor.data.force[:, ids]  # (N, 2, 3)
+    torque = sensor.data.torque[:, ids]
+    centroid = sensor.data.pos[:, ids]
+    load = -force[..., 2]
+    moment = torch.stack(
+        (centroid[..., 0] * load + torque[..., 1], centroid[..., 1] * load - torque[..., 0]), dim=-1
+    )  # (N, 2, 2): L p per foot
+    zmp = moment.sum(dim=1) / torch.clamp(load.sum(dim=-1), min=1e-9)[:, None]
+    return zmp, load
+
+
+def support_zmp(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     foot_target_command_name: str,
     lift_threshold: float,
+    zmp_tolerance: float,
+    sole_cfg: SceneEntityCfg,
     command_name: str = "twist",
     command_threshold: float = 0.01,
     sensor_foot_ids: tuple[int, int] = (0, 1),
     min_force: float = 0.1,
 ) -> torch.Tensor:
-    """Reward the higher foot carrying the share of the weight its target asks.
+    """Reward the feet's centre of pressure (ZMP) where the target asks the weight.
 
     On a standing command (as ``lifted_support_feet``) whose two published
-    foot targets differ in height by dz > 0, the higher foot
-    (``_higher_foot``, never one ``lifted_support_feet`` asks down) carries
-    the share s = Fz_up / (Fz_up + Fz_down) of the floor's vertical push on
-    the feet.  The target share s* = 0.5 max(0, 1 - dz / lift_threshold) is
-    even at dz = 0 and 0 (the higher foot carries nothing) from the
-    threshold up, so a partial shift of the weight pays below and above it.
-    Returns clamp(1 - 2 |s - s*|, 0, 1); 0 on other rows and when the feet
-    carry less than ``min_force`` newtons together (both in the air).
-    ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
-    right) feet; the sensor's net force (world frame) is the foot's push on
-    the floor, so the floor's push up on a foot is -z.
+    foot targets differ in height by dz > 0, with s* = 0.5 max(0, 1 - dz /
+    ``lift_threshold``) the higher foot's (``_higher_foot``) target share of
+    the weight, the target point is the support (lower) sole's centre plus
+    s* times the way to the higher sole's centre: the two soles' midpoint at
+    dz = 0, the support sole's centre from the threshold up.  The ZMP
+    (``feet_zmp``) scores clamp(1 - |ZMP - target| / ``zmp_tolerance``, 0,
+    1), horizontally.  With the tolerance half the HOME feet spacing, the
+    weight even on both feet scores 0 from the threshold up, and in one-foot
+    stance the ZMP at the support sole's centre scores 1 and at its side
+    edge (20 mm out) about 0.57: standing on the edge of the sole, where a
+    small push tips it, pays less than standing over its middle.  0 on other
+    rows and when the feet carry less than ``min_force`` newtons together
+    (both in the air).
+
+    The sole centres are the world x, y of ``sole_cfg``'s geoms (the (left,
+    right) feet's sole boxes, centred on the sole).  ``sensor_foot_ids`` are
+    the sensor's indices of the foot target's (left, right) feet.
     """
     standing, height, _, _ = _standing_and_feet_down(
         env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
     )
-    upper = _higher_foot(height)
+    upper = _higher_foot(height)  # (N, 2)
     dz = (height[:, 0] - height[:, 1]).abs()
-    target = 0.5 * torch.clamp(1.0 - dz / lift_threshold, min=0.0)
+    share = 0.5 * torch.clamp(1.0 - dz / lift_threshold, min=0.0)
 
-    force = env.scene.sensors[sensor_name].data.force[:, list(sensor_foot_ids), 2]
-    load = torch.clamp(-force, min=0.0)  # (N, 2)
+    sole = env.scene[sole_cfg.name].data.geom_pos_w[:, sole_cfg.geom_ids, :2]  # (N, 2, 2)
+    up = upper[..., None].float()
+    upper_sole = (sole * up).sum(dim=1)
+    support_sole = (sole * (1.0 - up)).sum(dim=1)
+    target = support_sole + share[:, None] * (upper_sole - support_sole)
+
+    zmp, load = feet_zmp(env.scene.sensors[sensor_name], sensor_foot_ids)
     total = load.sum(dim=-1)
-    share = (load * upper).sum(dim=-1) / torch.clamp(total, min=min_force)
-    reward = torch.clamp(1.0 - 2.0 * (share - target).abs(), 0.0, 1.0)
+    reward = torch.clamp(1.0 - torch.norm(zmp - target, dim=-1) / zmp_tolerance, 0.0, 1.0)
     return reward * (standing & (dz > 0.0) & (total >= min_force)).float()
 
 

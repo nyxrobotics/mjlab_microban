@@ -199,7 +199,7 @@ class FootTrackingRewardTest(unittest.TestCase):
             self.assertAlmostEqual(weight * single, MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, places=12,
                                    msg=stage.name)
 
-    def test_pico_uses_the_unload_threshold(self) -> None:
+    def test_pico_uses_the_support_threshold(self) -> None:
         from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
             make_microban_teleop_v13_arm_overlay_env_cfg,
         )
@@ -207,7 +207,7 @@ class FootTrackingRewardTest(unittest.TestCase):
         cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
         term = cfg.rewards["foot_target_tracking"]
         self.assertIs(term.func, foot_target_tracking_error_exp)
-        self.assertEqual(term.params["lift_threshold"], cfg.rewards["upper_foot_unload"].params["lift_threshold"])
+        self.assertEqual(term.params["lift_threshold"], cfg.rewards["support_zmp"].params["lift_threshold"])
 
 
 if __name__ == "__main__":

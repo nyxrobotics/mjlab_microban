@@ -16,7 +16,7 @@ privileged simulation state may still be used by the critic during training.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, fields, replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -28,6 +28,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
 )
@@ -38,8 +39,8 @@ from mjlab_microban.tasks.mdp import (
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
+    support_zmp,
     upper_foot_lift,
-    upper_foot_unload,
 )
 from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
@@ -93,40 +94,61 @@ PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # r / |w| = 0.9, so a fall does not pay; a stop/walk switch steps the 2 s value
 # by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
 MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
-# The unload reward (mdp.upper_foot_unload), on a standing row whose published
-# foot targets differ in z by dz > 0: clamp(1 - 2 |s - s*|, 0, 1), s the higher
-# foot's share of the floor's vertical push on the feet, s* = 0.5 max(0, 1 -
-# dz / threshold).  Threshold 10 mm: 4x the 2.5 mm floor band, reached by 84 %
-# of the single-foot targets (z ~ U(2.5, 50) mm); from it up the higher foot
-# carries nothing.  On the same rows the foot reward measures the lifted foot
-# from the support foot (mdp.foot_target_tracking_error_exp), so how high it
-# goes is the foot reward's: this term reads only the floor's push, and a
-# higher foot touching the floor with no weight on it scores in full (the
-# evaluation's air share watches that).  No contact test: it would pay again
-# the sub-millimetre contact flicker that took 57 % of the old reward.
+# The support reward (mdp.support_zmp), on a standing row whose published
+# foot targets differ in z by dz > 0: clamp(1 - |ZMP - P| / d0, 0, 1), the
+# ZMP the centre of pressure of the floor's push on both feet, P the support
+# sole's centre plus s* of the way to the higher sole's centre, s* = 0.5
+# max(0, 1 - dz / threshold) (the higher foot's share of the weight: even at
+# dz = 0, none from the threshold up), d0 half the HOME feet spacing.
+# Threshold 10 mm: 4x the 2.5 mm floor band, reached by 84 % of the
+# single-foot targets (z ~ U(2.5, 50) mm).  On the same rows the foot reward
+# measures the lifted foot from the support foot
+# (mdp.foot_target_tracking_error_exp), so how high it goes is the foot
+# reward's: this term reads only the floor's push, and a higher foot touching
+# the floor with no weight on it scores in full (the evaluation's air share
+# watches that).  No contact test: it would pay again the sub-millimetre
+# contact flicker that took 57 % of the old share reward.
 # Below the threshold the foot reward measures the feet in the trunk frame, so
 # moving the trunk over the lower foot costs there: s* at dz = 5 mm moves it
 # ~18 mm, -0.24 /s (foot stage), against +5 to +9 /s here.
-# Weight (from the foot stage), per second: from both feet down evenly (s =
-# 0.5, reward 0 at dz >= 10 mm) to all the weight on the lower foot pays w;
-# each 10 % of the weight moved pays w / 5.  What it costs, in the other terms
+# It replaces that reward (the higher foot's share of the vertical push s,
+# clamp(1 - 2 |s - s*|, 0, 1)), which paid in full as soon as the higher foot
+# carried nothing, however close to the sole's edge the robot then stood: in
+# the v13c run the support foot was sometimes lifted and set down again
+# (10-30 mm) during a one-foot stance, with the centre of mass only 7-16 mm
+# inside the sole's edge and the trunk leaning 4-9 deg over the support foot
+# (16-20 deg where it held).  While the weight moves, the ZMP moves from the
+# midpoint to the support sole in proportion, as the share did; in one-foot
+# stance it pays 1 over the sole's centre, 0.57 at its side edge (20 mm out).
+# Measured on v13c's model_12000 and model_14999 in this env (final stage, no
+# pushes, mean actions, 1024 envs x 30 s): in the 0.3 s before the support
+# foot left the floor during a one-foot target the ZMP was 21 mm (median)
+# from the support sole's centre, r 0.51; in one-foot targets without such a
+# lift 10-11 mm, r 0.76-0.78.  The old share reward paid both 1.
+# Weight (from the foot stage), per second: from both feet down evenly (0 at
+# dz >= 10 mm) to the ZMP over the support sole's centre pays w; each 10 % of
+# the weight moved pays about w / 5.  What it costs, in the other terms
 # (model_5000 of the +3 single-stance reward, training noise or mean actions,
 # with or without pushes, a second or more after a push, rows with the higher
 # foot up against both feet down): 3.0-3.8 /s at 5-10 mm up, 5.7-6.2 at 10 mm
 # or more, over 80 % of it the velocity terms (the trunk moving over the
 # support foot on a standing command).  w = 10 leaves +3.8 to +4.4 /s at 10 mm
-# or more (the old +3: -2.8 to -3.4) and pays the first 10 % of the weight
-# moved 2 /s.  Those costs were taken over lifts of 0.26 s or less, while the
-# trunk moved; a foot held up for a 3-8 s target pays the move once, so the
-# margin is larger.  10 /s is the largest positive weight on these rows,
-# shared with the lift and the foot reward's single-foot rows (track_linear
-# 5 + track_angular 2 + upright 1 + pose 1 = 9).
+# or more and pays the first 10 % of the weight moved 2 /s.  Those costs were
+# taken over lifts of 0.26 s or less, while the trunk moved; a foot held up
+# for a 3-8 s target pays the move once, so the margin is larger.  10 /s is
+# the largest positive weight on these rows, shared with the lift and the
+# foot reward's single-foot rows (track_linear 5 + track_angular 2 + upright
+# 1 + pose 1 = 9).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
-MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
+MICROBAN_TELEOP_SUPPORT_ZMP_TOLERANCE_M = HOME.feet_lateral_m / 2.0
+MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT = 10.0
+# The (left, right) soles' contact boxes: six nested boxes share one centre,
+# the sole's.
+MICROBAN_SOLE_GEOM_NAMES = ("left_foot_collision_1", "right_foot_collision_1")
 # The lift reward (mdp.upper_foot_lift), on a standing row whose published
 # foot targets differ in z by dz >= the threshold: the higher foot's height
 # over the lower one / dz, clamped to [0, 1], while it touches nothing and the
-# lower foot is down.  With the unload reward alone the policy took the weight
+# lower foot is down.  With the old share reward alone the policy took the weight
 # off the higher foot and stopped there (lift 2 mm): the foot reward's exp
 # form, far from a 40 mm target, pays about 0.05 /s for each 1 mm.  This term
 # pays w / dz per metre all the way up (w = 10: 0.25 /s per mm at 40 mm).
@@ -140,7 +162,7 @@ MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT = 10.0
 # in every judged single-foot case, 22-39 mm up, no falls).  Here the term
 # is on from the foot stage.  The lower-foot-down condition is not D's; on
 # D's model_8999 the lower foot was never up while the higher one was off the
-# floor, so it changes no row D trained on.  The same weight as the unload
+# floor, so it changes no row D trained on.  The same weight as the support
 # reward: both pay the same rows up to w, the largest positive weight there,
 # shared with the foot reward's single-foot rows.
 MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
@@ -239,7 +261,7 @@ TELEOP_STAGES = (
         "enable broad stationary foot tracking",
         PICO_SCHEDULE["foot"],
         (
-            Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
+            Setting("reward", "support_zmp", "weight", MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT),
             Setting("reward", "upper_foot_lift", "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
@@ -287,6 +309,14 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # dropping contacts or constraints at the moment the policy is least stable.
     cfg.sim.nconmax = 512
     cfg.sim.njmax = 2048
+    # The feet's floor contacts also report their centroid and the torque
+    # about it (still one net force per foot): the support reward's centre
+    # of pressure (mdp.feet_zmp).  Not observed; the walking task keeps its own.
+    cfg.scene.sensors = tuple(
+        replace(sensor, fields=("found", "force", "torque", "pos"))
+        if sensor.name == "feet_ground_contact" else sensor
+        for sensor in cfg.scene.sensors
+    )
 
     # Materialize the velocity task's runtime-only rotation extensions as a
     # proper dataclass before this config crosses the registry/Tyro CLI boundary.
@@ -438,11 +468,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # sample (the smallest commanded translation is 8 cm/s and yaw is 0.4
     # rad/s), so it cannot reward the stationary local optimum on moving tasks.
     # The fade stays at 1 cm/s in every stage, the standing threshold of
-    # upper_foot_unload and upper_foot_lift: with a 0.15 m/s fade from the
+    # support_zmp and upper_foot_lift: with a 0.15 m/s fade from the
     # foot stage, the single-foot rows' weight (10) paid more for standing on
     # one foot than for following a slow walking command (0.1 m/s), and slow
     # walking broke down after the foot stage even with the arms down.
-    # On the rows upper_foot_unload asks the higher foot to carry nothing (the
+    # On the rows support_zmp asks the higher foot to carry nothing (the
     # same threshold) it measures the lifted foot from the support foot (mdp
     # docstring) and pays MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT whatever
     # the term's weight (single_foot_weight = it / weight at every stage).
@@ -522,20 +552,25 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "sensor_foot_ids": (1, 0),
         },
     )
-    # The higher foot's share of the weight (weight in the foot stage), the
-    # same standing rows and feet as lifted_support_feet (the foot reward's
-    # 1 cm/s fade): on a walking command (8 cm/s and up) the walker steps on
-    # both feet in turn.
-    cfg.rewards["upper_foot_unload"] = RewardTermCfg(
-        func=upper_foot_unload,
+    # The feet's centre of pressure where the target puts the weight (weight
+    # in the foot stage), the same standing rows and feet as
+    # lifted_support_feet (the foot reward's 1 cm/s fade): on a walking
+    # command (8 cm/s and up) the walker steps on both feet in turn.  The
+    # sole centres are the sole boxes' (the foot sites sit 3.5 mm ahead).
+    cfg.rewards["support_zmp"] = RewardTermCfg(
+        func=support_zmp,
         weight=0.0,
         params={
             **cfg.rewards["lifted_support_feet"].params,
             "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+            "zmp_tolerance": MICROBAN_TELEOP_SUPPORT_ZMP_TOLERANCE_M,
+            "sole_cfg": SceneEntityCfg(
+                "robot", geom_names=MICROBAN_SOLE_GEOM_NAMES, preserve_order=True
+            ),
         },
     )
     # The higher foot's lift over the lower one (weight in the foot stage), on
-    # the same rows and feet from the same threshold as upper_foot_unload.
+    # the same rows and feet from the same threshold as support_zmp.
     cfg.rewards["upper_foot_lift"] = RewardTermCfg(
         func=upper_foot_lift,
         weight=0.0,

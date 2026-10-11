@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import re
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import torch
 
 from mjlab_microban.tasks import microban_teleop_foot_command as fc
-from mjlab_microban.tasks.mdp import FootTargetCommand, lifted_support_feet, upper_foot_lift, upper_foot_unload
+from mjlab_microban.tasks.mdp import FootTargetCommand, feet_zmp, lifted_support_feet, support_zmp, upper_foot_lift
 from mjlab_microban.tasks.microban_teleop_mdp import ResetFixedFootTargetCommand
 
 
@@ -37,6 +39,45 @@ def _command(stationary_probability: float, n: int = 3):
     command.foot_target_slewed_b = torch.zeros(n, 2, 3)
     command._max_step_m = fc.MICROBAN_TELEOP_FOOT_TARGET_SLEW_M_S * 0.02
     return command, velocity, twist
+
+
+class _Scene(SimpleNamespace):
+    def __getitem__(self, name):
+        return self.entities[name]
+
+
+def _zmp_env(published, single, lifted, twist=None, soles=None):
+    """A standing env for support_zmp: soles (N, 2, 3) world (left, right),
+    the feet sensor listing right before left."""
+    n = published.shape[0]
+    twist = torch.zeros(n, 3) if twist is None else twist
+    if soles is None:
+        soles = torch.tensor([[0.0, 0.047, 0.0], [0.0, -0.047, 0.0]]).repeat(n, 1, 1)
+    foot = SimpleNamespace(command=published.reshape(n, 6), is_single_support_env=single, lifted_foot_idx=lifted)
+    terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
+    manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
+    sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(n, 2), force=torch.zeros(n, 2, 3),
+                                                  torque=torch.zeros(n, 2, 3), pos=torch.zeros(n, 2, 3)))
+    robot = SimpleNamespace(data=SimpleNamespace(geom_pos_w=soles))
+    scene = _Scene(sensors={"feet": sensor}, entities={"robot": robot})
+    return SimpleNamespace(num_envs=n, command_manager=manager, scene=scene), twist, sensor, soles
+
+
+def _zmp_reward(env, sensor, load_left_right, at_left, at_right):
+    """support_zmp with each foot's load (N up) pressing at one point (world x, y)."""
+    n = env.num_envs
+    load = torch.tensor(load_left_right, dtype=torch.float32)
+    at = torch.stack([at_left, at_right])  # (2, 2)
+    sensor.data.force = torch.zeros(n, 2, 3)
+    sensor.data.force[..., 0] = 0.3  # a sideways push does not count
+    sensor.data.force[..., 2] = -load  # the sensor reports the foot's push on the floor
+    sensor.data.force = sensor.data.force.flip(1)
+    sensor.data.pos = torch.cat([at.expand(n, 2, 2), torch.zeros(n, 2, 1)], -1).flip(1)
+    sensor.data.torque = torch.zeros(n, 2, 3)
+    sensor.data.found = (load > 0).float().flip(1)
+    values = support_zmp(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01,
+                         zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]))
+    return [round(v, 4) for v in values.tolist()]
 
 
 class StationaryFootTargetTest(unittest.TestCase):
@@ -173,7 +214,30 @@ class StationaryFootTargetTest(unittest.TestCase):
         twist[:3] = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.0, 0.4], [0.004, 0.0, 0.004]])
         self.assertEqual(count(both_up), [0.0, 0.0, 1.0, 1.0, 2.0, 1.0, 0.0])
 
-    def test_upper_foot_unload_pays_the_higher_foot_off_its_share_of_the_weight(self) -> None:
+    def test_feet_zmp_is_the_vertical_force_weighted_mean_of_the_contact_points(self) -> None:
+        # Contact points of each foot (world x, y on the floor z = 0) with
+        # forces of the floor on the foot (sideways parts included), reduced
+        # as mujoco_warp's netforce does: the sum, the |F|-weighted centroid
+        # and the torque about it; the sensor reports the foot's push (minus).
+        torch.manual_seed(0)
+        n, k = 5, 7
+        points = torch.cat([torch.rand(n, 2, k, 2) * 0.06, torch.zeros(n, 2, k, 1)], dim=-1)
+        points[:, 1, :, 1] += 0.09
+        forces = torch.cat([torch.randn(n, 2, k, 2) * 0.3, torch.rand(n, 2, k, 1) * 2.0], dim=-1)
+        forces[0, 1] = 0.0  # one foot in the air
+        weight = forces.norm(dim=-1, keepdim=True)
+        centroid = (points * weight).sum(2) / weight.sum(2).clamp(min=1e-12)
+        net = forces.sum(2)
+        torque = torch.cross(points - centroid[:, :, None], forces, dim=-1).sum(2)
+        centroid[0, 1] = 0.0
+        sensor = SimpleNamespace(data=SimpleNamespace(force=-net.flip(1), torque=-torque.flip(1), pos=centroid.flip(1)))
+        zmp, load = feet_zmp(sensor, (1, 0))  # the sensor lists right before left
+        fz = forces[..., 2]
+        expected = (points[..., :2] * fz[..., None]).sum(dim=(1, 2)) / fz.sum(dim=(1, 2))[:, None]
+        torch.testing.assert_close(zmp, expected)
+        torch.testing.assert_close(load, fz.sum(2))
+
+    def test_support_zmp_pays_the_centre_of_pressure_where_the_target_puts_the_weight(self) -> None:
         # Rows (feet left, right): no target; single target on the left at
         # 30 mm; single target on the right at 30 mm; single target on the
         # right at 5 mm (half the 10 mm threshold); single target on the
@@ -190,55 +254,89 @@ class StationaryFootTargetTest(unittest.TestCase):
         published[7] = torch.tensor([[0.0, 0.0, 0.04], [0.0, 0.0, 0.01]])
         single = torch.tensor([False, True, True, True, True, False, False, True])
         lifted = torch.tensor([0, 0, 1, 1, 0, 0, 0, 1])
-        foot = SimpleNamespace(command=published.view(8, 6), is_single_support_env=single,
-                               lifted_foot_idx=lifted)
-        twist = torch.zeros(8, 3)
-        terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
-        manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
-        sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(8, 2), force=torch.zeros(8, 2, 3)))
-        env = SimpleNamespace(num_envs=8, command_manager=manager, scene=SimpleNamespace(sensors={"feet": sensor}))
+        env, twist, sensor, stand = _zmp_env(published, single, lifted)
+        left, right = torch.tensor([0.0, 0.047]), torch.tensor([0.0, -0.047])
 
-        def reward(load_left_right):  # newtons up from the floor; the sensor lists right before left
-            load = torch.tensor(load_left_right, dtype=torch.float32).flip(-1)
-            sensor.data.force = torch.zeros(8, 2, 3)
-            sensor.data.force[..., 0] = 0.3  # a sideways push does not count
-            sensor.data.force[..., 2] = -load  # the sensor reports the foot's push on the floor
-            sensor.data.found = (load > 0).float()
-            values = upper_foot_unload(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01)
-            return [round(v, 4) for v in values.tolist()]
+        def reward(load_left_right, at_left=left, at_right=right):
+            return _zmp_reward(env, sensor, load_left_right, at_left, at_right)
 
-        # Target shares of the higher foot: 0, 0, 0, 0.25, 0, 0.4, (none), 0;
-        # the higher foot is left, right, right, right, left, left, -, left.
-        # Even weight: 1 - 2 x 0.5 = 0 from the threshold up, 0.5 at 5 mm,
-        # 0.8 at 2 mm; no row without a height difference pays.
+        # Target points (y, mm): the support sole's centre from the threshold
+        # up; at 5 mm a quarter of the way to the higher (right) sole, +23.5;
+        # at 2 mm 0.4 of the way to the higher (left) sole, -9.4.  Over the
+        # midpoint (even weight on the sole centres): 0 from the threshold
+        # up (46 mm off, the tolerance), 0.5 at 5 mm, 0.8 at 2 mm; no row
+        # without a height difference pays.
         self.assertEqual(reward([[5.5, 5.5]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.8, 0.0, 0.0])
-        # All on the right foot: the higher left foot carries nothing.
+        # All on the right sole's centre.
         self.assertEqual(reward([[0.0, 11.0]] * 8), [0.0, 1.0, 0.0, 0.0, 1.0, 0.2, 0.0, 1.0])
-        # All on the left foot: the higher right foot carries nothing.
+        # All on the left sole's centre.
         self.assertEqual(reward([[11.0, 0.0]] * 8), [0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0])
-        # A quarter on the higher foot: 1 - 2 x 0.25 above the threshold,
-        # exactly the 5 mm target, 1 - 2 x 0.15 at 2 mm.
+        # A quarter on the higher foot, each foot pressing at its centre.
         self.assertEqual(reward([[2.75, 8.25]] * 8), [0.0, 0.5, 0.0, 0.0, 0.5, 0.7, 0.0, 0.5])
         self.assertEqual(reward([[8.25, 2.75]] * 8), [0.0, 0.0, 0.5, 1.0, 0.0, 0.3, 0.0, 0.0])
+        # On one foot, the centre of pressure 20 mm off the sole's centre (at
+        # its side edge, either way, or forward): 1 - 20 / 47.
+        edge = round(1.0 - 20.0 / 47.0, 4)
+        for shift in ([0.0, 0.02], [0.0, -0.02], [0.02, 0.0]):
+            off = torch.tensor(shift)
+            self.assertEqual(reward([[0.0, 11.0]] * 8, at_right=right + off)[1], edge)
+            self.assertEqual(reward([[11.0, 0.0]] * 8, at_left=left + off)[2], edge)
         # Both feet in the air (or all but a trace): 0.
         self.assertEqual(reward([[0.0, 0.0]] * 8), [0.0] * 8)
         self.assertEqual(reward([[0.0, 0.05]] * 8), [0.0] * 8)
-        # The higher foot is never one lifted_support_feet asks down: all the
-        # weight on the other foot pays in full from the threshold up and
-        # lifted_support_feet counts no foot.
-        higher_left = [[0.0, 11.0]] * 8
-        for row in (2, 3):
-            higher_left[row] = [11.0, 0.0]
-        self.assertEqual(reward(higher_left), [0.0, 1.0, 1.0, 0.5, 1.0, 0.2, 0.0, 1.0])
-        sensor.data.found[0] = 1.0
-        sensor.data.found[6] = 1.0
-        self.assertEqual(lifted_support_feet(env, "feet", "foot_target", sensor_foot_ids=(1, 0)).tolist(), [0.0] * 8)
         # A walking command pays nothing; a slow one below 1 cm/s still pays.
         twist[1] = torch.tensor([0.1, 0.0, 0.0])
         twist[2] = torch.tensor([0.0, 0.0, 0.4])
         twist[4] = torch.tensor([0.004, 0.0, 0.004])
         self.assertEqual(reward([[0.0, 11.0]] * 8), [0.0, 0.0, 0.0, 0.0, 1.0, 0.2, 0.0, 1.0])
         self.assertEqual(reward([[11.0, 0.0]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
+
+    def test_support_zmp_reads_the_torque_and_is_mirror_symmetric(self) -> None:
+        # Random rows, soles and loads; each foot's centroid is off its centre
+        # of pressure and the torque about the centroid puts it back.
+        torch.manual_seed(1)
+        n = 64
+        published = torch.zeros(n, 2, 3)
+        published[..., 2] = torch.rand(n, 2) * 0.03 * (torch.rand(n, 2) < 0.6)
+        lifted = torch.randint(0, 2, (n,))
+        single = torch.rand(n) < 0.5
+        soles = torch.cat([torch.randn(n, 2, 2) * 0.01, torch.zeros(n, 2, 1)], dim=-1)
+        soles[:, 0, 1] += 0.047
+        soles[:, 1, 1] -= 0.047
+        cop = soles[..., :2] + torch.randn(n, 2, 2) * 0.015  # (left, right)
+        load = torch.rand(n, 2) * 6.0 * (torch.rand(n, 2) < 0.85)
+        twist = torch.zeros(n, 3)
+
+        def run(published, lifted, soles, cop, load):
+            env, _, sensor, _ = _zmp_env(published, single, lifted, twist=twist, soles=soles)
+            centroid = cop + torch.randn(n, 2, 2) * 0.01
+            # L p = c L + (tau_y, -tau_x)
+            tau_y = (cop[..., 0] - centroid[..., 0]) * load
+            tau_x = -(cop[..., 1] - centroid[..., 1]) * load
+            sensor.data.force = torch.stack([torch.full_like(load, 0.2), -0.1 * load, -load], -1).flip(1)
+            sensor.data.torque = torch.stack([tau_x, tau_y, torch.full_like(load, 0.003)], -1).flip(1)
+            sensor.data.pos = torch.cat([centroid, torch.zeros(n, 2, 1)], -1).flip(1)
+            return support_zmp(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01,
+                               zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]))
+
+        values = run(published, lifted, soles, cop, load)
+        # The same from the per-foot centres of pressure directly.
+        upper = published[..., 2] > published.flip(1)[..., 2]
+        dz = (published[:, 0, 2] - published[:, 1, 2]).abs()
+        share = 0.5 * (1.0 - dz / 0.01).clamp(min=0.0)
+        sup = torch.where(upper[:, :1], soles[:, 1, :2], soles[:, 0, :2])
+        up = torch.where(upper[:, :1], soles[:, 0, :2], soles[:, 1, :2])
+        target = sup + share[:, None] * (up - sup)
+        zmp = (cop * load[..., None]).sum(1) / load.sum(1).clamp(min=1e-9)[:, None]
+        expected = (1.0 - (zmp - target).norm(dim=-1) / 0.047).clamp(0.0, 1.0)
+        expected = expected * ((dz > 0) & (load.sum(1) >= 0.1)).float()
+        torch.testing.assert_close(values, expected)
+        self.assertGreater(int((values > 0).sum()), n // 4)
+        # Mirrored (y -> -y, left <-> right): the same reward.
+        flip_y = torch.tensor([1.0, -1.0])
+        mirrored = run(published.flip(1), 1 - lifted, soles.flip(1) * torch.tensor([1.0, -1.0, 1.0]),
+                       cop.flip(1) * flip_y, load.flip(1))
+        torch.testing.assert_close(mirrored, values)
 
     def test_upper_foot_lift_pays_the_higher_foot_off_the_floor_by_its_height(self) -> None:
         # Rows (feet left, right): no target; single target on the left at
@@ -294,8 +392,9 @@ class StationaryFootTargetTest(unittest.TestCase):
 
     def test_pico_rewards_the_higher_foot_lift_from_the_foot_stage(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
+            MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+            MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT,
             MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT,
-            MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT,
             TELEOP_STAGES,
         )
         from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
@@ -305,41 +404,66 @@ class StationaryFootTargetTest(unittest.TestCase):
         settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
                     if s.manager == "reward" and s.term == "upper_foot_lift"]
         self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT)])
-        self.assertEqual(MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT, MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT)
+        self.assertEqual(MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT, MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT)
         rewards = make_microban_teleop_v13_arm_overlay_env_cfg().rewards
         term = rewards["upper_foot_lift"]
         self.assertIs(term.func, upper_foot_lift)
         self.assertEqual(term.weight, 0.0)
-        self.assertEqual(term.params, rewards["upper_foot_unload"].params)
+        self.assertEqual(term.params, {**rewards["lifted_support_feet"].params,
+                                       "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M})
 
-    def test_pico_rewards_unloading_the_higher_foot_from_the_foot_stage(self) -> None:
+    def test_pico_rewards_the_support_zmp_from_the_foot_stage(self) -> None:
+        from mjlab_microban.robot.home_pose import HOME
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
             MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
-            MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT,
+            MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT,
             TELEOP_STAGES,
         )
         from mjlab_microban.tasks.microban_teleop_mdp import MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
         from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
             make_microban_teleop_v13_arm_overlay_env_cfg,
         )
+        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
         settings = [(stage.name, s.path, s.value) for stage in TELEOP_STAGES for s in stage.settings
-                    if s.manager == "reward" and s.term == "upper_foot_unload"]
-        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT)])
+                    if s.manager == "reward" and s.term == "support_zmp"]
+        self.assertEqual(settings, [(TELEOP_STAGES[1].name, "weight", MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT)])
         # Above the 6.2 /s the measured shift to one foot costs in the other terms.
-        self.assertGreater(MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT, 6.2)
+        self.assertGreater(MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT, 6.2)
         cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
-        self.assertNotIn("single_support", cfg.rewards)
-        term = cfg.rewards["upper_foot_unload"]
-        self.assertIs(term.func, upper_foot_unload)
+        self.assertNotIn("upper_foot_unload", cfg.rewards)
+        term = cfg.rewards["support_zmp"]
+        self.assertIs(term.func, support_zmp)
         self.assertEqual(term.weight, 0.0)
-        penalty = cfg.rewards["lifted_support_feet"].params
-        self.assertEqual({k: v for k, v in term.params.items() if k != "lift_threshold"}, penalty)
-        threshold = term.params["lift_threshold"]
+        params = dict(term.params)
+        sole = params.pop("sole_cfg")
+        self.assertEqual((sole.name, tuple(sole.geom_names), sole.preserve_order),
+                         ("robot", ("left_foot_collision_1", "right_foot_collision_1"), True))
+        self.assertEqual(params.pop("zmp_tolerance"), HOME.feet_lateral_m / 2.0)
+        threshold = params.pop("lift_threshold")
+        self.assertEqual(params, cfg.rewards["lifted_support_feet"].params)
         self.assertEqual(threshold, MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M)
         # Above the floor band, below the highest single-foot target.
         self.assertGreater(threshold, MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M)
         self.assertLess(threshold, cfg.commands["foot_target"].lift_height_range[1])
+        # The PICO feet sensor adds the centroid and torque to the net force;
+        # the walking task's is left as it was.
+        sensors = {s.name: s for s in cfg.scene.sensors}
+        walk = {s.name: s for s in make_microban_velocity_env_cfg().scene.sensors}["feet_ground_contact"]
+        feet = sensors[params["sensor_name"]]
+        self.assertEqual((feet.fields, feet.reduce), (("found", "force", "torque", "pos"), "netforce"))
+        self.assertEqual(walk.fields, ("found", "force"))
+        self.assertEqual(replace(feet, fields=walk.fields), walk)
+
+    def test_the_sole_geoms_are_centred_on_the_sole(self) -> None:
+        import mujoco
+
+        xml = Path(fc.__file__).resolve().parents[1] / "robot" / "microban" / "robot.xml"
+        model = mujoco.MjModel.from_xml_path(str(xml))
+        for side in ("left", "right"):
+            geoms = [model.geom(f"{side}_foot_collision_{i}") for i in range(1, 7)]
+            for g in geoms[1:]:  # the six nested boxes share one centre
+                self.assertTrue(np.allclose(g.pos, geoms[0].pos) and np.allclose(g.quat, geoms[0].quat))
 
     def test_pico_penalizes_lifted_support_feet_from_the_arm_stage_instead_of_no_stepping(self) -> None:
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
