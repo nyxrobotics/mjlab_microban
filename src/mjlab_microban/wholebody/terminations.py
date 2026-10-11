@@ -1,6 +1,8 @@
 # Adapted from Teleopit f926386 train_mimic/tasks/tracking/mdp/terminations.py
 # (Apache-2.0, https://github.com/BotRunner64/Teleopit).  Changes: only the
-# three terms the task uses (height-only anchor and end bodies, gravity z).
+# terms the task uses (height-only anchor and end points, gravity z); the end
+# points may sit off their body's origin (Microban's hands are points on the
+# forearms); the end of a window is a time-out.
 
 """Termination terms: the robot left the reference."""
 
@@ -12,7 +14,7 @@ import torch
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab_microban.wholebody.motion import MotionCommand
-from mjlab_microban.wholebody.rewards import body_indexes
+from mjlab_microban.wholebody.rewards import body_points
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -32,10 +34,19 @@ def bad_anchor_ori(env: ManagerBasedRlEnv, command_name: str, threshold: float) 
     return (motion[:, 2] - robot[:, 2]).abs() > threshold
 
 
-def bad_motion_body_pos_z_only(
-    env: ManagerBasedRlEnv, command_name: str, threshold: float, body_names: tuple[str, ...] | None = None
+def bad_motion_body_point_z_only(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    threshold: float,
+    body_names: tuple[str, ...],
+    body_offsets: tuple[tuple[float, float, float], ...],
 ) -> torch.Tensor:
+    """A point fixed on a tracked body is more than ``threshold`` off the reference's height."""
     command = cast(MotionCommand, env.command_manager.get_term(command_name))
-    idx = body_indexes(command, body_names)
-    error = torch.abs(command.body_pos_relative_w[:, idx, -1] - command.robot_body_pos_w[:, idx, -1])
-    return torch.any(error > threshold, dim=-1)
+    ref_points, robot_points = body_points(command, body_names, body_offsets)
+    return torch.any(torch.abs(ref_points[..., 2] - robot_points[..., 2]) > threshold, dim=-1)
+
+
+def clip_end(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """The reference window ran out (a time-out: the episode is cut, not failed)."""
+    return cast(MotionCommand, env.command_manager.get_term(command_name)).clip_ended.clone()

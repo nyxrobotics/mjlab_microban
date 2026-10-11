@@ -1,4 +1,4 @@
-"""The whole-body ONNX: inputs, ONNX Runtime == torch, and the contract metadata."""
+"""The whole-body ONNX: its input, ONNX Runtime == torch, the contract metadata and the env's frame layout."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import onnxruntime as ort
 import torch
 from tensordict import TensorDict
 
-from mjlab_microban.policy_contract import ACTION_JOINT_NAMES
+from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, joint_ranges
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody import contract
-from mjlab_microban.wholebody.env_cfg import WholebodyRlCfg
+from mjlab_microban.wholebody.env_cfg import ACTOR_GROUP, WholebodyRlCfg, actor_terms, make_wholebody_env_cfg
 from mjlab_microban.wholebody.model import TemporalCNNModel
 
 WIDTH = contract.OBSERVATION_WIDTH
@@ -24,11 +24,10 @@ HISTORY = contract.HISTORY_LENGTH
 def _untrained_actor() -> TemporalCNNModel:
     torch.manual_seed(0)
     cfg = WholebodyRlCfg.actor
-    sample = TensorDict({"actor": torch.randn(64, WIDTH), "actor_history": torch.randn(64, HISTORY, WIDTH)},
-                        batch_size=[64])
+    sample = TensorDict({ACTOR_GROUP: torch.randn(64, HISTORY, WIDTH)}, batch_size=[64])
     model = TemporalCNNModel(
         sample,
-        {"actor": ["actor", "actor_history"]},
+        {"actor": [ACTOR_GROUP]},
         "actor",
         len(ACTION_JOINT_NAMES),
         hidden_dims=cfg.hidden_dims,
@@ -39,7 +38,8 @@ def _untrained_actor() -> TemporalCNNModel:
     )
     # Non-trivial normalizers, so the export must carry them.
     model.update_normalization(TensorDict(
-        {"actor": 3.0 + 2.0 * torch.randn(512, WIDTH), "actor_history": -1.0 + 0.5 * torch.randn(512, HISTORY, WIDTH)},
+        {ACTOR_GROUP: torch.cat([-1.0 + 0.5 * torch.randn(512, HISTORY - 1, WIDTH),
+                                 3.0 + 2.0 * torch.randn(512, 1, WIDTH)], dim=1)},
         batch_size=[512],
     ))
     return model.eval()
@@ -66,19 +66,13 @@ def test_export_matches_torch_and_carries_the_contract(tmp_path):
     rng = np.random.default_rng(1)
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     for _ in range(4):
-        obs = rng.standard_normal((1, WIDTH)).astype(np.float32)
         history = rng.standard_normal((1, HISTORY, WIDTH)).astype(np.float32)
-        expected = model(TensorDict({"actor": torch.from_numpy(obs), "actor_history": torch.from_numpy(history)},
-                                    batch_size=[1])).detach().numpy()
-        actual = session.run(None, {"obs": obs, "obs_history": history})[0]
+        expected = model(TensorDict({ACTOR_GROUP: torch.from_numpy(history)}, batch_size=[1])).detach().numpy()
+        actual = session.run(None, {"obs_history": history})[0]
         np.testing.assert_allclose(actual, expected, atol=1e-5, rtol=0)
 
-    rows = []
-    for _ in range(8):
-        history = np.stack([_possible_frame(rng) for _ in range(HISTORY)])
-        rows.append((history[-1].tolist(), history.tolist()))
-    batch = TensorDict({"actor": torch.tensor([r[0] for r in rows], dtype=torch.float32),
-                        "actor_history": torch.tensor([r[1] for r in rows], dtype=torch.float32)}, batch_size=[8])
+    rows = [np.stack([_possible_frame(rng) for _ in range(HISTORY)]).tolist() for _ in range(8)]
+    batch = TensorDict({ACTOR_GROUP: torch.tensor(rows, dtype=torch.float32)}, batch_size=[8])
     actions = model(batch).double().tolist()
     metadata = contract.contract_metadata(
         joint_names=list(HOME.joint_pos_rad),
@@ -97,9 +91,21 @@ def test_export_matches_torch_and_carries_the_contract(tmp_path):
     assert stored["microban_policy_contract"] == "microban-wholebody-1"
     assert stored["microban_policy_kind"] == "wholebody"
     assert stored["microban_recipe"] == "microban-wholebody-teleopit-track-1"
-    assert stored["input_names"] == "obs,obs_history"
+    assert stored["input_names"] == "obs_history"
     assert stored["history_length"] == "10"
-    assert stored["neck_control"] == "hmd"
+    assert stored["neck_control"] == "reference_clamped_slewed"
+    assert stored["reference_time"] == "one_control_period_ahead"
     assert stored["action_joint_names"].split(",") == list(ACTION_JOINT_NAMES)
     assert sum(width for _, width in json.loads(stored["observation_schema_json"])) == WIDTH == 118
     assert stored["dry_run_not_deployable"] == "true"
+
+
+def test_env_frame_layout_is_the_contract_schema():
+    # The actor's terms in order, its joint terms over the robot's joints in
+    # MJCF order, its reference terms over the policy's joints.
+    assert [name for name, _ in contract.OBSERVATION_SCHEMA] == list(actor_terms())
+    assert list(contract.OBSERVATION_JOINT_NAMES) == list(joint_ranges())
+    cfg = make_wholebody_env_cfg()
+    assert cfg.commands["motion"].joint_names == contract.REFERENCE_JOINT_NAMES
+    assert cfg.observations[ACTOR_GROUP].history_length == contract.HISTORY_LENGTH
+    assert WholebodyRlCfg.obs_groups["actor"] == (ACTOR_GROUP,)

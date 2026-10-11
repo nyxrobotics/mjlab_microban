@@ -6,13 +6,25 @@ parts: the HOME stamp, the SHA-256 records and the startup self-test rule
 (recorded rows with the torch actor's deterministic output, re-run in ONNX
 Runtime within the same bounds).
 
-Inputs: ``obs`` [1, 118], the current frame, and ``obs_history`` [1, 10, 118],
-the last 10 frames oldest first, the current one last; after a reset every
-row is the first frame.  A frame is the 12 terms of OBSERVATION_SCHEMA in
-order.  Output: ``actions`` [1, 18], the raw action of ACTION_JOINT_NAMES:
-target = HOME + action, saturated at +-pi.  head, neck_roll and neck_pitch
-are moved by the HMD controller, never by the policy; the policy observes
-them.
+Input: ``obs_history`` [1, 10, 118], the last 10 frames oldest first, the
+current one last (one reading per control step); after a reset every row is
+the first frame.  A frame is the 12 terms of OBSERVATION_SCHEMA in order.
+Output: ``actions`` [1, 18], the raw action of ACTION_JOINT_NAMES: target =
+HOME + action, saturated at +-pi.
+
+Reference.  The ``ref_*`` terms of the frame read at a control tick are the
+reference one control period later (the target for the state after this
+step).  Its yaw is turned about z so that, when tracking starts, the
+reference trunk's yaw is the robot IMU's yaw (Teleopit's
+align_motion_qpos_yaw); the ``*_b`` terms use the IMU's trunk orientation,
+yaw included.
+
+Neck.  head, neck_roll and neck_pitch are not the policy's; the policy
+observes them.  Their targets are the reference's angles of these joints,
+clamped to NECK_LIMITS_RAD within the joint range and slewed at
+NECK_SLEW_RATES_RAD_S, starting at the clamped reference: the same
+computation as in training (wholebody.motion.ReferenceNeckTarget), not the
+HMD head tracking of the PICO policy.
 """
 
 from __future__ import annotations
@@ -45,14 +57,20 @@ from mjlab_microban.policy_contract import (
     joint_ranges,
 )
 from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.tasks.microban_teleop_mdp import (
+    MICROBAN_HMD_RUNTIME_LIMITS_RAD,
+    MICROBAN_HMD_SLEW_RATES_RAD_S,
+)
 from mjlab_microban.wholebody.env_cfg import HISTORY_LENGTH
 
 CONTRACT = "microban-wholebody-1"
 KIND = "wholebody"
 RECIPE = "microban-wholebody-teleopit-track-1"
 POLICY_FILE = "wholebody.onnx"
-INPUT_NAMES = ("obs", "obs_history")
+INPUT_NAMES = ("obs_history",)
 OUTPUT_NAME = "actions"
+NECK_LIMITS_RAD = {name: MICROBAN_HMD_RUNTIME_LIMITS_RAD[name] for name in HEAD_JOINTS}
+NECK_SLEW_RATES_RAD_S = {name: MICROBAN_HMD_SLEW_RATES_RAD_S[name] for name in HEAD_JOINTS}
 OBSERVATION_JOINT_NAMES = (*HEAD_JOINTS, *ACTION_JOINT_NAMES)
 REFERENCE_JOINT_NAMES = ACTION_JOINT_NAMES
 OBSERVATION_SCHEMA: tuple[tuple[str, int], ...] = (
@@ -119,15 +137,13 @@ def frame_problem(row: Sequence[float]) -> str | None:
     return None
 
 
-def select_self_test_rows(
-    rows: Sequence[tuple[Sequence[float], Sequence[Sequence[float]]]], count: int = 32
-) -> list[tuple[list[float], list[list[float]]]]:
-    """At most ``count`` (obs, history) pairs whose every frame is a possible state, evenly spread."""
+def select_self_test_rows(rows: Sequence[Sequence[Sequence[float]]], count: int = 32) -> list[list[list[float]]]:
+    """At most ``count`` histories whose every frame is a possible state, evenly spread."""
     usable = []
-    for obs, history in rows:
+    for history in rows:
         frames = [list(map(float, frame)) for frame in history]
-        if len(frames) == HISTORY_LENGTH and all(frame_problem(f) is None for f in [obs, *frames]):
-            usable.append(([float(v) for v in obs], frames))
+        if len(frames) == HISTORY_LENGTH and all(frame_problem(f) is None for f in frames):
+            usable.append(frames)
     if len(usable) < SELF_TEST_MIN_ROWS:
         raise PolicyContractError(
             f"self-test: only {len(usable)} of {len(rows)} recorded rows are possible robot states "
@@ -175,7 +191,6 @@ def onnx_io(path: Path) -> dict[str, tuple[int, ...]]:
 
 def check_onnx_io(path: Path) -> None:
     expected = {
-        "obs": (1, OBSERVATION_WIDTH),
         "obs_history": (1, HISTORY_LENGTH, OBSERVATION_WIDTH),
         OUTPUT_NAME: (1, len(ACTION_JOINT_NAMES)),
     }
@@ -189,7 +204,7 @@ def contract_metadata(
     checkpoint: Path,
     checkpoint_sha256: str,
     benchmark_report_sha256: str,
-    self_test_rows: Sequence[tuple[Sequence[float], Sequence[Sequence[float]]]],
+    self_test_rows: Sequence[Sequence[Sequence[float]]],
     self_test_actions: Sequence[Sequence[float]],
     dry_run: bool,
 ) -> dict[str, str]:
@@ -207,9 +222,9 @@ def contract_metadata(
         self_test_rows
     ):
         raise PolicyContractError(f"self-test needs {SELF_TEST_MIN_ROWS}..{SELF_TEST_MAX_ROWS} rows, one action each")
-    for index, (obs, history) in enumerate(self_test_rows):
+    for index, history in enumerate(self_test_rows):
         problem = None if len(history) == HISTORY_LENGTH else "history length"
-        problem = problem or next((p for p in map(frame_problem, [obs, *history]) if p), None)
+        problem = problem or next((p for p in map(frame_problem, history) if p), None)
         if problem:
             raise PolicyContractError(f"self-test row {index}: {problem}")
     actions = [[float(v) for v in row] for row in self_test_actions]
@@ -235,8 +250,12 @@ def contract_metadata(
         "history_length": str(HISTORY_LENGTH),
         "history_order": "oldest_first_current_last",
         "history_after_reset": "every_row_the_first_frame",
+        "reference_time": "one_control_period_ahead",
+        "reference_yaw": "aligned_to_imu_yaw_at_start",
         "neck_joint_names": ",".join(HEAD_JOINTS),
-        "neck_control": "hmd",
+        "neck_control": "reference_clamped_slewed",
+        "neck_limits_rad_json": _json({name: list(NECK_LIMITS_RAD[name]) for name in HEAD_JOINTS}),
+        "neck_slew_rates_rad_s_json": _json(NECK_SLEW_RATES_RAD_S),
         "previous_action_semantics": PREVIOUS_ACTION_SEMANTICS,
         "base_ang_vel_frame": BASE_ANG_VEL_FRAME,
         "control_hz": str(CONTROL_HZ),
@@ -244,8 +263,7 @@ def contract_metadata(
         "checkpoint_iteration": str(int(stem[6:-3])),
         "checkpoint_sha256": checkpoint_sha256,
         "benchmark_report_sha256": benchmark_report_sha256,
-        "self_test_observations_json": _json([list(obs) for obs, _ in self_test_rows]),
-        "self_test_histories_json": _json([[list(f) for f in history] for _, history in self_test_rows]),
+        "self_test_histories_json": _json([[list(f) for f in history] for history in self_test_rows]),
         "self_test_actions_json": _json(actions),
     }
     if dry_run:
@@ -257,13 +275,12 @@ def check_self_test(onnx_path: Path, metadata: dict[str, str]) -> float:
     """Run the recorded rows through ONNX Runtime (CPU); return the worst error / bound (<= 1 passes)."""
     import onnxruntime as ort
 
-    obs = np.asarray(json.loads(metadata["self_test_observations_json"]), dtype=np.float32)
     history = np.asarray(json.loads(metadata["self_test_histories_json"]), dtype=np.float32)
     expected = np.asarray(json.loads(metadata["self_test_actions_json"]), dtype=np.float64)
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     worst = 0.0
-    for index in range(len(obs)):
-        output = session.run(None, {"obs": obs[index : index + 1], "obs_history": history[index : index + 1]})[0]
+    for index in range(len(history)):
+        output = session.run(None, {"obs_history": history[index : index + 1]})[0]
         output = np.asarray(output, dtype=np.float64)
         if output.shape != (1, len(ACTION_JOINT_NAMES)) or not np.isfinite(output).all():
             raise PolicyContractError(f"self-test row {index}: unsafe ONNX output")

@@ -3,10 +3,18 @@
 # window, heading terms or foot contact estimate; the dataset carries clip
 # names and joint names; the rewards and the actor see the policy's joints
 # (``joint_names``) while resets write all joints; ``reset_count`` lets the
-# neck target snap after a reset or a clip change; the reference advances by
-# the elapsed time (not by a step in env.reset).
+# neck target snap after a reset; an env placed on the reference sees it one
+# control step ahead whether env.step or env.reset placed it; the end of a
+# window holds its last frame and ends the episode as a time-out (Teleopit
+# placed the robot on a new window inside the command update).
 
-"""Reference motion: a clip library on the device and the motion command."""
+"""Reference motion: a clip library on the device and the motion command.
+
+Timing.  The reference the policy observes is the target of the coming
+control step: an env placed on reference time ``t`` observes ``t + step_dt``,
+and each step's rewards and terminations compare the robot after the step
+with that reference.
+"""
 
 from __future__ import annotations
 
@@ -176,6 +184,11 @@ class MotionCommand(CommandTerm):
         self.motion_times = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # Incremented whenever an env's robot is placed on the reference.
         self.reset_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Placed since the last update: advance by one control step.
+        self._placed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # The window ran out: the reference holds its last frame and the
+        # clip_end termination (a time-out) ends the episode.
+        self.clip_ended = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._step_dt = env.step_dt
         self._elapsed_s = env.step_dt
         self._cached_frames: dict[str, torch.Tensor] = {}
@@ -395,23 +408,30 @@ class MotionCommand(CommandTerm):
         self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
         self.robot.clear_state(env_ids=env_ids)
         self.reset_count[env_ids] += 1
+        self._placed[env_ids] = True
+        self.clip_ended[env_ids] = False
 
     def compute(self, dt: float) -> None:
-        # Advance the reference by the elapsed time (0 in env.reset; Teleopit
-        # always added one step).
+        # dt is the elapsed time: step_dt in env.step, 0 in env.reset.
         self._elapsed_s = dt
         super().compute(dt)
 
     def _update_command(self):
-        self.motion_times += self._elapsed_s
+        # An env placed since the last update (in env.step or env.reset) moves
+        # one control step past its placed state; every other env by the
+        # elapsed time.
+        advance = torch.full_like(self.motion_times, self._elapsed_s)
+        advance[self._placed] = self._step_dt
+        self._placed.zero_()
+        self.motion_times += advance
         end_times = self.motion.clip_sample_end_s[self.motion_ids]
-        env_ids = torch.where(self.motion_times >= end_times)[0]
-        if env_ids.numel() > 0 and self.cfg.resample_on_clip_end:
-            self._resample_command(env_ids)
-        elif env_ids.numel() > 0:
-            self.motion_times[env_ids] = torch.nextafter(
-                end_times[env_ids], self.motion.clip_sample_start_s[self.motion_ids[env_ids]]
-            )
+        ended = self.motion_times >= end_times
+        self.motion_times = torch.where(
+            ended,
+            torch.nextafter(end_times, self.motion.clip_sample_start_s[self.motion_ids]),
+            self.motion_times,
+        )
+        self.clip_ended |= ended
         self._refresh_frame_cache()
 
         nb = len(self.cfg.body_names)
@@ -458,7 +478,6 @@ class MotionCommandCfg(CommandTermCfg):
     velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     joint_position_range: tuple[float, float] = (-0.52, 0.52)
     sampling_mode: Literal["uniform", "start", "rewind"] = "rewind"
-    resample_on_clip_end: bool = True
     rewind_prob: float = 0.8
     rewind_min_steps: int = 25
     rewind_max_steps: int = 75
@@ -469,13 +488,14 @@ class MotionCommandCfg(CommandTermCfg):
 
 
 class ReferenceNeckTarget:
-    """``mode='step'`` event: the neck targets follow the reference like the robot's HMD.
+    """``mode='step'`` event: the neck targets follow the reference's neck angles.
 
-    On the robot the HMD controller, not the policy, moves head, neck_roll and
-    neck_pitch: it clamps the headset angles to its range and slews the
-    targets at 2.5 rad/s.  Here the reference's neck angles take the
-    headset's place.  An env just placed on the reference (reset or clip
-    change, ``MotionCommand.reset_count``) starts at the clamped reference.
+    head, neck_roll and neck_pitch are not the policy's.  In training and on
+    the robot (contract microban-wholebody-1) their targets are the
+    reference's angles of these joints, clamped to the HMD controller's
+    limits within the joint range and slewed at its 2.5 rad/s.  An env just
+    placed on the reference (``MotionCommand.reset_count``) starts at the
+    clamped reference.
     """
 
     def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:

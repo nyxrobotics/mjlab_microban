@@ -62,6 +62,27 @@ def motion_relative_body_position_error_exp(
     return torch.exp(-error.mean(-1) / std**2)
 
 
+def body_points(
+    command: MotionCommand,
+    body_names: tuple[str, ...],
+    body_offsets: tuple[tuple[float, float, float], ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Points fixed on tracked bodies: (reference moved under the robot, robot), each (N, k, 3)."""
+    index_by_name = {name: i for i, name in enumerate(command.cfg.body_names)}
+    missing = [name for name in body_names if name not in index_by_name]
+    if missing:
+        raise ValueError(f"body_names must be tracked bodies: missing {missing}")
+    if len(body_names) != len(body_offsets):
+        raise ValueError("body_offsets needs one offset per body")
+    idx = [index_by_name[name] for name in body_names]
+    offsets = torch.tensor(body_offsets, dtype=command.body_pos_relative_w.dtype, device=command.device).expand(
+        command.num_envs, -1, -1
+    )
+    ref_points = command.body_pos_relative_w[:, idx] + quat_apply(command.body_quat_relative_w[:, idx], offsets)
+    robot_points = command.robot_body_pos_w[:, idx] + quat_apply(command.robot_body_quat_w[:, idx], offsets)
+    return ref_points, robot_points
+
+
 def motion_relative_body_point_position_error_exp(
     env: ManagerBasedRlEnv,
     command_name: str,
@@ -70,19 +91,7 @@ def motion_relative_body_point_position_error_exp(
     body_offsets: tuple[tuple[float, float, float], ...],
 ) -> torch.Tensor:
     """Points fixed on bodies (here the hands on the forearms), relative like the bodies."""
-    command = _command(env, command_name)
-    index_by_name = {name: i for i, name in enumerate(command.cfg.body_names)}
-    missing = [name for name in body_names if name not in index_by_name]
-    if missing:
-        raise ValueError(f"body_names must be tracked bodies: missing {missing}")
-    if len(body_names) != len(body_offsets):
-        raise ValueError("body_offsets needs one offset per body")
-    idx = [index_by_name[name] for name in body_names]
-    offsets = torch.tensor(body_offsets, dtype=command.body_pos_relative_w.dtype, device=env.device).expand(
-        env.num_envs, -1, -1
-    )
-    ref_points = command.body_pos_relative_w[:, idx] + quat_apply(command.body_quat_relative_w[:, idx], offsets)
-    robot_points = command.robot_body_pos_w[:, idx] + quat_apply(command.robot_body_quat_w[:, idx], offsets)
+    ref_points, robot_points = body_points(_command(env, command_name), body_names, body_offsets)
     error = torch.sum(torch.square(ref_points - robot_points), dim=-1)
     return torch.exp(-error.mean(-1) / std**2)
 
