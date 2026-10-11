@@ -9,9 +9,13 @@ goal of the arm-overlay action, the policy's arm outputs are not used.
   ``foot_error``; a single lifted foot is measured above and off the floor
   and from the support foot against their HOME places, as the foot reward
   measures it, so a moving trunk does not count as a tracked foot.  Both
-  feet raised in the trunk frame is a crouch: the trunk must come down.
-* J2 pushes: falls are compared with the walker the adapter was built on.
+  feet raised in the trunk frame is a crouch: the trunk must come down by
+  the target's height, and the robot stands still in it.
+* J2 pushes: falls are compared with the walker the adapter was built on,
+  standing and walking, and crouched (the walker on the crouch pose).
 * J3 standing still: standing with the HMD and the arms moving or held out.
+  Standing without a foot target or crouched (J1), the feet's centre of
+  pressure stays near the soles' midpoint, as support_zmp asks.
 * J4 walking with the arms raised or moving: no further from the command
   than with the arms at HOME.
 
@@ -42,7 +46,7 @@ from tensordict import TensorDict
 
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.pipeline.walk_probe import _home_levelled_twist
-from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
+from mjlab_microban.robot.microban_constants import HOME, HOME_TRUNK_PITCH_RAD
 from mjlab_microban.schedules import PICO_SCHEDULE, PICO_TOTAL_UPDATES
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor, recipe_report_settings
 from mjlab_microban.scripts.teleop_v12_bootstrap_gate import _legacy_model
@@ -84,7 +88,7 @@ from mjlab_microban.tasks.microban_policy_export import (
     MICROBAN_HMD_JOINT_NAMES,
     MICROBAN_TELEOP_ACTION_JOINT_NAMES,
 )
-from mjlab_microban.tasks.mdp import feet_down
+from mjlab_microban.tasks.mdp import feet_down, support_zmp_distance
 from mjlab_microban.tasks.microban_teleop_mdp import HmdNeckTargetMotion
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -116,7 +120,8 @@ SEED_COUNT = 2
 # not count: a foot 0.3 x 52 mm off scores 0.76, a 40 mm target with the foot
 # left down 0.17.  The lifted foot reaches the target height above the floor;
 # both feet raised by dz in the trunk frame reach it by lowering the trunk by
-# dz (the feet stay on the floor).  Either way 0.7 x dz:
+# dz (the feet stay on the floor; no further down than dz + the error line
+# below).  Either way 0.7 x dz:
 FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
 # ... and off the floor (no pushes): a foot held up by its toes reaches the
 # height on the floor.  support_zmp does not ask this (it reads only the
@@ -131,11 +136,26 @@ FOOT_ERROR_FLOOR_M = 0.008  # the floor for small targets: still scores 0.93
 # floor, rounded up.
 SUPPORT_FOOT_MOVE_MAX_M = 0.010
 # J2.  The adapter keeps the walker's velocity and survival rewards and its
-# pushes (+-0.5 m/s): it may fall at most 5 points more often than the walker.
+# pushes (+-0.5 m/s): it may fall at most 5 points more often than the walker,
+# standing and walking, and crouched (the walker on the same crouch pose: the
+# crouch offsets are the environment's), each on its own.
 PUSH_FALL_RATE_MARGIN = 0.05
 # J3.  The lifted-support-feet penalty counts the feet up on a standing command; the
 # walking judgment allows 0.5 touchdowns per second (config/pipeline.yaml).
+# The crouches of J1 are standing commands too.
 STILL_TOUCHDOWNS_PER_S_MAX = 0.5
+# Standing without pushes with the feet level (J3's standing rows, J1's
+# crouches): the feet's centre of pressure (ZMP) from the soles' midpoint,
+# measured as support_zmp measures it (mdp.support_zmp_distance), the median
+# environment's mean over the scored time (the reward is 1 - mean / d0).
+# HOME's centre of mass stands over the midpoint, so standing still the
+# distance is 0 (the judged crouches and arm poses held without other motion:
+# 1-10 mm).  From the midpoint the nearest edge of the support is the toe or
+# the heel, half HOME's sole length (31 mm; sideways 67 mm); the ZMP keeps at
+# least half of that margin: a quarter of the sole length (15.5 mm, the
+# reward 0.67), which also keeps it between the soles' inner edges (26 mm
+# out), over neither sole.
+ZMP_CENTRE_MAX_M = 0.25 * (HOME.analysis.sole_x_max - HOME.analysis.sole_x_min)
 # J4.  Walking slower with the arms raised or moving is accepted; it still
 # walks along the command: at least 20 % of it (the walking judgment's
 # smallest single-axis share), or the speed with the arms at HOME if lower.
@@ -171,6 +191,7 @@ def thresholds() -> dict[str, Any]:
         "support_foot_move_max_m": SUPPORT_FOOT_MOVE_MAX_M,
         "push_fall_rate_margin": PUSH_FALL_RATE_MARGIN,
         "still_touchdowns_per_s_max": STILL_TOUCHDOWNS_PER_S_MAX,
+        "zmp_centre_max_m": ZMP_CENTRE_MAX_M,
         "arm_walk_min_share": ARM_WALK_MIN_SHARE,
         "twist_pass_line": twist_pass_line_record(),
     }
@@ -216,6 +237,13 @@ def _at_least(value: Any, limit: float) -> bool:
     return number is not None and number >= limit
 
 
+def crouch_drop_error_m(item: dict[str, Any]) -> float | None:
+    """How far a crouch's trunk drop (median environment) is from its dz."""
+
+    drop = _number(item["trunk_drop_median_m"])
+    return None if drop is None else abs(drop - float(item["foot_goal"][0][2]))
+
+
 def _feet_checks(feet: list[dict[str, Any]]) -> dict[str, bool]:
     lift = error = support = bool(feet)
     for item in feet:
@@ -223,6 +251,7 @@ def _feet_checks(feet: list[dict[str, Any]]) -> dict[str, bool]:
             # Both feet: the trunk comes down by dz (the same dz for both feet).
             dz = float(item["foot_goal"][0][2])
             lift = lift and _at_least(item["trunk_drop_median_m"], FOOT_LIFT_MIN_SHARE * dz)
+            error = error and _at_most(crouch_drop_error_m(item), foot_error_limit_m(dz))
         else:
             for lifted, goal, median, air in zip(
                 item["lifted"], item["foot_goal"], item["lift_median_m"], item["air_share_median"], strict=True
@@ -237,6 +266,16 @@ def _feet_checks(feet: list[dict[str, Any]]) -> dict[str, bool]:
     return {"foot_lift": lift, "foot_error": error, "support_foot_still": support}
 
 
+def push_groups(push: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """J2's pushed scenarios: standing and walking without a foot target, and crouched."""
+
+    crouched = [any(any(value != 0.0 for value in goal) for goal in item["foot_goal"]) for item in push]
+    return {
+        "standing_and_walking": [item for item, crouch in zip(push, crouched, strict=True) if not crouch],
+        "crouch": [item for item, crouch in zip(push, crouched, strict=True) if crouch],
+    }
+
+
 def push_fall_rates(push: list[dict[str, Any]]) -> dict[str, float]:
     rollouts = sum(int(item["rollouts"]) for item in push)
     return {
@@ -245,25 +284,48 @@ def push_fall_rates(push: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
+def push_fall_rates_by_group(push: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    return {group: push_fall_rates(items) for group, items in push_groups(push).items()}
+
+
+def _push_check(push: list[dict[str, Any]]) -> bool:
+    groups = push_groups(push)
+    return all(groups.values()) and all(
+        rates["pico"] <= rates["walker"] + PUSH_FALL_RATE_MARGIN
+        for rates in push_fall_rates_by_group(push).values()
+    )
+
+
 def arm_walk_min_speed(home_speed: float, command: float) -> float:
     """The smallest speed along the command allowed with the arms moved (J4)."""
 
     return min(ARM_WALK_MIN_SHARE * abs(command), home_speed)
 
 
-def _arm_checks(arms: list[dict[str, Any]]) -> dict[str, bool]:
+def _standing_check(feet: list[dict[str, Any]], arms: list[dict[str, Any]]) -> bool:
+    """Standing commands without pushes (J3's standing rows and J1's crouches):
+    no stepping, the ZMP near the soles' midpoint, and J3 no drift."""
+
+    crouches = [item for item in feet if all(item["lifted"])]
+    standing = [item for item in arms if all(value == 0.0 for value in item["twist"])]
+    still = bool(crouches) and bool(standing)
+    for item in (*crouches, *standing):
+        still = (
+            still
+            and _at_most(item["touchdowns_per_s"], STILL_TOUCHDOWNS_PER_S_MAX)
+            and _at_most(item["zmp_distance_median_m"], ZMP_CENTRE_MAX_M)
+        )
+    for item in standing:
+        twist = [_number(value) for value in item["mean_twist"]]
+        still = still and None not in twist and twist_passes((0.0, 0.0, 0.0), twist)
+    return still
+
+
+def _arm_walk_check(arms: list[dict[str, Any]]) -> bool:
     home = {item["base"]: item for item in arms if item["arms"] == "home"}
-    still = walking = bool(arms)
+    walking = bool(arms)
     for item in arms:
-        if all(value == 0.0 for value in item["twist"]):
-            twist = [_number(value) for value in item["mean_twist"]]
-            still = (
-                still
-                and _at_most(item["touchdowns_per_s"], STILL_TOUCHDOWNS_PER_S_MAX)
-                and None not in twist
-                and twist_passes((0.0, 0.0, 0.0), twist)
-            )
-        elif item["arms"] != "home":
+        if any(value != 0.0 for value in item["twist"]) and item["arms"] != "home":
             reference = _number(home[item["base"]]["signed_speed"]) if item["base"] in home else None
             speed = _number(item["signed_speed"])
             command = max(abs(float(value)) for value in item["twist"])
@@ -273,14 +335,13 @@ def _arm_checks(arms: list[dict[str, Any]]) -> dict[str, bool]:
                 and speed is not None
                 and speed >= arm_walk_min_speed(reference, command)
             )
-    return {"standing_still": still, "walking_with_arms": walking}
+    return walking
 
 
 def _acceptance(results: dict[str, Any]) -> tuple[dict[str, bool], str]:
     safety = results["safety"]
     feet, push, arms = results["feet"], results["push"], results["arms"]
     soft = _number(safety["maximum_actual_soft_limit_violation_rad"])
-    rates = push_fall_rates(push)
     checks = {
         "finite": safety["finite"] is True,
         "actual_soft_limits": soft is not None and 0.0 <= soft <= ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
@@ -298,8 +359,9 @@ def _acceptance(results: dict[str, Any]) -> tuple[dict[str, bool], str]:
         "no_falls_without_push": bool(feet) and bool(arms)
         and all(int(item["falls"]) == 0 for item in (*feet, *arms)),
         **_feet_checks(feet),
-        "push_falls": bool(push) and rates["pico"] <= rates["walker"] + PUSH_FALL_RATE_MARGIN,
-        **_arm_checks(arms),
+        "push_falls": _push_check(push),
+        "standing_still": _standing_check(feet, arms),
+        "walking_with_arms": _arm_walk_check(arms),
     }
     if set(checks) != CHECK_NAMES:
         raise AssertionError("PICO judgment check set drifted")
@@ -441,6 +503,8 @@ def _rollout(
     both = lifted.all(dim=-1)
     support_foot = (~lifted).long().argmax(dim=-1)
     rows = torch.arange(n, device=device)
+    zmp_params = dict(env.reward_manager.get_term_cfg("support_zmp").params)
+    zmp_params.pop("zmp_tolerance")
 
     fell = torch.zeros(n, dtype=torch.bool, device=device)
     count = torch.zeros(n, device=device)
@@ -451,6 +515,8 @@ def _rollout(
     support_move = torch.zeros(n, device=device)
     twist_sum = torch.zeros(n, 3, device=device)
     touchdowns = torch.zeros(n, device=device)
+    zmp_sum = torch.zeros(n, device=device)
+    zmp_count = torch.zeros(n, device=device)
     down = feet_on_floor(env)
     hmd_min = torch.full((n, 3, 2), math.inf, device=device)
     hmd_max = torch.full((n, 3, 2), -math.inf, device=device)
@@ -519,6 +585,10 @@ def _rollout(
             count += up
             twist_sum += _home_levelled_twist(robot.data, HOME_TRUNK_PITCH_RAD) * up[:, None]
             touchdowns += (now_down & ~down).sum(dim=-1).float() * up
+            # The ZMP from where support_zmp puts it (standing rows with the feet loaded).
+            distance, scored = support_zmp_distance(env, **zmp_params)
+            zmp_sum += distance * scored.float() * up
+            zmp_count += scored.float() * up
             arm_nonzero = observations["actor"][:, ctx.arm_slice].ne(0.0).any(dim=-1)
             if actor == "pico":
                 ctx.home_nonzero_steps += int((arm_nonzero & (spec["arms"] == 0) & (index >= 0)).sum())
@@ -554,6 +624,8 @@ def _rollout(
         "support_move": support_move,
         "twist_sum": twist_sum,
         "touchdowns_per_s": touchdowns / (counted * env.step_dt),
+        "zmp_distance": zmp_sum / zmp_count.clamp(min=1.0),
+        "zmp_count": zmp_count,
         "push_slot": torch.arange(n, device=device) % PUSH_DIRECTIONS,
     }
 
@@ -585,6 +657,12 @@ def _median(values: torch.Tensor) -> float | None:
     return float(values.median()) if values.numel() else None
 
 
+def _zmp_median(m: dict[str, torch.Tensor]) -> float | None:
+    """The median environment's mean ZMP distance (environments up and scored)."""
+
+    return _median(m["zmp_distance"][~m["fell"] & (m["zmp_count"] > 0)])
+
+
 def _feet(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> list[dict[str, Any]]:
     records = []
     for scenario, m in _runs(
@@ -614,6 +692,9 @@ def _feet(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> li
             "relative_target_m": float(torch.linalg.vector_norm(goal[0] - goal[1])),
             "relative_error_rms_m": float(torch.sqrt(m["error_sq_sum"][up].sum() / samples)) if samples > 0 else None,
             "support_move_median_m": _median(m["support_move"][up]) if sum(lifted) == 1 else None,
+            # A crouch is a standing command: touchdowns and the ZMP from the soles' midpoint.
+            "touchdowns_per_s": float(m["touchdowns_per_s"][up].mean()) if all(lifted) and bool(up.any()) else None,
+            "zmp_distance_median_m": _zmp_median(m) if all(lifted) else None,
         })
     return records
 
@@ -629,6 +710,7 @@ def _push(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> li
         records.append({
             "name": scenario.name,
             "twist": list(scenario.twist),
+            "foot_goal": [list(value) for value in scenario.foot_goal],
             "rollouts": int(pico["fell"].numel()),
             "falls": {"pico": int(pico["fell"].sum()), "walker": int(walker["fell"].sum())},
             "falls_by_direction": {
@@ -662,6 +744,7 @@ def _arms(ctx: _Context, seeds: tuple[int, ...], smoke: list[list[float]]) -> li
             "mean_twist": mean,  # HOME-levelled (v_x, v_y, w_z) after the 1 s settle
             "signed_speed": signed,
             "touchdowns_per_s": float(m["touchdowns_per_s"][up].mean()) if bool(up.any()) else None,
+            "zmp_distance_median_m": _zmp_median(m) if axis is None else None,
         })
     return records
 
@@ -759,7 +842,7 @@ def run_evaluation(
         "settings": {**canonical_settings(device=device, seed=seed), **recipe_report_settings(infos)},
         "thresholds": thresholds(),
         "checks": checks,
-        "push_fall_rates": push_fall_rates(results["push"]),
+        "push_fall_rates": push_fall_rates_by_group(results["push"]),
         "raw_action_envelope": envelope,
         # The robot's startup ONNX self-test corpus: the actor observations of
         # the first environment of every PICO scenario, after the settle and

@@ -17,6 +17,7 @@ from mjlab_microban.scripts.teleop_v12_scenarios import (
     foot_scenarios,
     patch_observation,
     per_env,
+    push_scenarios,
     push_velocity,
     scenario_index,
 )
@@ -40,13 +41,21 @@ class FootScenarioTest(unittest.TestCase):
         self.assertEqual((reach.foot_goal, reach.arms), (by_name["right_back_in"].foot_goal, "reach_right"))
 
     def test_both_feet_get_the_same_offset(self) -> None:
+        # The crouches: straight down by half and all of the sent box's
+        # height (0.8 x (10, 10, 20) mm), and two of its corners.
         both = [s for s in foot_scenarios() if all(s.lifted)]
-        self.assertEqual([s.name for s in both], ["both_front_left", "both_back_right"])
-        for scenario in both:
+        self.assertEqual([s.name for s in both], ["both_up8", "both_up16", "both_front_left", "both_back_right"])
+        for scenario, shares in zip(both, ((0, 0, 0.5), (0, 0, 1), (1, 1, 1), (-1, -1, 1)), strict=True):
             left, right = scenario.foot_goal
             self.assertEqual(left, right)
-            for value, limit in zip(left, (0.8 * 0.01, 0.8 * 0.01, 0.8 * 0.02)):
-                self.assertAlmostEqual(abs(value), limit)
+            for value, share, limit in zip(left, shares, (0.8 * 0.01, 0.8 * 0.01, 0.8 * 0.02), strict=True):
+                self.assertAlmostEqual(value, share * limit)
+        # The same crouches pushed (J2), after standing and walking.
+        pushed = push_scenarios()
+        self.assertEqual([(s.name, s.foot_goal, s.twist) for s in pushed[-4:]],
+                         [(s.name, s.foot_goal, s.twist) for s in both])
+        self.assertTrue(all(s.push for s in pushed))
+        self.assertFalse(any(any(any(goal) for goal in s.foot_goal) for s in pushed[:-4]))
 
     def test_arm_scenarios(self) -> None:
         names = [s.name for s in arm_scenarios()]

@@ -28,6 +28,7 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FINAL_PROFILE,
     SEED_COUNT,
     TRACKING_PROFILES,
+    ZMP_CENTRE_MAX_M,
     arm_walk_min_speed,
     _acceptance,
     canonical_settings,
@@ -105,10 +106,13 @@ def _results() -> dict[str, object]:
             "relative_target_m": math.dist(scenario.foot_goal[0], scenario.foot_goal[1]),
             "relative_error_rms_m": 0.006,
             "support_move_median_m": 0.002 if sum(lifted) == 1 else None,
+            "touchdowns_per_s": 0.1 if all(lifted) else None,
+            "zmp_distance_median_m": 0.005 if all(lifted) else None,
         })
     push = [
-        {"name": s.name, "twist": list(s.twist), "rollouts": ROLLOUTS,
-         "falls": {"pico": 3, "walker": 2}, "falls_by_direction": {"pico": [0] * 8, "walker": [0] * 8}}
+        {"name": s.name, "twist": list(s.twist), "foot_goal": [list(goal) for goal in s.foot_goal],
+         "rollouts": ROLLOUTS, "falls": {"pico": 3, "walker": 2},
+         "falls_by_direction": {"pico": [0] * 8, "walker": [0] * 8}}
         for s in push_scenarios()
     ]
     arms = []
@@ -120,6 +124,7 @@ def _results() -> dict[str, object]:
             "twist": list(scenario.twist), "rollouts": ROLLOUTS, "falls": 0, "mean_twist": mean,
             "signed_speed": None if axis is None else abs(mean[axis]),
             "touchdowns_per_s": 0.1 if axis is None else 3.0,
+            "zmp_distance_median_m": 0.005 if axis is None else None,
         })
     safety = {
         "finite": True,
@@ -356,6 +361,47 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertNotIn(".found", inspect.getsource(judgment).replace(inspect.getsource(feet_on_floor), ""))
         self.assertEqual(inspect.getsource(judgment._rollout).count("feet_on_floor(env)"), 2)
 
+    def test_a_crouch_goes_down_by_its_height_and_stands_still(self) -> None:
+        # The trunk drop: at least 0.7 dz, at most dz + max(0.3 dz, 8 mm).
+        for name, drop, lift, error in (
+            ("both_up8", 0.0056 - 1.0e-5, False, True),
+            ("both_up8", 0.016, True, True),
+            ("both_up8", 0.016 + 1.0e-5, True, False),
+            ("both_up16", 0.024 + 1.0e-5, True, False),
+            ("both_front_left", 0.0112 - 1.0e-5, False, True),
+        ):
+            with self.subTest(name=name, drop=drop):
+                results = _results()
+                _find(results["feet"], name)["trunk_drop_median_m"] = drop
+                checks = _acceptance(results)[0]
+                self.assertIs(checks["foot_lift"], lift)
+                self.assertIs(checks["foot_error"], error)
+        # Crouched on a standing command: no stepping (as J3).
+        stepping = _results()
+        _find(stepping["feet"], "both_up16")["touchdowns_per_s"] = 0.6
+        self.assertFalse(_acceptance(stepping)[0]["standing_still"])
+        fell = _results()
+        _find(fell["feet"], "both_back_right")["falls"] = 1
+        self.assertFalse(_acceptance(fell)[0]["no_falls_without_push"])
+
+    def test_standing_keeps_the_zmp_between_the_soles(self) -> None:
+        # A quarter of HOME's sole length (62 mm): half the margin from the
+        # soles' midpoint to the toe or heel.
+        self.assertAlmostEqual(ZMP_CENTRE_MAX_M, 0.0155, delta=0.0002)
+        self.assertEqual(thresholds()["zmp_centre_max_m"], ZMP_CENTRE_MAX_M)
+        for part, name in (("feet", "both_up8"), ("feet", "both_front_left"), ("arms", "neutral/arms_home"),
+                           ("arms", "neutral/arms_raised"), ("arms", "neutral/arms_moving")):
+            for distance, passed in ((ZMP_CENTRE_MAX_M, True), (ZMP_CENTRE_MAX_M + 1.0e-4, False), (None, False)):
+                with self.subTest(name=name, distance=distance):
+                    results = _results()
+                    _find(results[part], name)["zmp_distance_median_m"] = distance
+                    checks = _acceptance(results)[0]
+                    self.assertIs(checks["standing_still"], passed)
+                    self.assertTrue(checks["walking_with_arms"])
+        # Not judged on a single-foot target or a walking command.
+        self.assertTrue(all(item["zmp_distance_median_m"] is None for item in _results()["feet"]
+                            if not all(item["lifted"])))
+
     def test_the_support_foot_stays(self) -> None:
         moved = _results()
         _find(moved["feet"], "right_front_in")["support_move_median_m"] = 0.011
@@ -374,6 +420,19 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertFalse(_acceptance(results)[0]["push_falls"])
         _find(results["push"], "forward_0p1")["falls"]["walker"] = 10
         self.assertTrue(_acceptance(results)[0]["push_falls"])
+        # The crouches against the walker on the same crouch pose, on their own.
+        crouched = [s.name for s in push_scenarios() if any(any(goal) for goal in s.foot_goal)]
+        self.assertEqual(crouched, ["both_up8", "both_up16", "both_front_left", "both_back_right"])
+        results = _results()
+        for item in results["push"]:
+            item["falls"] = {"pico": 0, "walker": 0}
+        _find(results["push"], "both_up16")["falls"].update(pico=40, walker=15)  # 25/512 < 5 points
+        self.assertTrue(_acceptance(results)[0]["push_falls"])
+        _find(results["push"], "both_up16")["falls"]["pico"] = 41
+        self.assertFalse(_acceptance(results)[0]["push_falls"])
+        # Walking falls of the walker do not cover crouched falls of PICO.
+        _find(results["push"], "forward_0p2")["falls"]["walker"] = 100
+        self.assertFalse(_acceptance(results)[0]["push_falls"])
 
     def test_standing_still_with_the_head_and_arms_moving(self) -> None:
         stepping = _results()
@@ -675,10 +734,12 @@ def _write_reports(root: Path, identity: dict[str, object], results: dict[str, o
 
 
 def _failing_behaviour() -> dict[str, object]:
-    """A support foot that steps and touchdowns while standing with raised arms."""
+    """A support foot that steps, the ZMP off-centre in a crouch and
+    touchdowns while standing with raised arms."""
 
     results = _results()
     _find(results["feet"], "left_back_out")["support_move_median_m"] = 0.029
+    _find(results["feet"], "both_up16")["zmp_distance_median_m"] = 0.02
     _find(results["arms"], "neutral/arms_raised")["touchdowns_per_s"] = 0.95
     return results
 
@@ -710,6 +771,9 @@ class TrackingWaiverTest(unittest.TestCase):
                 "approval": APPROVAL,
                 "checks": {
                     "standing_still": [{
+                        "scenario": "both_up16", "quantity": "zmp_distance_median_m",
+                        "measured": 0.02, "limit": ZMP_CENTRE_MAX_M, "rule": "at_most",
+                    }, {
                         "scenario": "neutral/arms_raised", "quantity": "touchdowns_per_s",
                         "measured": 0.95, "limit": 0.5, "rule": "at_most",
                     }],

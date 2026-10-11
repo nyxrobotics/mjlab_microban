@@ -49,10 +49,12 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     SEED_COUNT,
     STILL_TOUCHDOWNS_PER_S_MAX,
     SUPPORT_FOOT_MOVE_MAX_M,
+    ZMP_CENTRE_MAX_M,
     arm_walk_min_speed,
     canonical_settings,
+    crouch_drop_error_m,
     foot_error_limit_m,
-    push_fall_rates,
+    push_fall_rates_by_group,
     required_tracking_check_names,
     required_tracking_profile,
 )
@@ -394,6 +396,16 @@ def _record_failure(
     )
 
 
+def _standing_failures(entries: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    """A standing command's touchdowns and ZMP distance (J1's crouches, J3)."""
+
+    name = str(item["name"])
+    _record_failure(entries, scenario=name, quantity="touchdowns_per_s", measured=item["touchdowns_per_s"],
+                    limit=STILL_TOUCHDOWNS_PER_S_MAX, rule="at_most")
+    _record_failure(entries, scenario=name, quantity="zmp_distance_median_m",
+                    measured=item["zmp_distance_median_m"], limit=ZMP_CENTRE_MAX_M, rule="at_most")
+
+
 def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Every failing measurement of each waivable PICO check.
 
@@ -413,6 +425,9 @@ def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str,
             _record_failure(failures["foot_lift"], scenario=name, quantity="trunk_drop_median_m",
                             measured=item["trunk_drop_median_m"], limit=FOOT_LIFT_MIN_SHARE * dz,
                             rule="at_least")
+            _record_failure(failures["foot_error"], scenario=name, quantity="trunk_drop_error_m",
+                            measured=crouch_drop_error_m(item), limit=foot_error_limit_m(dz), rule="at_most")
+            _standing_failures(failures["standing_still"], item)
         else:
             for side, lifted, goal, median, air in zip(
                 ("left", "right"), item["lifted"], item["foot_goal"], item["lift_median_m"],
@@ -434,18 +449,15 @@ def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str,
     for item in (*feet, *arms):
         _record_failure(failures["no_falls_without_push"], scenario=str(item["name"]),
                         quantity="falls", measured=item["falls"], limit=0.0, rule="at_most")
-    if push:
-        rates = push_fall_rates(push)
-        _record_failure(failures["push_falls"], scenario="all_push_scenarios",
+    for group, rates in push_fall_rates_by_group(push).items():
+        _record_failure(failures["push_falls"], scenario=f"{group}_push_scenarios",
                         quantity="pico_fall_rate", measured=rates["pico"],
                         limit=rates["walker"] + PUSH_FALL_RATE_MARGIN, rule="at_most")
     home = {item["base"]: item for item in arms if item["arms"] == "home"}
     for item in arms:
         name = str(item["name"])
         if all(value == 0.0 for value in item["twist"]):
-            _record_failure(failures["standing_still"], scenario=name, quantity="touchdowns_per_s",
-                            measured=item["touchdowns_per_s"], limit=STILL_TOUCHDOWNS_PER_S_MAX,
-                            rule="at_most")
+            _standing_failures(failures["standing_still"], item)
             for axis, value, limit in zip(TWIST_AXES, item["mean_twist"], STANDING_DRIFT_MAX, strict=True):
                 number = _number_or_none(value)
                 _record_failure(failures["standing_still"], scenario=name, quantity=f"abs_mean_{axis}",
@@ -566,6 +578,9 @@ def _validate_tracking_report(
             "lifted"
         ) != list(scenario.lifted):
             raise ValueError("Tracking report foot targets drifted")
+    for item, scenario in zip(results["push"], push_scenarios(), strict=True):
+        if item.get("foot_goal") != [list(goal) for goal in scenario.foot_goal]:
+            raise ValueError("Tracking report push foot targets drifted")
     try:
         recomputed, status = _tracking_acceptance(results)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:

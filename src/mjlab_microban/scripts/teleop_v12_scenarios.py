@@ -5,9 +5,11 @@ of two seeds, with the HMD neck moving as in training:
 
 * feet (J1): standing, no push, arms at HOME (and two corners with one arm
   reaching out); one foot lifted (left and right mirrored), or both feet
-  moved by the same offset, to a target that teleop's 0.12 m/s ramp reaches;
-* pushes (J2): standing and the nine-scenario walking set, pushed every
-  second from eight directions, against the walker the adapter was built on;
+  moved by the same offset (a crouch), to a target that teleop's 0.12 m/s
+  ramp reaches;
+* pushes (J2): standing and the nine-scenario walking set, and the crouches
+  of J1, pushed every second from eight directions, against the walker the
+  adapter was built on;
 * arms (J3, J4): the same nine commands with the arms at HOME, raised forward
   70 degrees, or moved as in training (pico_arm_target_motion), and standing
   with one arm reaching out.
@@ -116,16 +118,28 @@ def _mirror(goal: Vec3) -> Vec3:
     return (goal[0], -goal[1], goal[2])
 
 
-def foot_scenarios() -> tuple[Scenario, ...]:
-    """J1: single-foot lifts and the corners of the sent box, mirrored; both feet.
+def crouch_goals() -> dict[str, Vec3]:
+    """The two-foot targets judged (both feet get the same offset): straight
+    down by half and all of the sent box's height, and two of its corners.
 
-    Both feet always get the same offset (training draws one (dx, dy, dz) for
-    the two feet): in the trunk frame the feet rise by dz, so the trunk
-    crouches by dz with the feet on the floor and shifts by (-dx, -dy).
+    Training draws one (dx, dy, dz) for the two feet: in the trunk frame the
+    feet rise by dz, so the trunk crouches by dz with the feet on the floor
+    and shifts by (-dx, -dy).
     """
 
-    x, y, z = (value * TARGET_SAFETY_MARGIN for value in FOOT_TARGET_LIMIT_M)
     bx, by, bz = (value * TARGET_SAFETY_MARGIN for value in SIMULTANEOUS_BOTH_FEET_TARGET_LIMIT_M)
+    return {
+        "up8": (0.0, 0.0, bz / 2.0),
+        "up16": (0.0, 0.0, bz),
+        "front_left": (bx, by, bz),
+        "back_right": (-bx, -by, bz),
+    }
+
+
+def foot_scenarios() -> tuple[Scenario, ...]:
+    """J1: single-foot lifts and the corners of the sent box, mirrored; the crouches."""
+
+    x, y, z = (value * TARGET_SAFETY_MARGIN for value in FOOT_TARGET_LIMIT_M)
     single = {
         "up20": (0.0, 0.0, 0.02),
         "up40": (0.0, 0.0, z),
@@ -146,17 +160,21 @@ def foot_scenarios() -> tuple[Scenario, ...]:
     scenarios.append(
         Scenario("right_back_in/arms_reach_right", foot_goal=(ZERO, _mirror(single["back_in"])), arms="reach_right")
     )
-    for name, goal in {"front_left": (bx, by, bz), "back_right": (-bx, -by, bz)}.items():
+    for name, goal in crouch_goals().items():
         scenarios.append(Scenario(f"both_{name}", foot_goal=(goal, goal)))
     return tuple(scenarios)
 
 
 def push_scenarios() -> tuple[Scenario, ...]:
-    """J2: standing and the eight walking commands, pushed, arms at HOME."""
+    """J2: standing and the eight walking commands, then the crouches of J1,
+    pushed, arms at HOME."""
 
-    return tuple(
-        Scenario(item.name, twist=tuple(item.twist), push=True)  # type: ignore[arg-type]
-        for item in walking_scenarios()
+    return (
+        *(
+            Scenario(item.name, twist=tuple(item.twist), push=True)  # type: ignore[arg-type]
+            for item in walking_scenarios()
+        ),
+        *(Scenario(f"both_{name}", foot_goal=(goal, goal), push=True) for name, goal in crouch_goals().items()),
     )
 
 
