@@ -13,6 +13,9 @@ and the neck are driven from outside), and on a row with a foot target whose
 foot reward is not faded out it is 1.0: the legs are free to follow the foot
 target.  (1.0, not 0: a smaller value would make a foot-target row less worth
 surviving.)
+
+The legs work around the crouch pose of a two-foot target
+(microban_teleop_v12_env_cfg.apply_crouch_feedforward).
 """
 
 from __future__ import annotations

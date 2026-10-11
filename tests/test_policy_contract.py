@@ -27,6 +27,7 @@ ROBOT_PICO_KEYS = {
     "pico_walk_checkpoint_sha256", "pico_target_frame", "pico_arm_target_json",
     "pico_foot_target_lower_json", "pico_foot_target_upper_json", "pico_both_feet_target_lower_json",
     "pico_both_feet_target_upper_json", "pico_raw_action_guard_json", "pico_curriculum_json", "pico_active_adapter_columns_json",
+    "pico_crouch_feedforward_json",
 }
 SHA = "ab" * 32
 

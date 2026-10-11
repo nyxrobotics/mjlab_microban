@@ -38,11 +38,13 @@ POLICY_CONTRACT = "microban-policy-1"
 # The training recipe of each kind (the robot accepts exactly these).  A recipe
 # id changes with the reward family or a target meaning; fixing a failed run
 # inside the family (weights, switch updates) does not change it.  PICO's
-# names its structure too: the frozen walker with a residual MLP.
+# names its structure too: the frozen walker with a residual MLP, whose leg
+# targets and observed leg joints the robot offsets by the crouch pose of a
+# two-foot target (robot/crouch_feedforward.py, pico_crouch_record).
 RECIPES: Mapping[str, str] = {
     "walk": "microban-walk-track-velocity-1",
     "getup": "microban-getup-single-run-1",
-    "pico": "microban-pico-arm-overlay-residual-track-velocity-1",
+    "pico": "microban-pico-arm-overlay-residual-crouch-feedforward-track-velocity-1",
 }
 KINDS = tuple(RECIPES)
 POLICY_FILES: Mapping[str, str] = {
@@ -144,6 +146,19 @@ PICO_ARM_UPPER_RAD = [math.radians(value) for value in (100.0, 120.0, 0.0, 100.0
 PICO_ARM_SLEW_RATE_RAD_S = 4.0
 PICO_ADAPTER_COLUMNS = [6, 7, 8, 27, 28, 29, *range(69, 81)]
 PICO_CURRICULUM_KEYS = ("critic_warmup", "arm_start", "foot_start", "foot_tighten", "total")
+# Published foot targets (left dx, dy, dz, right dx, dy, dz) at which the
+# robot's copy of crouch_feedforward must reproduce the recorded leg offsets:
+# held two-foot targets, unequal feet, one foot up, none, beyond the support.
+PICO_CROUCH_PROBE_FOOT_TARGETS = [
+    [0.0, 0.0, 0.008] * 2,
+    [0.0, 0.0, 0.016] * 2,
+    [0.008, 0.008, 0.016] * 2,
+    [-0.008, -0.008, 0.016] * 2,
+    [0.005, -0.003, 0.012, 0.004, -0.002, 0.014],
+    [0.0, 0.0, 0.03, 0.0, 0.0, 0.0],
+    [0.0] * 6,
+    [0.02, -0.02, 0.03] * 2,
+]
 
 
 class PolicyContractError(ValueError):
@@ -424,6 +439,23 @@ def pico_arm_target_record() -> dict[str, Any]:
     }
 
 
+def pico_crouch_record() -> dict[str, Any]:
+    """The crouch offsets the robot adds (pico_crouch_feedforward_json): the
+    ONNX is the policy alone; the robot computes the offsets with its copy of
+    crouch_feedforward and must reproduce these probes."""
+
+    from mjlab_microban.robot import crouch_feedforward
+
+    table = crouch_feedforward.build_table(HOME.joint_pos_rad, HOME.trunk_pitch_rad)
+    offsets = crouch_feedforward.leg_offsets(table, np.asarray(PICO_CROUCH_PROBE_FOOT_TARGETS))
+    return {
+        "contract": crouch_feedforward.CONTRACT,
+        "joint_names": list(crouch_feedforward.LEG_JOINT_NAMES),
+        "foot_targets": PICO_CROUCH_PROBE_FOOT_TARGETS,
+        "leg_offsets_rad": offsets.tolist(),
+    }
+
+
 def pico_metadata(
     *,
     walk_checkpoint_sha256: str,
@@ -457,6 +489,7 @@ def pico_metadata(
         "pico_both_feet_target_lower_json": _json(PICO_BOTH_FEET_TARGET_LOWER),
         "pico_both_feet_target_upper_json": _json(PICO_BOTH_FEET_TARGET_UPPER),
         "pico_arm_target_json": _json(pico_arm_target_record()),
+        "pico_crouch_feedforward_json": _json(pico_crouch_record()),
         "pico_raw_action_guard_json": _json(guard),
         "pico_curriculum_json": _json(record),
         "pico_active_adapter_columns_json": _json(list(active_adapter_columns)),

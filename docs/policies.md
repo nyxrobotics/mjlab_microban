@@ -56,7 +56,7 @@ PICO の `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確
 | --- | --- |
 | `microban_policy_contract` | `microban-policy-1` |
 | `microban_policy_kind` | `walk` / `getup` / `pico` |
-| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-arm-overlay-residual-track-velocity-1` |
+| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-arm-overlay-residual-crouch-feedforward-track-velocity-1` |
 | `home_pose` | `{"joint_pos_rad":{21 関節},"root_pos_m":[3],"root_quat_wxyz":[4]}`（全精度） |
 | `joint_names`、`default_joint_pos` | 21 関節と、その順の HOME（`repr` の全精度） |
 | `action_joint_names` | 18 関節（実機の `OBSERVATION_DOF_ORDER`） |
@@ -80,7 +80,15 @@ PICO だけのキー: `pico_walk_checkpoint_sha256`（凍結した歩行器）�
 取り決め: 名前 `microban_pico_arm_target_rel_home_v1`、関節の名前、箱 `lower_rad`/`upper_rad`、速さ 4.0 rad/s）、
 `pico_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
 （`critic_warmup`、`arm_start`、`foot_start`、`foot_tighten`、`total`。更新回数）、
-`pico_active_adapter_columns_json`。
+`pico_active_adapter_columns_json`、`pico_crouch_feedforward_json`（しゃがみの脚の角: 名前
+`microban_pico_crouch_feedforward_v1`、12 脚関節の名前、確かめの足の目標と、そこでの脚の角）。
+
+PICO の ONNX は方策の網だけで、しゃがみの脚の角は実機が足し引きする（`robot/crouch_feedforward.py`。
+実機の `src/crouch_feedforward.py` は同じファイル）。公開中の両足の目標がともに帯 2.5 mm より上のとき、
+(dx, dy の平均, 低い方の dz) に胴を下げ、両足の裏を HOME の位置に残す脚の角 Δq を IK の表から補間で求め、
+脚の目標を HOME + Δq + 生の出力にし、観測の脚の関節角を 実測 − HOME − Δq にする。前回の行動は生の出力のまま。
+それ以外の行（目標なし、片足、歩行）は Δq = 0。実機は `pico_crouch_feedforward_json` の確かめの点で
+自分の Δq が記録と 1e-6 rad 以内で一致することを確かめる。
 
 PICO の観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME
 （左 pitch, roll, elbow、右 pitch, roll, elbow）。腕のサーボには方策の出力を使わない。PICO の自己テストの

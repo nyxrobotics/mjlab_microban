@@ -72,6 +72,7 @@ from mjlab_microban.scripts.teleop_v12_scenarios import (
     copy_forced_moving_hmd_neck_event,
     copy_moving_arm_event,
     foot_scenarios,
+    patch_foot_target,
     patch_observation,
     per_env,
     push_scenarios,
@@ -480,7 +481,7 @@ def _rollout(
             ctx.recurrence = False
         # The foot target the robot receives next (teleop's ramp, then the floor band).
         ramp.advance(step + 1 >= FOOT_TARGET_STEP)
-        observations = patch_observation(observations, {ctx.foot_slice: ramp.observed})
+        observations = patch_foot_target(env, observations, ramp.observed)
         if bool(NanGuard.detect_nans(env.sim.data)[0].item()) or not bool(
             torch.isfinite(robot.data.joint_pos).all() and torch.isfinite(robot.data.root_link_pose_w).all()
         ):

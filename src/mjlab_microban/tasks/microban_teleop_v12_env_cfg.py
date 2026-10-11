@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+from mjlab.tasks.velocity import mdp as velocity_mdp
 
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.microban_constants import (
@@ -19,6 +20,7 @@ from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.tasks.microban_teleop_env_cfg import (
     make_microban_teleop_env_cfg,
 )
+from mjlab_microban.tasks.microban_teleop_mdp import crouch_joint_pos_rel
 
 MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION = "13"
 # Weight of the left-right mirror loss (MicrobanMirrorLossCfg).  Measured on
@@ -85,13 +87,36 @@ def teleop_v12_action_clip_cfg() -> dict[str, tuple[float, float]]:
 MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE = 3.0e-4
 
 
+def apply_crouch_feedforward(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Work the legs around the crouch pose of a two-foot target.
+
+    The frozen walker pulls its observed joints back to where its targets are
+    relative to: with HOME there it undid a crouch the residual asked for
+    (7-8 tenths of an added knee offset were cancelled, and no run learned to
+    crouch).  Here the leg targets are HOME + the crouch offsets of the
+    published foot targets + raw, and the actor observes the leg joints minus
+    HOME and the same offsets (robot/crouch_feedforward.py); the previous
+    action stays the raw output and the critic keeps the measured joints.
+    The robot adds the same offsets; the ONNX is the policy alone.
+    """
+
+    cfg.actions["joint_pos"].crouch_command_name = "foot_target"
+    joint_pos = cfg.observations["actor"].terms["joint_pos"]
+    if joint_pos.func is not velocity_mdp.joint_pos_rel:
+        raise TypeError("The crouch offset replaces the actor's joint_pos_rel")
+    joint_pos.func = crouch_joint_pos_rel
+    joint_pos.params["command_name"] = "foot_target"
+
+
 def make_microban_teleop_v12_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Build teleop with the source actor's raw recurrence and servo-range bound."""
+    """Build teleop with the source actor's raw recurrence and servo-range
+    bound, and the crouch offsets (``apply_crouch_feedforward``)."""
 
     cfg = make_microban_teleop_env_cfg(play=play)
     cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
+    apply_crouch_feedforward(cfg)
 
     hmd_event = cfg.events.get("hmd_neck_target_motion")
     if hmd_event is not None and HOME_TRUNK_PITCH_RAD != 0.0:
