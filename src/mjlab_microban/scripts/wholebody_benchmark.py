@@ -8,6 +8,13 @@ piece) and ``-kinds.csv`` / ``-pieces.csv`` next to it.  Pass two
 checkpoints of one run to see whether success and errors still improve: with
 the same seed they meet the same conditions piece by piece.  The kinds of
 the training set (``--train-motion-file``) must all be evaluated.
+
+An evaluation-only set is judged on its own kinds with ``--eval-only-set``
+(no training kinds or walk, run and sprint required; the same lines):
+
+  uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py \\
+      --checkpoint <model.pt> --motion-file data/wholebody/pico_eval/eval --eval-only-set \\
+      --output-root artifacts/wholebody_pico
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
     probe = benchmark_env_cfg(args.motion_file, args.clip_seconds, 1, 0)
     step_dt = probe.decimation * probe.sim.mujoco.timestep
     pieces = benchmark.load_pieces(args.motion_file, ACTION_JOINT_NAMES, args.clip_seconds, step_dt, no_load)
-    expected_kinds = benchmark.dataset_kinds(args.train_motion_file)
+    expected_kinds = set() if args.eval_only_set else benchmark.dataset_kinds(args.train_motion_file)
     results = []
     batches = [pieces[i : i + args.num_envs] for i in range(0, len(pieces), args.num_envs)]
     for index, batch in enumerate(batches):
@@ -66,7 +73,8 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
         "motion_file": str(Path(args.motion_file).resolve()),
-        "train_motion_file": str(Path(args.train_motion_file).resolve()),
+        "train_motion_file": None if args.eval_only_set else str(Path(args.train_motion_file).resolve()),
+        "eval_only_set": args.eval_only_set,
         "clip_seconds": args.clip_seconds,
         "servo_no_load_speed_rad_s": no_load,
         "pieces": len(pieces),
@@ -75,7 +83,8 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
         "seed": args.seed,
     }
     report = benchmark.write_outputs(
-        Path(args.output_root) / run, checkpoint.stem, metadata, results, expected_kinds
+        Path(args.output_root) / run, checkpoint.stem, metadata, results, expected_kinds,
+        require_locomotion=not args.eval_only_set,
     )
     print(f"{checkpoint}:\n{benchmark.format_summary(report)}")
     return report
@@ -86,6 +95,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, action="append", required=True)
     parser.add_argument("--motion-file", default=EVAL_MOTION_DIR)
     parser.add_argument("--train-motion-file", default=TRAIN_MOTION_DIR, help="Its kinds must all be evaluated")
+    parser.add_argument(
+        "--eval-only-set",
+        action="store_true",
+        help="Judge only the kinds of --motion-file (an evaluation-only set such as data/wholebody/pico_eval/eval): "
+        "the training kinds and walk, run and sprint are not required",
+    )
     parser.add_argument("--clip-seconds", type=float, default=10.0)
     parser.add_argument("--num-envs", type=int, default=1024, help="Pieces run at once")
     parser.add_argument("--seed", type=int, default=0)

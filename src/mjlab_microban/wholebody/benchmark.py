@@ -29,7 +29,9 @@ run and sprint the trunk's horizontal displacement over each successful
 piece is projected on the reference's: progress = sum(d_robot . d_ref) /
 sum(|d_ref|^2), 0 standing still, 1 covering the reference's ground, and it
 must reach ``MIN_PROGRESS``.  Every kind of the training set and walk, run
-and sprint must be in the evaluation set.
+and sprint must be in the evaluation set; an evaluation-only set (the PICO
+recordings, whose kinds are not training kinds) is judged on its own kinds,
+by the same lines, with progress on whichever locomotion kinds it has.
 
 The share of steps whose reference joint speed exceeds the XC330's no-load
 speed is reported per kind; it is not a line.
@@ -196,12 +198,16 @@ def summarize(results: Sequence[PieceResult]) -> dict[str, Any]:
     return kinds
 
 
-def verdicts(kinds: dict[str, Any], expected_kinds: Iterable[str] = ()) -> dict[str, Any]:
+def verdicts(
+    kinds: dict[str, Any], expected_kinds: Iterable[str] = (), require_locomotion: bool = True
+) -> dict[str, Any]:
     """The full run's pass (every kind at least 90 % and under the error lines,
     locomotion progress) and the small run's checks (no kind at 0 %,
     locomotion progress, finite errors).  A kind expected but not evaluated
-    fails both."""
-    missing = sorted((set(expected_kinds) | set(LOCOMOTION_KINDS)) - set(kinds))
+    fails both; walk, run and sprint are expected unless ``require_locomotion``
+    is off (an evaluation-only set)."""
+    required = set(expected_kinds) | (set(LOCOMOTION_KINDS) if require_locomotion else set())
+    missing = sorted(required - set(kinds))
     errors_ok = {k: all(v[n] is not None and v[n] <= std for n, std in ERROR_LINES.items()) for k, v in kinds.items()}
     progress = {k: kinds[k]["progress"] for k in LOCOMOTION_KINDS if k in kinds}
     progress_ok = not missing and all(v is not None and v >= MIN_PROGRESS for v in progress.values())
@@ -229,7 +235,12 @@ def verdicts(kinds: dict[str, Any], expected_kinds: Iterable[str] = ()) -> dict[
 
 
 def write_outputs(
-    out_dir: Path, stem: str, metadata: dict[str, Any], results: Sequence[PieceResult], expected_kinds: Iterable[str]
+    out_dir: Path,
+    stem: str,
+    metadata: dict[str, Any],
+    results: Sequence[PieceResult],
+    expected_kinds: Iterable[str],
+    require_locomotion: bool = True,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     kinds = summarize(results)
@@ -238,7 +249,7 @@ def write_outputs(
         "error_lines": ERROR_LINES,
         "final_success_rate": FINAL_SUCCESS_RATE,
         "min_progress": MIN_PROGRESS,
-        "verdicts": verdicts(kinds, expected_kinds),
+        "verdicts": verdicts(kinds, expected_kinds, require_locomotion),
         "kinds": kinds,
         "pieces": [asdict(r) for r in results],
     }

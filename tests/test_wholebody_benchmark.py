@@ -44,3 +44,19 @@ def test_verdicts_fail_missing_kinds_and_a_robot_standing_still():
     assert not benchmark.verdicts({k: v for k, v in kinds.items() if k != "sprint"})["small_run"]["pass"]
     still = benchmark.verdicts({**kinds, "walk": _kind(1.0, progress=0.05)})
     assert not still["final"]["pass"] and not still["small_run"]["pass"]
+
+
+def test_an_evaluation_only_set_is_judged_on_its_own_kinds():
+    # The PICO set: no training kinds, no walk/run/sprint; the same lines.
+    pico = {"picoteleopit": _kind(0.95, None), "picotwist": _kind(0.91, None), "picoany": _kind(0.9, None)}
+    assert not benchmark.verdicts(pico)["small_run"]["pass"]  # the default still asks for locomotion
+    judged = benchmark.verdicts(pico, require_locomotion=False)
+    assert judged["final"]["pass"] and judged["small_run"]["pass"]
+    assert judged["final"]["kinds_without_pieces"] == []
+    failing = benchmark.verdicts({**pico, "picoany": _kind(0.0, None)}, require_locomotion=False)
+    assert failing["final"]["kinds_below_success_rate"] == ["picoany"]
+    assert failing["small_run"]["kinds_never_succeeding"] == ["picoany"]
+    assert not failing["final"]["pass"] and not failing["small_run"]["pass"]
+    # A locomotion kind it does have is still held to the progress line.
+    still = benchmark.verdicts({**pico, "walk": _kind(1.0, progress=0.05)}, require_locomotion=False)
+    assert not still["final"]["pass"]
