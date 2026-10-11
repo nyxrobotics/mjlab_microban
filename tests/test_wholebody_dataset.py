@@ -5,13 +5,23 @@ from __future__ import annotations
 import pickle
 
 import numpy as np
+import pytest
 import torch
+from scipy.spatial.transform import Rotation as R
 
 from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.wholebody.data import build
 from mjlab_microban.wholebody.data.build import process_file, split_files
 from mjlab_microban.wholebody.data.fk import quat_wxyz_to_xyzw, quat_xyzw_to_wxyz
 from mjlab_microban.wholebody.data.hdf5 import write_motion_shard
-from mjlab_microban.wholebody.data.preprocess import ExclusionSpec, joint_jumps
+from mjlab_microban.wholebody.data.preprocess import (
+    ClipKinematics,
+    ExclusionSpec,
+    convex_hull_2d,
+    distance_outside,
+    frame_flags,
+    joint_jumps,
+)
 from mjlab_microban.wholebody.motion import MotionLib
 
 FPS = 30
@@ -51,7 +61,7 @@ def test_home_clip_with_sunk_feet_splits_into_named_sections(tmp_path):
     (part,) = result["parts"]
     assert part["flagged_frames"] == {
         "floor_penetration": 9, "self_penetration": 0, "joint_range": 0, "joint_jump": 0, "lifted": 0,
-        "off_ground": 0,
+        "off_ground": 0, "unsupported": 0,
     }
     pad = round(spec.pad_s * FPS)
     names = [section["name"] for section in part["sections"]]
@@ -88,3 +98,64 @@ def test_joint_jump_marks_a_one_frame_step_but_not_a_fast_smooth_motion():
     switch = np.abs(np.diff([1.62, 1.59, 1.55, 1.45, 0.57, 0.37, 0.40]))[:, None]
     assert not joint_jumps(swing, FPS, spec).any()
     assert joint_jumps(switch, FPS, spec).tolist() == [False, False, False, True, False, False]
+
+
+def _home_frames(frames: int):
+    root_pos = np.tile(np.asarray(HOME.root_pos), (frames, 1))
+    root_quat = np.tile(np.asarray(HOME.root_quat_wxyz), (frames, 1))
+    return root_pos, root_quat, np.tile([HOME.joint_pos_rad[name] for name in JOINTS], (frames, 1))
+
+
+def test_support_hull_and_the_distance_outside_it():
+    square = convex_hull_2d(np.array([[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [1, 0]]))
+    assert len(square) == 4
+    assert distance_outside(np.array([0.5, 0.5]), square) == 0.0
+    assert distance_outside(np.array([2.0, 0.5]), square) == 1.0
+    assert distance_outside(np.array([0.5, 0.0]), convex_hull_2d(np.array([[0, 1], [1, 1]]))) == 1.0
+    assert distance_outside(np.array([0.0, 0.0]), convex_hull_2d(np.zeros((0, 2)))) == np.inf
+
+
+def test_leaning_back_upright_for_over_a_second_is_unsupported():
+    # HOME turned 30 degrees backwards about the back edge of the soles: the
+    # toes rise, the centre of mass is behind the heels.  1.5 s of it is cut,
+    # 0.5 s (a step, a fall) is not, and HOME stands inside its support.
+    checker = build._checker()
+    spec = ExclusionSpec()
+    root_pos, root_quat, joints = _home_frames(4 * FPS)
+    home = checker.run(root_pos[:1], root_quat[:1], joints[:1])
+    assert home.com_outside_support_m[0] == 0.0
+    corners = checker.data.geom_xpos[checker.corner_geom] + np.einsum(
+        "nij,nj->ni", checker.data.geom_xmat[checker.corner_geom].reshape(-1, 3, 3), checker.corner_local)
+    pivot = np.array([corners[corners[:, 2] < 0.005, 0].min(), 0.0, 0.0])
+    back = R.from_euler("y", -30.0, degrees=True)
+    tilted = (pivot + back.apply(root_pos[0] - pivot), (back * R.from_quat(root_quat[0], scalar_first=True)).as_quat(scalar_first=True))
+    for first, last in ((15, 15 + 45), (90, 90 + 15)):  # 1.5 s and 0.5 s
+        root_pos[first:last], root_quat[first:last] = tilted
+    kin = checker.run(root_pos, root_quat, joints)
+    assert kin.com_outside_support_m[20] > spec.support_margin_m
+    assert np.degrees(kin.trunk_tilt_rad[20]) == pytest.approx(20.0, abs=0.1)  # HOME leans 10 degrees forward
+    flags = frame_flags(kin, FPS, spec)
+    assert np.flatnonzero(flags["unsupported"]).tolist() == list(range(15, 60))
+
+
+def test_unsupported_needs_contact_an_upright_trunk_and_time():
+    spec = ExclusionSpec()
+    frames = 3 * FPS
+    outside = np.full(frames, 0.05)
+    tilt = np.zeros(frames)
+
+    def flagged(outside, tilt):
+        kin = ClipKinematics(
+            body_pos_w=np.zeros((frames, 1, 3)), body_quat_w=np.zeros((frames, 1, 4)), lowest_point_z=np.zeros(frames),
+            self_penetration_m=np.zeros(frames), joint_excess_rad=np.zeros(frames), joint_step_rad=np.zeros((frames - 1, 1)),
+            com_outside_support_m=outside, trunk_tilt_rad=tilt,
+        )
+        return int(frame_flags(kin, FPS, spec)["unsupported"].sum())
+
+    assert flagged(outside, tilt) == frames
+    assert flagged(np.full(frames, 0.015), tilt) == 0  # within the margin
+    assert flagged(outside, np.full(frames, np.radians(60.0))) == 0  # lying or crawling
+    assert flagged(np.full(frames, np.inf), tilt) == 0  # airborne: the off-ground rule's
+    short = np.zeros(frames)
+    short[10:10 + FPS] = 0.05  # exactly the duration: kept
+    assert flagged(short, tilt) == 0
