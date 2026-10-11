@@ -2,7 +2,8 @@
 # train_mimic/scripts/benchmark.py (Apache-2.0,
 # https://github.com/BotRunner64/Teleopit).  Changes: the evaluation set run
 # in consecutive pieces, results per motion kind, error lines equal to the
-# reward stds, a progress line for walking and running, no reset during a run.
+# reward stds, a progress line on every piece whose reference travels, no
+# reset during a run.
 
 """Evaluate a checkpoint on the evaluation set, per motion kind.
 
@@ -24,14 +25,20 @@ Lines.  For every successful piece the RMS over time of each tracking error
 reference of the step (the observed target); per kind the RMS over all steps
 of its successful pieces is compared with that reward's std (RMS <= std: the
 reward stays above exp(-1) on average).  The trunk velocity line cannot tell
-a robot standing still from a walking one at Microban's speeds, so on walk,
-run and sprint the trunk's horizontal displacement over each successful
-piece is projected on the reference's: progress = sum(d_robot . d_ref) /
-sum(|d_ref|^2), 0 standing still, 1 covering the reference's ground, and it
-must reach ``MIN_PROGRESS``.  Every kind of the training set and walk, run
-and sprint must be in the evaluation set; an evaluation-only set (the PICO
-recordings, whose kinds are not training kinds) is judged on its own kinds,
-by the same lines, with progress on whichever locomotion kinds it has.
+a robot standing still from a walking one at Microban's speeds, so the
+trunk's horizontal displacement over each successful piece is projected on
+the reference's: progress = sum(d_robot . d_ref) / sum(|d_ref|^2) over a
+kind's travelling pieces, 0 standing still, 1 covering the reference's
+ground, and it must reach ``MIN_PROGRESS``.  A piece travels when its
+reference trunk moves at least ``PROGRESS_TRAVEL_M`` = BODY_POS_STD_M /
+(1 - MIN_PROGRESS) across the floor (from the motion file, whatever the
+policy does): a robot that ends such a piece within the trunk position std of
+the reference reaches MIN_PROGRESS, one standing still does not.  The line
+holds on every kind with a travelling piece, whatever its name (LAFAN1's
+walk, CMU's cmuwalk, the PICO recordings' walking).  Every kind of the
+training set and walk, run and sprint must be in the evaluation set; an
+evaluation-only set (the PICO recordings, whose kinds are not training
+kinds) is judged on its own kinds, by the same lines.
 
 The share of steps whose reference joint speed exceeds the XC330's no-load
 speed is reported per kind; it is not a line.
@@ -53,6 +60,7 @@ import numpy as np
 from mjlab_microban.wholebody.data.hdf5 import find_motion_shards, motion_category, read_strings
 from mjlab_microban.wholebody.env_cfg import (
     ACTOR_GROUP,
+    ANCHOR_BODY_NAME,
     BODY_POS_STD_M,
     JOINT_POS_STD_RAD,
     LIN_VEL_STD_M_S,
@@ -69,6 +77,7 @@ ERROR_LINES = {
 FINAL_SUCCESS_RATE = 0.9
 LOCOMOTION_KINDS = ("walk", "run", "sprint")
 MIN_PROGRESS = 0.5
+PROGRESS_TRAVEL_M = BODY_POS_STD_M / (1.0 - MIN_PROGRESS)
 SERVO_VIN_V = 11.1
 
 
@@ -88,6 +97,7 @@ class Piece:
     steps: int
     seconds: float
     overspeed_share: float
+    ref_travel_m: float  # the reference trunk's horizontal displacement over the piece
 
 
 @dataclass(frozen=True)
@@ -102,6 +112,7 @@ class PieceResult:
     success: bool
     failure_reason: str | None
     overspeed_share: float
+    ref_travel_m: float
     # RMS tracking errors of a successful piece (None after a fall).
     body_pos_m: float | None
     trunk_ori_rad: float | None
@@ -121,12 +132,22 @@ def dataset_kinds(motion_file: str | Path) -> set[str]:
     return kinds
 
 
+def _trunk_xy(trunk_xy: np.ndarray, start: int, length: int, fps: float, time_s: float) -> np.ndarray:
+    """The reference trunk's (x, y) at ``time_s`` into a window (linear between frames)."""
+    position = min(time_s * fps, length - 1)
+    lower = int(math.floor(position))
+    upper = min(lower + 1, length - 1)
+    weight = position - lower
+    return (1.0 - weight) * trunk_xy[start + lower] + weight * trunk_xy[start + upper]
+
+
 def load_pieces(
     motion_file: str | Path,
     joint_names: Sequence[str],
     clip_seconds: float,
     step_dt: float,
     no_load_speed: float,
+    anchor_body: str = ANCHOR_BODY_NAME,
 ) -> list[Piece]:
     """Every window (in MotionLib's order) cut into consecutive pieces of at most ``clip_seconds``."""
     pieces: list[Piece] = []
@@ -137,6 +158,8 @@ def load_pieces(
             shard_joints = read_strings(h5, "joint_names")
             columns = [shard_joints.index(name) for name in joint_names]
             fast = np.any(np.abs(np.asarray(h5["joint_vel"])[:, columns]) > no_load_speed, axis=1)
+            anchor = read_strings(h5, "body_names").index(anchor_body)
+            trunk_xy = np.asarray(h5["body_pos_w"][:, anchor, :2], dtype=np.float64)
             for start, length, fps, source in zip(
                 np.asarray(h5["clip_starts"]), np.asarray(h5["clip_lengths"]), np.asarray(h5["clip_fps"]),
                 np.asarray(h5["source_clip_ids"]), strict=True,
@@ -151,10 +174,14 @@ def load_pieces(
                     seconds = steps * step_dt
                     first = int(start) + int(math.floor(begin * fps))
                     last = int(start) + min(int(math.ceil((begin + seconds) * fps)), int(length) - 1)
+                    travel = _trunk_xy(trunk_xy, int(start), int(length), float(fps), begin + seconds) - _trunk_xy(
+                        trunk_xy, int(start), int(length), float(fps), begin
+                    )
                     pieces.append(Piece(
                         piece_id=len(pieces), window_id=window_id, clip_name=names[source],
                         kind=motion_category(names[source]), start_s=begin, steps=steps, seconds=seconds,
                         overspeed_share=float(np.mean(fast[first : last + 1])),
+                        ref_travel_m=float(np.linalg.norm(travel)),
                     ))
                     index += 1
                 window_id += 1
@@ -192,8 +219,11 @@ def summarize(results: Sequence[PieceResult]) -> dict[str, Any]:
             entry[name] = (
                 math.sqrt(sum(getattr(r, name) ** 2 * r.steps for r in succeeded) / steps) if steps else None
             )
-        ref_sq = sum(r.ref_displacement_sq_m2 for r in succeeded)
-        entry["progress"] = sum(r.progress_dot_m2 for r in succeeded) / ref_sq if ref_sq > 0 else None
+        # Progress on the travelling pieces; the line holds on a kind that has any (travel_seconds > 0).
+        entry["travel_seconds"] = sum(r.seconds for r in rows if r.ref_travel_m >= PROGRESS_TRAVEL_M)
+        travelled = [r for r in succeeded if r.ref_travel_m >= PROGRESS_TRAVEL_M]
+        ref_sq = sum(r.ref_displacement_sq_m2 for r in travelled)
+        entry["progress"] = sum(r.progress_dot_m2 for r in travelled) / ref_sq if ref_sq > 0 else None
         kinds[kind] = entry
     return kinds
 
@@ -202,22 +232,22 @@ def verdicts(
     kinds: dict[str, Any], expected_kinds: Iterable[str] = (), require_locomotion: bool = True
 ) -> dict[str, Any]:
     """The full run's pass (every kind at least 90 % and under the error lines,
-    locomotion progress) and the small run's checks (no kind at 0 %,
-    locomotion progress, finite errors).  A kind expected but not evaluated
-    fails both; walk, run and sprint are expected unless ``require_locomotion``
-    is off (an evaluation-only set)."""
+    progress on every kind with a travelling piece) and the small run's checks
+    (no kind at 0 %, the same progress, finite errors).  A kind expected but
+    not evaluated fails both; walk, run and sprint are expected unless
+    ``require_locomotion`` is off (an evaluation-only set)."""
     required = set(expected_kinds) | (set(LOCOMOTION_KINDS) if require_locomotion else set())
     missing = sorted(required - set(kinds))
     errors_ok = {k: all(v[n] is not None and v[n] <= std for n, std in ERROR_LINES.items()) for k, v in kinds.items()}
-    progress = {k: kinds[k]["progress"] for k in LOCOMOTION_KINDS if k in kinds}
+    progress = {k: v["progress"] for k, v in kinds.items() if v["travel_seconds"] > 0}
     progress_ok = not missing and all(v is not None and v >= MIN_PROGRESS for v in progress.values())
     finite = not any(v["non_finite_pieces"] for v in kinds.values())
     final = {
         "kinds_without_pieces": missing,
         "kinds_below_success_rate": sorted(k for k, v in kinds.items() if v["success_rate"] < FINAL_SUCCESS_RATE),
         "kinds_above_error_lines": sorted(k for k, ok in errors_ok.items() if not ok),
-        "locomotion_progress": progress,
-        "locomotion_progress_ok": progress_ok,
+        "progress": progress,
+        "progress_ok": progress_ok,
     }
     final["pass"] = bool(
         kinds and not missing and not final["kinds_below_success_rate"] and not final["kinds_above_error_lines"]
@@ -226,8 +256,8 @@ def verdicts(
     small = {
         "kinds_without_pieces": missing,
         "kinds_never_succeeding": sorted(k for k, v in kinds.items() if v["success_rate"] == 0.0),
-        "locomotion_progress": progress,
-        "locomotion_progress_ok": progress_ok,
+        "progress": progress,
+        "progress_ok": progress_ok,
         "finite": finite,
     }
     small["pass"] = bool(kinds and not missing and not small["kinds_never_succeeding"] and progress_ok and finite)
@@ -249,13 +279,15 @@ def write_outputs(
         "error_lines": ERROR_LINES,
         "final_success_rate": FINAL_SUCCESS_RATE,
         "min_progress": MIN_PROGRESS,
+        "progress_travel_m": PROGRESS_TRAVEL_M,
         "verdicts": verdicts(kinds, expected_kinds, require_locomotion),
         "kinds": kinds,
         "pieces": [asdict(r) for r in results],
     }
     (out_dir / f"{stem}.json").write_text(json.dumps(report, indent=1, allow_nan=False) + "\n", encoding="utf-8")
     with (out_dir / f"{stem}-kinds.csv").open("w", newline="") as stream:
-        fields = ["kind", "pieces", "seconds", "success_rate", "overspeed_share", "progress", *ERROR_LINES]
+        fields = ["kind", "pieces", "seconds", "success_rate", "overspeed_share", "travel_seconds", "progress",
+                  *ERROR_LINES]
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for kind, entry in kinds.items():
@@ -278,10 +310,11 @@ def format_summary(report: dict[str, Any]) -> str:
         lines.append(f"{kind:<18}{v['pieces']:>5}{v['seconds'] / 60:>6.1f}{100 * v['success_rate']:>8.0f}%"
                      f"{100 * (v['overspeed_share'] or 0.0):>5.0f}%{number(v['progress'], '.2f'):>9}{errors}")
     final, small = report["verdicts"]["final"], report["verdicts"]["small_run"]
+    progress = {k: None if v is None else round(v, 2) for k, v in small["progress"].items()}
     lines.append(f"final pass: {final['pass']}  missing kinds: {final['kinds_without_pieces']}  "
                  f"below 90%: {final['kinds_below_success_rate']}  above error lines: {final['kinds_above_error_lines']}")
     lines.append(f"small-run checks: {small['pass']}  never succeeding: {small['kinds_never_succeeding']}  "
-                 f"locomotion progress (>= {MIN_PROGRESS}): {small['locomotion_progress']}")
+                 f"progress (>= {MIN_PROGRESS} where the reference travels >= {PROGRESS_TRAVEL_M:.2f} m): {progress}")
     return "\n".join(lines)
 
 
@@ -387,7 +420,7 @@ def rollout(
                 piece_id=piece.piece_id, window_id=piece.window_id, clip_name=piece.clip_name, kind=piece.kind,
                 start_s=piece.start_s, seconds=piece.seconds, steps=int(steps[index]), success=ok,
                 failure_reason=None if ok else (reasons[index] or "terminated"),
-                overspeed_share=piece.overspeed_share,
+                overspeed_share=piece.overspeed_share, ref_travel_m=piece.ref_travel_m,
                 **{name: (value if ok else None) for name, value in rms.items()},
                 progress_dot_m2=float(robot_disp[index] @ ref_disp[index]) if ok else None,
                 ref_displacement_sq_m2=float(ref_disp[index] @ ref_disp[index]) if ok else None,

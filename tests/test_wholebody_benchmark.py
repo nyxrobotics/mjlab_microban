@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mjlab_microban.wholebody import benchmark
 from mjlab_microban.wholebody.data.hdf5 import FRAME_KEYS, write_motion_shard
@@ -28,8 +29,21 @@ def test_pieces_cover_each_section_once(tmp_path):
     ]
 
 
-def _kind(success_rate: float, progress: float | None = 1.0) -> dict:
-    return {"success_rate": success_rate, "non_finite_pieces": 0, "progress": progress,
+def test_pieces_measure_the_reference_trunks_travel(tmp_path):
+    # The trunk walks along x at 0.03 m/s for 10 s, then stands: 0.3 m, then 0.
+    section = _section("dance1_subject5__f0-601", 601)
+    t = np.arange(601) / 30.0
+    section["body_pos_w"][:, 0, 0] = 0.03 * np.minimum(t, 10.0)
+    path = tmp_path / "motion.h5"
+    write_motion_shard([section], path, body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
+    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
+    assert [round(p.ref_travel_m, 6) for p in pieces] == [0.3, 0.0]
+
+
+def _kind(success_rate: float, progress: float | None = 1.0, travel_seconds: float | None = None) -> dict:
+    """A kind's summary; it travels (the progress line holds) when it has a progress."""
+    travel = (60.0 if progress is not None else 0.0) if travel_seconds is None else travel_seconds
+    return {"success_rate": success_rate, "non_finite_pieces": 0, "progress": progress, "travel_seconds": travel,
             **{name: 0.5 * std for name, std in benchmark.ERROR_LINES.items()}}
 
 
@@ -46,17 +60,62 @@ def test_verdicts_fail_missing_kinds_and_a_robot_standing_still():
     assert not still["final"]["pass"] and not still["small_run"]["pass"]
 
 
+def test_progress_holds_on_every_kind_whose_reference_travels():
+    kinds = {"walk": _kind(1.0), "run": _kind(1.0), "sprint": _kind(0.95)}
+    # Whatever its name (CMU's walking, a fight that moves around), a travelling kind is held to progress ...
+    for name in ("cmuwalk", "fight"):
+        still = benchmark.verdicts({**kinds, name: _kind(1.0, progress=0.1)})
+        assert still["final"]["progress"][name] == 0.1
+        assert not still["final"]["pass"] and not still["small_run"]["pass"]
+    # ... and so is one whose travelling pieces all failed (no progress measured).
+    assert not benchmark.verdicts({**kinds, "fight": _kind(0.5, progress=None, travel_seconds=20.0)})["small_run"]["pass"]
+    # A kind that never travels has no progress line.
+    judged = benchmark.verdicts({**kinds, "cmujump": _kind(1.0, progress=None)})
+    assert judged["final"]["pass"] and "cmujump" not in judged["final"]["progress"]
+
+
+def _result(kind: str, travel: float, dot: float, success: bool = True, seconds: float = 10.0):
+    """A piece result whose reference trunk travelled ``travel`` m and the robot ``dot`` / ``travel`` of it."""
+    errors = {name: 0.5 * std for name, std in benchmark.ERROR_LINES.items()}
+    return benchmark.PieceResult(
+        piece_id=0, window_id=0, clip_name=f"{kind}1_subject5", kind=kind, start_s=0.0, seconds=seconds,
+        steps=int(seconds / 0.02), success=success, failure_reason=None if success else "anchor_pos",
+        overspeed_share=0.0, ref_travel_m=travel,
+        **{name: (value if success else None) for name, value in errors.items()},
+        progress_dot_m2=dot if success else None, ref_displacement_sq_m2=travel**2 if success else None,
+    )
+
+
+def test_progress_is_taken_on_the_travelling_pieces():
+    line = benchmark.PROGRESS_TRAVEL_M
+    assert line == benchmark.BODY_POS_STD_M / (1.0 - benchmark.MIN_PROGRESS)
+    kinds = benchmark.summarize([
+        _result("walk", 0.4, 0.4 * 0.4),  # covers its ground
+        _result("walk", 0.6 * line, -0.05),  # too short to judge: left out
+        _result("walk", 0.5, 0.0, success=False),  # failed: counts as travelling time, not in progress
+        _result("cmujump", 0.5 * line, 0.0),
+    ])
+    assert kinds["walk"]["progress"] == 1.0
+    assert kinds["walk"]["travel_seconds"] == 20.0
+    assert kinds["cmujump"]["progress"] is None and kinds["cmujump"]["travel_seconds"] == 0.0
+    # A robot that ends a travelling piece within the trunk position std of the reference reaches the line.
+    ref = np.array([line, 0.0])
+    worst = ref + np.array([-benchmark.BODY_POS_STD_M, 0.0])
+    assert float(worst @ ref) / float(ref @ ref) == pytest.approx(benchmark.MIN_PROGRESS)
+
+
 def test_an_evaluation_only_set_is_judged_on_its_own_kinds():
     # The PICO set: no training kinds, no walk/run/sprint; the same lines.
-    pico = {"picoteleopit": _kind(0.95, None), "picotwist": _kind(0.91, None), "picoany": _kind(0.9, None)}
+    pico = {"picoteleopit": _kind(0.95), "picotwist": _kind(0.91), "picoany": _kind(0.9, None)}
     assert not benchmark.verdicts(pico)["small_run"]["pass"]  # the default still asks for locomotion
     judged = benchmark.verdicts(pico, require_locomotion=False)
     assert judged["final"]["pass"] and judged["small_run"]["pass"]
     assert judged["final"]["kinds_without_pieces"] == []
+    assert sorted(judged["final"]["progress"]) == ["picoteleopit", "picotwist"]
     failing = benchmark.verdicts({**pico, "picoany": _kind(0.0, None)}, require_locomotion=False)
     assert failing["final"]["kinds_below_success_rate"] == ["picoany"]
     assert failing["small_run"]["kinds_never_succeeding"] == ["picoany"]
     assert not failing["final"]["pass"] and not failing["small_run"]["pass"]
-    # A locomotion kind it does have is still held to the progress line.
-    still = benchmark.verdicts({**pico, "walk": _kind(1.0, progress=0.05)}, require_locomotion=False)
-    assert not still["final"]["pass"]
+    # Its recordings walk without walk in their kind names: a robot standing still fails.
+    still = benchmark.verdicts({**pico, "picoteleopit": _kind(1.0, progress=0.05)}, require_locomotion=False)
+    assert not still["final"]["pass"] and not still["small_run"]["pass"]

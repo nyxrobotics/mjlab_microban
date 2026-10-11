@@ -72,6 +72,10 @@ uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --check
     --motion-file data/wholebody/pico_eval/eval --eval-only-set --output-root artifacts/wholebody_pico
 ```
 
+進み具合の線（胴の進んだ量を参照の進んだ量に射影した比が 0.5 以上）は、種類の名前によらず、参照の胴が片（10 秒）の間に
+0.12 m 以上進む片を持つ種類すべてに掛かる。0.12 m は、片の終わりに胴の位置の報酬の std（0.06 m）以内にいれば 0.5 に届き、
+立ち止まれば届かない長さ（0.06 / (1 - 0.5)）。PICO の歩き（`picoteleopit`、`picotwist`）や CMU の歩き（`cmuwalk`）にも掛かる。
+
 ## PICO の録画（手で置く）
 
 PICO の全身推定を G1 に写した公開録画。評価だけに使い、配らない。データの条件は 3 つとも確認できていない。
