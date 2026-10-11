@@ -11,3 +11,6 @@ artifacts/*
 # Walker checkpoints the release pipeline keeps for the PICO provenance.
 checkpoints/
 wandb/*
+
+# Retargeted LAFAN1 (CC BY-NC-ND 4.0) and the datasets built from it: never committed.
+data/wholebody/
