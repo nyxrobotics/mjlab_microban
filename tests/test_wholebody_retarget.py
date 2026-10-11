@@ -1,8 +1,9 @@
 """The human-to-Microban retargeting on a synthetic CMU-style skeleton (CPU, no downloaded data).
 
 The standing reference lands on HOME, a mirrored motion gives the mirrored
-robot, the heading and position of the motion do not change the joints, and
-an AMASS SMPL-X file reads as the body model's forward kinematics.
+robot, the human's left limbs move the robot's left limbs, the heading and
+position of the motion do not change the joints, and an AMASS SMPL-X file
+reads as the body model's forward kinematics.
 """
 
 from __future__ import annotations
@@ -119,6 +120,27 @@ def test_mirrored_motion_gives_the_mirrored_robot(tmp_path):
         assert np.abs(pos - sites_m[other] * flip).max() < 2e-3, name
     # The motion is asymmetric, so the check is not trivially met.
     assert np.abs(sites["left_hand"] - sites["right_hand"] * flip).max() > 0.02
+
+
+def test_the_human_left_drives_the_robot_left(tmp_path):
+    # The human raises the left arm sideways and lifts the left foot (hip forward, knee back); the right side stays.
+    frames = 31
+    ramp = np.linspace(0.0, 1.0, frames)
+    zeros = np.zeros(frames)
+    b = _bvh({
+        "LeftArm": np.stack([80.0 * ramp, zeros, zeros], 1),  # -Y (hanging) towards +X (the subject's left)
+        "LeftUpLeg": np.stack([zeros, zeros, -45.0 * ramp], 1),  # the thigh forward (+Z)
+        "LeftLeg": np.stack([zeros, zeros, 70.0 * ramp], 1),  # the shank back
+    }, frames)
+    ref = skeleton.standing_reference(b, "bvh_cmu")
+    frames_, _, _ = skeleton.motion_frames(b, "bvh_cmu", FPS)
+    _, q = _retarget(tmp_path, "left", frames_, ref)
+    sites = _site_positions(q)
+    rise = {name: sites[name][-1, 2] - sites[name][0, 2] for name in ("left_hand", "right_hand", "left_ankle_c", "right_ankle_c")}
+    assert rise["left_hand"] > 0.05 and abs(rise["right_hand"]) < 0.005, rise
+    assert rise["left_ankle_c"] > 0.02 and abs(rise["right_ankle_c"]) < 0.005, rise
+    # The robot faces +x, so its left is +y: the raised hand goes out to the left.
+    assert sites["left_hand"][-1, 1] - sites["left_hand"][0, 1] > 0.03
 
 
 def test_heading_and_position_do_not_change_the_joints(tmp_path):
