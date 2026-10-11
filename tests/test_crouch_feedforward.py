@@ -84,6 +84,36 @@ class KinematicsTest(unittest.TestCase):
         knee = cf.LEG_JOINT_NAMES.index("right_knee")
         self.assertGreater(offsets[1, knee], 0.8)
 
+    def test_the_trunk_shift_moves_the_centre_of_mass_by_the_support_reward_share(self) -> None:
+        """support_zmp moves its level point by -share (dx, dy) of a two-foot
+        target: the crouch pose's centre of mass from the soles' midpoint is
+        the straight-down crouch's less share (dx, dy), and HOME's is on it."""
+
+        from mjlab_microban.robot.home_pose import _pose_model
+        from mjlab_microban.tasks.microban_teleop_env_cfg import MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE
+
+        pose = _pose_model(str(MICROBAN_XML.resolve()))
+
+        def com_from_midpoint(goal):
+            joints = dict(HOME.joint_pos_rad)
+            if any(goal):
+                offsets = cf.solve_offsets(HOME.joint_pos_rad, HOME.trunk_pitch_rad, np.asarray([goal]))[0]
+                for name, value in zip(cf.LEG_JOINT_NAMES, offsets):
+                    joints[name] += value
+            pose.set_pose(joints, HOME.trunk_pitch_rad)
+            soles = [pose.data.geom_xpos[pose.sole_geom_ids[side][0]][:2] for side in ("left", "right")]
+            return pose.data.subtree_com[pose.trunk_id][:2] - 0.5 * (soles[0] + soles[1])
+
+        np.testing.assert_allclose(com_from_midpoint((0.0, 0.0, 0.0)), 0.0, atol=1.0e-4)
+        for dz in (0.004, 0.012, 0.02):
+            straight = com_from_midpoint((0.0, 0.0, dz))
+            self.assertLess(np.linalg.norm(straight), 0.002)  # knees forward: under 2 mm
+            for dx, dy in ((0.01, 0.0), (0.0, -0.01), (-0.008, 0.008), (0.01, 0.01)):
+                with self.subTest(dx=dx, dy=dy, dz=dz):
+                    shift = com_from_midpoint((dx, dy, dz)) - straight
+                    np.testing.assert_allclose(shift, -MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE * np.array([dx, dy]),
+                                               atol=2.0e-4)
+
     def test_the_knees_bend_forward_and_more_with_dz(self) -> None:
         """Every node's knee angle (HOME + offset) is >= 0 and grows with dz."""
 

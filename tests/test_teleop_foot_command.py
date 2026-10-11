@@ -53,14 +53,21 @@ class _Scene(SimpleNamespace):
         return self.entities[name]
 
 
-def _zmp_env(published, single, lifted, twist=None, soles=None):
+def _heading(yaw):
+    """Quaternions (w, x, y, z) of a turn by ``yaw`` (N,) about z."""
+    return torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], -1)
+
+
+def _zmp_env(published, single, lifted, twist=None, soles=None, yaw=None):
     """A standing env for support_zmp: soles (N, 2, 3) world (left, right),
-    the feet sensor listing right before left."""
+    the trunk's heading ``yaw`` (N,), the feet sensor listing right before left."""
     n = published.shape[0]
     twist = torch.zeros(n, 3) if twist is None else twist
     if soles is None:
         soles = torch.tensor([[0.0, 0.047, 0.0], [0.0, -0.047, 0.0]]).repeat(n, 1, 1)
-    foot = SimpleNamespace(command=published.reshape(n, 6), is_single_support_env=single, lifted_foot_idx=lifted)
+    heading = _heading(torch.zeros(n) if yaw is None else yaw)
+    foot = SimpleNamespace(command=published.reshape(n, 6), is_single_support_env=single, lifted_foot_idx=lifted,
+                           heading_quat=lambda: heading)
     terms = {"twist": SimpleNamespace(command=twist), "foot_target": foot}
     manager = SimpleNamespace(get_term=terms.__getitem__, get_command=lambda name: terms[name].command)
     sensor = SimpleNamespace(data=SimpleNamespace(found=torch.ones(n, 2), force=torch.zeros(n, 2, 3),
@@ -83,7 +90,8 @@ def _zmp_reward(env, sensor, load_left_right, at_left, at_right):
     sensor.data.torque = torch.zeros(n, 2, 3)
     sensor.data.found = (load > 0).float().flip(1)
     values = support_zmp(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01,
-                         zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]))
+                         zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]),
+                         com_share=0.8)
     return [round(v, 4) for v in values.tolist()]
 
 
@@ -302,69 +310,80 @@ class StationaryFootTargetTest(unittest.TestCase):
         self.assertEqual(reward([[5.5, 5.5]] * 8), [0.0, 0.0, 0.0, 0.5, 0.0, 0.8, 1.0, 0.0])
 
     def test_support_zmp_centres_the_weight_between_the_soles_at_equal_heights(self) -> None:
-        # Rows: no target; both feet by (0, 0, 8) mm; by (8, 8, 16) mm, the
-        # soles where that crouch leaves them under the trunk (the trunk
-        # moved by -(8, 8) mm); by (-8, -8, 16) mm.  The soles' midpoint is
-        # the target point on every row, wherever the soles stand.
-        published = torch.zeros(4, 2, 3)
+        # Rows: no target; both feet by (0, 0, 8) mm; by (8, 8, 16) mm; by
+        # (-8, -8, 16) mm; by (8, 8, 16) mm with the trunk heading 90 deg left.
+        # The target point is the soles' midpoint moved by -0.8 of the
+        # target's (x, y) (the centre of mass moves 0.8 of the trunk's shift
+        # -(x, y)), turned by the heading, wherever the soles stand.
+        published = torch.zeros(5, 2, 3)
         published[1, :, 2] = 0.008
         published[2] = torch.tensor([0.008, 0.008, 0.016])
         published[3] = torch.tensor([-0.008, -0.008, 0.016])
-        soles = torch.tensor([[0.0033, 0.0464, 0.0], [0.0033, -0.0464, 0.0]]).repeat(4, 1, 1)
+        published[4] = torch.tensor([0.008, 0.008, 0.016])
+        yaw = torch.tensor([0.0, 0.0, 0.0, 0.0, torch.pi / 2])
+        soles = torch.tensor([[0.0033, 0.0464, 0.0], [0.0033, -0.0464, 0.0]]).repeat(5, 1, 1)
         soles[2, :, :2] += 0.008
         soles[3, :, :2] -= 0.008
+        soles[4] = torch.tensor([[-0.0464, 0.0033, 0.0], [0.0464, 0.0033, 0.0]])
         mid = soles[:, :, :2].mean(dim=1)
-        single, lifted = torch.zeros(4, dtype=torch.bool), torch.zeros(4, dtype=torch.long)
-        env, twist, sensor, _ = _zmp_env(published, single, lifted, soles=soles)
+        shift = torch.tensor([[0.0, 0.0], [0.0, 0.0], [-0.0064, -0.0064], [0.0064, 0.0064], [0.0064, -0.0064]])
+        point = mid + shift
+        single, lifted = torch.zeros(5, dtype=torch.bool), torch.zeros(5, dtype=torch.long)
+        env, twist, sensor, _ = _zmp_env(published, single, lifted, soles=soles, yaw=yaw)
         params = dict(sensor_foot_ids=(1, 0), lift_threshold=0.01,
-                      sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]))
+                      sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]), com_share=0.8)
 
         def press(load_left_right, at_left, at_right):
             # Each foot's load (N up) pressing at one point (N, 2) of its own.
-            load = torch.tensor(load_left_right, dtype=torch.float32).expand(4, 2)
-            sensor.data.force = torch.zeros(4, 2, 3)
+            load = torch.tensor(load_left_right, dtype=torch.float32).expand(5, 2)
+            sensor.data.force = torch.zeros(5, 2, 3)
             sensor.data.force[..., 2] = -load
             sensor.data.force = sensor.data.force.flip(1)
             at = torch.stack([at_left, at_right], dim=1)
-            sensor.data.pos = torch.cat([at, torch.zeros(4, 2, 1)], -1).flip(1)
-            sensor.data.torque = torch.zeros(4, 2, 3)
+            sensor.data.pos = torch.cat([at, torch.zeros(5, 2, 1)], -1).flip(1)
+            sensor.data.torque = torch.zeros(5, 2, 3)
             distance, scored = support_zmp_distance(env, "feet", "foot_target", **params)
             reward = support_zmp(env, "feet", "foot_target", zmp_tolerance=0.047, **params)
             return distance, scored, reward
 
-        # The weight even on both soles (each pressing at its centre): the
-        # ZMP at the midpoint, distance 0, reward 1.
-        distance, scored, reward = press([5.5, 5.5], soles[:, 0, :2], soles[:, 1, :2])
-        torch.testing.assert_close(distance, torch.zeros(4))
-        self.assertEqual(scored.tolist(), [True] * 4)
-        torch.testing.assert_close(reward, torch.ones(4))
-        # Evenly, but both pressing 10 mm forward: 10 mm off, 1 - 10 / 47.
-        ahead = torch.tensor([0.01, 0.0])
+        # The weight even on both soles, each pressing at the target point's
+        # offset from the midpoint: the ZMP at the target point, reward 1.
+        distance, scored, reward = press([5.5, 5.5], soles[:, 0, :2] + shift, soles[:, 1, :2] + shift)
+        torch.testing.assert_close(distance, torch.zeros(5))
+        self.assertEqual(scored.tolist(), [True] * 5)
+        torch.testing.assert_close(reward, torch.ones(5))
+        # At the midpoint: 1 straight down, 9.05 mm short of a shifted crouch.
+        distance, _, reward = press([5.5, 5.5], soles[:, 0, :2], soles[:, 1, :2])
+        torch.testing.assert_close(distance, shift.norm(dim=-1))
+        torch.testing.assert_close(reward[:2], torch.ones(2))
+        torch.testing.assert_close(reward[2:], torch.full((3,), 1.0 - 0.0064 * 2**0.5 / 0.047))
+        # Both pressing 10 mm forward of the target point: 1 - 10 / 47.
+        ahead = shift + torch.tensor([0.01, 0.0])
         distance, _, reward = press([5.5, 5.5], soles[:, 0, :2] + ahead, soles[:, 1, :2] + ahead)
-        torch.testing.assert_close(distance, torch.full((4,), 0.01))
-        torch.testing.assert_close(reward, torch.full((4,), 1.0 - 10.0 / 47.0))
+        torch.testing.assert_close(distance, torch.full((5,), 0.01))
+        torch.testing.assert_close(reward, torch.full((5,), 1.0 - 10.0 / 47.0))
         # All on one sole's centre: 46.4 mm off the midpoint, about 0.
         for load, sole in (([11.0, 0.0], 0), ([0.0, 11.0], 1)):
             distance, _, reward = press(load, soles[:, 0, :2], soles[:, 1, :2])
-            torch.testing.assert_close(distance, (soles[:, sole, :2] - mid).norm(dim=-1))
-            self.assertLess(float(reward.max()), 0.02)
+            torch.testing.assert_close(distance, (soles[:, sole, :2] - point).norm(dim=-1))
+            self.assertLess(float(reward[:2].max()), 0.02)
         # Both feet in the air (all but a trace): not scored, 0.
         _, scored, reward = press([0.0, 0.05], soles[:, 0, :2], soles[:, 1, :2])
-        self.assertEqual(scored.tolist(), [False] * 4)
-        self.assertEqual(reward.tolist(), [0.0] * 4)
+        self.assertEqual(scored.tolist(), [False] * 5)
+        self.assertEqual(reward.tolist(), [0.0] * 5)
         # A walking command: not scored, 0.
         twist[:] = torch.tensor([0.1, 0.0, 0.0])
-        _, scored, reward = press([5.5, 5.5], soles[:, 0, :2], soles[:, 1, :2])
-        self.assertEqual(scored.tolist(), [False] * 4)
-        self.assertEqual(reward.tolist(), [0.0] * 4)
+        _, scored, reward = press([5.5, 5.5], soles[:, 0, :2] + shift, soles[:, 1, :2] + shift)
+        self.assertEqual(scored.tolist(), [False] * 5)
+        self.assertEqual(reward.tolist(), [0.0] * 5)
         twist[:] = 0.0
-        # Mirrored (y -> -y, left <-> right): the same distance.
+        # Mirrored (y -> -y, left <-> right, the heading turned the other way): the same distance.
         flip = torch.tensor([1.0, -1.0])
         at_left, at_right = soles[:, 0, :2] + torch.tensor([0.004, 0.012]), soles[:, 1, :2] - 0.003
         distance, _, _ = press([3.0, 8.0], at_left, at_right)
         mirror_env, _, mirror_sensor, _ = _zmp_env(
             published.flip(1) * torch.tensor([1.0, -1.0, 1.0]), single, lifted,
-            soles=soles.flip(1) * torch.tensor([1.0, -1.0, 1.0]))
+            soles=soles.flip(1) * torch.tensor([1.0, -1.0, 1.0]), yaw=-yaw)
         env, sensor = mirror_env, mirror_sensor
         mirrored, _, _ = press([8.0, 3.0], at_right * flip, at_left * flip)
         torch.testing.assert_close(mirrored, distance)
@@ -376,6 +395,8 @@ class StationaryFootTargetTest(unittest.TestCase):
         n = 64
         published = torch.zeros(n, 2, 3)
         published[..., 2] = torch.rand(n, 2) * 0.03 * (torch.rand(n, 2) < 0.6)
+        published[..., :2] = (torch.rand(n, 2, 2) - 0.5) * 0.06 * (published[..., 2:] > 0)
+        yaw = (torch.rand(n) - 0.5) * 6.0
         lifted = torch.randint(0, 2, (n,))
         single = torch.rand(n) < 0.5
         soles = torch.cat([torch.randn(n, 2, 2) * 0.01, torch.zeros(n, 2, 1)], dim=-1)
@@ -385,8 +406,8 @@ class StationaryFootTargetTest(unittest.TestCase):
         load = torch.rand(n, 2) * 6.0 * (torch.rand(n, 2) < 0.85)
         twist = torch.zeros(n, 3)
 
-        def run(published, lifted, soles, cop, load):
-            env, _, sensor, _ = _zmp_env(published, single, lifted, twist=twist, soles=soles)
+        def run(published, lifted, soles, cop, load, yaw):
+            env, _, sensor, _ = _zmp_env(published, single, lifted, twist=twist, soles=soles, yaw=yaw)
             centroid = cop + torch.randn(n, 2, 2) * 0.01
             # L p = c L + (tau_y, -tau_x)
             tau_y = (cop[..., 0] - centroid[..., 0]) * load
@@ -395,16 +416,21 @@ class StationaryFootTargetTest(unittest.TestCase):
             sensor.data.torque = torch.stack([tau_x, tau_y, torch.full_like(load, 0.003)], -1).flip(1)
             sensor.data.pos = torch.cat([centroid, torch.zeros(n, 2, 1)], -1).flip(1)
             return support_zmp(env, "feet", "foot_target", sensor_foot_ids=(1, 0), lift_threshold=0.01,
-                               zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]))
+                               zmp_tolerance=0.047, sole_cfg=SimpleNamespace(name="robot", geom_ids=[0, 1]),
+                               com_share=0.8)
 
-        values = run(published, lifted, soles, cop, load)
+        values = run(published, lifted, soles, cop, load, yaw)
         # The same from the per-foot centres of pressure directly.
         upper = published[..., 2] > published.flip(1)[..., 2]
         dz = (published[:, 0, 2] - published[:, 1, 2]).abs()
         share = 0.5 * (1.0 - dz / 0.01).clamp(min=0.0)
         sup = torch.where(upper[:, :1], soles[:, 1, :2], soles[:, 0, :2])
-        up = torch.where(upper[:, :1], soles[:, 0, :2], soles[:, 1, :2])
-        target = sup + share[:, None] * (up - sup)
+        # The level point: the midpoint less 0.8 of the targets' mean (x, y), turned by the heading.
+        mean = published[..., :2].mean(dim=1)
+        c, s = torch.cos(yaw), torch.sin(yaw)
+        turned = torch.stack([c * mean[:, 0] - s * mean[:, 1], s * mean[:, 0] + c * mean[:, 1]], -1)
+        level = soles[..., :2].mean(dim=1) - 0.8 * turned
+        target = sup + 2.0 * share[:, None] * (level - sup)
         zmp = (cop * load[..., None]).sum(1) / load.sum(1).clamp(min=1e-9)[:, None]
         expected = (1.0 - (zmp - target).norm(dim=-1) / 0.047).clamp(0.0, 1.0)
         expected = expected * (load.sum(1) >= 0.1).float()
@@ -412,8 +438,8 @@ class StationaryFootTargetTest(unittest.TestCase):
         self.assertGreater(int((values > 0).sum()), n // 4)
         # Mirrored (y -> -y, left <-> right): the same reward.
         flip_y = torch.tensor([1.0, -1.0])
-        mirrored = run(published.flip(1), 1 - lifted, soles.flip(1) * torch.tensor([1.0, -1.0, 1.0]),
-                       cop.flip(1) * flip_y, load.flip(1))
+        mirrored = run(published.flip(1) * torch.tensor([1.0, -1.0, 1.0]), 1 - lifted,
+                       soles.flip(1) * torch.tensor([1.0, -1.0, 1.0]), cop.flip(1) * flip_y, load.flip(1), -yaw)
         torch.testing.assert_close(mirrored, values)
 
     def test_upper_foot_lift_pays_the_higher_foot_off_the_floor_by_its_height(self) -> None:
@@ -495,6 +521,7 @@ class StationaryFootTargetTest(unittest.TestCase):
         from mjlab_microban.tasks.microban_teleop_env_cfg import (
             MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT,
+            MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE,
             TELEOP_STAGES,
         )
         from mjlab_microban.tasks.microban_teleop_mdp import MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
@@ -518,6 +545,7 @@ class StationaryFootTargetTest(unittest.TestCase):
         self.assertEqual((sole.name, tuple(sole.geom_names), sole.preserve_order),
                          ("robot", ("left_foot_collision_1", "right_foot_collision_1"), True))
         self.assertEqual(params.pop("zmp_tolerance"), HOME.feet_lateral_m / 2.0)
+        self.assertEqual(params.pop("com_share"), MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE)
         threshold = params.pop("lift_threshold")
         self.assertEqual(params, cfg.rewards["lifted_support_feet"].params)
         self.assertEqual(threshold, MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M)

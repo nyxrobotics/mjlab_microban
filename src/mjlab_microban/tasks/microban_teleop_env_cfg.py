@@ -93,22 +93,33 @@ PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # = 7.2 -> 7 makes it 28-70 % of r.  A standing row stays above zero while n <
 # r / |w| = 0.9, so a fall does not pay; a stop/walk switch steps the 2 s value
 # by (6.32 - 7 x 0.25 - 2.45) x 2 = 4 (a bonus of 7 per foot down: 36).
+# Those are the arm stage's numbers.  From the foot stage support_zmp pays
+# the standing rows too (up to 10 /s, 8.8 on an unpushed stand of the v13h
+# trial's model_7000): a row then stays above zero up to n = 2.2 (both
+# feet), and the switch steps the 2 s value by about 22.
 MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # The support reward (mdp.support_zmp), on every standing row: clamp(1 -
 # |ZMP - P| / d0, 0, 1), the ZMP the centre of pressure of the floor's push
-# on both feet, d0 half the HOME feet spacing.  P is the soles' midpoint
-# moved towards the lower (support) sole's centre by 1 - 2 s*, s* = 0.5
-# max(0, 1 - dz / threshold) the higher foot's share of the weight, dz the
-# published targets' height difference.
-# Without a foot target or crouched on both feet (dz = 0) P is the midpoint:
-# the soles stand as mirror images, so it is the centre of the area the two
-# soles and the gap between them cover (their convex hull; 0.02 mm apart at
-# HOME and in every crouch of the judgment).
-# HOME's centre of mass stands over it (0.03 mm off), so standing still at
-# HOME scores 1 and the ZMP over either sole's centre 0.  Holding the
-# judgment's crouches without moving anything else puts the centre of mass
-# 1-10 mm off it ((0, 0, 8) to (-8, -8, 16) mm), its fixed arm poses up to
-# 6 mm (both arms raised).
+# on both feet, d0 half the HOME feet spacing.  P is the level point moved
+# towards the lower (support) sole's centre by 1 - 2 s*, s* = 0.5 max(0, 1 -
+# dz / threshold) the higher foot's share of the weight, dz the published
+# targets' height difference.
+# The level point is the soles' midpoint moved with the centre of mass the
+# targets ask for: the foot reward measures each foot from the trunk below
+# the threshold, so feet at the published targets o put the trunk -mean(o)
+# from them, and a trunk shift over the feet moves the centre of mass by
+# MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE of its (x, y).  Without a foot target
+# it is the midpoint: the soles stand as mirror images, so it is the centre
+# of the area the two soles and the gap between them cover (their convex
+# hull; 0.02 mm apart at HOME and in the judged crouches).  HOME's centre of
+# mass stands over it (0.03 mm off), so standing still at HOME scores 1 and
+# the ZMP over either sole's centre 0.  A two-foot target (dx, dy, dz) moves
+# it by -0.8 (dx, dy), so this term and the foot reward ask for one pose.
+# Left at the midpoint, the term paid more for dropping the shift than the
+# foot reward took (at (8, 8, 16) mm, from the v13h trial's model_7000: about
+# +1.6 /s against -0.37 /s).  A crouch's own forward shift (knees forward:
+# 1.5 mm at dz = 16 mm) is not followed: straight down the level point stays
+# the midpoint.
 # From dz = threshold on P is the support sole's centre.  Threshold 10 mm:
 # 4x the 2.5 mm floor band, reached by 84 % of the single-foot targets (z ~
 # U(2.5, 50) mm).  On those rows the foot reward measures the lifted foot
@@ -139,9 +150,26 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # off the floor.  10 /s is the largest positive weight on these rows, shared
 # with the lift and the foot reward's single-foot rows (track_linear 5 +
 # track_angular 2 + upright 1 + pose 1 = 9).
+# The same weight on the level rows (no target, a crouch) keeps one scale
+# for the term.  Pushed there, stepping moves the ZMP onto one sole: on a
+# pushed stand without a target (the judgment's J2 standing pushes, v13h
+# trial and v13g model_7000, which did not train this term there; 16 x 2
+# environments) r is 0.68-0.71 with both feet down and 0.06-0.11 with one up
+# (44 % of the time), so each foot in the air costs about 6 /s here on top
+# of lifted_support_feet's 7, and holding on over the toe or heel (31 mm
+# off, r 0.34) instead of stepping gains about 2.5 /s.  A fall still costs
+# more than any step (it ends the standing row's 15 /s); whether the robot
+# still steps when it has to is the push judgment's (J2, standing and
+# crouched).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_SUPPORT_ZMP_TOLERANCE_M = HOME.feet_lateral_m / 2.0
 MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT = 10.0
+# The share of a trunk shift over the feet that moves the centre of mass:
+# the crouch pose of a two-foot target (robot/crouch_feedforward.py, both
+# soles at HOME, the trunk moved by -(dx, dy, dz), the arms at HOME) puts the
+# centre of mass -0.80 (dx, dy) from where the straight-down crouch puts it
+# (robot.xml, |dx|, |dy| <= 10 mm, dz 4-20 mm: within 0.14 mm).
+MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE = 0.8
 # The (left, right) soles' contact boxes: six nested boxes share one centre,
 # the sole's.
 MICROBAN_SOLE_GEOM_NAMES = ("left_foot_collision_1", "right_foot_collision_1")
@@ -564,6 +592,7 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             **cfg.rewards["lifted_support_feet"].params,
             "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             "zmp_tolerance": MICROBAN_TELEOP_SUPPORT_ZMP_TOLERANCE_M,
+            "com_share": MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE,
             "sole_cfg": SceneEntityCfg(
                 "robot", geom_names=MICROBAN_SOLE_GEOM_NAMES, preserve_order=True
             ),
