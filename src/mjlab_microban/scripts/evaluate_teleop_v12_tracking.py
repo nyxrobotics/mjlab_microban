@@ -118,7 +118,7 @@ SEED_COUNT = 2
 # dz (the feet stay on the floor).  Either way 0.7 x dz:
 FOOT_LIFT_MIN_SHARE = 0.7  # 40 mm target: 12 mm short alone still scores 0.85
 # ... and off the floor (no pushes): a foot held up by its toes reaches the
-# height on the floor.  upper_foot_unload does not ask this (it reads only the
+# height on the floor.  support_zmp does not ask this (it reads only the
 # floor's push); upper_foot_lift pays only off the floor.  The foot may touch
 # down for a tenth of the scored time.
 FOOT_AIR_MIN_SHARE = 0.9
