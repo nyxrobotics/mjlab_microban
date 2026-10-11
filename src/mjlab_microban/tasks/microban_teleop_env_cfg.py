@@ -38,6 +38,7 @@ from mjlab_microban.tasks.mdp import (
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
+    trunk_crouch,
     upper_foot_lift,
     upper_foot_unload,
 )
@@ -148,6 +149,24 @@ MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT = 10.0
 # paid 0.05-0.09 /s per mm far from the target (lift: 0.25), the lifted foot
 # stayed 25 mm off over 14 cases; 1000 updates at 10 took it to 18.5 mm.
 MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT = MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT
+# The crouch reward (mdp.trunk_crouch), on a standing row whose two published
+# foot targets are both above the floor band and less than the one-foot
+# threshold apart (the operator crouched: both feet up by dz, their mean, in
+# the HOME-levelled trunk frame): clamp(1 - |drop - dz| / dz, 0, 1), drop the
+# trunk's fall over the feet since the reset (HOME). Without it the trunk
+# stayed up: on the evaluation's two-foot cases ((+-8, +-8, 16) mm) the v13c
+# run (15000 updates from scratch) dropped -0.5 to -0.8 mm against the 0.7 dz
+# pass line. The foot reward measures those rows as the mean of the feet's
+# squared errors from the trunk, exp(-e / 0.03^2), so the legs left straight
+# still score 75 % of it at 16 mm, and the two-foot rows are 5-10 % of the
+# foot targets with dz up to 20 mm: lowering the trunk paid at most a quarter
+# of weight 3 (0.75 /s), and the policy did not learn to bend both knees. The
+# same form as upper_foot_lift, which took the lifted foot from 2 mm to 22-39
+# mm: each millimetre pays w / dz (w = 10: 0.6 /s per mm at 16 mm), and past
+# dz it costs as much, so the trunk does not fall to its lowest. The same
+# weight as the lift, the largest positive weight on the standing rows, from
+# the same foot stage.
+MICROBAN_TELEOP_TRUNK_CROUCH_WEIGHT = MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT
 MICROBAN_TELEOP_INITIAL_HMD_NEUTRAL_PROBABILITY = 1.0
 MICROBAN_TELEOP_MOVING_HMD_NEUTRAL_PROBABILITY = 0.2
 MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO = 0.05
@@ -241,6 +260,7 @@ TELEOP_STAGES = (
         (
             Setting("reward", "upper_foot_unload", "weight", MICROBAN_TELEOP_UPPER_FOOT_UNLOAD_WEIGHT),
             Setting("reward", "upper_foot_lift", "weight", MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT),
+            Setting("reward", "trunk_crouch", "weight", MICROBAN_TELEOP_TRUNK_CROUCH_WEIGHT),
             Setting("reward", "foot_target_tracking", "weight", 2.0),
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
                     MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 2.0),
@@ -542,6 +562,20 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={
             **cfg.rewards["lifted_support_feet"].params,
             "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+        },
+    )
+    # The trunk lowered by a two-foot target's height (weight in the foot
+    # stage), on the same standing rows and below the same threshold the lift
+    # starts at; both published feet above the floor band.
+    cfg.rewards["trunk_crouch"] = RewardTermCfg(
+        func=trunk_crouch,
+        weight=0.0,
+        params={
+            "foot_target_command_name": "foot_target",
+            "lift_threshold": MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
+            "floor_band": MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+            "command_name": "twist",
+            "command_threshold": cfg.rewards["lifted_support_feet"].params["command_threshold"],
         },
     )
 

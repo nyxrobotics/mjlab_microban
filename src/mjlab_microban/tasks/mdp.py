@@ -498,6 +498,18 @@ class FootTargetCommand(CommandTerm):
         )
         return quat_apply_inverse(heading, feet_w[:, 0] - feet_w[:, 1])
 
+    def trunk_over_feet(self) -> torch.Tensor:
+        """The trunk's world height over the mean of the two foot sites'.  Shape (N,)."""
+        feet_w = self.robot.data.site_pos_w[:, self._foot_asset_cfg.site_ids, :]
+        return self.robot.data.root_link_pos_w[:, 2] - feet_w[..., 2].mean(dim=-1)
+
+    def trunk_over_feet_at_reset(self) -> torch.Tensor:
+        """``trunk_over_feet`` at the episode's reference stance
+        (``_default_foot_pos_b``): the reset puts the robot at HOME, where the
+        HOME-levelled trunk frame is level, so its z is the world height.
+        Shape (N,)."""
+        return -self._default_foot_pos_b[..., 2].mean(dim=-1)
+
     def _update_metrics(self) -> None:
         error = torch.sum(
             torch.square(
@@ -1329,6 +1341,41 @@ def upper_foot_lift(
     lift = torch.clamp(rise / torch.clamp(dz, min=1e-6), 0.0, 1.0)
     stance = ~(down & upper).any(dim=-1) & (down & ~upper).any(dim=-1)
     return lift * (standing & _single_foot_rows(height, lift_threshold) & stance).float()
+
+
+def trunk_crouch(
+    env: ManagerBasedRlEnv,
+    foot_target_command_name: str,
+    lift_threshold: float,
+    floor_band: float,
+    command_name: str = "twist",
+    command_threshold: float = 0.01,
+) -> torch.Tensor:
+    """Reward lowering the trunk over the feet by a two-foot target's height.
+
+    On a standing command (as ``lifted_support_feet``) whose two published
+    foot targets differ in z by less than ``lift_threshold`` (not a one-foot
+    row, ``_single_foot_rows``) and are both above ``floor_band`` (both feet
+    raised: the operator crouched), with dz the mean of the two target
+    heights: the trunk's drop over the feet, drop = h0 - h, h the trunk's
+    world height over the mean of the two foot sites' and h0 the same at the
+    episode's reset reference (``FootTargetCommand.trunk_over_feet_at_reset``,
+    the HOME stance), scores clamp(1 - |drop - dz| / dz, 0, 1).  Each
+    millimetre towards dz pays the same and each one past it costs the same;
+    a trunk raised (drop < 0) pays nothing.  The feet stay down by themselves
+    (h is measured from them, so a hop does not lower it); 0 on other rows.
+    """
+    command = env.command_manager.get_command(command_name)  # (N, 3)
+    cmd_speed = torch.norm(command[:, :2], dim=-1) + torch.abs(command[:, 2])
+    standing = cmd_speed < command_threshold
+
+    foot_target = env.command_manager.get_term(foot_target_command_name)
+    height = foot_target.command.reshape(env.num_envs, 2, 3)[..., 2]
+    both = ~_single_foot_rows(height, lift_threshold) & (height > floor_band).all(dim=-1)
+    dz = height.mean(dim=-1)
+    drop = foot_target.trunk_over_feet_at_reset() - foot_target.trunk_over_feet()
+    crouch = torch.clamp(1.0 - (drop - dz).abs() / torch.clamp(dz, min=1e-6), 0.0, 1.0)
+    return crouch * (standing & both).float()
 
 
 ########################## CURRICULUM #############################
