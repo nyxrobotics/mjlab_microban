@@ -104,9 +104,12 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # single-foot targets (z ~ U(2.5, 50) mm).  On the same rows the foot reward
 # measures the lifted foot from the support foot
 # (mdp.foot_target_tracking_error_exp), so how high it goes is the foot
-# reward's: this term reads only the floor's push, and a higher foot touching
-# the floor with no weight on it scores in full (the evaluation's air share
-# watches that).  No contact test: it would pay again the sub-millimetre
+# reward's, and taking it off the floor the lift reward's: this term reads only
+# the floor's push.  With the ZMP over the support sole's centre the higher
+# foot may still carry up to about 21 % of the weight (its centre of pressure
+# at its inner edge, the support foot's at its outer edge) and score in full;
+# on v13c's model_12000 0.5 % or less of the one-foot rows had 10-20 % on it
+# and r >= 0.9.  No contact test: it would pay again the sub-millimetre
 # contact flicker that took 57 % of the old share reward.
 # Below the threshold the foot reward measures the feet in the trunk frame, so
 # moving the trunk over the lower foot costs there: s* at dz = 5 mm moves it
@@ -118,27 +121,48 @@ MICROBAN_TELEOP_LIFTED_SUPPORT_FEET_WEIGHT = -7.0
 # (10-30 mm) during a one-foot stance, with the centre of mass only 7-16 mm
 # inside the sole's edge and the trunk leaning 4-9 deg over the support foot
 # (16-20 deg where it held).  While the weight moves, the ZMP moves from the
-# midpoint to the support sole in proportion, as the share did; in one-foot
-# stance it pays 1 over the sole's centre, 0.57 at its side edge (20 mm out).
+# midpoint to the support sole in proportion, as the share did (d0 is half
+# the spacing, so 10 % of the weight is 0.2 of r in both).  In one-foot stance
+# it pays 1 over the sole's centre, 0.57 at its side edge (20 mm out) and
+# 0.34 at its toe or heel (31 mm out): the distance is not scaled by the
+# sole's half-length, and the stance the term is after (v13c's lifts) failed
+# sideways.
 # Measured on v13c's model_12000 and model_14999 in this env (final stage, no
 # pushes, mean actions, 1024 envs x 30 s): in the 0.3 s before the support
 # foot left the floor during a one-foot target the ZMP was 21 mm (median)
 # from the support sole's centre, r 0.51; in one-foot targets without such a
-# lift 10-11 mm, r 0.76-0.78.  The old share reward paid both 1.
+# lift 10-11 mm, r 0.76-0.78.  The old share reward paid both 1.  Over all
+# rows of one-foot targets (model_12000, 512 envs x 30 s) it pays 0.69 (no
+# pushes) and 0.55 (pushes) where the old one paid 0.96 and 0.86.
+# The target point follows the support sole, so a foot set down again under
+# the ZMP, or slid there, scores as well as the ZMP moved over the foot: on
+# model_12000 r went from 0.53 in the 0.3 s before such a lift-off to 0.63
+# after it (no pushes; 0.49 to 0.57 with pushes), against 7 /s of
+# lifted_support_feet for the ~0.1 s off the floor.  The point is not held
+# where the sole stood when the target began: that fines every move of the
+# support foot for the rest of the target, as v13d's support-foot penalty
+# did, which stepped more on standing commands and fell more under pushes
+# without fewer re-placements.  Moving the trunk over the foot pays the same
+# without the fine and the risk of the foot off the floor; the evaluation
+# counts the re-placements.
 # Weight (from the foot stage), per second: from both feet down evenly (0 at
 # dz >= 10 mm) to the ZMP over the support sole's centre pays w; each 10 % of
-# the weight moved pays about w / 5.  What it costs, in the other terms
-# (model_5000 of the +3 single-stance reward, training noise or mean actions,
-# with or without pushes, a second or more after a push, rows with the higher
-# foot up against both feet down): 3.0-3.8 /s at 5-10 mm up, 5.7-6.2 at 10 mm
-# or more, over 80 % of it the velocity terms (the trunk moving over the
-# support foot on a standing command).  w = 10 leaves +3.8 to +4.4 /s at 10 mm
-# or more and pays the first 10 % of the weight moved 2 /s.  Those costs were
-# taken over lifts of 0.26 s or less, while the trunk moved; a foot held up
-# for a 3-8 s target pays the move once, so the margin is larger.  10 /s is
-# the largest positive weight on these rows, shared with the lift and the
-# foot reward's single-foot rows (track_linear 5 + track_angular 2 + upright
-# 1 + pose 1 = 9).
+# the weight moved pays w / 5.  What it costs, in the other terms (model_5000
+# of the +3 single-stance reward, training noise or mean actions, with or
+# without pushes, a second or more after a push, rows with the higher foot up
+# against both feet down): 3.0-3.8 /s at 5-10 mm up, 5.7-6.2 at 10 mm or
+# more, over 80 % of it the velocity terms (the trunk moving over the support
+# foot on a standing command).  At 10 mm or more w = 10 pays that cost with
+# the ZMP within 18-20 mm of the sole's centre (the side edge: 5.7), and
+# v13c's held one-foot stance (r 0.76-0.78) clears it by 1.4-2.1 /s; the
+# lift reward (also 10, the same rows) pays it on its own once the foot is
+# off the floor, so lifting does not rest on this term.  Below 10 mm it pays
+# the first 10 % of the weight moved 2 /s.  Those costs were taken over lifts
+# of 0.26 s or less, while the trunk moved; a foot held up for a 3-8 s target
+# pays the move once, so the margin is larger.  10 /s is the largest positive
+# weight on these rows, shared with the lift and the foot reward's
+# single-foot rows (track_linear 5 + track_angular 2 + upright 1 + pose 1 =
+# 9).
 MICROBAN_TELEOP_SINGLE_SUPPORT_LIFT_THRESHOLD_M = 0.010
 MICROBAN_TELEOP_SUPPORT_ZMP_TOLERANCE_M = HOME.feet_lateral_m / 2.0
 MICROBAN_TELEOP_SUPPORT_ZMP_WEIGHT = 10.0
