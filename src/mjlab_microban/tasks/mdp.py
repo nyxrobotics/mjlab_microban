@@ -1324,15 +1324,19 @@ def support_zmp(
     (``feet_zmp``) scores clamp(1 - |ZMP - target| / ``zmp_tolerance``, 0,
     1), horizontally.  With the tolerance half the HOME feet spacing, the
     weight even on both feet scores 0 from the threshold up, and in one-foot
-    stance the ZMP at the support sole's centre scores 1 and at its side
-    edge (20 mm out) about 0.57: standing on the edge of the sole, where a
-    small push tips it, pays less than standing over its middle.  0 on other
-    rows and when the feet carry less than ``min_force`` newtons together
-    (both in the air).
+    stance the ZMP at the support sole's centre scores 1, at its side edge
+    (20 mm out) about 0.57 and at its toe or heel (31 mm) about 0.34 (the
+    distance is not scaled per axis): standing on the edge of the sole, where
+    a small push tips it, pays less than standing over its middle.  0 on
+    other rows and when the feet carry less than ``min_force`` newtons
+    together (both in the air).
 
     The sole centres are the world x, y of ``sole_cfg``'s geoms (the (left,
-    right) feet's sole boxes, centred on the sole).  ``sensor_foot_ids`` are
-    the sensor's indices of the foot target's (left, right) feet.
+    right) feet's sole boxes, centred on the sole), where the soles stand now:
+    a support foot set down again under the ZMP scores as well as the ZMP
+    moved over it (the config says why the point is not held).
+    ``sensor_foot_ids`` are the sensor's indices of the foot target's (left,
+    right) feet.
     """
     standing, height, _, _ = _standing_and_feet_down(
         env, sensor_name, foot_target_command_name, command_name, command_threshold, sensor_foot_ids
