@@ -21,9 +21,10 @@ writes an external arm target instead (slewed at the robot's rate),
 ``PicoArmTargetMotion`` draws it, and ``arm_target_rel`` observes it.
 
 On a two-foot target the legs work around the crouch pose of that target
-(robot/crouch_feedforward.py): the same action adds its leg offsets to the
-leg targets and ``crouch_joint_pos_rel`` observes the leg joints relative to
-it.  The robot computes the offsets the same way; the ONNX is the policy alone.
+(robot/crouch_feedforward.py): the same action adds its leg offsets (rate
+limited, held per environment) to the leg targets and ``crouch_joint_pos_rel``
+observes the leg joints relative to them.  The robot computes the offsets the
+same way; the ONNX is the policy alone.
 """
 
 from __future__ import annotations
@@ -624,8 +625,11 @@ class PicoArmOverlayJointPositionAction(JointPositionAction):
     absolute angles in ``PICO_ARM_JOINT_NAMES`` order and reset to HOME.
 
     With ``cfg.crouch_command_name`` the twelve leg targets are
-    ``HOME + crouch offset + raw`` (``crouch_leg_offsets`` of the published
-    foot targets, the ones the policy observed).
+    ``HOME + crouch offset + raw``.  ``crouch_offsets_rad`` (reset to zero)
+    are the offsets in use; ``crouch_next`` moves them one step towards those
+    of the published foot targets (``crouch_feedforward.follow``) without
+    keeping the result, so the observation after a step sees exactly the
+    offsets that ``process_actions`` of the next step keeps and adds.
     """
 
     cfg: PicoArmOverlayJointPositionActionCfg
@@ -660,11 +664,27 @@ class PicoArmOverlayJointPositionAction(JointPositionAction):
             not isinstance(self._scale, float) or cfg.clip is None
         ):
             raise ValueError("The crouch offset needs a scalar action scale and a clip")
+        if cfg.crouch_command_name is not None and not math.isclose(
+            env.step_dt, crouch_feedforward.POLICY_DT_S
+        ):
+            raise ValueError("The crouch offset rate is per 0.02 s policy step")
         self.crouch_columns = torch.tensor(
             [names.index(name) for name in crouch_feedforward.LEG_JOINT_NAMES],
             dtype=torch.long,
             device=self.device,
         )
+        self.crouch_offsets_rad = torch.zeros(
+            self.num_envs, len(self.crouch_columns), device=self.device
+        )
+
+    def crouch_next(self, foot: torch.Tensor | None = None) -> torch.Tensor:
+        """The crouch offsets of the next step (N, 12): ``crouch_offsets_rad``
+        one step towards the offsets of ``foot`` (N, 6; default the command's
+        published foot targets)."""
+
+        if foot is None:
+            foot = self._env.command_manager.get_term(self.cfg.crouch_command_name).command
+        return crouch_feedforward.follow(self.crouch_offsets_rad, crouch_offsets(foot))
 
     def set_arm_target(
         self, env_ids: torch.Tensor, value: torch.Tensor, *, immediate: bool
@@ -691,10 +711,11 @@ class PicoArmOverlayJointPositionAction(JointPositionAction):
         self._processed_actions[:, self.arm_columns] = self.arm_target_rad
         if self.cfg.crouch_command_name is not None:
             legs = self.crouch_columns
+            self.crouch_offsets_rad = self.crouch_next()
             target = (
                 self._raw_actions[:, legs] * self._scale
                 + self._offset[:, legs]
-                + crouch_leg_offsets(self._env, self.cfg.crouch_command_name)
+                + self.crouch_offsets_rad
             )
             self._processed_actions[:, legs] = torch.clamp(
                 target, min=self._clip[:, legs, 0], max=self._clip[:, legs, 1]
@@ -706,6 +727,7 @@ class PicoArmOverlayJointPositionAction(JointPositionAction):
         self.arm_target_rad[ids] = self.arm_home_rad[ids]
         self.arm_goal_rad[ids] = self.arm_home_rad[ids]
         self._processed_actions[ids.unsqueeze(-1), self.arm_columns] = self.arm_home_rad[ids]
+        self.crouch_offsets_rad[ids] = 0.0
 
 
 @dataclass(kw_only=True)
@@ -728,22 +750,17 @@ def _crouch_table(device: str) -> dict[str, torch.Tensor]:
 
 
 def crouch_offsets(foot: torch.Tensor) -> torch.Tensor:
-    """The crouch offsets (N, 12) of published foot targets ``foot`` (N, 6), in
-    ``crouch_feedforward.LEG_JOINT_NAMES`` order (zero unless both feet have a
-    target)."""
+    """The target crouch offsets (N, 12) of published foot targets ``foot``
+    (N, 6), in ``crouch_feedforward.LEG_JOINT_NAMES`` order (zero unless both
+    feet have a target inside the two-foot support)."""
 
     return crouch_feedforward.leg_offsets(_crouch_table(str(foot.device)), foot)
 
 
-def crouch_leg_offsets(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
-    """``crouch_offsets`` of the command's published foot targets."""
-
-    return crouch_offsets(env.command_manager.get_term(command_name).command)
-
-
 class crouch_joint_pos_rel:
     """``joint_pos_rel`` whose leg columns are relative to HOME + the crouch
-    offsets (what the policy's leg targets are relative to)."""
+    offsets the next action adds (what the policy's leg targets are relative
+    to)."""
 
     def __init__(self, cfg: Any, env: ManagerBasedRlEnv) -> None:
         asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
@@ -760,12 +777,12 @@ class crouch_joint_pos_rel:
         self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg,
-        command_name: str,
+        action_name: str,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         ids = asset_cfg.joint_ids
         relative = asset.data.joint_pos[:, ids] - asset.data.default_joint_pos[:, ids]
-        relative[:, self.columns] -= crouch_leg_offsets(env, command_name)
+        relative[:, self.columns] -= env.action_manager.get_term(action_name).crouch_next()
         return relative
 
 

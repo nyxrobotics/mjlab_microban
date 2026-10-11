@@ -148,7 +148,8 @@ PICO_ADAPTER_COLUMNS = [6, 7, 8, 27, 28, 29, *range(69, 81)]
 PICO_CURRICULUM_KEYS = ("critic_warmup", "arm_start", "foot_start", "foot_tighten", "total")
 # Published foot targets (left dx, dy, dz, right dx, dy, dz) at which the
 # robot's copy of crouch_feedforward must reproduce the recorded leg offsets:
-# held two-foot targets, unequal feet, one foot up, none, beyond the support.
+# held two-foot targets, unequal feet, one foot up, none, beyond the support
+# (both feet, and one foot above it).
 PICO_CROUCH_PROBE_FOOT_TARGETS = [
     [0.0, 0.0, 0.008] * 2,
     [0.0, 0.0, 0.016] * 2,
@@ -158,6 +159,7 @@ PICO_CROUCH_PROBE_FOOT_TARGETS = [
     [0.0, 0.0, 0.03, 0.0, 0.0, 0.0],
     [0.0] * 6,
     [0.02, -0.02, 0.03] * 2,
+    [0.0, 0.0, 0.025, 0.0, 0.0, 0.015],
 ]
 
 
@@ -442,7 +444,8 @@ def pico_arm_target_record() -> dict[str, Any]:
 def pico_crouch_record() -> dict[str, Any]:
     """The crouch offsets the robot adds (pico_crouch_feedforward_json): the
     ONNX is the policy alone; the robot computes the offsets with its copy of
-    crouch_feedforward and must reproduce these probes."""
+    crouch_feedforward, must reproduce these probes and must follow them at
+    the same rate per policy step."""
 
     from mjlab_microban.robot import crouch_feedforward
 
@@ -451,6 +454,8 @@ def pico_crouch_record() -> dict[str, Any]:
     return {
         "contract": crouch_feedforward.CONTRACT,
         "joint_names": list(crouch_feedforward.LEG_JOINT_NAMES),
+        "policy_dt_s": crouch_feedforward.POLICY_DT_S,
+        "max_step_rad": crouch_feedforward.MAX_STEP_RAD,
         "foot_targets": PICO_CROUCH_PROBE_FOOT_TARGETS,
         "leg_offsets_rad": offsets.tolist(),
     }

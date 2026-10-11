@@ -32,8 +32,6 @@ from mjlab_microban.tasks.microban_teleop_foot_command import StationaryFootTarg
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     HmdNeckTargetMotion,
-    crouch_leg_offsets,
-    crouch_offsets,
 )
 
 Vec3 = tuple[float, float, float]
@@ -362,17 +360,16 @@ def patch_observation(observations: Any, columns: dict[slice, torch.Tensor]) -> 
 def patch_foot_target(env: ManagerBasedRlEnv, observations: Any, foot: torch.Tensor) -> Any:
     """Write the foot target ``foot`` (N, 2, 3) the robot receives next into the
     actor observation of a step that ran on the previous one: its columns and,
-    with the crouch offsets, the leg joints relative to the new offsets (the
-    next action adds them; the robot observes and acts on one target)."""
+    with the crouch offsets, the leg joints relative to the offsets the next
+    action adds for it (the robot observes and acts on one target)."""
 
     columns = {actor_term_slice(env, "foot_target"): foot}
     action = env.action_manager.get_term("joint_pos")
-    command_name = getattr(action.cfg, "crouch_command_name", None)
-    if command_name is not None:
+    if getattr(action.cfg, "crouch_command_name", None) is not None:
         joint = actor_term_slice(env, "joint_pos")
         names = list(env.scene["robot"].joint_names)
         legs = [names.index(name) for name in crouch_feedforward.LEG_JOINT_NAMES]
         values = observations["actor"][:, joint].clone()
-        values[:, legs] += crouch_leg_offsets(env, command_name) - crouch_offsets(foot.reshape(len(foot), -1))
+        values[:, legs] += action.crouch_next() - action.crouch_next(foot.reshape(len(foot), -1))
         columns[joint] = values
     return patch_observation(observations, columns)

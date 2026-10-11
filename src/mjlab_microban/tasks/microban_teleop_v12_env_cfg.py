@@ -95,8 +95,10 @@ def apply_crouch_feedforward(cfg: ManagerBasedRlEnvCfg) -> None:
     (7-8 tenths of an added knee offset were cancelled, and no run learned to
     crouch).  Here the leg targets are HOME + the crouch offsets of the
     published foot targets + raw, and the actor observes the leg joints minus
-    HOME and the same offsets (robot/crouch_feedforward.py); the previous
-    action stays the raw output and the critic keeps the measured joints.
+    HOME and the same offsets (robot/crouch_feedforward.py; the offsets follow
+    their target at a bounded rate, held by the action per environment); the
+    previous action stays the raw output and the critic keeps the measured
+    joints.
     The robot adds the same offsets; the ONNX is the policy alone.
     """
 
@@ -105,7 +107,7 @@ def apply_crouch_feedforward(cfg: ManagerBasedRlEnvCfg) -> None:
     if joint_pos.func is not velocity_mdp.joint_pos_rel:
         raise TypeError("The crouch offset replaces the actor's joint_pos_rel")
     joint_pos.func = crouch_joint_pos_rel
-    joint_pos.params["command_name"] = "foot_target"
+    joint_pos.params["action_name"] = "joint_pos"
 
 
 def make_microban_teleop_v12_env_cfg(

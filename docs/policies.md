@@ -81,14 +81,19 @@ PICO だけのキー: `pico_walk_checkpoint_sha256`（凍結した歩行器）�
 `pico_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
 （`critic_warmup`、`arm_start`、`foot_start`、`foot_tighten`、`total`。更新回数）、
 `pico_active_adapter_columns_json`、`pico_crouch_feedforward_json`（しゃがみの脚の角: 名前
-`microban_pico_crouch_feedforward_v1`、12 脚関節の名前、確かめの足の目標と、そこでの脚の角）。
+`microban_pico_crouch_feedforward_v2`、12 脚関節の名前、方策の周期 0.02 s と Δq の 1 周期の上限 0.2 rad、
+確かめの足の目標と、そこでの脚の角）。
 
 PICO の ONNX は方策の網だけで、しゃがみの脚の角は実機が足し引きする（`robot/crouch_feedforward.py`。
-実機の `src/crouch_feedforward.py` は同じファイル）。公開中の両足の目標がともに帯 2.5 mm より上のとき、
-(dx, dy の平均, 低い方の dz) に胴を下げ、両足の裏を HOME の位置に残す脚の角 Δq を IK の表から補間で求め、
-脚の目標を HOME + Δq + 生の出力にし、観測の脚の関節角を 実測 − HOME − Δq にする。前回の行動は生の出力のまま。
-それ以外の行（目標なし、片足、歩行）は Δq = 0。実機は `pico_crouch_feedforward_json` の確かめの点で
-自分の Δq が記録と 1e-6 rad 以内で一致することを確かめる。
+実機の `src/crouch_feedforward.py` は同じファイル）。公開中の両足の目標がともに帯 2.5 mm より上で、
+両足とも両足の範囲（xy ±10 mm、dz 20 mm 以下）の中のとき、(dx, dy の平均, 低い方の dz) に胴を下げ、
+両足の裏を HOME の位置に残す脚の角を IK の表から補間で求める。それ以外の行（目標なし、片足、歩行、
+範囲の外）ではこの角は 0。使う Δq は、この角へ 1 周期 0.2 rad（12 関節のノルム、10 rad/s）までの速さで
+近づく状態で、学習では env ごと、実機では PICO の動作ごとに持ち、始めに 0 にする。床の帯の出入り、
+範囲の出入り、実機で両足の目標が一度に消えるときの跳びは、この速さのランプになる。
+脚の目標を HOME + Δq + 生の出力にし、観測の脚の関節角を 実測 − HOME − Δq にする（観測の Δq は、
+次の行動が足す Δq と同じ）。前回の行動は生の出力のまま。実機は `pico_crouch_feedforward_json` の
+確かめの点で自分の角が記録と 1e-6 rad 以内で一致し、周期と上限が同じことを確かめる。
 
 PICO の観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME
 （左 pitch, roll, elbow、右 pitch, roll, elbow）。腕のサーボには方策の出力を使わない。PICO の自己テストの
