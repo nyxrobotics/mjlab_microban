@@ -81,6 +81,8 @@ def main() -> None:
     training = [name for name in sets if name in pipeline.TRAINING_SETS]
     if args.step in ("all", "retarget"):
         only = set(args.only.read_text().split()) if args.only else None
+        if only and (unknown := sorted(only - set().union(*(pipeline.clip_names(n, root) for n in training)))):
+            parser.error(f"--only names no clip of {', '.join(training)}: {unknown[:10]}")
         for name in training:
             errors = pipeline.retarget(name, root, args.workers, only)
             if errors:

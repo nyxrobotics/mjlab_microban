@@ -7,7 +7,10 @@ Layout (everything under data/wholebody/, which git ignores):
   (``raw/amass/``, ``raw/body_models/smplx/``) are placed by hand.
 * ``gmr/<set>/``: the retargeting's output per clip (``<name>.pkl``, ``.npz``,
   ``_report.json``, ``_ik.json``), ``manifest.json`` (name, source file,
-  description) and ``errors.json`` (clips that failed).
+  description) and ``errors.json`` (clips that failed).  A run of the whole
+  set starts from an empty folder, and a run of some clips (``only``) first
+  removes their old output, so a clip that fails or is no longer made leaves
+  no PKL for ``finalize`` to pick up.
 * ``<set>/retarget/``: the PKLs with the long arm-branch flips cut
   (``finalize``), ``<set>/finalize.json`` (what was cut), and the training
   side's ``<set>/{train,eval}/motion.h5`` and ``report.json``.  The PICO set
@@ -126,6 +129,26 @@ def _jobs(name: str, raw: Path) -> list[tuple[str, str, str, str]]:
     raise ValueError(f"unknown training set {name!r}")
 
 
+CLIP_OUTPUTS = (".pkl", ".npz", "_report.json", "_ik.json")
+
+
+def _fresh_output(out: Path, only: set[str] | None) -> None:
+    """Empty ``out`` for a whole run, or remove the outputs of the clips in ``only``."""
+    if only is None:
+        if out.exists():
+            shutil.rmtree(out)
+    else:
+        for stem in only:
+            for suffix in CLIP_OUTPUTS:
+                (out / f"{stem}{suffix}").unlink(missing_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+
+
+def clip_names(name: str, root: Path = ROOT) -> set[str]:
+    """The clip names a training set's retargeting makes."""
+    return {stem for _, _, stem, _ in _jobs(name, root / "raw")}
+
+
 def _retarget_job(args):
     path, fmt, out_dir, stem, smplx_dir = args
     from mjlab_microban.wholebody.retarget import core
@@ -144,7 +167,15 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
     items = _jobs(name, raw)
     if not items:
         raise FileNotFoundError(f"no source files for {name} under {raw}")
-    out.mkdir(parents=True, exist_ok=True)
+    if only is not None:
+        only = only & {stem for _, _, stem, _ in items}
+        if not only:
+            return {}
+    previous = {}
+    if only is not None and (out / "errors.json").exists():
+        previous = {stem: error for stem, error in json.loads((out / "errors.json").read_text()).items()
+                    if stem not in only}
+    _fresh_output(out, only)
     if only is None:
         (out / "manifest.json").write_text(json.dumps(
             [{"name": s, "source": os.path.relpath(f, raw), "description": d} for f, _, s, d in items],
@@ -152,7 +183,7 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
     smplx_dir = str(raw / "body_models" / "smplx")
     jobs = [(f, fm, str(out), s, smplx_dir) for f, fm, s, _ in sorted(items, key=lambda x: -os.path.getsize(x[0]))
             if only is None or s in only]  # the longest first, so the workers end together
-    errors, t0 = {}, time.time()
+    errors, t0 = dict(previous), time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_retarget_job, job) for job in jobs]
         for done, future in enumerate(as_completed(futures), 1):
@@ -161,7 +192,7 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
                 errors[stem] = error
             if done % 100 == 0 or done == len(jobs):
                 print(f"{name}: {done}/{len(jobs)} {time.time() - t0:.0f}s errors={len(errors)}", flush=True)
-    (out / "errors.json").write_text(json.dumps(errors, indent=1))
+    (out / "errors.json").write_text(json.dumps(dict(sorted(errors.items())), indent=1))
     return errors
 
 
@@ -185,7 +216,7 @@ def retarget_pico(root: Path = ROOT, workers: int = 8) -> dict:
     if not sources:
         raise FileNotFoundError(f"no PICO recordings under {raw / 'pico'}")
     refs, chosen = pico.references(sources, model)
-    out.mkdir(parents=True, exist_ok=True)
+    _fresh_output(out, None)
     items = [(s, n, f, rp, rq, jp, refs[s], str(out), g1_xml) for s, n, f, rp, rq, jp in sources]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         frames = dict(pool.map(_pico_job, items))

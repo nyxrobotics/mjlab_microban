@@ -104,3 +104,45 @@ def test_pico_recordings_split_at_root_teleports_and_resample_to_30_fps():
     assert (source, name, fps) == ("twist2", "picotwist_x", 30.0)
     assert np.allclose(np.diff(root_pos[:, 0]), 1 / 30)
     assert root_quat.shape == (len(root_pos), 4) and np.allclose(root_quat, [1, 0, 0, 0])
+
+
+def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mjlab_microban.wholebody.retarget import core
+
+    data = tmp_path / "raw" / "cmu" / "data" / "007"
+    data.mkdir(parents=True)
+    for take in ("07_01", "07_02", "07_03"):
+        (data / f"{take}.bvh").write_text("")
+    (tmp_path / "raw" / "cmu" / "cmu-mocap-index-text.txt").write_text("07_01\twalk\n07_02\twalk\n07_03\twalk\n")
+    failing: set[str] = set()
+
+    def fake_run(path, fmt, fps, out_dir, stem, smplx_model_dir=None):
+        if stem in failing:
+            raise RuntimeError("IK failed")
+        for suffix in pipeline.CLIP_OUTPUTS:
+            (out_dir / f"{stem}{suffix}").write_text("")
+        return {"frames": 1}
+
+    monkeypatch.setattr(core, "run", fake_run)
+    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", ThreadPoolExecutor)
+    out = tmp_path / "gmr" / "cmu"
+    out.mkdir(parents=True)
+    (out / "cmuold_99_99.pkl").write_text("")  # a clip the current rules no longer make
+    (out / "cmuwalk_07_03.pkl").write_text("")  # made last time, fails this time
+
+    failing.add("cmuwalk_07_03")
+    errors = pipeline.retarget("cmu", tmp_path, workers=2)
+    assert sorted(p.name for p in out.glob("*.pkl")) == ["cmuwalk_07_01.pkl", "cmuwalk_07_02.pkl"]
+    assert list(errors) == ["cmuwalk_07_03"]
+
+    # Redoing some clips: their old output goes, the other clips' output and errors stay.
+    failing.clear()
+    failing.add("cmuwalk_07_02")
+    pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_02", "cmuwalk_07_03", "lafan_only_name"})
+    assert sorted(p.name for p in out.glob("*.pkl")) == ["cmuwalk_07_01.pkl", "cmuwalk_07_03.pkl"]
+    assert list(json.loads((out / "errors.json").read_text())) == ["cmuwalk_07_02"]
+    # Names of another set leave this one alone.
+    assert pipeline.retarget("cmu", tmp_path, workers=2, only={"walk1_subject1"}) == {}
+    assert list(json.loads((out / "errors.json").read_text())) == ["cmuwalk_07_02"]
