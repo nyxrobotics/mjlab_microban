@@ -11,8 +11,10 @@ Each PKL (GMR's standard output) holds ``fps``, ``root_pos`` (T, 3),
 robot.xml qpos order, or in the order of an optional ``joint_names``).
 
 Split: the ``subject5`` files are the evaluation set (LAFAN1's standard
-split); a kind without one gives its last file by name; a kind with a single
-file gives its last 20 % of frames.  Both sets go through the same cuts.
+split); every file of a kind without one gives its last 20 % of frames.  Both
+sets go through the same cuts.  The training shard is cut into overlapping
+windows (Teleopit's); each evaluation section is one window, so the
+evaluation can run it in consecutive pieces.
 """
 
 from __future__ import annotations
@@ -90,12 +92,9 @@ def split_files(names: Sequence[str]) -> dict[str, str]:
         by_kind[motion_category(name)].append(name)
     split = {}
     for files in by_kind.values():
-        if len(files) == 1:
-            split[files[0]] = "tail"
-            continue
-        evaluation = [name for name in files if re.search(rf"{EVAL_SUBJECT}(?!\d)", name)] or [files[-1]]
+        evaluation = [name for name in files if re.search(rf"{EVAL_SUBJECT}(?!\d)", name)]
         for name in files:
-            split[name] = "eval" if name in evaluation else "train"
+            split[name] = ("eval" if name in evaluation else "train") if evaluation else "tail"
     return split
 
 
@@ -213,6 +212,7 @@ def build_dataset(
             Path(out_dir) / part / "motion.h5",
             body_names=results[0]["body_names"],
             joint_names=results[0]["joint_names"],
+            **({} if part == "train" else {"max_window_frames": None}),
         )
     report = {
         "retarget_dir": str(Path(retarget_dir).resolve()),
@@ -227,7 +227,7 @@ def build_dataset(
 
 
 def format_report(report: dict[str, Any]) -> str:
-    lines = [f"{'kind':<18}{'files tr/ev':>12}{'min':>7}{'excluded':>10}  flagged (floor/self/joint/air)"]
+    lines = [f"{'kind':<18}{'files tr/ev':>12}{'min':>7}{'excluded':>10}  flagged % ({'/'.join(REASONS)})"]
     for kind, row in report["kinds"].items():
         f = row["flagged_fraction"]
         minutes = row["seconds"] / 60.0

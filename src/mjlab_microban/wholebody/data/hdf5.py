@@ -6,9 +6,10 @@
 """The whole-body motion dataset: precomputed HDF5 shards cut into windows.
 
 Frame arrays are flat over all source clips; ``clip_starts``/``clip_lengths``
-are the training windows (at most ``max_window_frames``, overlapping by
-``overlap_frames``) and ``source_clip_ids`` names each window's source clip,
-whose name is ``clip_names[source_clip_ids[i]]``.
+are the windows (at most ``max_window_frames``, overlapping by
+``overlap_frames``; one window per clip without a maximum) and
+``source_clip_ids`` names each window's source clip, whose name is
+``clip_names[source_clip_ids[i]]``.
 """
 
 from __future__ import annotations
@@ -60,12 +61,16 @@ def write_motion_shard(
     *,
     body_names: Sequence[str],
     joint_names: Sequence[str],
-    max_window_frames: int = DEFAULT_MAX_WINDOW_FRAMES,
+    max_window_frames: int | None = DEFAULT_MAX_WINDOW_FRAMES,
     overlap_frames: int = DEFAULT_WINDOW_OVERLAP_FRAMES,
 ) -> dict[str, Any]:
-    """Write ``clips`` (each: name, fps and the FRAME_KEYS arrays) as one shard."""
+    """Write ``clips`` (each: name, fps and the FRAME_KEYS arrays) as one shard
+    (``max_window_frames=None``: each clip is one window)."""
     if not clips:
         raise ValueError(f"no clips to write to {path}")
+    if max_window_frames is None:
+        max_window_frames = max(int(np.asarray(clip["joint_pos"]).shape[0]) for clip in clips)
+        overlap_frames = 0
     names = [str(clip["name"]) for clip in clips]
     if len(set(names)) != len(names):
         raise ValueError("clip names must be unique")

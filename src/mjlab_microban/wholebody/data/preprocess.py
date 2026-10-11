@@ -2,8 +2,9 @@
 # https://github.com/BotRunner64/Teleopit).  Changes: frames that break a
 # rule are cut out of the clip (Teleopit drops the whole clip), and the rules
 # measure the retargeted pose on the training model (floor and self
-# penetration, joint range); the airborne rule is Teleopit's, at Microban's
-# size and on the lowest collision point.
+# penetration, joint range, one-frame joint jumps, lifted above the
+# termination height); the airborne rule is Teleopit's, at Microban's size
+# and on the lowest collision point.
 
 """Cut the frames of a retargeted clip that the robot cannot be asked to follow.
 
@@ -14,6 +15,14 @@ a floor plane at z = 0):
 * two robot geoms that collide in training overlap by more than
   ``self_penetration_m``;
 * a joint is more than ``joint_range_excess_rad`` outside its MJCF range;
+* a joint jumps between two frames: a step faster than ``joint_jump_rad_s``
+  and more than ``joint_jump_ratio`` times the joint's steps before and after
+  it (an IK branch switch of the retargeting; a fast human motion speeds up
+  and slows down over several frames).  Both frames are marked;
+* the lowest collision point is more than ``lifted_height_m`` above the floor
+  (the termination height): a robot on the floor in that pose ends the
+  episode, and GMR keeps human timing at 0.21 x the length, so the
+  reference's flight has no gravity-consistent jump behind it;
 * the lowest collision point stays above ``off_ground_height_m`` for longer
   than ``max_off_ground_s`` (Teleopit's 0.12 m x 0.21 Microban/G1 scale; the
   whole run is marked).
@@ -30,8 +39,9 @@ import mujoco
 import numpy as np
 
 from mjlab_microban.wholebody.data.fk import normalize_quaternion, set_qpos
+from mjlab_microban.wholebody.env_cfg import HEIGHT_TERMINATION_M
 
-REASONS = ("floor_penetration", "self_penetration", "joint_range", "off_ground")
+REASONS = ("floor_penetration", "self_penetration", "joint_range", "joint_jump", "lifted", "off_ground")
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,9 @@ class ExclusionSpec:
     floor_penetration_m: float = 0.01
     self_penetration_m: float = 0.005
     joint_range_excess_rad: float = 0.1
+    joint_jump_rad_s: float = 15.0
+    joint_jump_ratio: float = 2.0
+    lifted_height_m: float = HEIGHT_TERMINATION_M
     off_ground_height_m: float = 0.025
     max_off_ground_s: float = 0.8
     pad_s: float = 0.2
@@ -55,6 +68,7 @@ class ClipKinematics:
     lowest_point_z: np.ndarray  # (T,) lowest collision point
     self_penetration_m: np.ndarray  # (T,) deepest robot-robot overlap
     joint_excess_rad: np.ndarray  # (T,) largest excursion beyond a joint range
+    joint_step_rad: np.ndarray  # (T - 1, J) |q[t + 1] - q[t]|
 
 
 class ClipChecker:
@@ -136,6 +150,7 @@ class ClipChecker:
             lowest_point_z=lowest,
             self_penetration_m=self_pen,
             joint_excess_rad=np.maximum(np.max(excess, axis=1), 0.0),
+            joint_step_rad=np.abs(np.diff(joint_pos, axis=0)),
         )
 
 
@@ -146,8 +161,21 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.where(edges == 1)[0].tolist(), np.where(edges == -1)[0].tolist()))
 
 
+def joint_jumps(step: np.ndarray, fps: int, spec: ExclusionSpec) -> np.ndarray:
+    """(T - 1,) the steps where some joint jumps (see the module docstring)."""
+    if step.shape[0] == 0:
+        return np.zeros(0, dtype=bool)
+    padded = np.pad(step, ((1, 1), (0, 0)))
+    neighbours = np.maximum(padded[:-2], padded[2:])
+    return np.any((step * fps > spec.joint_jump_rad_s) & (step > spec.joint_jump_ratio * neighbours), axis=1)
+
+
 def frame_flags(kin: ClipKinematics, fps: int, spec: ExclusionSpec) -> dict[str, np.ndarray]:
     """Per-reason marks (T,) of one clip."""
+    jump = joint_jumps(kin.joint_step_rad, fps, spec)
+    jumped = np.zeros(kin.lowest_point_z.shape, dtype=bool)
+    jumped[:-1] |= jump
+    jumped[1:] |= jump
     airborne = kin.lowest_point_z > spec.off_ground_height_m
     off_ground = np.zeros_like(airborne)
     longest = int(round(spec.max_off_ground_s * fps))
@@ -158,6 +186,8 @@ def frame_flags(kin: ClipKinematics, fps: int, spec: ExclusionSpec) -> dict[str,
         "floor_penetration": kin.lowest_point_z < -spec.floor_penetration_m,
         "self_penetration": kin.self_penetration_m > spec.self_penetration_m,
         "joint_range": kin.joint_excess_rad > spec.joint_range_excess_rad,
+        "joint_jump": jumped,
+        "lifted": kin.lowest_point_z > spec.lifted_height_m,
         "off_ground": off_ground,
     }
 
