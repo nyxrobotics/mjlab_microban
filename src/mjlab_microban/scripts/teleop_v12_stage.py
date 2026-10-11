@@ -45,15 +45,15 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     FOOT_AIR_MIN_SHARE,
     FOOT_LIFT_MIN_SHARE,
-    PUSH_FALL_RATE_MARGIN,
     SEED_COUNT,
     STILL_TOUCHDOWNS_PER_S_MAX,
     SUPPORT_FOOT_MOVE_MAX_M,
     ZMP_CENTRE_MAX_M,
     arm_walk_min_speed,
     canonical_settings,
-    crouch_drop_error_m,
+    crouch_target_m,
     foot_error_limit_m,
+    push_fall_rate_limit,
     push_fall_rates_by_group,
     required_tracking_check_names,
     required_tracking_profile,
@@ -397,13 +397,17 @@ def _record_failure(
 
 
 def _standing_failures(entries: list[dict[str, Any]], item: dict[str, Any]) -> None:
-    """A standing command's touchdowns and ZMP distance (J1's crouches, J3)."""
+    """A standing command's touchdowns, ZMP distance and drift (J1's crouches, J3)."""
 
     name = str(item["name"])
     _record_failure(entries, scenario=name, quantity="touchdowns_per_s", measured=item["touchdowns_per_s"],
                     limit=STILL_TOUCHDOWNS_PER_S_MAX, rule="at_most")
     _record_failure(entries, scenario=name, quantity="zmp_distance_median_m",
                     measured=item["zmp_distance_median_m"], limit=ZMP_CENTRE_MAX_M, rule="at_most")
+    for axis, value, limit in zip(TWIST_AXES, item["mean_twist"], STANDING_DRIFT_MAX, strict=True):
+        number = _number_or_none(value)
+        _record_failure(entries, scenario=name, quantity=f"abs_mean_{axis}",
+                        measured=None if number is None else abs(number), limit=limit, rule="at_most")
 
 
 def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -425,8 +429,9 @@ def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str,
             _record_failure(failures["foot_lift"], scenario=name, quantity="trunk_drop_median_m",
                             measured=item["trunk_drop_median_m"], limit=FOOT_LIFT_MIN_SHARE * dz,
                             rule="at_least")
-            _record_failure(failures["foot_error"], scenario=name, quantity="trunk_drop_error_m",
-                            measured=crouch_drop_error_m(item), limit=foot_error_limit_m(dz), rule="at_most")
+            _record_failure(failures["foot_error"], scenario=name, quantity="trunk_frame_error_rms_m",
+                            measured=item["trunk_frame_error_rms_m"],
+                            limit=foot_error_limit_m(crouch_target_m(item)), rule="at_most")
             _standing_failures(failures["standing_still"], item)
         else:
             for side, lifted, goal, median, air in zip(
@@ -452,17 +457,12 @@ def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str,
     for group, rates in push_fall_rates_by_group(push).items():
         _record_failure(failures["push_falls"], scenario=f"{group}_push_scenarios",
                         quantity="pico_fall_rate", measured=rates["pico"],
-                        limit=rates["walker"] + PUSH_FALL_RATE_MARGIN, rule="at_most")
+                        limit=push_fall_rate_limit(push), rule="at_most")
     home = {item["base"]: item for item in arms if item["arms"] == "home"}
     for item in arms:
         name = str(item["name"])
         if all(value == 0.0 for value in item["twist"]):
             _standing_failures(failures["standing_still"], item)
-            for axis, value, limit in zip(TWIST_AXES, item["mean_twist"], STANDING_DRIFT_MAX, strict=True):
-                number = _number_or_none(value)
-                _record_failure(failures["standing_still"], scenario=name, quantity=f"abs_mean_{axis}",
-                                measured=None if number is None else abs(number), limit=limit,
-                                rule="at_most")
         elif item["arms"] != "home":
             reference = _number_or_none(home[item["base"]]["signed_speed"]) if item["base"] in home else None
             command = max(abs(float(value)) for value in item["twist"])

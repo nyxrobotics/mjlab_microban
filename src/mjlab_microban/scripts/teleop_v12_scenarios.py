@@ -9,7 +9,7 @@ of two seeds, with the HMD neck moving as in training:
   ramp reaches;
 * pushes (J2): standing and the nine-scenario walking set, and the crouches
   of J1, pushed every second from eight directions, against the walker the
-  adapter was built on;
+  adapter was built on (standing and walking);
 * arms (J3, J4): the same nine commands with the arms at HOME, raised forward
   70 degrees, or moved as in training (pico_arm_target_motion), and standing
   with one arm reaching out.

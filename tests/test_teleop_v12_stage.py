@@ -33,8 +33,10 @@ from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
     _acceptance,
     canonical_settings,
     _cfg,
+    crouch_target_m,
     feet_on_floor,
     foot_error_limit_m,
+    push_fall_rates_by_group,
     required_tracking_check_names,
     required_tracking_profile,
     thresholds,
@@ -106,13 +108,16 @@ def _results() -> dict[str, object]:
             "relative_target_m": math.dist(scenario.foot_goal[0], scenario.foot_goal[1]),
             "relative_error_rms_m": 0.006,
             "support_move_median_m": 0.002 if sum(lifted) == 1 else None,
+            "trunk_frame_error_rms_m": 0.006 if all(lifted) else None,
             "touchdowns_per_s": 0.1 if all(lifted) else None,
+            "mean_twist": [0.0, 0.0, 0.0] if all(lifted) else None,
             "zmp_distance_median_m": 0.005 if all(lifted) else None,
         })
+    # The walker runs standing and walking only.
     push = [
         {"name": s.name, "twist": list(s.twist), "foot_goal": [list(goal) for goal in s.foot_goal],
-         "rollouts": ROLLOUTS, "falls": {"pico": 3, "walker": 2},
-         "falls_by_direction": {"pico": [0] * 8, "walker": [0] * 8}}
+         "rollouts": ROLLOUTS, "falls": {"pico": 3, **({} if any(s.lifted) else {"walker": 2})},
+         "falls_by_direction": {"pico": [0] * 8, **({} if any(s.lifted) else {"walker": [0] * 8})}}
         for s in push_scenarios()
     ]
     arms = []
@@ -317,6 +322,7 @@ class TeleopV12StageTest(unittest.TestCase):
         for item in still["feet"]:
             if all(item["lifted"]):
                 item["trunk_drop_median_m"] = 0.0  # no crouch; the feet stay apart as they were
+                item["trunk_frame_error_rms_m"] = crouch_target_m(item)
             else:
                 item["lift_median_m"] = [0.0 if up else None for up in item["lifted"]]
             item["relative_error_rms_m"] = item["relative_target_m"]
@@ -361,25 +367,41 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertNotIn(".found", inspect.getsource(judgment).replace(inspect.getsource(feet_on_floor), ""))
         self.assertEqual(inspect.getsource(judgment._rollout).count("feet_on_floor(env)"), 2)
 
-    def test_a_crouch_goes_down_by_its_height_and_stands_still(self) -> None:
-        # The trunk drop: at least 0.7 dz, at most dz + max(0.3 dz, 8 mm).
-        for name, drop, lift, error in (
-            ("both_up8", 0.0056 - 1.0e-5, False, True),
-            ("both_up8", 0.016, True, True),
-            ("both_up8", 0.016 + 1.0e-5, True, False),
-            ("both_up16", 0.024 + 1.0e-5, True, False),
-            ("both_front_left", 0.0112 - 1.0e-5, False, True),
+    def test_a_crouch_goes_down_by_its_height_shifts_by_its_offset_and_stands_still(self) -> None:
+        # The trunk drop: at least 0.7 dz.
+        for name, drop, lift in (
+            ("both_up8", 0.0056 - 1.0e-5, False),
+            ("both_up8", 0.0056, True),
+            ("both_front_left", 0.0112 - 1.0e-5, False),
         ):
             with self.subTest(name=name, drop=drop):
                 results = _results()
                 _find(results["feet"], name)["trunk_drop_median_m"] = drop
+                self.assertIs(_acceptance(results)[0]["foot_lift"], lift)
+        # Each foot from the trunk, as the foot reward measures a crouch:
+        # within max(0.3 |offset|, 8 mm) RMS, 8 mm for every judged crouch
+        # ((8, 8, 16) mm: 0.3 x 19.6 mm = 5.9 mm).  A crouch that drops its
+        # (8, 8) mm shift is 11.3 mm off.
+        self.assertAlmostEqual(crouch_target_m(_find(_results()["feet"], "both_front_left")), 0.0196, places=4)
+        for name, error, passed in (
+            ("both_up16", 0.008, True),
+            ("both_up16", 0.008 + 1.0e-5, False),
+            ("both_back_right", 0.0113, False),
+            ("both_front_left", None, False),
+        ):
+            with self.subTest(name=name, error=error):
+                results = _results()
+                _find(results["feet"], name)["trunk_frame_error_rms_m"] = error
                 checks = _acceptance(results)[0]
-                self.assertIs(checks["foot_lift"], lift)
-                self.assertIs(checks["foot_error"], error)
-        # Crouched on a standing command: no stepping (as J3).
+                self.assertIs(checks["foot_error"], passed)
+                self.assertTrue(checks["foot_lift"])
+        # Crouched on a standing command: no stepping and no drift (as J3).
         stepping = _results()
         _find(stepping["feet"], "both_up16")["touchdowns_per_s"] = 0.6
         self.assertFalse(_acceptance(stepping)[0]["standing_still"])
+        drifting = _results()
+        _find(drifting["feet"], "both_back_right")["mean_twist"] = [0.0, 0.06, 0.0]
+        self.assertFalse(_acceptance(drifting)[0]["standing_still"])
         fell = _results()
         _find(fell["feet"], "both_back_right")["falls"] = 1
         self.assertFalse(_acceptance(fell)[0]["no_falls_without_push"])
@@ -420,18 +442,26 @@ class TeleopV12StageTest(unittest.TestCase):
         self.assertFalse(_acceptance(results)[0]["push_falls"])
         _find(results["push"], "forward_0p1")["falls"]["walker"] = 10
         self.assertTrue(_acceptance(results)[0]["push_falls"])
-        # The crouches against the walker on the same crouch pose, on their own.
+        # The crouches on their own, against the walker standing and walking
+        # (the walker is not run crouched).
         crouched = [s.name for s in push_scenarios() if any(any(goal) for goal in s.foot_goal)]
         self.assertEqual(crouched, ["both_up8", "both_up16", "both_front_left", "both_back_right"])
         results = _results()
         for item in results["push"]:
-            item["falls"] = {"pico": 0, "walker": 0}
-        _find(results["push"], "both_up16")["falls"].update(pico=40, walker=15)  # 25/512 < 5 points
+            item["falls"] = {"pico": 0} if item["name"] in crouched else {"pico": 0, "walker": 0}
+        _find(results["push"], "both_up16")["falls"]["pico"] = 25  # 25/512 < 5 points
         self.assertTrue(_acceptance(results)[0]["push_falls"])
-        _find(results["push"], "both_up16")["falls"]["pico"] = 41
+        _find(results["push"], "both_up16")["falls"]["pico"] = 26
         self.assertFalse(_acceptance(results)[0]["push_falls"])
-        # Walking falls of the walker do not cover crouched falls of PICO.
-        _find(results["push"], "forward_0p2")["falls"]["walker"] = 100
+        _find(results["push"], "forward_0p2")["falls"]["walker"] = 12  # 12/1152: 1 point more
+        self.assertTrue(_acceptance(results)[0]["push_falls"])
+        self.assertEqual(push_fall_rates_by_group(results["push"]),
+                         {"standing_and_walking": {"pico": 0.0, "walker": 12 / 1152}, "crouch": {"pico": 26 / 512}})
+        # Standing and walking falls of PICO do not hide behind its crouches.
+        results = _results()
+        for item in results["push"]:
+            item["falls"] = {"pico": 0} if item["name"] in crouched else {"pico": 0, "walker": 0}
+        _find(results["push"], "neutral")["falls"]["pico"] = 58
         self.assertFalse(_acceptance(results)[0]["push_falls"])
 
     def test_standing_still_with_the_head_and_arms_moving(self) -> None:
