@@ -26,17 +26,32 @@ a floor plane at z = 0):
 * the lowest collision point stays above ``off_ground_height_m`` for longer
   than ``max_off_ground_s`` (Teleopit's 0.12 m x 0.21 Microban/G1 scale; the
   whole run is marked);
-* the trunk is upright (within ``upright_tilt_deg`` of vertical) and the
-  robot's centre of mass, seen from above, is more than ``support_margin_m``
-  outside the convex hull of the collision geom corners within
-  ``off_ground_height_m`` of the floor, for longer than ``max_unsupported_s``
-  (the whole run is marked).  The reference leans its weight on something
-  the simulation does not have: a chair or a stool (a seated human puts the
-  robot's feet on the floor and its trunk in the air), a rail, a wall, a
-  partner.  An upright robot that far outside its support falls within a
-  fraction of a second; a fall or a step passes in less than the duration.
-  Lying and crawling (trunk past ``upright_tilt_deg``) are not judged: their
-  trunk is near the floor and settles onto it.
+* the trunk is upright (within ``upright_tilt_deg`` of vertical), the
+  robot's centre of mass moves slower than ``quasi_static_speed_m_s`` across
+  the floor and, seen from above, is more than ``support_margin_m`` outside
+  the convex hull of the collision geom corners within ``off_ground_height_m``
+  of the floor, for longer than ``max_unsupported_s`` (the whole run is
+  marked).  The reference leans its weight on something the simulation does
+  not have: a chair or a stool (a seated human puts the robot's feet on the
+  floor and its trunk in the air), a rail, a wall, a partner.
+
+  Why these numbers.  The zero-moment point, which stays inside the support,
+  is the centre of mass minus (h / g) times its acceleration; over 1 s below
+  0.1 m/s their means differ by at most (h / g) (2 x 0.1 m/s) / 1 s = 3.6 mm
+  (h = 0.18 m), so such a reference cannot keep its centre of mass outside
+  the support (an inverted pendulum of that height leaves in sqrt(h / g) =
+  0.13 s).  A moving centre of mass (a run, a jump, a fall, a step) is not
+  judged.  The 1 cm margin is above the retargeting's own error and below
+  sitting: in the motions of LAFAN1 that lean on nothing (walk, run, sprint,
+  dance, fight, jumps, ...) 0.28 % of the slow 1 s windows have the centre of
+  mass more than 1 cm outside (0.65 % beyond 0.5 cm, 0.03 % beyond 1.5 cm),
+  while the rule marks 17.2 % of CMU's sit at 0.5 cm, 16.3 % at 1 cm, 13.0 %
+  at 1.5 cm and 9.0 % at 2 cm (CMU 114_05, seated 1.8 to 1.9 cm behind the
+  feet, stayed at 2 cm).  The support is wide (corners up to the off-ground
+  height count) because the retargeting leaves a standing foot hovering:
+  standing still, the higher foot is 1 to 2.5 cm above the floor in 7 % of
+  those frames.  Lying and crawling (trunk past ``upright_tilt_deg``) are not
+  judged: their trunk is near the floor and settles onto it.
 
 ``pad_s`` around every marked frame is dropped too, and the remaining runs of
 at least ``min_frames`` frames become separate clips.
@@ -65,7 +80,8 @@ class ExclusionSpec:
     lifted_height_m: float = HEIGHT_TERMINATION_M
     off_ground_height_m: float = 0.025
     max_off_ground_s: float = 0.8
-    support_margin_m: float = 0.02  # a third of the foot's length
+    support_margin_m: float = 0.01
+    quasi_static_speed_m_s: float = 0.1
     upright_tilt_deg: float = 45.0
     max_unsupported_s: float = 1.0
     pad_s: float = 0.2
@@ -87,6 +103,7 @@ class ClipKinematics:
     # hull of the collision geom corners near the floor); inf without contact.
     com_outside_support_m: np.ndarray
     trunk_tilt_rad: np.ndarray  # (T,) the root body's z axis from vertical
+    com_xy_w: np.ndarray  # (T, 2) the centre of mass seen from above
 
 
 def convex_hull_2d(points: np.ndarray) -> np.ndarray:
@@ -182,15 +199,17 @@ class ClipChecker:
         free = [j for j in range(model.njnt) if int(model.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_FREE)]
         self.root_body = int(model.jnt_bodyid[free[0]])
 
-    def _support(self) -> tuple[float, float]:
-        """(centre of mass outside the support, trunk tilt) of the current pose; mj_kinematics has run."""
+    def _support(self) -> tuple[float, float, np.ndarray]:
+        """(centre of mass outside the support, trunk tilt, centre of mass (x, y)) of the current pose;
+        mj_kinematics has run."""
         mujoco.mj_comPos(self.model, self.data)
         xmat = self.data.geom_xmat[self.corner_geom].reshape(-1, 3, 3)
         corners = self.data.geom_xpos[self.corner_geom] + np.einsum("nij,nj->ni", xmat, self.corner_local)
         hull = convex_hull_2d(corners[corners[:, 2] < self.contact_height_m, :2])
-        outside = distance_outside(self.data.subtree_com[self.root_body, :2], hull)
+        com_xy = self.data.subtree_com[self.root_body, :2].copy()
+        outside = distance_outside(com_xy, hull)
         tilt = float(np.arccos(np.clip(self.data.xmat[self.root_body, 8], -1.0, 1.0)))
-        return outside, tilt
+        return outside, tilt, com_xy
 
     def _lowest_point(self) -> float:
         z = self.data.geom_xpos[self.geom_ids, 2]
@@ -223,6 +242,7 @@ class ClipChecker:
         self_pen = np.empty(frames)
         outside = np.empty(frames)
         tilt = np.empty(frames)
+        com_xy = np.empty((frames, 2))
         for frame in range(frames):
             set_qpos(self.model, self.data, root_pos[frame], root_quat[frame], joint_pos[frame])
             mujoco.mj_collision(self.model, self.data)
@@ -230,7 +250,7 @@ class ClipChecker:
             body_quat[frame] = self.data.xquat[self.body_ids]
             lowest[frame] = self._lowest_point()
             self_pen[frame] = self._self_penetration()
-            outside[frame], tilt[frame] = self._support()
+            outside[frame], tilt[frame], com_xy[frame] = self._support()
         excess = np.maximum(self.joint_lower - joint_pos, joint_pos - self.joint_upper)
         return ClipKinematics(
             body_pos_w=body_pos,
@@ -241,6 +261,7 @@ class ClipChecker:
             joint_step_rad=np.abs(np.diff(joint_pos, axis=0)),
             com_outside_support_m=outside,
             trunk_tilt_rad=tilt,
+            com_xy_w=com_xy,
         )
 
 
@@ -272,10 +293,16 @@ def frame_flags(kin: ClipKinematics, fps: int, spec: ExclusionSpec) -> dict[str,
     for start, end in _runs(airborne):
         if end - start > longest:
             off_ground[start:end] = True
+    com_speed = (
+        np.linalg.norm(np.gradient(kin.com_xy_w, axis=0), axis=1) * fps
+        if len(kin.com_xy_w) > 1
+        else np.zeros(len(kin.com_xy_w))
+    )
     leaning = (
         np.isfinite(kin.com_outside_support_m)
         & (kin.com_outside_support_m > spec.support_margin_m)
         & (kin.trunk_tilt_rad < np.radians(spec.upright_tilt_deg))
+        & (com_speed < spec.quasi_static_speed_m_s)
     )
     unsupported = np.zeros_like(leaning)
     longest = int(round(spec.max_unsupported_s * fps))

@@ -135,25 +135,33 @@ def test_leaning_back_upright_for_over_a_second_is_unsupported():
     assert kin.com_outside_support_m[20] > spec.support_margin_m
     assert np.degrees(kin.trunk_tilt_rad[20]) == pytest.approx(20.0, abs=0.1)  # HOME leans 10 degrees forward
     flags = frame_flags(kin, FPS, spec)
-    assert np.flatnonzero(flags["unsupported"]).tolist() == list(range(15, 60))
+    # The first and last tilted frames are next to a jump of the pose: their centre of mass moves.
+    assert np.flatnonzero(flags["unsupported"]).tolist() == list(range(16, 59))
 
 
-def test_unsupported_needs_contact_an_upright_trunk_and_time():
+def test_unsupported_needs_contact_an_upright_trunk_a_slow_centre_of_mass_and_time():
     spec = ExclusionSpec()
     frames = 3 * FPS
     outside = np.full(frames, 0.05)
     tilt = np.zeros(frames)
+    still = np.zeros((frames, 2))
 
-    def flagged(outside, tilt):
+    def flagged(outside, tilt, com_xy=still):
         kin = ClipKinematics(
             body_pos_w=np.zeros((frames, 1, 3)), body_quat_w=np.zeros((frames, 1, 4)), lowest_point_z=np.zeros(frames),
             self_penetration_m=np.zeros(frames), joint_excess_rad=np.zeros(frames), joint_step_rad=np.zeros((frames - 1, 1)),
-            com_outside_support_m=outside, trunk_tilt_rad=tilt,
+            com_outside_support_m=outside, trunk_tilt_rad=tilt, com_xy_w=com_xy,
         )
         return int(frame_flags(kin, FPS, spec)["unsupported"].sum())
 
     assert flagged(outside, tilt) == frames
-    assert flagged(np.full(frames, 0.015), tilt) == 0  # within the margin
+    # Seated 1.9 cm behind the feet (CMU 114_05's start): out of reach, cut.
+    assert flagged(np.full(frames, 0.019), tilt) == frames
+    assert flagged(np.full(frames, 0.009), tilt) == 0  # within the margin
+    # A centre of mass crossing the floor at 0.2 m/s (a run, a jump, a step) is not judged; at 0.05 m/s it is.
+    t = np.arange(frames) / FPS
+    assert flagged(outside, tilt, np.stack([0.2 * t, 0 * t], axis=1)) == 0
+    assert flagged(outside, tilt, np.stack([0.05 * t, 0 * t], axis=1)) == frames
     assert flagged(outside, np.full(frames, np.radians(60.0))) == 0  # lying or crawling
     assert flagged(np.full(frames, np.inf), tilt) == 0  # airborne: the off-ground rule's
     short = np.zeros(frames)
