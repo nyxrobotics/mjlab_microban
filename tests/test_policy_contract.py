@@ -164,6 +164,34 @@ class PolicyContractTest(unittest.TestCase):
             with self.assertRaises(p.PolicyContractError):
                 p.pico_metadata(**arguments)
 
+    def test_tracking_waiver_is_checked_as_the_robot_checks_it(self) -> None:
+        waiver = {
+            "approval": "approved",
+            "checks": {"foot_error": [{"scenario": "left_up20", "quantity": "relative_error_rms_m",
+                                       "measured": 0.01, "limit": 0.008, "rule": "at_most"}]},
+        }
+        metadata = p.tracking_waiver_metadata(waiver)
+        self.assertEqual(metadata["gate_status"], p.GATE_STATUS_WAIVED)
+        self.assertEqual(json.loads(metadata[p.TRACKING_WAIVER_METADATA_KEY]), waiver)
+        self.assertEqual(
+            set(p.PICO_WAIVABLE_TRACKING_CHECKS) & set(p.PICO_UNWAIVABLE_TRACKING_CHECKS), set()
+        )
+        entry = waiver["checks"]["foot_error"][0]
+        for broken in (
+            {**waiver, "approval": ""},
+            {**waiver, "extra": 1},
+            {**waiver, "checks": {}},
+            {**waiver, "checks": {"finite": [entry]}},
+            {**waiver, "checks": {"actual_soft_limits": [entry]}},
+            {**waiver, "checks": {"unknown": [entry]}},
+            {**waiver, "checks": {"foot_error": []}},
+            {**waiver, "checks": {"foot_error": [{**entry, "measured": 0.007}]}},
+            {**waiver, "checks": {"foot_error": [{**entry, "measured": None}]}},
+            {**waiver, "checks": {"foot_error": [{**entry, "rule": "equal"}]}},
+        ):
+            with self.subTest(broken=broken), self.assertRaises(p.PolicyContractError):
+                p.tracking_waiver_metadata(broken)
+
     def test_gate_report_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

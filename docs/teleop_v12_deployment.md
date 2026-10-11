@@ -109,6 +109,36 @@ rejects non-canonical evidence.  The parity ONNX (`${PREFIX}.onnx`) and its
 JSON report are one evidence pair; if either is regenerated, run the ONNX
 gate and the stage-gate creation again before packaging.
 
+### Installing with failing behaviour checks (user-approved waiver)
+
+When the user approves installing a policy whose PICO judgment failed only
+behaviour checks, run the same sequence without `set -e` stopping at the
+tracking judgment (its report is still written), check that the 9x300 and
+ONNX reports passed, and create the gate with the exact failing checks and the
+user's approval:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
+  mjlab_microban.scripts.teleop_v12_stage create \
+  "$CKPT" "${PREFIX}_9x300.json" "${PREFIX}_tracking.json" \
+  "${PREFIX}_onnx.json" "${PREFIX}_gate.json" --force \
+  --waive-tracking-checks foot_error,foot_lift,... \
+  --waiver-note "User approved on <date> ..."
+```
+
+The list must equal the failing checks.  Only the behaviour checks
+(`policy_contract.PICO_WAIVABLE_TRACKING_CHECKS`: falls without pushes, foot
+lift, foot error, support foot, push falls, standing still, walking with the
+arms) can be waived; `finite`, `actual_soft_limits`, `raw_action_recurrence`,
+`forced_hmd_motion`, `arm_observation`, the 9x300 locomotion and the ONNX gate
+cannot.  The gate's status is `pass_with_waiver` and `tracking_waiver` records
+the approval and every failing measurement (scenario, quantity, measured
+value, limit); `validate` and the packager recompute it from the tracking
+report.  The package carries `gate_status=pass_with_waiver` and the same record
+in `gate_tracking_waiver_json`; the robot shows it at start and in
+`tools/validate_policies.py`, and refuses a malformed record or one that waives
+a safety check.  Without `--waive-tracking-checks` nothing changes.
+
 ## PICO judgment
 
 One profile, `pico_feet_push_still_arms_v1`, the same at every HOME

@@ -4,6 +4,16 @@ A PICO run (one process, mjlab_microban/schedules.py) is judged once: the locomo
 (9x300, seed 42), PICO judgment (seeds 42 and 43) and ONNX reports of the
 checkpoint it ends with (its last update, ``PICO_TOTAL_UPDATES``) are
 validated and bound into one gate file, which the packager requires.
+
+A PICO judgment whose behaviour checks failed can still be gated when the user
+approves installing it anyway: ``create --waive-tracking-checks NAMES
+--waiver-note TEXT`` names exactly the failing checks.  The gate then has the
+status ``pass_with_waiver`` and records the approval and every failing
+measurement of each waived check (``tracking_waiver``); the packager copies the
+record into the ONNX metadata.  Only behaviour checks
+(``policy_contract.PICO_WAIVABLE_TRACKING_CHECKS``) can be waived: the safety
+and integrity checks of the PICO judgment, the 9x300 locomotion and the ONNX
+gate cannot.  Without a waiver nothing changes.
 """
 
 from __future__ import annotations
@@ -12,12 +22,14 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from mjlab_microban import policy_contract
 from mjlab_microban.legacy_velocity_diagnostics import publish_json_atomic
 from mjlab_microban.schedules import PICO_TOTAL_UPDATES
 from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
@@ -28,8 +40,19 @@ from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
 from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    CHECK_NAMES as TRACKING_CHECK_NAMES,
+)
+from mjlab_microban.scripts.evaluate_teleop_v12_tracking import (
+    FOOT_AIR_MIN_SHARE,
+    FOOT_LIFT_MIN_SHARE,
+    PUSH_FALL_RATE_MARGIN,
     SEED_COUNT,
+    STILL_TOUCHDOWNS_PER_S_MAX,
+    SUPPORT_FOOT_MOVE_MAX_M,
+    arm_walk_min_speed,
     canonical_settings,
+    foot_error_limit_m,
+    push_fall_rates,
     required_tracking_check_names,
     required_tracking_profile,
 )
@@ -76,7 +99,15 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 from mjlab_microban.teleop_v12_safety import (
     ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
 )
-from mjlab_microban.twist_pass_line import twist_pass_line_record
+from mjlab_microban.twist_pass_line import AXES as TWIST_AXES
+from mjlab_microban.twist_pass_line import STANDING_DRIFT_MAX, twist_pass_line_record
+
+if set(policy_contract.PICO_WAIVABLE_TRACKING_CHECKS) | set(
+    policy_contract.PICO_UNWAIVABLE_TRACKING_CHECKS
+) != set(TRACKING_CHECK_NAMES) or set(policy_contract.PICO_WAIVABLE_TRACKING_CHECKS) & set(
+    policy_contract.PICO_UNWAIVABLE_TRACKING_CHECKS
+):
+    raise AssertionError("PICO waivable/unwaivable check split drifted from the judgment")
 
 _VELOCITY_AXES = ("vx_m_s", "vy_m_s", "yaw_rad_s")
 _LOCOMOTION_COMMANDS = {
@@ -337,14 +368,165 @@ def _require_action_envelope(
     return value
 
 
+def _number_or_none(value: object) -> float | None:
+    return float(value) if _finite_number(value) else None
+
+
+def _record_failure(
+    entries: list[dict[str, Any]],
+    *,
+    scenario: str,
+    quantity: str,
+    measured: object,
+    limit: float | None,
+    rule: str,
+) -> None:
+    """Append the measurement when it breaks its limit (or is not a number)."""
+
+    value = _number_or_none(measured)
+    if value is not None and limit is not None:
+        if rule == "at_most" and value <= limit:
+            return
+        if rule == "at_least" and value >= limit:
+            return
+    entries.append(
+        {"scenario": scenario, "quantity": quantity, "measured": value, "limit": limit, "rule": rule}
+    )
+
+
+def tracking_check_failures(results: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Every failing measurement of each waivable PICO check.
+
+    Read with the same limits as evaluate_teleop_v12_tracking._acceptance;
+    create_gate cross-checks the two (a check fails exactly when it lists a
+    measurement here).
+    """
+
+    failures: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in policy_contract.PICO_WAIVABLE_TRACKING_CHECKS
+    }
+    feet, push, arms = results["feet"], results["push"], results["arms"]
+    for item in feet:
+        name = str(item["name"])
+        if all(item["lifted"]):
+            dz = float(item["foot_goal"][0][2])
+            _record_failure(failures["foot_lift"], scenario=name, quantity="trunk_drop_median_m",
+                            measured=item["trunk_drop_median_m"], limit=FOOT_LIFT_MIN_SHARE * dz,
+                            rule="at_least")
+        else:
+            for side, lifted, goal, median, air in zip(
+                ("left", "right"), item["lifted"], item["foot_goal"], item["lift_median_m"],
+                item["air_share_median"], strict=True,
+            ):
+                if lifted:
+                    _record_failure(failures["foot_lift"], scenario=name,
+                                    quantity=f"{side}_foot_lift_median_m", measured=median,
+                                    limit=FOOT_LIFT_MIN_SHARE * float(goal[2]), rule="at_least")
+                    _record_failure(failures["foot_lift"], scenario=name,
+                                    quantity=f"{side}_foot_air_share_median", measured=air,
+                                    limit=FOOT_AIR_MIN_SHARE, rule="at_least")
+            _record_failure(failures["support_foot_still"], scenario=name,
+                            quantity="support_move_median_m", measured=item["support_move_median_m"],
+                            limit=SUPPORT_FOOT_MOVE_MAX_M, rule="at_most")
+        _record_failure(failures["foot_error"], scenario=name, quantity="relative_error_rms_m",
+                        measured=item["relative_error_rms_m"],
+                        limit=foot_error_limit_m(float(item["relative_target_m"])), rule="at_most")
+    for item in (*feet, *arms):
+        _record_failure(failures["no_falls_without_push"], scenario=str(item["name"]),
+                        quantity="falls", measured=item["falls"], limit=0.0, rule="at_most")
+    if push:
+        rates = push_fall_rates(push)
+        _record_failure(failures["push_falls"], scenario="all_push_scenarios",
+                        quantity="pico_fall_rate", measured=rates["pico"],
+                        limit=rates["walker"] + PUSH_FALL_RATE_MARGIN, rule="at_most")
+    home = {item["base"]: item for item in arms if item["arms"] == "home"}
+    for item in arms:
+        name = str(item["name"])
+        if all(value == 0.0 for value in item["twist"]):
+            _record_failure(failures["standing_still"], scenario=name, quantity="touchdowns_per_s",
+                            measured=item["touchdowns_per_s"], limit=STILL_TOUCHDOWNS_PER_S_MAX,
+                            rule="at_most")
+            for axis, value, limit in zip(TWIST_AXES, item["mean_twist"], STANDING_DRIFT_MAX, strict=True):
+                number = _number_or_none(value)
+                _record_failure(failures["standing_still"], scenario=name, quantity=f"abs_mean_{axis}",
+                                measured=None if number is None else abs(number), limit=limit,
+                                rule="at_most")
+        elif item["arms"] != "home":
+            reference = _number_or_none(home[item["base"]]["signed_speed"]) if item["base"] in home else None
+            command = max(abs(float(value)) for value in item["twist"])
+            _record_failure(failures["walking_with_arms"], scenario=name, quantity="signed_speed_m_s",
+                            measured=item["signed_speed"],
+                            limit=None if reference is None else arm_walk_min_speed(reference, command),
+                            rule="at_least")
+    return failures
+
+
+def _require_waivable_failures(checks: dict[str, Any], waived: Sequence[str]) -> None:
+    """The report passes, or ``waived`` names exactly its failing behaviour checks."""
+
+    failing = sorted(name for name, value in checks.items() if value is not True)
+    if not waived:
+        if failing:
+            raise ValueError("Tracking report contains a failing check")
+        return
+    names = list(waived)
+    if len(set(names)) != len(names):
+        raise ValueError("Waived tracking checks are listed twice")
+    unwaivable = sorted(set(failing) & set(policy_contract.PICO_UNWAIVABLE_TRACKING_CHECKS))
+    if unwaivable:
+        raise ValueError("Safety checks failed and cannot be waived: " + ", ".join(unwaivable))
+    if set(names) & set(policy_contract.PICO_UNWAIVABLE_TRACKING_CHECKS):
+        raise ValueError("Safety checks cannot be waived")
+    if set(names) != set(failing):
+        raise ValueError(
+            "A waiver must name exactly the failing tracking checks: failing="
+            + ",".join(failing) + " waived=" + ",".join(sorted(names))
+        )
+
+
+def _tracking_waiver(
+    tracking: dict[str, Any],
+    waived: Sequence[str],
+    approval: str | None,
+) -> dict[str, Any] | None:
+    """The waiver record of a validated failing judgment, or None without a waiver."""
+
+    if not waived:
+        if approval is not None:
+            raise ValueError("A waiver note needs --waive-tracking-checks")
+        return None
+    checks, results = tracking["checks"], tracking["results"]
+    _require_waivable_failures(checks, waived)
+    if approval is None or not approval.strip():
+        raise ValueError("A tracking waiver needs the user's approval (--waiver-note)")
+    try:
+        failures = tracking_check_failures(results)
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
+        raise ValueError("Tracking result evidence is malformed") from exc
+    for name in policy_contract.PICO_WAIVABLE_TRACKING_CHECKS:
+        if bool(failures[name]) == checks[name]:
+            raise ValueError(f"Waiver measurements of {name} disagree with its check")
+    record = {
+        "approval": approval.strip(),
+        "checks": {name: failures[name] for name in sorted(waived)},
+    }
+    try:
+        return policy_contract.check_tracking_waiver(record)
+    except policy_contract.PolicyContractError as exc:
+        raise ValueError(f"Tracking waiver cannot be recorded: {exc}") from exc
+
+
 def _validate_tracking_report(
     report: dict[str, Any],
     expected_identity: dict[str, int | str],
+    *,
+    waived: Sequence[str] = (),
 ) -> str:
-    """Validate one passing PICO judgment report; return its profile.
+    """Validate one PICO judgment report; return its profile.
 
     The checks are recomputed from the recorded measurements of every
-    scenario (evaluate_teleop_v12_tracking._acceptance).
+    scenario (evaluate_teleop_v12_tracking._acceptance).  The report must
+    pass, unless ``waived`` names exactly its failing (behaviour) checks.
     """
 
     completed = int(expected_identity["completed_updates"])
@@ -353,7 +535,7 @@ def _validate_tracking_report(
         report.get("schema_version") != 2
         or report.get("gate") != "microban_teleop_v12_tracking"
         or report.get("profile") != profile
-        or report.get("status") != "pass"
+        or report.get("status") != ("fail" if waived else "pass")
     ):
         raise ValueError("Tracking report schema/profile/status drifted")
     _require_report_identity(report, expected_identity, "Tracking")
@@ -388,9 +570,12 @@ def _validate_tracking_report(
         recomputed, status = _tracking_acceptance(results)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
         raise ValueError("Tracking result evidence is malformed") from exc
-    checks = _require_exact_true_checks(report, required_tracking_check_names(profile), "Tracking")
-    if status != "pass" or recomputed != checks:
+    checks = report.get("checks")
+    if not isinstance(checks, dict) or set(checks) != set(required_tracking_check_names(profile)):
+        raise ValueError("Tracking report check set is incomplete or drifted")
+    if recomputed != checks or status != report.get("status"):
         raise ValueError("Tracking checks do not match result evidence")
+    _require_waivable_failures(checks, waived)
     _require_action_envelope(
         report.get("raw_action_envelope"),
         label="Tracking/aggregate",
@@ -541,6 +726,8 @@ def create_gate(
     locomotion_report: Path,
     tracking_report: Path,
     onnx_report: Path,
+    waive_tracking_checks: Sequence[str] = (),
+    waiver_note: str | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.resolve()
     locomotion_report = locomotion_report.resolve()
@@ -557,12 +744,23 @@ def create_gate(
         "completed_updates": completed,
     }
     _validate_locomotion_report(locomotion, expected_report_identity)
-    tracking_profile = _validate_tracking_report(tracking, expected_report_identity)
+    waived = tuple(waive_tracking_checks)
+    if waived:
+        tracking_profile = _validate_tracking_report(
+            tracking, expected_report_identity, waived=waived
+        )
+    else:
+        tracking_profile = _validate_tracking_report(tracking, expected_report_identity)
+    waiver = _tracking_waiver(tracking, waived, waiver_note)
     onnx_path, onnx_sha = _validate_onnx_report(onnx, expected_report_identity)
     result = {
         "schema_version": GATE_SCHEMA_VERSION,
         "gate": "microban_teleop_v12_stage",
-        "status": "pass",
+        "status": (
+            policy_contract.GATE_STATUS_PASS
+            if waiver is None
+            else policy_contract.GATE_STATUS_WAIVED
+        ),
         "checkpoint": portable_bootstrap_artifact_path(checkpoint),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": iteration,
@@ -584,7 +782,22 @@ def create_gate(
             "sha256": onnx_sha,
         },
     }
+    if waiver is not None:
+        result["tracking_waiver"] = waiver
     return result
+
+
+def _gate_waiver_arguments(gate: dict[str, Any]) -> tuple[tuple[str, ...], str | None]:
+    """The waiver a gate was created with (validated by rebuilding the gate)."""
+
+    if "tracking_waiver" not in gate:
+        return (), None
+    waiver = gate["tracking_waiver"]
+    try:
+        policy_contract.check_tracking_waiver(waiver)
+    except policy_contract.PolicyContractError as exc:
+        raise ValueError(f"V12 stage gate tracking waiver is malformed: {exc}") from exc
+    return tuple(waiver["checks"]), waiver["approval"]
 
 
 def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
@@ -593,10 +806,13 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
     gate = _load_json(gate_path)
     checkpoint_sha, iteration, completed, infos = _checkpoint_identity(checkpoint)
     _require_final_clock(completed)
+    waived, approval = _gate_waiver_arguments(gate)
     exact = {
         "schema_version": GATE_SCHEMA_VERSION,
         "gate": "microban_teleop_v12_stage",
-        "status": "pass",
+        "status": (
+            policy_contract.GATE_STATUS_WAIVED if waived else policy_contract.GATE_STATUS_PASS
+        ),
         "checkpoint": portable_bootstrap_artifact_path(checkpoint),
         "checkpoint_sha256": checkpoint_sha,
         "iteration": iteration,
@@ -619,6 +835,8 @@ def validate_gate(gate_path: Path, checkpoint: Path) -> dict[str, Any]:
         locomotion_report=resolve_bootstrap_artifact_path(reports["locomotion"]),
         tracking_report=resolve_bootstrap_artifact_path(reports["tracking"]),
         onnx_report=resolve_bootstrap_artifact_path(reports["onnx"]),
+        waive_tracking_checks=waived,
+        waiver_note=approval,
     )
     if rebuilt != gate:
         raise ValueError("V12 stage gate content is not canonical")
@@ -638,6 +856,12 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("onnx_report", type=Path)
     create.add_argument("output", type=Path)
     create.add_argument("--force", action="store_true")
+    create.add_argument(
+        "--waive-tracking-checks",
+        default="",
+        help="comma-separated failing PICO behaviour checks the user approved installing with",
+    )
+    create.add_argument("--waiver-note", help="the user's approval, recorded in the gate and the ONNX")
     validate = subparsers.add_parser("validate")
     validate.add_argument("gate", type=Path)
     validate.add_argument("checkpoint", type=Path)
@@ -654,6 +878,10 @@ def main(argv: list[str] | None = None) -> int:
             locomotion_report=args.locomotion_report,
             tracking_report=args.tracking_report,
             onnx_report=args.onnx_report,
+            waive_tracking_checks=tuple(
+                name.strip() for name in args.waive_tracking_checks.split(",") if name.strip()
+            ),
+            waiver_note=args.waiver_note,
         )
         publish_json_atomic(args.output, gate)
     else:

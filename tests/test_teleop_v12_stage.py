@@ -631,5 +631,139 @@ class TeleopV12StageTest(unittest.TestCase):
                     onnx_report_path.write_text(json.dumps(onnx))
 
 
+APPROVAL = "User approved installing this model with these tracking checks failing"
+
+
+def _final_checkpoint(root: Path) -> tuple[Path, dict[str, object]]:
+    checkpoint = root / f"model_{PICO_TOTAL_UPDATES - 1}.pt"
+    infos = {
+        "microban_teleop_training_contract_version": MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
+        "microban_teleop_recipe_revision": MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
+        BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION,
+        TELEOP_V12_HOME_POSE_INFO_KEY: teleop_v12_home_pose_marker(),
+        "adapter_gradient_schedule_revision": TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
+        "active_actor_columns_at_save": list(teleop_v12_active_adapter_columns(PICO_TOTAL_UPDATES * 24)),
+        "env_state": {"common_step_counter": PICO_TOTAL_UPDATES * 24},
+    }
+    torch.save({"iter": PICO_TOTAL_UPDATES - 1, "infos": infos}, checkpoint)
+    identity = {
+        "sha256": sha256_file(checkpoint),
+        "iteration": PICO_TOTAL_UPDATES - 1,
+        "completed_updates": PICO_TOTAL_UPDATES,
+    }
+    return checkpoint, identity
+
+
+def _write_reports(root: Path, identity: dict[str, object], results: dict[str, object]) -> dict[str, Path]:
+    paths = {
+        "locomotion_report": root / "locomotion.json",
+        "tracking_report": root / "tracking.json",
+        "onnx_report": root / "onnx.json",
+    }
+    onnx_path = root / "policy.onnx"
+    onnx_path.write_bytes(b"unit-test-onnx")
+    paths["locomotion_report"].write_text(json.dumps(_locomotion_report(identity)))
+    paths["tracking_report"].write_text(json.dumps(_tracking_report(identity, results)))
+    paths["onnx_report"].write_text(json.dumps(_onnx_report(identity, onnx_path)))
+    return paths
+
+
+def _failing_behaviour() -> dict[str, object]:
+    """A support foot that steps and touchdowns while standing with raised arms."""
+
+    results = _results()
+    _find(results["feet"], "left_back_out")["support_move_median_m"] = 0.029
+    _find(results["arms"], "neutral/arms_raised")["touchdowns_per_s"] = 0.95
+    return results
+
+
+class TrackingWaiverTest(unittest.TestCase):
+    def test_a_normal_gate_carries_no_waiver(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint, identity = _final_checkpoint(root)
+            gate = create_gate(checkpoint=checkpoint, **_write_reports(root, identity, _results()))
+            self.assertEqual(gate["status"], "pass")
+            self.assertNotIn("tracking_waiver", gate)
+            with self.assertRaisesRegex(ValueError, "waiver note needs"):
+                create_gate(checkpoint=checkpoint, waiver_note=APPROVAL,
+                            **_write_reports(root, identity, _results()))
+            with self.assertRaisesRegex(ValueError, "status drifted"):
+                create_gate(checkpoint=checkpoint, **_write_reports(root, identity, _failing_behaviour()))
+
+    def test_waived_behaviour_checks_are_recorded_with_their_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint, identity = _final_checkpoint(root)
+            paths = _write_reports(root, identity, _failing_behaviour())
+            waived = ("support_foot_still", "standing_still")
+            gate = create_gate(checkpoint=checkpoint, waive_tracking_checks=waived,
+                               waiver_note=APPROVAL, **paths)
+            self.assertEqual(gate["status"], "pass_with_waiver")
+            self.assertEqual(gate["tracking_waiver"], {
+                "approval": APPROVAL,
+                "checks": {
+                    "standing_still": [{
+                        "scenario": "neutral/arms_raised", "quantity": "touchdowns_per_s",
+                        "measured": 0.95, "limit": 0.5, "rule": "at_most",
+                    }],
+                    "support_foot_still": [{
+                        "scenario": "left_back_out", "quantity": "support_move_median_m",
+                        "measured": 0.029, "limit": 0.01, "rule": "at_most",
+                    }],
+                },
+            })
+            gate_path = root / "gate.json"
+            gate_path.write_text(json.dumps(gate))
+            self.assertEqual(validate_gate(gate_path, checkpoint), gate)
+            for keys, value in (
+                (("tracking_waiver", "checks", "standing_still", 0, "limit"), 0.9),
+                (("tracking_waiver", "checks", "standing_still", 0, "measured"), 0.6),
+                (("status",), "pass"),
+            ):
+                with self.subTest(keys=keys):
+                    tampered = deepcopy(gate)
+                    target = tampered
+                    for key in keys[:-1]:
+                        target = target[key]
+                    target[keys[-1]] = value
+                    gate_path.write_text(json.dumps(tampered))
+                    with self.assertRaises(ValueError):
+                        validate_gate(gate_path, checkpoint)
+            dropped = deepcopy(gate)
+            del dropped["tracking_waiver"]
+            gate_path.write_text(json.dumps(dropped))
+            with self.assertRaises(ValueError):
+                validate_gate(gate_path, checkpoint)
+            for names, note, message in (
+                (("support_foot_still",), APPROVAL, "exactly the failing"),
+                ((*waived, "foot_error"), APPROVAL, "exactly the failing"),
+                (waived, None, "approval"),
+                (waived, "  ", "approval"),
+            ):
+                with self.subTest(names=names, note=note), self.assertRaisesRegex(ValueError, message):
+                    create_gate(checkpoint=checkpoint, waive_tracking_checks=names, waiver_note=note, **paths)
+
+    def test_safety_checks_cannot_be_waived(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint, identity = _final_checkpoint(root)
+            results = _failing_behaviour()
+            results["safety"]["maximum_actual_soft_limit_violation_rad"] = 0.5
+            paths = _write_reports(root, identity, results)
+            for names in (
+                ("support_foot_still", "standing_still"),
+                ("support_foot_still", "standing_still", "actual_soft_limits"),
+            ):
+                with self.subTest(names=names), self.assertRaisesRegex(ValueError, "Safety checks"):
+                    create_gate(checkpoint=checkpoint, waive_tracking_checks=names,
+                                waiver_note=APPROVAL, **paths)
+            paths = _write_reports(root, identity, _failing_behaviour())
+            with self.assertRaisesRegex(ValueError, "Safety checks"):
+                create_gate(checkpoint=checkpoint,
+                            waive_tracking_checks=("support_foot_still", "standing_still", "finite"),
+                            waiver_note=APPROVAL, **paths)
+
+
 if __name__ == "__main__":
     unittest.main()

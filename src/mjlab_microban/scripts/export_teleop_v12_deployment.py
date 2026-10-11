@@ -5,7 +5,10 @@ evidence; this command turns that evidence into the robot's contract
 microban-policy-1 (policy_contract.py, docs/policies.md: the HOME stamp, the
 layout, the PICO foot and arm targets and curriculum, the raw-action guard and the startup
 self-test: the final tracking rollouts' actor observations with the actor's
-deterministic output for each), checks the final metadata-bearing graph with
+deterministic output for each; a gate created under a user-approved waiver of
+failing PICO behaviour checks adds the gate status ``pass_with_waiver`` and the
+waiver record, policy_contract.TRACKING_WAIVER_METADATA_KEY), checks the final
+metadata-bearing graph with
 both ONNX implementations and the robot's self-test rule and only then
 atomically publishes the file.  The robot side is checked when the release is
 installed (its tools/validate_policies.py and its tests): the package does not
@@ -177,10 +180,13 @@ def _require_final_gate(
 ) -> None:
     from mjlab_microban.scripts.teleop_v12_stage import GATE_SCHEMA_VERSION
 
+    waived = "tracking_waiver" in gate
     expected = {
         "schema_version": GATE_SCHEMA_VERSION,
         "gate": "microban_teleop_v12_stage",
-        "status": "pass",
+        "status": (
+            policy_contract.GATE_STATUS_WAIVED if waived else policy_contract.GATE_STATUS_PASS
+        ),
         "checkpoint_sha256": checkpoint_sha256,
     }
     mismatches = [name for name, value in expected.items() if gate.get(name) != value]
@@ -334,6 +340,11 @@ def build_v12_deployment_metadata(
         ))
     except policy_contract.PolicyContractError as exc:
         raise ValueError(str(exc)) from exc
+    if "tracking_waiver" in gate:
+        try:
+            metadata.update(policy_contract.tracking_waiver_metadata(gate["tracking_waiver"]))
+        except policy_contract.PolicyContractError as exc:
+            raise ValueError(str(exc)) from exc
     metadata["run_path"] = checkpoint.parent.name
     if (
         set(training_git_provenance) != set(TRAINING_GIT_METADATA_KEYS)
@@ -648,6 +659,14 @@ def package_v12_deployment(
             "output_sha256": sha256_file(output),
             "checkpoint_sha256": checkpoint_sha256,
             "stage_gate_sha256": gate_sha256,
+            **(
+                {
+                    "gate_status": metadata["gate_status"],
+                    "tracking_waiver": gate["tracking_waiver"],
+                }
+                if "tracking_waiver" in gate
+                else {}
+            ),
             **training_git_provenance,
             "completed_updates": gate["completed_updates"],
             "parity": final_parity,

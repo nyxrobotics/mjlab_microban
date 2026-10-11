@@ -291,6 +291,63 @@ def test_metadata_is_the_pico_contract_and_derives_guard(tmp_path: Path) -> None
         assert [abs(float(value)) for value in metadata[key].split(",")] == [math.pi] * 18
 
 
+WAIVER = {
+    "approval": "User approved installing this model with these tracking checks failing",
+    "checks": {
+        "standing_still": [{
+            "scenario": "neutral/arms_raised", "quantity": "touchdowns_per_s",
+            "measured": 0.95, "limit": 0.5, "rule": "at_most",
+        }],
+    },
+}
+
+
+def test_a_waived_gate_records_its_waiver_in_the_metadata(tmp_path: Path) -> None:
+    checkpoint = tmp_path / FINAL_NAME
+    checkpoint.write_bytes(b"checkpoint")
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    gate, _locomotion, tracking, _onnx_report, infos = _evidence(tmp_path)
+    gate["checkpoint_sha256"] = _sha(checkpoint)
+    rows = deployment._self_test_rows(tracking)
+
+    def build(changed: dict) -> dict[str, str]:
+        return deployment.build_v12_deployment_metadata(
+            checkpoint=checkpoint,
+            checkpoint_sha256=_sha(checkpoint),
+            gate_path=gate_path,
+            gate=changed,
+            infos=infos,
+            bootstrap=_bootstrap(),
+            tracking=tracking,
+            self_test_observations=rows,
+            self_test_actions=[[0.5] * 18 for _ in rows],
+            training_git_provenance=_git_provenance(),
+            dry_run=False,
+        )
+
+    normal = build(gate)
+    assert normal["gate_status"] == "pass"
+    assert "gate_tracking_waiver_json" not in normal
+    waived = {**gate, "status": "pass_with_waiver", "tracking_waiver": WAIVER}
+    metadata = build(waived)
+    assert metadata["gate_status"] == "pass_with_waiver"
+    assert json.loads(metadata["gate_tracking_waiver_json"]) == WAIVER
+    assert {k: v for k, v in metadata.items() if k not in ("gate_status", "gate_tracking_waiver_json")} == {
+        k: v for k, v in normal.items() if k != "gate_status"
+    }
+    for broken in (
+        {**gate, "tracking_waiver": WAIVER},
+        {**gate, "status": "pass_with_waiver"},
+    ):
+        with pytest.raises(ValueError, match="requires the passing gate"):
+            build(broken)
+    unsafe = json.loads(json.dumps(WAIVER))
+    unsafe["checks"]["finite"] = unsafe["checks"]["standing_still"]
+    with pytest.raises(ValueError, match="safety checks cannot be waived"):
+        build({**waived, "tracking_waiver": unsafe})
+
+
 def test_deployment_requires_the_corrected_bilateral_site_order() -> None:
     infos = {BILATERAL_SITE_ORDER_INFO_KEY: MICROBAN_BILATERAL_SITE_ORDER_REVISION}
     require_bilateral_site_order(infos)

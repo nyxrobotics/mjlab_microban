@@ -51,6 +51,33 @@ POLICY_FILES: Mapping[str, str] = {
     "pico": "pico_teleop.onnx",
 }
 DRY_RUN_METADATA_KEY = "dry_run_not_deployable"
+# A PICO release whose behaviour checks failed may still be installed when the
+# user approves it explicitly (teleop_v12_stage create --waive-tracking-checks).
+# Its gate status is then GATE_STATUS_WAIVED and TRACKING_WAIVER_METADATA_KEY
+# records the approval and every failing measurement of each waived check.
+# Only the behaviour checks of the PICO judgment can be waived; its safety and
+# integrity checks, the 9x300 locomotion and the ONNX gate never can.
+GATE_STATUS_PASS = "pass"
+GATE_STATUS_WAIVED = "pass_with_waiver"
+TRACKING_WAIVER_METADATA_KEY = "gate_tracking_waiver_json"
+PICO_WAIVABLE_TRACKING_CHECKS = (
+    "no_falls_without_push",
+    "foot_lift",
+    "foot_error",
+    "support_foot_still",
+    "push_falls",
+    "standing_still",
+    "walking_with_arms",
+)
+PICO_UNWAIVABLE_TRACKING_CHECKS = (
+    "finite",
+    "actual_soft_limits",
+    "raw_action_recurrence",
+    "forced_hmd_motion",
+    "arm_observation",
+)
+TRACKING_WAIVER_RULES = ("at_most", "at_least")
+TRACKING_WAIVER_APPROVAL_MAX_CHARS = 2000
 
 # The robot's OBSERVATION_DOF_ORDER: action order of every policy and the
 # joint order of the walk/get-up joint observations.
@@ -121,6 +148,70 @@ PICO_CURRICULUM_KEYS = ("critic_warmup", "arm_start", "foot_start", "foot_tighte
 
 class PolicyContractError(ValueError):
     """An export does not satisfy microban-policy-1."""
+
+
+def check_tracking_waiver(value: object) -> dict[str, Any]:
+    """Check a tracking-check waiver record (the robot applies the same rule).
+
+    ``{"approval": str, "checks": {name: [{"scenario", "quantity", "measured",
+    "limit", "rule"}, ...]}}``: only behaviour checks, each with at least one
+    finite failing measurement that really breaks its limit.
+    """
+
+    if not isinstance(value, dict) or set(value) != {"approval", "checks"}:
+        raise PolicyContractError("tracking waiver must hold exactly approval and checks")
+    approval = value["approval"]
+    if (
+        not isinstance(approval, str)
+        or not approval.strip()
+        or approval != approval.strip()
+        or len(approval) > TRACKING_WAIVER_APPROVAL_MAX_CHARS
+    ):
+        raise PolicyContractError("tracking waiver approval must be a non-empty trimmed text")
+    checks = value["checks"]
+    if not isinstance(checks, dict) or not checks:
+        raise PolicyContractError("tracking waiver must name at least one check")
+    unwaivable = sorted(set(checks) & set(PICO_UNWAIVABLE_TRACKING_CHECKS))
+    if unwaivable:
+        raise PolicyContractError(f"safety checks cannot be waived: {', '.join(unwaivable)}")
+    unknown = sorted(set(checks) - set(PICO_WAIVABLE_TRACKING_CHECKS))
+    if unknown:
+        raise PolicyContractError(f"tracking waiver names unknown checks: {', '.join(unknown)}")
+    for name, entries in checks.items():
+        if not isinstance(entries, list) or not entries:
+            raise PolicyContractError(f"tracking waiver {name} records no failing measurement")
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"scenario", "quantity", "measured", "limit", "rule"}:
+                raise PolicyContractError(f"tracking waiver {name} measurement is malformed")
+            numbers = (entry["measured"], entry["limit"])
+            if (
+                not isinstance(entry["scenario"], str)
+                or not entry["scenario"]
+                or not isinstance(entry["quantity"], str)
+                or not entry["quantity"]
+                or entry["rule"] not in TRACKING_WAIVER_RULES
+                or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+                       for x in numbers)
+            ):
+                raise PolicyContractError(f"tracking waiver {name} measurement is malformed")
+            measured, limit = (float(x) for x in numbers)
+            breaks = measured > limit if entry["rule"] == "at_most" else measured < limit
+            if not breaks:
+                raise PolicyContractError(
+                    f"tracking waiver {name} records a measurement within its limit"
+                )
+    return value
+
+
+def tracking_waiver_metadata(waiver: Mapping[str, Any]) -> dict[str, str]:
+    """The gate status and waiver record of a PICO release installed under a waiver."""
+
+    record = check_tracking_waiver(json.loads(json.dumps(waiver)))
+    return {
+        "gate_status": GATE_STATUS_WAIVED,
+        TRACKING_WAIVER_METADATA_KEY: json.dumps(record, ensure_ascii=True, sort_keys=True,
+                                                 separators=(",", ":")),
+    }
 
 
 def sha256_file(path: str | Path) -> str:
@@ -311,7 +402,7 @@ def contract_metadata(
         "checkpoint_filename": stem,
         "checkpoint_iteration": str(iteration),
         "checkpoint_sha256": checkpoint_sha256,
-        "gate_status": "pass",
+        "gate_status": GATE_STATUS_PASS,
         "gate_report_sha256": gate_report_sha256,
         "self_test_observations_json": _json(rows),
         "self_test_actions_json": _json(actions),
