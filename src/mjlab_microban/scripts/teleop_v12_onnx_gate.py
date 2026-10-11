@@ -33,6 +33,7 @@ from mjlab_microban.tasks.microban_teleop_v12_runner import (
 )
 from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
     load_bootstrap_source_state,
+    portable_bootstrap_artifact_path,
     validate_bootstrap_provenance,
     sha256_file,
 )
@@ -181,7 +182,9 @@ def run_gate(
             "residual": "excluded",
         },
         "onnx": {
-            "path": str(onnx_path.resolve()),
+            # repo:// for an in-repository ONNX, so the evidence still
+            # validates after the run is copied to another clone.
+            "path": portable_bootstrap_artifact_path(onnx_path),
             "sha256": sha256_file(onnx_path),
             "opset": 18,
             "input_shape": [1, MICROBAN_TELEOP_OBSERVATION_WIDTH],

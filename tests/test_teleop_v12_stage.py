@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -59,7 +61,11 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     TELEOP_V12_ADAPTER_GRADIENT_SCHEDULE_REVISION,
     teleop_v12_active_adapter_columns,
 )
-from mjlab_microban.tasks.microban_teleop_v12_bootstrap import sha256_file
+from mjlab_microban.tasks import microban_teleop_v12_bootstrap
+from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+    portable_bootstrap_artifact_path,
+    sha256_file,
+)
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import (
     MICROBAN_TELEOP_V12_TRAINING_CONTRACT_VERSION,
     MICROBAN_TELEOP_V13_ARM_OVERLAY_RECIPE_REVISION,
@@ -269,7 +275,7 @@ def _onnx_report(identity: dict[str, object], onnx_path: Path) -> dict[str, obje
             "residual": "excluded",
         },
         "onnx": {
-            "path": str(onnx_path),
+            "path": portable_bootstrap_artifact_path(onnx_path),
             "sha256": sha256_file(onnx_path),
             "opset": 18,
             "input_shape": [1, 81],
@@ -763,6 +769,29 @@ class TrackingWaiverTest(unittest.TestCase):
                 create_gate(checkpoint=checkpoint,
                             waive_tracking_checks=("support_foot_still", "standing_still", "finite"),
                             waiver_note=APPROVAL, **paths)
+
+
+class PortableEvidenceTest(unittest.TestCase):
+    def test_a_gate_still_validates_after_the_run_is_copied_to_another_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first", Path(directory) / "second"
+            run = Path("artifacts/pico_release/run")
+            (first / run).mkdir(parents=True)
+            with mock.patch.object(microban_teleop_v12_bootstrap, "_PROJECT_ROOT", first):
+                checkpoint, identity = _final_checkpoint(first / run)
+                paths = _write_reports(first / run, identity, _failing_behaviour())
+                self.assertTrue(
+                    json.loads(paths["onnx_report"].read_text())["onnx"]["path"].startswith("repo://")
+                )
+                gate = create_gate(checkpoint=checkpoint,
+                                   waive_tracking_checks=("support_foot_still", "standing_still"),
+                                   waiver_note=APPROVAL, **paths)
+                (first / run / "gate.json").write_text(json.dumps(gate))
+            shutil.copytree(first, second)
+            shutil.rmtree(first)
+            with mock.patch.object(microban_teleop_v12_bootstrap, "_PROJECT_ROOT", second):
+                copied = second / run
+                self.assertEqual(validate_gate(copied / "gate.json", copied / checkpoint.name), gate)
 
 
 if __name__ == "__main__":
