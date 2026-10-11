@@ -26,6 +26,9 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
     MicrobanVelocityRlCfg,
 )
 from mjlab_microban.tasks.microban_velocity_runner import MicrobanVelocityOnPolicyRunner
+from mjlab_microban.wholebody.env_cfg import TASK_ID as WHOLEBODY_TASK_ID
+from mjlab_microban.wholebody.env_cfg import WholebodyRlCfg, make_wholebody_env_cfg
+from mjlab_microban.wholebody.runner import WholebodyOnPolicyRunner
 
 register_mjlab_task(
     task_id="Mjlab-Velocity-Microban",
@@ -54,4 +57,12 @@ register_mjlab_task(
     play_env_cfg=make_microban_teleop_v13_arm_overlay_env_cfg(play=True),
     rl_cfg=MicrobanTeleopV13ArmOverlayRlCfg,
     runner_cls=MicrobanTeleopV13ArmOverlayOnPolicyRunner,
+)
+# Whole-body motion tracking (Teleopit's task on Microban; src/mjlab_microban/wholebody).
+register_mjlab_task(
+    task_id=WHOLEBODY_TASK_ID,
+    env_cfg=make_wholebody_env_cfg(),
+    play_env_cfg=make_wholebody_env_cfg(play=True),
+    rl_cfg=WholebodyRlCfg,
+    runner_cls=WholebodyOnPolicyRunner,
 )
