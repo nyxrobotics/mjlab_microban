@@ -9,13 +9,26 @@ left, and the IK targets (red dots) are drawn over the robot.  Writes
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+# glvnd's vendor folders: where a Mesa vendor file is, EGL is pointed at it so
+# it draws with llvmpipe even when a GPU vendor is installed; elsewhere glvnd
+# picks the vendor.
+EGL_VENDOR_DIRS = ("/usr/share/glvnd/egl_vendor.d", "/etc/glvnd/egl_vendor.d", "/usr/local/share/glvnd/egl_vendor.d")
+
+
+def _mesa_egl_vendor() -> str | None:
+    for folder in EGL_VENDOR_DIRS:
+        for path in sorted(Path(folder).glob("*mesa*.json")):
+            return str(path)
+    return None
+
 
 os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
+if (_vendor := _mesa_egl_vendor()) is not None:
+    os.environ.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES", _vendor)
 os.environ.setdefault("EGL_PLATFORM", "surfaceless")
 os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-
-from pathlib import Path
 
 import imageio.v2 as imageio
 import matplotlib

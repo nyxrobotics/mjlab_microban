@@ -60,7 +60,7 @@ FORMATS = {
                        "subject5": ("pushAndStumble1_subject5.bvh", 309)},
     },
     # G1 robot recordings (the PICO sets) as pseudo-bones from G1's forward
-    # kinematics (g1.py); the neck base is the midpoint of the shoulders.
+    # kinematics (pico.py); the neck base is the midpoint of the shoulders.
     "g1": {
         "skip_first": 0, "pelvis": "pelvis", "spine": "torso", "neck": "neck",
         **{s: {p: f"{s}_{p}" for p in _LIMBS} for s in "LR"},
