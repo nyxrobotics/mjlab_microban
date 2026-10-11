@@ -14,7 +14,8 @@ Split: the ``subject5`` files are the evaluation set (LAFAN1's standard
 split); every file of a kind without one gives its last 20 % of frames.  Both
 sets go through the same cuts.  The training shard is cut into overlapping
 windows (Teleopit's); each evaluation section is one window, so the
-evaluation can run it in consecutive pieces.
+evaluation can run it in consecutive pieces.  An evaluation-only set (the
+PICO recordings) puts every file in the evaluation set.
 """
 
 from __future__ import annotations
@@ -168,12 +169,13 @@ def build_dataset(
     *,
     spec: ExclusionSpec = ExclusionSpec(),
     workers: int = 1,
+    eval_only: bool = False,
 ) -> dict[str, Any]:
-    """Write ``out_dir/{train,eval}/motion.h5`` and ``out_dir/report.json``."""
+    """Write ``out_dir/{train,eval}/motion.h5`` (``eval_only``: the evaluation shard only) and ``out_dir/report.json``."""
     files = sorted(Path(retarget_dir).glob("*.pkl"))
     if not files:
         raise FileNotFoundError(f"no PKL files in {retarget_dir}")
-    split = split_files([path.stem for path in files])
+    split = {path.stem: "eval" for path in files} if eval_only else split_files([path.stem for path in files])
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(process_file, files, [split[p.stem] for p in files], [spec] * len(files)))
@@ -204,7 +206,7 @@ def build_dataset(
         row["needs_review"] = row["excluded_fraction"] > REVIEW_EXCLUDED_FRACTION
 
     shards = {}
-    for part in ("train", "eval"):
+    for part in ("eval",) if eval_only else ("train", "eval"):
         if not sections[part]:
             raise ValueError(f"no {part} sections survived the cuts")
         shards[part] = write_motion_shard(

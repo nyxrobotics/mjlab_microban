@@ -5,7 +5,9 @@
 
 Writes ``<out-dir>/train/motion.h5``, ``<out-dir>/eval/motion.h5`` and
 ``<out-dir>/report.json`` (per motion kind: the files of each set and the
-share of frames cut, by reason), and prints the report.  LAFAN1 is CC BY-NC-ND
+share of frames cut, by reason), and prints the report.  ``--eval-only``
+writes every file to the evaluation shard (the PICO recordings).  The whole
+pipeline from the downloads is wholebody_make_data.py.  LAFAN1 is CC BY-NC-ND
 4.0: everything under data/wholebody/ stays out of git and off the network.
 """
 
@@ -23,8 +25,9 @@ def main() -> None:
     parser.add_argument("--retarget-dir", type=Path, default=Path("data/wholebody/lafan1/retarget"))
     parser.add_argument("--out-dir", type=Path, default=Path("data/wholebody/lafan1"))
     parser.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 1))
+    parser.add_argument("--eval-only", action="store_true", help="Every file to the evaluation shard (no training shard)")
     args = parser.parse_args()
-    report = build_dataset(args.retarget_dir, args.out_dir, workers=args.workers)
+    report = build_dataset(args.retarget_dir, args.out_dir, workers=args.workers, eval_only=args.eval_only)
     print(format_report(report))
 
 
