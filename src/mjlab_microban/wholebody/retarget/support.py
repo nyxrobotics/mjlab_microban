@@ -110,7 +110,7 @@ class SupportSpec:
     # Least squares weights, per frame and squared: the ZMP outside (per m; w_lift times at a lift-off), the shift
     # (per m), its acceleration (per m/s^2), its forward speed (per m/s) and the shift where it must be 0 (per m).
     w_outside: float = 1.0
-    w_lift: float = 3.0
+    w_lift: float = 10.0
     w_shift: float = 3e-2
     w_accel: float = 1e-4
     w_speed_forward: float = 0.3  # 1e-2 let the trunk stop and go at every step (forward speed std x1.9)
