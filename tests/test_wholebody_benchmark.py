@@ -23,10 +23,11 @@ def test_pieces_cover_each_section_once(tmp_path):
     path = tmp_path / "motion.h5"
     write_motion_shard([_section("walk1_subject5__f0-751", 751), _section("run1_subject5__f0-90", 90)], path,
                        body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
-    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
+    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0, start="reference")
     assert [(p.window_id, p.kind, p.start_s, p.steps) for p in pieces] == [
         (0, "walk", 0.0, 500), (0, "walk", 10.0, 500), (0, "walk", 20.0, 250), (1, "run", 0.0, 148),
     ]
+    assert all(p.settle_steps == 0 and p.judged_seconds == p.seconds for p in pieces)
 
 
 def test_pieces_measure_the_reference_trunks_travel(tmp_path):
@@ -36,8 +37,30 @@ def test_pieces_measure_the_reference_trunks_travel(tmp_path):
     section["body_pos_w"][:, 0, 0] = 0.03 * np.minimum(t, 10.0)
     path = tmp_path / "motion.h5"
     write_motion_shard([section], path, body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
-    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
+    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0, start="reference")
     assert [round(p.ref_travel_m, 6) for p in pieces] == [0.3, 0.0]
+
+
+def test_a_home_start_judges_each_piece_after_its_first_second(tmp_path):
+    # From HOME the first second of a piece is the way to the reference pose:
+    # 25 s at 0.03 m/s for 10 s, then standing; a 1.0 s section (nothing past
+    # the settle, left out) and a 1.07 s one (0.06 s judged).
+    section = _section("dance1_subject5__f0-751", 751)
+    t = np.arange(751) / 30.0
+    section["body_pos_w"][:, 0, 0] = 0.03 * np.minimum(t, 10.0)
+    path = tmp_path / "motion.h5"
+    write_motion_shard([section, _section("run1_subject5__f0-31", 31), _section("run2_subject5__f0-33", 33)], path,
+                       body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
+    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
+    assert benchmark.settle_steps("home", 0.02) == 50 and benchmark.settle_steps("reference", 0.02) == 0
+    assert [(p.window_id, p.start_s, p.steps, p.settle_steps) for p in pieces] == [
+        (0, 0.0, 500, 50), (0, 10.0, 500, 50), (0, 20.0, 250, 50), (2, 0.0, 53, 50),
+    ]
+    assert [round(p.judged_seconds, 6) for p in pieces] == [9.0, 9.0, 4.0, 0.06]
+    # The reference's travel over the judged steps only: 0.3 m less the first second's 0.03 m.
+    assert [round(p.ref_travel_m, 6) for p in pieces[:2]] == [0.27, 0.0]
+    with pytest.raises(ValueError):
+        benchmark.settle_steps("crouched", 0.02)
 
 
 def _kind(success_rate: float, progress: float | None = 1.0, travel_seconds: float | None = None) -> dict:
@@ -74,13 +97,20 @@ def test_progress_holds_on_every_kind_whose_reference_travels():
     assert judged["final"]["pass"] and "cmujump" not in judged["final"]["progress"]
 
 
-def _result(kind: str, travel: float, dot: float, success: bool = True, seconds: float = 10.0):
+def _result(
+    kind: str,
+    travel: float,
+    dot: float,
+    success: bool = True,
+    seconds: float = 10.0,
+    settle_s: float = 0.0,
+):
     """A piece result whose reference trunk travelled ``travel`` m and the robot ``dot`` / ``travel`` of it."""
     errors = {name: 0.5 * std for name, std in benchmark.ERROR_LINES.items()}
     return benchmark.PieceResult(
         piece_id=0, window_id=0, clip_name=f"{kind}1_subject5", kind=kind, start_s=0.0, seconds=seconds,
-        steps=int(seconds / 0.02), success=success, failure_reason=None if success else "anchor_pos",
-        overspeed_share=0.0, ref_travel_m=travel,
+        judged_seconds=seconds - settle_s, steps=round((seconds - settle_s) / 0.02), success=success,
+        failure_reason=None if success else "anchor_pos", overspeed_share=0.0, ref_travel_m=travel,
         **{name: (value if success else None) for name, value in errors.items()},
         progress_dot_m2=dot if success else None, ref_displacement_sq_m2=travel**2 if success else None,
     )
@@ -119,3 +149,16 @@ def test_an_evaluation_only_set_is_judged_on_its_own_kinds():
     # Its recordings walk without walk in their kind names: a robot standing still fails.
     still = benchmark.verdicts({**pico, "picoteleopit": _kind(1.0, progress=0.05)}, require_locomotion=False)
     assert not still["final"]["pass"] and not still["small_run"]["pass"]
+
+
+def test_a_kind_is_judged_on_its_judged_seconds():
+    # From HOME: success and travelling time over the seconds past the settle.
+    kinds = benchmark.summarize([
+        _result("walk", 0.4, 0.16, seconds=10.0, settle_s=1.0),
+        _result("walk", 0.4, 0.16, success=False, seconds=4.0, settle_s=1.0),
+        _result("walk", 0.0, 0.0, success=False, seconds=2.0, settle_s=1.0),
+    ])
+    walk = kinds["walk"]
+    assert walk["judged_seconds"] == pytest.approx(13.0) and walk["seconds"] == pytest.approx(16.0)
+    assert walk["success_rate"] == pytest.approx(9.0 / 13.0)
+    assert walk["travel_seconds"] == pytest.approx(12.0)

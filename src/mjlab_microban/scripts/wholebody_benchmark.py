@@ -9,6 +9,10 @@ checkpoints of one run to see whether success and errors still improve: with
 the same seed they meet the same conditions piece by piece.  The kinds of
 the training set (``--train-motion-file``) must all be evaluated.
 
+The robot starts every piece at rest at HOME and its first second is not
+judged; ``--start reference`` places it on the reference's first frame
+instead, as earlier reports did (see benchmark.py).
+
 An evaluation-only set is judged on its own kinds with ``--eval-only-set``
 (no training kinds or walk, run and sprint required; the same lines):
 
@@ -51,7 +55,9 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
     no_load = benchmark.servo_no_load_speed_rad_s()
     probe = benchmark_env_cfg(args.motion_file, args.clip_seconds, 1, 0)
     step_dt = probe.decimation * probe.sim.mujoco.timestep
-    pieces = benchmark.load_pieces(args.motion_file, ACTION_JOINT_NAMES, args.clip_seconds, step_dt, no_load)
+    pieces = benchmark.load_pieces(
+        args.motion_file, ACTION_JOINT_NAMES, args.clip_seconds, step_dt, no_load, start=args.start
+    )
     expected_kinds = set() if args.eval_only_set else benchmark.dataset_kinds(args.train_motion_file)
     results = []
     batches = [pieces[i : i + args.num_envs] for i in range(0, len(pieces), args.num_envs)]
@@ -62,7 +68,7 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
             runner = WholebodyOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(load_rl_cfg(TASK_ID)), device=args.device)
             runner.load(str(checkpoint), load_cfg={"actor": True}, map_location=args.device)
             policy = runner.get_inference_policy(device=args.device)
-            batch_results, _ = benchmark.rollout(env, policy, batch)
+            batch_results, _ = benchmark.rollout(env, policy, batch, start=args.start)
             results.extend(batch_results)
         finally:
             env.close()
@@ -76,9 +82,11 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
         "train_motion_file": None if args.eval_only_set else str(Path(args.train_motion_file).resolve()),
         "eval_only_set": args.eval_only_set,
         "clip_seconds": args.clip_seconds,
+        "start": args.start,
         "servo_no_load_speed_rad_s": no_load,
         "pieces": len(pieces),
         "seconds": sum(p.seconds for p in pieces),
+        "judged_seconds": sum(p.judged_seconds for p in pieces),
         "num_envs": args.num_envs,
         "seed": args.seed,
     }
@@ -102,6 +110,13 @@ def main() -> None:
         "the training kinds and walk, run and sprint are not required",
     )
     parser.add_argument("--clip-seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--start",
+        choices=("home", "reference"),
+        default="home",
+        help="home: at rest at HOME, the first second not judged (as on the robot); "
+        "reference: on the reference's first frame, judged from the first step (earlier reports)",
+    )
     parser.add_argument("--num-envs", type=int, default=1024, help="Pieces run at once")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-root", default="artifacts/wholebody")
