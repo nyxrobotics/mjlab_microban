@@ -6,6 +6,7 @@ import json
 import pickle
 
 import numpy as np
+import pytest
 
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody.data.fk import quat_wxyz_to_xyzw
@@ -146,3 +147,9 @@ def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
     # Names of another set leave this one alone.
     assert pipeline.retarget("cmu", tmp_path, workers=2, only={"walk1_subject1"}) == {}
     assert list(json.loads((out / "errors.json").read_text())) == ["cmuwalk_07_02"]
+    # Redoing some clips with other support shift settings than the set's is refused (the manifest holds for all).
+    from mjlab_microban.wholebody.retarget.support import SupportSpec
+
+    with pytest.raises(ValueError, match="retarget the whole set"):
+        pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"}, support_spec=SupportSpec())
+    assert (out / "cmuwalk_07_01.pkl").exists()

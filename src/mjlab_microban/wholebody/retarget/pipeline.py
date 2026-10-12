@@ -11,7 +11,9 @@ Layout (everything under data/wholebody/, which git ignores):
   ``errors.json`` (clips that failed).  A run of the whole
   set starts from an empty folder, and a run of some clips (``only``) first
   removes their old output, so a clip that fails or is no longer made leaves
-  no PKL for ``finalize`` to pick up.
+  no PKL for ``finalize`` to pick up.  A run of some clips with other support
+  settings than the set's is refused, so that the manifest holds for every
+  clip.
 * ``<set>/retarget/``: the PKLs with the long arm-branch flips cut
   (``finalize``), ``<set>/finalize.json`` (what was cut), and the training
   side's ``<set>/{train,eval}/motion.h5`` and ``report.json``.  The PICO set
@@ -177,13 +179,19 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
         only = only & {stem for _, _, stem, _ in items}
         if not only:
             return {}
+    manifest = out / "manifest.json"
+    if only is not None and manifest.exists():
+        had = json.loads(manifest.read_text()).get("support_shift")
+        if had != _settings(support_spec):
+            raise ValueError(f"{name} was retargeted with the support shift {had}, not {_settings(support_spec)}: "
+                             "retarget the whole set to change it")
     previous = {}
     if only is not None and (out / "errors.json").exists():
         previous = {stem: error for stem, error in json.loads((out / "errors.json").read_text()).items()
                     if stem not in only}
     _fresh_output(out, only)
-    if only is None:
-        (out / "manifest.json").write_text(json.dumps(
+    if only is None or not manifest.exists():
+        manifest.write_text(json.dumps(
             {"support_shift": _settings(support_spec),
              "clips": [{"name": s, "source": os.path.relpath(f, raw), "description": d} for f, _, s, d in items]},
             ensure_ascii=False, indent=0))

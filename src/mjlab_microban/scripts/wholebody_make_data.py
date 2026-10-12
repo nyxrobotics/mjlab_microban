@@ -58,10 +58,19 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("."), help="file: the output folder")
     parser.add_argument("--support", action="store_true",
                         help="all, retarget, file: move the trunk so that the zero-moment point stays in the support")
-    parser.add_argument("--support-margin-mm", type=float, default=1000 * SupportSpec.margin_m,
-                        help="with --support: the support is the contact hull shrunk inward by this (default %(default)g)")
+    parser.add_argument("--support-margin-mm", type=float,
+                        help=f"with --support: the support is the contact hull shrunk inward by this "
+                             f"(default {1000 * SupportSpec.margin_m:g})")
     args = parser.parse_args()
-    support_spec = SupportSpec(margin_m=args.support_margin_mm / 1000) if args.support else None
+    support_spec = None
+    if args.support_margin_mm is not None and not args.support:
+        parser.error("--support-margin-mm needs --support")
+    if args.support:
+        margin = SupportSpec.margin_m if args.support_margin_mm is None else args.support_margin_mm / 1000
+        try:
+            support_spec = SupportSpec(margin_m=margin)
+        except ValueError as error:
+            parser.error(str(error))
 
     if args.step == "file":
         from mjlab_microban.wholebody.retarget import core
@@ -94,7 +103,10 @@ def main() -> None:
         if only and (unknown := sorted(only - set().union(*(pipeline.clip_names(n, root) for n in training)))):
             parser.error(f"--only names no clip of {', '.join(training)}: {unknown[:10]}")
         for name in training:
-            errors = pipeline.retarget(name, root, args.workers, only, support_spec)
+            try:
+                errors = pipeline.retarget(name, root, args.workers, only, support_spec)
+            except ValueError as error:  # --only with other support settings than the set's
+                parser.error(str(error))
             if errors:
                 print(f"{name}: {len(errors)} clips failed, see {root / 'gmr' / name / 'errors.json'}")
         if "pico_eval" in sets:
