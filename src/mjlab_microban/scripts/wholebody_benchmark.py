@@ -14,7 +14,8 @@ judged; ``--start reference`` places it on the reference's first frame
 instead, as earlier reports did (see benchmark.py).
 
 An evaluation-only set is judged on its own kinds with ``--eval-only-set``
-(no training kinds or walk, run and sprint required; the same lines):
+(no training kinds or walk, run and sprint required; the same lines, and the
+fall line, which holds only on the operator's motions):
 
   uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py \\
       --checkpoint <model.pt> --motion-file data/wholebody/pico_eval/eval --eval-only-set \\
@@ -92,7 +93,7 @@ def evaluate(checkpoint: Path, args: argparse.Namespace) -> dict:
     }
     report = benchmark.write_outputs(
         Path(args.output_root) / run, checkpoint.stem, metadata, results, expected_kinds,
-        require_locomotion=not args.eval_only_set,
+        require_locomotion=not args.eval_only_set, hold_fall_line=args.eval_only_set,
     )
     print(f"{checkpoint}:\n{benchmark.format_summary(report)}")
     return report
@@ -107,7 +108,7 @@ def main() -> None:
         "--eval-only-set",
         action="store_true",
         help="Judge only the kinds of --motion-file (an evaluation-only set such as data/wholebody/pico_eval/eval): "
-        "the training kinds and walk, run and sprint are not required",
+        "the training kinds and walk, run and sprint are not required, and the fall line holds",
     )
     parser.add_argument("--clip-seconds", type=float, default=10.0)
     parser.add_argument(

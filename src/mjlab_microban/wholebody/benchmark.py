@@ -3,7 +3,8 @@
 # https://github.com/BotRunner64/Teleopit).  Changes: the evaluation set run
 # in consecutive pieces, results per motion kind, error lines equal to the
 # reward stds, a progress line on every piece whose reference travels, no
-# reset during a run, the robot started at rest at HOME.
+# reset during a run, the robot started at rest at HOME, a fall line and a
+# line on the leg targets' step-to-step change.
 
 """Evaluate a checkpoint on the evaluation set, per motion kind.
 
@@ -34,7 +35,9 @@ Conditions.  Observation noise, pushes and the physics randomization of
 training are off.  The robot's own conditions (battery voltage and its drop,
 actuator and sensor delays) are drawn from their training ranges with the
 seed.  No env is reset during a run, so the draws do not depend on the
-policy: two checkpoints meet the same conditions piece by piece.
+policy: two checkpoints meet the same conditions piece by piece.  A piece
+that ended (a termination) keeps running to its end for the fall and
+action-rate measures.
 
 Success and error lines.  A piece succeeds when no termination fires in its
 judged steps (the end of the reference is a time-out, not a failure).  A
@@ -58,9 +61,31 @@ trunk position std of the reference reaches MIN_PROGRESS, one standing still
 does not.  The line holds on every kind with a travelling piece, whatever its
 name (LAFAN1's walk, CMU's cmuwalk, the PICO recordings' walking).
 
+Action-rate line (violence).  Per kind, the mean over steps of the sum over
+the 12 leg joints of the squared change of the servo target in one step (the
+form of the action_rate_l2 reward, rad^2) is at most ``MAX_LEG_ACTION_RATE``
+= 3.36: the PICO policy that runs on the robot without violent motion
+(mjlab_microban_teleop_v12 run 2026-10-11_23-19-20_home_481503d292_pico_v13_v13g2,
+model_14999) walking (standing and eight directions, arms at HOME, 128
+rollouts of 10 s) measures 3.355 over the same steps: from 1 s into a
+rollout until the robot falls.  Every piece counts, failed ones included,
+from 1 s into the piece until it falls.
+
+Fall line.  A piece falls when the robot trunk tilts past ``FALL_TILT_RAD`` =
+45 deg while the reference trunk is within ``FALL_REF_TILT_RAD`` = 30 deg of
+upright (a reference lying down is not a fall), at any step of the piece.  On
+an evaluation-only set (the operator's motions: the PICO recordings) at most
+``MAX_FALL_SHARE`` = 6 / 144 of the pieces may fall: the share of the PICO
+policy above in its push check (standing and walking in eight directions,
+pushed every second), 6 of 144 rollouts by the same tilt rule.  On the
+training kinds' set the share is reported, not judged: it holds motions the
+operator does not ask the robot for (sprints, jumps, falls), and its success
+line already bounds the terminations.
+
 Kinds.  Every kind of the training set and walk, run and sprint must be in
 the evaluation set; an evaluation-only set (the PICO recordings, whose kinds
-are not training kinds) is judged on its own kinds, by the same lines.
+are not training kinds) is judged on its own kinds, by the same lines and the
+fall line.
 
 The share of steps whose reference joint speed exceeds the XC330's no-load
 speed is reported per kind; it is not a line.
@@ -79,6 +104,7 @@ from typing import Any, Iterable, Literal, Sequence
 import h5py
 import numpy as np
 
+from mjlab_microban.policy_contract import ACTION_JOINT_NAMES
 from mjlab_microban.wholebody.data.hdf5 import find_motion_shards, motion_category, read_strings
 from mjlab_microban.wholebody.env_cfg import (
     ACTOR_GROUP,
@@ -103,6 +129,12 @@ PROGRESS_TRAVEL_M = BODY_POS_STD_M / (1.0 - MIN_PROGRESS)
 SERVO_VIN_V = 11.1
 Start = Literal["home", "reference"]
 SETTLE_S = 1.0
+LEG_JOINT_NAMES = tuple(name for name in ACTION_JOINT_NAMES if "shoulder" not in name and "elbow" not in name)
+MAX_LEG_ACTION_RATE = 3.36
+ACTION_RATE_FROM_S = 1.0  # the PICO policy was measured from 1 s into its rollouts
+FALL_TILT_RAD = math.radians(45.0)
+FALL_REF_TILT_RAD = math.radians(30.0)
+MAX_FALL_SHARE = 6 / 144
 
 
 def servo_no_load_speed_rad_s(vin: float = SERVO_VIN_V) -> float:
@@ -155,6 +187,11 @@ class PieceResult:
     # Horizontal trunk displacements of a successful piece: d_robot . d_ref and |d_ref|^2.
     progress_dot_m2: float | None
     ref_displacement_sq_m2: float | None
+    # The fall line: the time into the piece of the first fall, None if it did not fall.
+    fall_s: float | None
+    # The action-rate line: its mean per step over action_rate_steps steps (None without one).
+    leg_action_rate: float | None
+    action_rate_steps: int
 
 
 def dataset_kinds(motion_file: str | Path) -> set[str]:
@@ -229,7 +266,7 @@ def load_pieces(
 
 
 def _weighted(rows: Iterable[PieceResult], value: str, weight: str) -> float | None:
-    rows = list(rows)
+    rows = [r for r in rows if getattr(r, value) is not None]
     total = sum(getattr(r, weight) for r in rows)
     return sum(getattr(r, value) * getattr(r, weight) for r in rows) / total if total > 0 else None
 
@@ -242,11 +279,15 @@ def summarize(results: Sequence[PieceResult]) -> dict[str, Any]:
     for kind, rows in sorted(by_kind.items()):
         succeeded = [r for r in rows if r.success]
         judged = sum(r.judged_seconds for r in rows)
+        falls = sum(r.fall_s is not None for r in rows)
         entry: dict[str, Any] = {
             "pieces": len(rows),
             "seconds": sum(r.seconds for r in rows),
             "judged_seconds": judged,
             "success_rate": sum(r.judged_seconds for r in succeeded) / judged,
+            "falls": falls,
+            "fall_share": falls / len(rows),
+            "leg_action_rate": _weighted(rows, "leg_action_rate", "action_rate_steps"),
             "non_finite_pieces": sum(r.failure_reason == "non_finite" for r in rows),
             "overspeed_share": _weighted(rows, "overspeed_share", "seconds"),
         }
@@ -270,29 +311,42 @@ def summarize(results: Sequence[PieceResult]) -> dict[str, Any]:
 
 
 def verdicts(
-    kinds: dict[str, Any], expected_kinds: Iterable[str] = (), require_locomotion: bool = True
+    kinds: dict[str, Any],
+    expected_kinds: Iterable[str] = (),
+    require_locomotion: bool = True,
+    hold_fall_line: bool = False,
 ) -> dict[str, Any]:
-    """The full run's pass (every kind at least 90 % and under the error lines,
-    progress on every kind with a travelling piece) and the small run's checks
-    (no kind at 0 %, the same progress, finite errors).  A kind expected but
-    not evaluated fails both; walk, run and sprint are expected unless
-    ``require_locomotion`` is off (an evaluation-only set)."""
+    """The full run's pass (every kind at least 90 % and under the error and
+    action-rate lines, progress on every kind with a travelling piece, and with
+    ``hold_fall_line`` at most MAX_FALL_SHARE of all pieces fallen) and the
+    small run's checks (no kind at 0 %, the same progress, finite errors).  A
+    kind expected but not evaluated fails both; walk, run and sprint are
+    expected unless ``require_locomotion`` is off (an evaluation-only set)."""
     required = set(expected_kinds) | (set(LOCOMOTION_KINDS) if require_locomotion else set())
     missing = sorted(required - set(kinds))
     errors_ok = {k: all(v[n] is not None and v[n] <= std for n, std in ERROR_LINES.items()) for k, v in kinds.items()}
     progress = {k: v["progress"] for k, v in kinds.items() if v["travel_seconds"] > 0}
     progress_ok = not missing and all(v is not None and v >= MIN_PROGRESS for v in progress.values())
     finite = not any(v["non_finite_pieces"] for v in kinds.values())
+    pieces = sum(v["pieces"] for v in kinds.values())
+    fall_share = sum(v["falls"] for v in kinds.values()) / pieces if pieces else None
+    fall_ok = not hold_fall_line or (fall_share is not None and fall_share <= MAX_FALL_SHARE)
     final = {
         "kinds_without_pieces": missing,
         "kinds_below_success_rate": sorted(k for k, v in kinds.items() if v["success_rate"] < FINAL_SUCCESS_RATE),
         "kinds_above_error_lines": sorted(k for k, ok in errors_ok.items() if not ok),
+        "kinds_above_action_rate_line": sorted(
+            k for k, v in kinds.items() if v["leg_action_rate"] is None or v["leg_action_rate"] > MAX_LEG_ACTION_RATE
+        ),
         "progress": progress,
         "progress_ok": progress_ok,
+        "fall_share": fall_share,
+        "fall_line_held": hold_fall_line,
+        "fall_ok": fall_ok,
     }
     final["pass"] = bool(
         kinds and not missing and not final["kinds_below_success_rate"] and not final["kinds_above_error_lines"]
-        and progress_ok and finite
+        and not final["kinds_above_action_rate_line"] and progress_ok and fall_ok and finite
     )
     small = {
         "kinds_without_pieces": missing,
@@ -306,8 +360,8 @@ def verdicts(
 
 
 KIND_COLUMNS = (
-    "kind", "pieces", "seconds", "judged_seconds", "success_rate", "overspeed_share", "travel_seconds", "progress",
-    *ERROR_LINES,
+    "kind", "pieces", "seconds", "judged_seconds", "success_rate", "fall_share", "leg_action_rate",
+    "overspeed_share", "travel_seconds", "progress", *ERROR_LINES,
 )
 
 
@@ -318,6 +372,7 @@ def write_outputs(
     results: Sequence[PieceResult],
     expected_kinds: Iterable[str],
     require_locomotion: bool = True,
+    hold_fall_line: bool = False,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     kinds = summarize(results)
@@ -328,7 +383,12 @@ def write_outputs(
         "min_progress": MIN_PROGRESS,
         "progress_travel_m": PROGRESS_TRAVEL_M,
         "settle_s": SETTLE_S,
-        "verdicts": verdicts(kinds, expected_kinds, require_locomotion),
+        "max_leg_action_rate": MAX_LEG_ACTION_RATE,
+        "leg_joint_names": LEG_JOINT_NAMES,
+        "fall_tilt_rad": FALL_TILT_RAD,
+        "fall_ref_tilt_rad": FALL_REF_TILT_RAD,
+        "max_fall_share": MAX_FALL_SHARE,
+        "verdicts": verdicts(kinds, expected_kinds, require_locomotion, hold_fall_line),
         "kinds": kinds,
         "pieces": [asdict(r) for r in results],
     }
@@ -349,19 +409,33 @@ def format_summary(report: dict[str, Any]) -> str:
     def number(value: float | None, pattern: str) -> str:
         return "-" if value is None else format(value, pattern)
 
-    lines = [f"{'kind':<18}{'n':>5}{'min':>6}{'success':>9}{'fast':>6}{'progress':>9}"
+    lines = [f"{'kind':<18}{'n':>5}{'min':>6}{'success':>9}{'fall':>6}{'rate':>6}{'fast':>6}{'progress':>9}"
              + "".join(f"{n:>19}" for n in ERROR_LINES)]
     for kind, v in report["kinds"].items():
         errors = "".join(f"{number(v[n], '.3f'):>13}/{std:<5}" for n, std in ERROR_LINES.items())
         lines.append(f"{kind:<18}{v['pieces']:>5}{v['judged_seconds'] / 60:>6.1f}{100 * v['success_rate']:>8.0f}%"
+                     f"{100 * v['fall_share']:>5.0f}%{number(v['leg_action_rate'], '.2f'):>6}"
                      f"{100 * (v['overspeed_share'] or 0.0):>5.0f}%{number(v['progress'], '.2f'):>9}{errors}")
     final, small = report["verdicts"]["final"], report["verdicts"]["small_run"]
     progress = {k: None if v is None else round(v, 2) for k, v in small["progress"].items()}
+    held = "" if final["fall_line_held"] else " (not a line here)"
     lines.append(f"final pass: {final['pass']}  missing kinds: {final['kinds_without_pieces']}  "
-                 f"below 90%: {final['kinds_below_success_rate']}  above error lines: {final['kinds_above_error_lines']}")
+                 f"below 90%: {final['kinds_below_success_rate']}  above error lines: {final['kinds_above_error_lines']}  "
+                 f"above action-rate line ({MAX_LEG_ACTION_RATE}): {final['kinds_above_action_rate_line']}  "
+                 f"fall share {100 * (final['fall_share'] or 0.0):.1f}% (<= {100 * MAX_FALL_SHARE:.1f}%){held}")
     lines.append(f"small-run checks: {small['pass']}  never succeeding: {small['kinds_never_succeeding']}  "
                  f"progress (>= {MIN_PROGRESS} where the reference travels >= {PROGRESS_TRAVEL_M:.2f} m): {progress}")
     return "\n".join(lines)
+
+
+def tilt_rad(quat: Any) -> Any:
+    """Angle between a body's z axis and the world's, from (w, x, y, z) quaternions (torch)."""
+    return (1.0 - 2.0 * (quat[..., 1] ** 2 + quat[..., 2] ** 2)).clamp(-1.0, 1.0).arccos()
+
+
+def fell(robot_quat: Any, ref_quat: Any) -> Any:
+    """The robot trunk past FALL_TILT_RAD while the reference trunk is within FALL_REF_TILT_RAD of upright."""
+    return (tilt_rad(robot_quat) > FALL_TILT_RAD) & (tilt_rad(ref_quat) < FALL_REF_TILT_RAD)
 
 
 def _place_at_home(env: Any, command: Any) -> None:
@@ -404,6 +478,7 @@ def rollout(
     settle = settle_steps(start, env.step_dt)
     if any(p.settle_steps != settle for p in pieces):
         raise ValueError(f"the pieces were not cut for start={start!r}")
+    rate_from = round(ACTION_RATE_FROM_S / env.step_dt)
     env.reset()
     command = env.command_manager.get_term("motion")
     ids = torch.arange(n, device=device)
@@ -424,13 +499,18 @@ def rollout(
     robot_start_xy = command.robot_anchor_pos_w[:, :2].clone()
     ref_start_xy = robot_start_xy.clone()
 
+    leg_ids = command.tracked_joint_ids[[list(command.cfg.joint_names).index(name) for name in LEG_JOINT_NAMES]]
     budgets = torch.tensor([p.steps for p in pieces], device=device)
     sums = {name: torch.zeros(n, device=device) for name in ERROR_LINES}
     running = torch.ones(n, dtype=torch.bool, device=device)
     success = torch.zeros(n, dtype=torch.bool, device=device)
     steps = torch.zeros(n, dtype=torch.long, device=device)
+    fall_step = torch.full((n,), -1, dtype=torch.long, device=device)
+    rate_sum = torch.zeros(n, device=device)
+    rate_steps = torch.zeros(n, dtype=torch.long, device=device)
     robot_end_xy = torch.zeros(n, 2, device=device)
     ref_end_xy = torch.zeros(n, 2, device=device)
+    previous_target = command.robot.data.joint_pos_target[:, leg_ids].clone()
     reasons: list[str | None] = [None] * n
     recorded = []
     for step in range(int(budgets.max())):
@@ -451,6 +531,15 @@ def rollout(
         # history and draw new conditions; an ended piece just keeps going.
         env._manual_reset_pending.zero_()
         obs = TensorDict(raw, batch_size=[n])
+        in_piece = step < budgets
+        fell_now = in_piece & (fall_step < 0) & fell(command.robot_anchor_quat_w, ref["trunk_quat"])
+        fall_step[fell_now] = step
+        # The leg targets' change from the previous step, while standing from 1 s on.
+        target = command.robot.data.joint_pos_target[:, leg_ids].clone()
+        counted = in_piece & (fall_step < 0) & (step > rate_from)
+        rate_sum += torch.where(counted, torch.square(target - previous_target).sum(-1), torch.zeros_like(rate_sum))
+        rate_steps += counted.long()
+        previous_target = target
         judged = running & (step >= settle)
         errors = {
             "body_pos_m": torch.square(ref["body_pos"] - command.robot_body_pos_w).sum(-1).mean(-1),
@@ -479,8 +568,6 @@ def rollout(
             # The judged steps start: displacements from here.
             robot_start_xy = command.robot_anchor_pos_w[:, :2].clone()
             ref_start_xy = ref["trunk_xy"].clone()
-        if not record_every and not bool(running.any()):
-            break
 
     robot_disp = (robot_end_xy - robot_start_xy).cpu()
     ref_disp = (ref_end_xy - ref_start_xy).cpu()
@@ -490,6 +577,7 @@ def rollout(
         rms = {name: math.sqrt(float(sums[name][index]) / max(int(steps[index]), 1)) for name in ERROR_LINES}
         if ok and not all(math.isfinite(value) for value in rms.values()):
             ok, reasons[index] = False, "non_finite"
+        rate_n = int(rate_steps[index])
         results.append(
             PieceResult(
                 piece_id=piece.piece_id, window_id=piece.window_id, clip_name=piece.clip_name, kind=piece.kind,
@@ -499,6 +587,9 @@ def rollout(
                 **{name: (value if ok else None) for name, value in rms.items()},
                 progress_dot_m2=float(robot_disp[index] @ ref_disp[index]) if ok else None,
                 ref_displacement_sq_m2=float(ref_disp[index] @ ref_disp[index]) if ok else None,
+                fall_s=None if int(fall_step[index]) < 0 else (int(fall_step[index]) + 1) * env.step_dt,
+                leg_action_rate=float(rate_sum[index]) / rate_n if rate_n else None,
+                action_rate_steps=rate_n,
             )
         )
     return results, recorded
