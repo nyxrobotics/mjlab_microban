@@ -3,8 +3,9 @@
 # GMR's general_motion_retargeting/motion_retarget.py (MIT, Copyright 2025
 # Yanjieze, https://github.com/YanjieZe/GMR; the licence is LICENSE next to
 # this file).  Changes here: mink.solve_ik gets the limits as ``limits=``
-# (passed by position they land in its safety_break argument), and rich's
-# print is not imported.
+# (passed by position they land in its safety_break argument), rich's
+# print is not imported, and the error decrease below which an IK solve stops
+# is ``min_gain`` (GMR's 0.001).
 
 import mink
 import mujoco as mj
@@ -97,6 +98,7 @@ class GeneralMotionRetargeting:
         self.ground = ik_config["ground_height"] * np.array([0, 0, 1])
 
         self.max_iter = 10
+        self.min_gain = 0.001
 
         self.solver = solver
         self.damping = damping
@@ -312,7 +314,7 @@ class GeneralMotionRetargeting:
             self.configuration.integrate_inplace(vel1, dt)
             next_error = self.error1()
             num_iter = 0
-            while curr_error - next_error > 0.001 and num_iter < iter_limit:
+            while curr_error - next_error > self.min_gain and num_iter < iter_limit:
                 curr_error = next_error
                 vel1 = mink.solve_ik(
                     self.configuration, self.tasks1, dt, self.solver, self.damping, limits=self.ik_limits
@@ -329,7 +331,7 @@ class GeneralMotionRetargeting:
             self.configuration.integrate_inplace(vel2, dt)
             next_error = self.error2()
             num_iter = 0
-            while curr_error - next_error > 0.001 and num_iter < iter_limit:
+            while curr_error - next_error > self.min_gain and num_iter < iter_limit:
                 curr_error = next_error
                 vel2 = mink.solve_ik(
                     self.configuration, self.tasks2, dt, self.solver, self.damping, limits=self.ik_limits
