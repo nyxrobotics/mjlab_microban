@@ -242,3 +242,86 @@ def test_the_kinds_table_carries_the_new_lines(tmp_path):
     assert float(rows[0]["judged_seconds"]) == 18.0
     assert report["verdicts"]["final"]["falls_per_minute"] == pytest.approx(60.0 / 14.0)
     assert not report["verdicts"]["final"]["pass"]
+
+
+def test_a_rollout_starts_at_rest_at_home_and_judges_after_the_settle(tmp_path):
+    # On the simulator (CPU), two pieces of 65 and 85 steps whose reference
+    # trunk, tilted 20 deg and heading 60 deg, lies on the floor for 0.88 s
+    # (the trunk height termination fires) and then stands at HOME's height
+    # (the end points' termination is left out: the other bodies stay at 0).
+    # The policy alternates every action by +-0.05 rad and knocks the second
+    # robot over at step 60, the first at step 70 (past its piece).
+    from mjlab.envs import ManagerBasedRlEnv
+    from mjlab.utils.lab_api.math import quat_mul, yaw_quat
+
+    from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, joint_ranges
+    from mjlab_microban.robot.home_pose import HOME
+    from mjlab_microban.scripts.wholebody_benchmark import benchmark_env_cfg
+    from mjlab_microban.wholebody.env_cfg import TRACKED_BODY_NAMES
+
+    def axis_quat(angle: float, axis: int) -> torch.Tensor:
+        quat = torch.zeros(4)
+        quat[0], quat[1 + axis] = math.cos(angle / 2.0), math.sin(angle / 2.0)
+        return quat
+
+    joints, bodies = tuple(joint_ranges()), len(TRACKED_BODY_NAMES)
+    trunk_quat = quat_mul(axis_quat(math.radians(60.0), 2), axis_quat(math.radians(20.0), 0))
+
+    def clip(name: str, frames: int) -> dict:
+        section = {"name": name, "fps": 50, "joint_pos": np.zeros((frames, len(joints))),
+                   "joint_vel": np.zeros((frames, len(joints))), "body_pos_w": np.zeros((frames, bodies, 3)),
+                   "body_quat_w": np.tile([1.0, 0.0, 0.0, 0.0], (frames, bodies, 1)),
+                   "body_lin_vel_w": np.zeros((frames, bodies, 3)), "body_ang_vel_w": np.zeros((frames, bodies, 3))}
+        section["body_pos_w"][:, 0] = (0.3, -0.2, HOME.root_pos[2])
+        section["body_pos_w"][:44, 0, 2] = 0.0
+        section["body_quat_w"][:, 0] = trunk_quat.numpy()
+        return section
+
+    path = tmp_path / "motion.h5"
+    write_motion_shard([clip("walk1_subject5", 66), clip("run1_subject5", 86)], path, body_names=TRACKED_BODY_NAMES,
+                       joint_names=joints, max_window_frames=None)
+    cfg = benchmark_env_cfg(str(path), 10.0, 2, 0)
+    del cfg.terminations["ee_body_pos"]
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        pieces = benchmark.load_pieces(path, ACTION_JOINT_NAMES, 10.0, env.step_dt, no_load_speed=10.0)
+        assert [p.steps for p in pieces] == [65, 85]
+        command = env.command_manager.get_term("motion")
+        robot = command.robot
+        start = {}
+
+        def policy(obs):
+            step = start.setdefault("calls", 0)
+            start["calls"] += 1
+            if step == 0:  # placed, before the first step
+                start.update(trunk=robot.data.root_link_pose_w.clone(), vel=robot.data.root_link_vel_w.clone(),
+                             joint_pos=robot.data.joint_pos.clone(), joint_vel=robot.data.joint_vel.clone(),
+                             ref_xy=command.anchor_pos_w[:, :2].clone())
+            if step in (60, 70):
+                index = 1 if step == 60 else 0
+                lying = torch.zeros(1, 13)
+                lying[0, :3] = robot.data.root_link_pose_w[index, :3] * torch.tensor([1.0, 1.0, 0.0])
+                lying[0, 2] = 0.08
+                lying[0, 3:7] = axis_quat(math.pi / 2.0, 0)
+                robot.write_root_state_to_sim(lying, env_ids=torch.tensor([index]))
+            return torch.full((2, env.action_manager.total_action_dim), 0.05 * (-1.0) ** step)
+
+        results, _ = benchmark.rollout(env, policy, pieces)
+        # At rest at HOME, under the reference trunk and facing its heading (not its tilt).
+        home = robot.data.default_root_state
+        np.testing.assert_allclose(start["trunk"][:, :2], start["ref_xy"], atol=1e-5)
+        np.testing.assert_allclose(start["trunk"][:, 2], home[:, 2] + env.scene.env_origins[:, 2], atol=1e-5)
+        expected_quat = quat_mul(yaw_quat(trunk_quat.expand(2, 4)), home[:, 3:7])
+        assert torch.allclose(start["trunk"][:, 3:7], expected_quat, atol=1e-5)
+        assert torch.allclose(start["joint_pos"], robot.data.default_joint_pos, atol=1e-6)
+        assert not start["joint_vel"].any() and not start["vel"].any()
+        # The termination of the first second fails no piece; the fall does
+        # (on step 60, the 11th judged step), and the piece runs to its end.
+        assert [(r.steps, r.success, r.failure_reason) for r in results] == [(15, True, None), (11, False, "anchor_pos")]
+        # The fall and the leg targets' change (12 leg joints x 0.1 rad per
+        # step) are taken from 1 s into each piece until its end or its fall.
+        assert results[0].fall_s is None and results[1].fall_s == pytest.approx(61 * env.step_dt)
+        assert [r.action_rate_steps for r in results] == [65 - 51, 60 - 51]
+        assert [r.leg_action_rate for r in results] == pytest.approx([12 * 0.1**2] * 2, rel=1e-4)
+    finally:
+        env.close()
