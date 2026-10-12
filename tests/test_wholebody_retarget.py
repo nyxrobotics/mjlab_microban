@@ -255,3 +255,32 @@ def test_amass_smplx_motion_matches_the_body_model_and_retargets(tmp_path):
     ref = skeleton.standing_reference(b, "smplx")
     report = core.retarget_frames("seq", "smplx", [ref] * 3, FPS, ref, tmp_path)
     assert report["ref_to_home_max_joint_err_deg"] < 1e-3 and report["ref_to_home_root_err_mm"] < 1e-3
+
+
+def test_support_shift_puts_the_zmp_on_the_standing_foot(tmp_path):
+    # The human lifts the right foot (hip forward, knee back) and stands on the left with the hips where they were:
+    # scaled to Microban's wide stance, the zero-moment point stays near the middle, 3-4 cm outside the left sole's
+    # support.  With the support shift the trunk moves over the left foot (up to the 4 cm limit) and the
+    # zero-moment point comes to the support, and the standing foot stays put.
+    from mjlab_microban.wholebody.retarget import support
+
+    frames = 60
+    lift = np.clip(np.linspace(-1.0, 2.0, frames), 0.0, 1.0)
+    zeros = np.zeros(frames)
+    b = _bvh({"RightUpLeg": np.stack([zeros, zeros, -40.0 * lift], 1), "RightLeg": np.stack([zeros, zeros, 60.0 * lift], 1)},
+             frames)
+    ref = skeleton.standing_reference(b, "bvh_cmu")
+    frames_, _, _ = skeleton.motion_frames(b, "bvh_cmu", FPS)
+    out = {}
+    for name, spec in (("plain", None), ("shifted", support.SupportSpec())):
+        core.retarget_frames(name, "bvh_cmu", frames_, FPS, ref, tmp_path, support_spec=spec)
+        out[name] = np.load(tmp_path / f"{name}.npz")
+    plain, shifted = out["plain"], out["shifted"]
+    left, right = (support.PARTS.index(p) for p in ("left_foot", "right_foot"))
+    one = plain["contact"][:, left] & ~plain["contact"][:, right] & np.isfinite(plain["zmp_outside"])
+    assert one.sum() > 20 and (shifted["contact"] == plain["contact"]).all()
+    assert np.median(plain["zmp_outside"][one]) > 0.03
+    assert np.percentile(shifted["zmp_outside"][one], 95) < 0.008
+    assert np.median(shifted["support_shift"][one, 1]) > 0.03  # the trunk went left
+    ankle = _site_positions(shifted["qpos"])["left_ankle_c"]
+    assert np.abs(ankle - _site_positions(plain["qpos"])["left_ankle_c"]).max() < 3e-3

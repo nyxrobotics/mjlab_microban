@@ -7,7 +7,11 @@ clip to Microban (``retarget``), cuts the long arm-branch flips
 (``finalize``), builds the training and evaluation shards (``build``) and
 links them into ``data/wholebody/mix`` (``mix``).  The PICO evaluation set
 (``pico_eval``) and AMASS (``amass``) are included when their files are
-under ``data/wholebody/raw`` (placed by hand).  Each step can run alone:
+under ``data/wholebody/raw`` (placed by hand).  ``--support`` retargets with
+the support shift (the trunk moved so that Microban's zero-moment point stays
+in its support, the contact hull shrunk by ``--support-margin-mm``;
+retarget/support.py); without it the trunk is not moved.  Each step can run
+alone:
 
   ... wholebody_make_data.py fetch
   ... wholebody_make_data.py retarget --sets cmu [--only names.txt]
@@ -29,6 +33,7 @@ import json
 from pathlib import Path
 
 from mjlab_microban.wholebody.retarget import pipeline
+from mjlab_microban.wholebody.retarget.support import SupportSpec
 
 
 def _present_sets(root: Path) -> list[str]:
@@ -51,14 +56,19 @@ def main() -> None:
     parser.add_argument("--only", type=Path, help="retarget: a file with the clip names to redo")
     parser.add_argument("--format", default="bvh_cmu", help="file: the source format (skeleton.FORMATS)")
     parser.add_argument("--out-dir", type=Path, default=Path("."), help="file: the output folder")
+    parser.add_argument("--support", action="store_true",
+                        help="all, retarget, file: move the trunk so that the zero-moment point stays in the support")
+    parser.add_argument("--support-margin-mm", type=float, default=1000 * SupportSpec.margin_m,
+                        help="with --support: the support is the contact hull shrunk inward by this (default %(default)g)")
     args = parser.parse_args()
+    support_spec = SupportSpec(margin_m=args.support_margin_mm / 1000) if args.support else None
 
     if args.step == "file":
         from mjlab_microban.wholebody.retarget import core
 
         for path in args.paths:
             report = core.run(path, args.format, pipeline.FPS, args.out_dir,
-                              smplx_model_dir=args.root / "raw" / "body_models" / "smplx")
+                              smplx_model_dir=args.root / "raw" / "body_models" / "smplx", support_spec=support_spec)
             print(json.dumps(report, ensure_ascii=False))
         return
     if args.step == "render":
@@ -84,11 +94,11 @@ def main() -> None:
         if only and (unknown := sorted(only - set().union(*(pipeline.clip_names(n, root) for n in training)))):
             parser.error(f"--only names no clip of {', '.join(training)}: {unknown[:10]}")
         for name in training:
-            errors = pipeline.retarget(name, root, args.workers, only)
+            errors = pipeline.retarget(name, root, args.workers, only, support_spec)
             if errors:
                 print(f"{name}: {len(errors)} clips failed, see {root / 'gmr' / name / 'errors.json'}")
         if "pico_eval" in sets:
-            pipeline.retarget_pico(root, min(args.workers, 8))
+            pipeline.retarget_pico(root, min(args.workers, 8), support_spec)
     if args.step in ("all", "finalize"):
         for name in sets:
             print(json.dumps(pipeline.finalize(name, root)))

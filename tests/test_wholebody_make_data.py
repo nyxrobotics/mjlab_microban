@@ -118,7 +118,7 @@ def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
     (tmp_path / "raw" / "cmu" / "cmu-mocap-index-text.txt").write_text("07_01\twalk\n07_02\twalk\n07_03\twalk\n")
     failing: set[str] = set()
 
-    def fake_run(path, fmt, fps, out_dir, stem, smplx_model_dir=None):
+    def fake_run(path, fmt, fps, out_dir, stem, smplx_model_dir=None, support_spec=None):
         if stem in failing:
             raise RuntimeError("IK failed")
         for suffix in pipeline.CLIP_OUTPUTS:

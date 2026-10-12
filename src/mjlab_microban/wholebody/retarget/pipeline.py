@@ -6,8 +6,9 @@ Layout (everything under data/wholebody/, which git ignores):
   pinned versions; the PICO recordings (``raw/pico/``) and AMASS
   (``raw/amass/``, ``raw/body_models/smplx/``) are placed by hand.
 * ``gmr/<set>/``: the retargeting's output per clip (``<name>.pkl``, ``.npz``,
-  ``_report.json``, ``_ik.json``), ``manifest.json`` (name, source file,
-  description) and ``errors.json`` (clips that failed).  A run of the whole
+  ``_report.json``, ``_ik.json``), ``manifest.json`` (the support shift's
+  settings or null, and per clip name, source file, description) and
+  ``errors.json`` (clips that failed).  A run of the whole
   set starts from an empty folder, and a run of some clips (``only``) first
   removes their old output, so a clip that fails or is no longer made leaves
   no PKL for ``finalize`` to pick up.
@@ -150,19 +151,24 @@ def clip_names(name: str, root: Path = ROOT) -> set[str]:
 
 
 def _retarget_job(args):
-    path, fmt, out_dir, stem, smplx_dir = args
+    path, fmt, out_dir, stem, smplx_dir, support_spec = args
     from mjlab_microban.wholebody.retarget import core
 
     t0 = time.time()
     try:
-        report = core.run(path, fmt, FPS, Path(out_dir), stem=stem, smplx_model_dir=smplx_dir)
+        report = core.run(path, fmt, FPS, Path(out_dir), stem=stem, smplx_model_dir=smplx_dir, support_spec=support_spec)
         return stem, None, time.time() - t0, report["frames"]
     except Exception:  # noqa: BLE001  (a clip that fails is listed in errors.json, the rest go on)
         return stem, traceback.format_exc(), time.time() - t0, 0
 
 
-def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | None = None) -> dict:
-    """Retarget one training set into ``root/gmr/<name>/`` (``only``: just these clip names)."""
+def _settings(support_spec) -> dict | None:
+    return None if support_spec is None else support_spec.to_dict()
+
+
+def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | None = None, support_spec=None) -> dict:
+    """Retarget one training set into ``root/gmr/<name>/`` (``only``: just these clip names; ``support_spec``:
+    with the support shift, retarget.support.SupportSpec)."""
     raw, out = root / "raw", root / "gmr" / name
     items = _jobs(name, raw)
     if not items:
@@ -178,10 +184,11 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
     _fresh_output(out, only)
     if only is None:
         (out / "manifest.json").write_text(json.dumps(
-            [{"name": s, "source": os.path.relpath(f, raw), "description": d} for f, _, s, d in items],
+            {"support_shift": _settings(support_spec),
+             "clips": [{"name": s, "source": os.path.relpath(f, raw), "description": d} for f, _, s, d in items]},
             ensure_ascii=False, indent=0))
     smplx_dir = str(raw / "body_models" / "smplx")
-    jobs = [(f, fm, str(out), s, smplx_dir) for f, fm, s, _ in sorted(items, key=lambda x: -os.path.getsize(x[0]))
+    jobs = [(f, fm, str(out), s, smplx_dir, support_spec) for f, fm, s, _ in sorted(items, key=lambda x: -os.path.getsize(x[0]))
             if only is None or s in only]  # the longest first, so the workers end together
     errors, t0 = dict(previous), time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -197,16 +204,17 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
 
 
 def _pico_job(item):
-    _, name, fps, rp, rq, jp, ref, out_dir, g1_xml = item
+    _, name, fps, rp, rq, jp, ref, out_dir, g1_xml, support_spec = item
     from mjlab_microban.wholebody.retarget import core, pico
 
     frames = pico.normalize(pico.g1_frames(pico.g1_model(g1_xml), rp, rq, jp))
-    report = core.retarget_frames(name, "g1", frames, fps, ref, Path(out_dir), 0.0, (pico.NAMES, pico.PARENTS))
+    report = core.retarget_frames(name, "g1", frames, fps, ref, Path(out_dir), 0.0, (pico.NAMES, pico.PARENTS), support_spec)
     return name, report["frames"]
 
 
-def retarget_pico(root: Path = ROOT, workers: int = 8) -> dict:
-    """Retarget the PICO recordings (``root/raw/pico``) into ``root/gmr/pico_eval/``."""
+def retarget_pico(root: Path = ROOT, workers: int = 8, support_spec=None) -> dict:
+    """Retarget the PICO recordings (``root/raw/pico``) into ``root/gmr/pico_eval/`` (``support_spec`` as
+    retarget's)."""
     from mjlab_microban.wholebody.retarget import pico
 
     raw, out = root / "raw", root / "gmr" / "pico_eval"
@@ -217,11 +225,11 @@ def retarget_pico(root: Path = ROOT, workers: int = 8) -> dict:
         raise FileNotFoundError(f"no PICO recordings under {raw / 'pico'}")
     refs, chosen = pico.references(sources, model)
     _fresh_output(out, None)
-    items = [(s, n, f, rp, rq, jp, refs[s], str(out), g1_xml) for s, n, f, rp, rq, jp in sources]
+    items = [(s, n, f, rp, rq, jp, refs[s], str(out), g1_xml, support_spec) for s, n, f, rp, rq, jp in sources]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         frames = dict(pool.map(_pico_job, items))
     (out / "manifest.json").write_text(json.dumps(
-        {"reference_stance": chosen,
+        {"reference_stance": chosen, "support_shift": _settings(support_spec),
          "clips": [{"name": n, "source": s, "frames": frames[n]} for s, n, *_ in sources]}, indent=0))
     return frames
 

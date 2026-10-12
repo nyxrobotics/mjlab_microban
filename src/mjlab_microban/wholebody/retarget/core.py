@@ -60,10 +60,17 @@ error 0).
   their height when on the floor): lying, crawling and hands on the floor.
 * The neck is not retargeted (the HMD drives it): no neck target, so the neck
   stays at 0 (HOME).
+* Support shift (``support_spec``, off by default; support.py): the trunk
+  moved horizontally so that Microban's zero-moment point stays in its
+  support.  The trunk and what is fixed on it (hips, shoulders) move, the
+  feet and hands keep their targets, a knee or an elbow moves by the share of
+  its limb below it, and the thigh, shank and upper arm turn with their
+  limb's line.
 
 Outputs of ``retarget_frames`` (in ``out_dir``): ``<name>.npz`` (qpos, joint
 names, the joints in HOME's order, the targets, the human skeleton for
-drawing, per-frame marks), ``<name>.pkl`` (GMR's PKL with ``joint_names``,
+drawing, per-frame marks, the zero-moment point and the parts on the floor
+before and after the support shift), ``<name>.pkl`` (GMR's PKL with ``joint_names``,
 read by wholebody/data/build.py), ``<name>_ik.json`` (the IK configuration)
 and ``<name>_report.json`` (the numbers).  CPU only.
 """
@@ -82,7 +89,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from mjlab_microban.robot.home_pose import HOME_JOINT_NAMES
-from mjlab_microban.wholebody.retarget import smplx
+from mjlab_microban.wholebody.retarget import smplx, support
 from mjlab_microban.wholebody.retarget.gmr import GeneralMotionRetargeting
 from mjlab_microban.wholebody.retarget.gmr import params as gparams
 from mjlab_microban.wholebody.retarget.model import (
@@ -151,6 +158,8 @@ SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("lef
 # floor: the lowest 0.5 % of each part's height in LAFAN1's lying and falling
 # clips (ground, fallAndGetUp, pushAndFall; 13 clips).
 CONTACT_RADIUS = {"pelvis": 0.09, "spine": 0.06, "neck": 0.12, "shoulder": 0.05, "elbow": -0.02, "wrist": -0.02, "knee": 0.01}
+# The support shift (support.py) lowers the trunk by at most this where a leg would not reach its foot.
+MAX_SHIFT_DROP_M = 0.02
 
 
 def _register_robot() -> str:
@@ -358,6 +367,16 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             self.arms.append((t1[f"{side}_shoulder_c"][0], t1[f"{side}_elbow_c"][0], task, t2[f"{side}_shoulder_c"][2], adr, sign,
                               t1[f"{side}_hand"][0]))
         self.trunk_id = self.model.body("trunk").id
+        # The support shift of the current frame (support.py; zero unless asked for), world (x, y).
+        self.shift = np.zeros(2)
+        fmt = FORMATS[fmt_name]
+        self.limbs = [tuple(role_name(fmt, f"{s}.{p}") for p in parts)
+                      for s in "LR" for parts in (("hip", "knee", "ankle"), ("shoulder", "elbow", "wrist"))]
+        d = mujoco.MjData(self.model)
+        d.qpos[:] = home_qpos(self.model)
+        mujoco.mj_kinematics(self.model, d)
+        self.leg_reach = float(np.linalg.norm(d.site_xpos[self.model.site("left_hip_c").id]
+                                              - d.site_xpos[self.model.site("left_ankle_c").id]))
 
     def reset_configuration(self):
         super().reset_configuration()
@@ -444,11 +463,36 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
                 side = R.align_vectors([d], [a_ref])[0].apply(vec - par * a_ref) if w > 0.0 else 0.0
                 seg = T.apply(par * d + w * side)
             out[hb] = (out[parent][0] + seg, human_data[hb][1])
+        if self.shift.any():
+            out = self._shifted(out, human_root_name)
         # The upper-arm orientation weight: proportional to the squared sideways part of the upper arm's target
         # direction in the trunk frame (sideways, the shoulder pitch becomes the upper-arm twist and positions do not fix it).
         for sh, el, task, weight, *_ in self.arms:
             d = T.inv().apply(out[el][0] - out[sh][0])
             task.set_orientation_cost(weight * (d[1] / np.linalg.norm(d)) ** 2)
+        return out
+
+    def _shifted(self, out, root):
+        """The targets with the support shift: the trunk and what is fixed on it (hips, shoulders) move by the
+        shift, the feet and hands stay, a knee or an elbow moves by the share of its limb below it, and the
+        thigh, shank and upper arm turn with their limb's line (base -> end).  The trunk goes down where a leg
+        would have to stretch beyond its straight length (or its length before the shift, if longer) to reach
+        its foot, by at most MAX_SHIFT_DROP_M."""
+        s = np.array([self.shift[0], self.shift[1], 0.0])
+        for hip, _, ankle in self.limbs[::2]:
+            p = out[hip][0] + s - out[ankle][0]
+            reach = max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
+            if np.linalg.norm(p) > reach:
+                drop = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
+                s[2] = -min(max(-s[2], drop), MAX_SHIFT_DROP_M)
+        out[root] = (out[root][0] + s, out[root][1])
+        for base, mid, end in self.limbs:
+            b, m, e = out[base][0], out[mid][0], out[end][0]
+            share = np.linalg.norm(e - m) / max(np.linalg.norm(m - b) + np.linalg.norm(e - m), 1e-9)
+            tilt = R.align_vectors([b + s - e], [b - e])[0]
+            turn = lambda q: (tilt * R.from_quat(q, scalar_first=True)).as_quat(scalar_first=True)
+            out[base] = (b + s, turn(out[base][1]))
+            out[mid] = (m + share * s, turn(out[mid][1]))
         return out
 
 
@@ -529,9 +573,9 @@ def load_motion(path: str | Path, fmt_name: str, fps_out: float, smplx_model_dir
 
 
 def run(path: str | Path, fmt_name: str, fps_out: float, out_dir: Path, stem: str | None = None,
-        smplx_model_dir: str | Path | None = None) -> dict:
+        smplx_model_dir: str | Path | None = None, support_spec: support.SupportSpec | None = None) -> dict:
     frames, fps, ref, tilt_deg, skel = load_motion(path, fmt_name, fps_out, smplx_model_dir)
-    return retarget_frames(stem or Path(path).stem, fmt_name, frames, fps, ref, Path(out_dir), tilt_deg, skel)
+    return retarget_frames(stem or Path(path).stem, fmt_name, frames, fps, ref, Path(out_dir), tilt_deg, skel, support_spec)
 
 
 def arm_flips(rob, tgt, trunk_quat, roll_deg):
@@ -558,10 +602,46 @@ def longest_run(mask) -> int:
     return best
 
 
+def solve_frames(gmr: MicrobanRetargeting, frames: list, shift=None, seeds=None):
+    """IK of every frame from a reset: qpos (T, nq) and the targets' positions and orientations per frame, with
+    the support shift ``shift`` (T, 2) (MicrobanRetargeting.shift).  With ``seeds`` (T, nq), each frame's IK starts
+    from its seed instead of the frame before (a shifted clip solved from the unshifted solution stays on its
+    branches: a near-straight leg's hip yaw and ankle roll, the arms)."""
+    gmr.reset_configuration()
+    if seeds is not None:
+        gmr._warmup_needed = False
+    qs, targets, target_quats = [], [], []
+    for t, f in enumerate(frames):
+        gmr.shift = np.zeros(2) if shift is None else np.asarray(shift[t], float)
+        if seeds is not None:
+            gmr.configuration.update(q=seeds[t])
+        qs.append(gmr.retarget(to_input(f)).copy())
+        targets.append({k: np.asarray(v[0]).copy() for k, v in gmr.scaled_human_data.items()})
+        target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
+    gmr.shift = np.zeros(2)
+    return np.asarray(qs), targets, target_quats
+
+
+def put_on_floor(model, lowest: LowestPoint, qs, targets, height) -> None:
+    """Floor: each frame's lowest point (training collision shapes) at ``height`` (the human clearance x root
+    scale); the joints are unchanged, only the root height (and the targets) move.  In place."""
+    d = mujoco.MjData(model)
+    lows = []
+    for q in qs:
+        d.qpos[:] = q
+        mujoco.mj_kinematics(model, d)
+        lows.append(lowest(d))
+    dz = np.asarray(lows) - height
+    qs[:, 2] -= dz
+    for tg, z in zip(targets, dz):
+        for k in tg:
+            tg[k] = tg[k] - [0.0, 0.0, z]
+
+
 def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dict, out_dir: Path,
-                    tilt_deg: float = 0.0, skel=None) -> dict:
+                    tilt_deg: float = 0.0, skel=None, support_spec: support.SupportSpec | None = None) -> dict:
     """Retarget human frames ({name: (position, quaternion wxyz)}, Z-up, floor z = 0) and write the npz, PKL,
-    IK configuration and report to ``out_dir``."""
+    IK configuration and report to ``out_dir``.  ``support_spec``: with the support shift (support.py)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     fmt = FORMATS[fmt_name]
     model = mujoco.MjModel.from_xml_path(_register_robot())
@@ -579,32 +659,39 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     ref_joint_err = float(np.degrees(np.abs(q_ref[7:] - q_home[7:]).max()))
     ref_root_err = float(np.linalg.norm(q_ref[:3] - q_home[:3]))
 
-    gmr.reset_configuration()
     fallbacks0 = COLLISION_FALLBACKS[0]
-    qs, targets, target_quats = [], [], []
-    t0 = time.perf_counter()
-    for f in frames:
-        qs.append(gmr.retarget(to_input(f)).copy())
-        targets.append({k: np.asarray(v[0]).copy() for k, v in gmr.scaled_human_data.items()})
-        target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
-    ik_fps = len(qs) / (time.perf_counter() - t0)
-    qs = np.asarray(qs)
-
-    # Floor: each frame's lowest point (training collision shapes) at the human clearance x root scale
-    # (the joints are unchanged; only the root height moves).
-    d = mujoco.MjData(model)
-    lowest = LowestPoint(model)
-    lows = []
-    for q in qs:
-        d.qpos[:] = q
-        mujoco.mj_kinematics(model, d)
-        lows.append(lowest(d))
     clear, floor = human_clearance(frames, ref, fmt, fps)
-    dz = np.asarray(lows) - scale * clear
-    qs[:, 2] -= dz
-    for tg, z in zip(targets, dz):
-        for k in tg:
-            tg[k] = tg[k] - [0.0, 0.0, z]
+    lowest = LowestPoint(model)
+    solved, seeds = {}, []
+
+    def solve(shift):
+        """The clip's qpos with a support shift (T, 2) (None: none), each frame on the floor.  The first solve is
+        the unshifted clip; the later ones start each frame from it."""
+        qs, tg, tq = solve_frames(gmr, frames, shift, seeds[0] if seeds else None)
+        if not seeds:
+            seeds.append(qs.copy())
+        put_on_floor(model, lowest, qs, tg, scale * clear)
+        solved[id(qs)] = (tg, tq)
+        return qs
+
+    human = support.human_contact(frames, ref, fmt, fps, floor, role_name, CONTACT_RADIUS)
+    t0 = time.perf_counter()
+    if support_spec is None:
+        qs = solve(None)
+        shift = np.zeros((len(qs), 2))
+        spec = support.SupportSpec()
+        z, load = support.zmp(model, qs, fps, spec.smooth_s)
+        sup = support.supports(model, qs, human, support.Shapes(model), spec, fps)
+        dist = support.stats(z, load, sup)
+        summary = {"before": support.zmp_summary(dist)}
+        zmp_before, dist_before = z, dist
+    else:
+        qs, shift, summary, first, after = support.plan(model, solve, human, fps, support_spec)
+        zmp_before, dist_before = first[0], first[3]
+        z, load, sup, dist = after
+    targets, target_quats = solved[id(qs)]
+    ik_fps = len(solved) * len(qs) / (time.perf_counter() - t0)
+    d = mujoco.MjData(model)
 
     # The numbers.
     jn = [model.joint(j).name for j in range(1, model.njnt)]
@@ -687,6 +774,11 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         "frames_within_1deg_of_limit": {jn[i]: int(c) for i, c in enumerate(near) if c > 0},
         "root_z_m_min_max": [round(float(qs[:, 2].min()), 3), round(float(qs[:, 2].max()), 3)],
         "root_xy_end_m": np.round(qs[-1, :2], 3).tolist(),
+        "ik_passes": len(solved),
+        "support_shift": None if support_spec is None else support_spec.to_dict(),
+        "support_shift_mm_p50_p95_max": [round(1000 * float(np.percentile(np.linalg.norm(shift, axis=1), p)), 1)
+                                         for p in (50, 95, 100)],
+        "zmp_in_support": summary,
     }
     home_order = list(HOME_JOINT_NAMES)
     extra = {}
@@ -699,7 +791,10 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
              joint_pos_home_order=qs[:, [7 + jn.index(n) for n in home_order]], home_joint_names=np.array(home_order),
              targets=tg_arr.astype(np.float32), target_frames=np.array(tf),
              flip=flip, joint_jump=jump, target_jump=tjump, hand_err=np.asarray(hand_err, np.float32),
-             lowest_point=low_after.astype(np.float32), **extra)
+             lowest_point=low_after.astype(np.float32), support_shift=shift.astype(np.float32),
+             zmp=z.astype(np.float32), zmp_outside=dist.astype(np.float32), zmp_before=zmp_before.astype(np.float32),
+             zmp_outside_before=dist_before.astype(np.float32), contact=sup.contact, contact_parts=np.array(support.PARTS),
+             **extra)
     with open(out_dir / f"{stem}.pkl", "wb") as fh:  # the shape of GMR's scripts/bvh_to_robot.py output
         pickle.dump({"fps": fps, "root_pos": qs[:, :3], "root_rot": qs[:, [4, 5, 6, 3]],  # xyzw
                      "dof_pos": qs[:, 7:], "joint_names": jn, "local_body_pos": None, "link_body_list": None}, fh)
