@@ -549,17 +549,27 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
     def hold_legs(self, q):
         """``q`` with the legs of the feet on the floor (``hold_on``) solved again, alone (their six joints, the
         trunk where the IK put it), to put each foot on its held target (``held``): the IK weighs the held feet
-        against the other targets and leaves them a few mm off, which the next frame turns into a slide."""
+        against the other targets and leaves them a few mm off, which the next frame turns into a slide.  A leg
+        that cannot reach its foot, or reaches it only through a part the IK keeps apart (a thigh into the trunk
+        in a deep crouch), is left as the IK put it, nearest the human's (the foot slides there)."""
         on = self.hold_on[self.frame]
         if not on.any():
             return q
-        self._leg_data.qpos[:] = q
+        m, d = self.model, self._leg_data
+        d.qpos[:] = q
+        mujoco.mj_kinematics(m, d)
+        apart = not self.penetrates()
         for i in np.flatnonzero(on):
             adr = self._legs_ik[i][1]
-            before = self._leg_data.qpos[adr].copy()
+            before = d.qpos[adr].copy()
             if self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], True) > HOLD_FAIL_M:
-                self._leg_data.qpos[adr] = before  # out of the leg's reach: the IK's leg, nearest the human's
-        return self._leg_data.qpos.copy()
+                d.qpos[adr] = before
+                continue
+            if apart:
+                mujoco.mj_kinematics(m, d)
+                if self.penetrates():
+                    d.qpos[adr] = before
+        return d.qpos.copy()
 
     def solve_leg(self, i, goal_p, goal_quat, standing):
         """Solve leg ``i`` (left 0, right 1) alone in ``_leg_data`` (its qpos the pose; the trunk stays) to put its
