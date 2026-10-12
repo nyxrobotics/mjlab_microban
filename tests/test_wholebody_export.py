@@ -8,10 +8,11 @@ from copy import deepcopy
 import numpy as np
 import onnx
 import onnxruntime as ort
+import pytest
 import torch
 from tensordict import TensorDict
 
-from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, joint_ranges
+from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, PolicyContractError, joint_ranges, sha256_file
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody import contract
 from mjlab_microban.wholebody.env_cfg import ACTOR_GROUP, WholebodyRlCfg, actor_terms, make_wholebody_env_cfg
@@ -79,6 +80,7 @@ def test_export_matches_torch_and_carries_the_contract(tmp_path):
         checkpoint=tmp_path / "model_4999.pt",
         checkpoint_sha256="a" * 64,
         benchmark_report_sha256="b" * 64,
+        eval_only_benchmark_report_sha256="c" * 64,
         self_test_rows=rows,
         self_test_actions=actions,
         dry_run=True,
@@ -97,7 +99,42 @@ def test_export_matches_torch_and_carries_the_contract(tmp_path):
     assert stored["reference_time"] == "one_control_period_ahead"
     assert stored["action_joint_names"].split(",") == list(ACTION_JOINT_NAMES)
     assert sum(width for _, width in json.loads(stored["observation_schema_json"])) == WIDTH == 118
+    assert stored["eval_only_benchmark_report_sha256"] == "c" * 64
     assert stored["dry_run_not_deployable"] == "true"
+
+
+def test_export_asks_for_both_sets_started_at_home(tmp_path):
+    # The fall line holds only on an evaluation-only set (the PICO recordings),
+    # and only a start at HOME is the robot's.
+    from mjlab_microban.scripts.wholebody_export import benchmark_sha256
+
+    def report(name: str, eval_only_set: bool = False, start: str | None = "home", passed: bool = True,
+               sha: str = "a" * 64):
+        metadata = {"checkpoint_sha256": sha, "eval_only_set": eval_only_set, "start": start}
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({
+            "metadata": {key: value for key, value in metadata.items() if value is not None},
+            "verdicts": {"final": {"pass": passed}},
+        }))
+        return path
+
+    train, pico = report("train"), report("pico", eval_only_set=True)
+    assert benchmark_sha256(train, "a" * 64, False, dry_run=False) == sha256_file(train)
+    assert benchmark_sha256(pico, "a" * 64, True, dry_run=False) == sha256_file(pico)
+    for path, eval_only_set, problem in (
+        (train, True, "not the benchmark on an evaluation-only set"),  # the training set's report has no fall line
+        (pico, False, "not the benchmark on the training kinds' set"),
+        (report("reference", start="reference"), False, "does not start the pieces at HOME"),
+        (report("earlier", start=None), False, "does not start the pieces at HOME"),  # before the start was recorded
+        (report("failed", eval_only_set=True, passed=False), True, "does not pass"),
+        (report("other", sha="b" * 64), False, "not the benchmark of this checkpoint"),
+    ):
+        with pytest.raises(PolicyContractError, match=problem):
+            benchmark_sha256(path, "a" * 64, eval_only_set, dry_run=False)
+    # A dry run takes any report of the checkpoint.
+    assert benchmark_sha256(report("failed2", start="reference", passed=False), "a" * 64, True, dry_run=True)
+    with pytest.raises(PolicyContractError, match="this checkpoint"):
+        benchmark_sha256(report("other2", sha="b" * 64), "a" * 64, False, dry_run=True)
 
 
 def test_env_frame_layout_is_the_contract_schema():

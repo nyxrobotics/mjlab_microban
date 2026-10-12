@@ -204,6 +204,7 @@ def contract_metadata(
     checkpoint: Path,
     checkpoint_sha256: str,
     benchmark_report_sha256: str,
+    eval_only_benchmark_report_sha256: str,
     self_test_rows: Sequence[Sequence[Sequence[float]]],
     self_test_actions: Sequence[Sequence[float]],
     dry_run: bool,
@@ -215,7 +216,11 @@ def contract_metadata(
     stem = Path(checkpoint).name
     if not (stem.startswith("model_") and stem.endswith(".pt") and stem[6:-3].isdigit()):
         raise PolicyContractError(f"checkpoint {stem!r} is not model_N.pt")
-    for key, value in (("checkpoint_sha256", checkpoint_sha256), ("benchmark_report_sha256", benchmark_report_sha256)):
+    for key, value in (
+        ("checkpoint_sha256", checkpoint_sha256),
+        ("benchmark_report_sha256", benchmark_report_sha256),
+        ("eval_only_benchmark_report_sha256", eval_only_benchmark_report_sha256),
+    ):
         if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
             raise PolicyContractError(f"{key} must be a lowercase SHA-256")
     if not SELF_TEST_MIN_ROWS <= len(self_test_rows) <= SELF_TEST_MAX_ROWS or len(self_test_actions) != len(
@@ -263,6 +268,7 @@ def contract_metadata(
         "checkpoint_iteration": str(int(stem[6:-3])),
         "checkpoint_sha256": checkpoint_sha256,
         "benchmark_report_sha256": benchmark_report_sha256,
+        "eval_only_benchmark_report_sha256": eval_only_benchmark_report_sha256,
         "self_test_histories_json": _json([[list(f) for f in history] for history in self_test_rows]),
         "self_test_actions_json": _json(actions),
     }

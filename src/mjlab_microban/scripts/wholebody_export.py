@@ -2,10 +2,15 @@
 
   uv run --locked python src/mjlab_microban/scripts/wholebody_export.py \\
       --checkpoint logs/rsl_rl/microban_wholebody/<run>/model_29999.pt \\
-      --benchmark-report artifacts/wholebody/<run>/model_29999.json --output wholebody.onnx
+      --benchmark-report artifacts/wholebody/<run>/model_29999.json \\
+      --eval-only-report artifacts/wholebody_pico/<run>/model_29999.json --output wholebody.onnx
 
-The benchmark report must be this checkpoint's and pass the full-run lines;
-``--dry-run`` accepts any report and marks the file not deployable.  The
+Both benchmark reports must be this checkpoint's, start the pieces at HOME
+and pass the full-run lines: ``--benchmark-report`` on the training kinds'
+evaluation set, ``--eval-only-report`` on an evaluation-only set (the PICO
+recordings, ``--eval-only-set``), the one that holds the fall line.
+``--dry-run`` accepts any report of the checkpoint and marks the file not
+deployable.  The
 self-test rows (8-64 observation histories) come from an evaluation rollout
 of the checkpoint on the CPU, with the torch actor's output for each, and
 are re-run in ONNX Runtime before the file is published.
@@ -37,19 +42,29 @@ SELF_TEST_RECORD_EVERY = 10
 SELF_TEST_PIECES = 4
 
 
-def _benchmark_sha256(path: Path, checkpoint_sha256: str, dry_run: bool) -> str:
+def benchmark_sha256(path: Path, checkpoint_sha256: str, eval_only_set: bool, dry_run: bool) -> str:
+    """The SHA-256 of this checkpoint's benchmark report; unless ``dry_run`` it
+    must start at HOME, be on the set asked for and pass the full-run lines."""
     report = json.loads(path.read_text(encoding="utf-8"))
-    if report["metadata"]["checkpoint_sha256"] != checkpoint_sha256:
+    metadata = report["metadata"]
+    if metadata["checkpoint_sha256"] != checkpoint_sha256:
         raise PolicyContractError(f"{path} is not the benchmark of this checkpoint")
-    if not report["verdicts"]["final"]["pass"] and not dry_run:
-        raise PolicyContractError(f"{path} does not pass the full-run lines")
+    if not dry_run:
+        if metadata.get("start") != "home":
+            raise PolicyContractError(f"{path} does not start the pieces at HOME")
+        if bool(metadata.get("eval_only_set")) != eval_only_set:
+            kind = "an evaluation-only set" if eval_only_set else "the training kinds' set"
+            raise PolicyContractError(f"{path} is not the benchmark on {kind}")
+        if not report["verdicts"]["final"]["pass"]:
+            raise PolicyContractError(f"{path} does not pass the full-run lines")
     return sha256_file(path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--benchmark-report", type=Path, required=True)
+    parser.add_argument("--benchmark-report", type=Path, required=True, help="On the training kinds' set")
+    parser.add_argument("--eval-only-report", type=Path, required=True, help="On an evaluation-only set (PICO)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--motion-file", default=EVAL_MOTION_DIR)
     parser.add_argument("--dry-run", action="store_true")
@@ -61,7 +76,8 @@ def main() -> None:
     if output.exists() and not args.replace:
         raise FileExistsError(f"{output} exists (use --replace)")
     checkpoint_sha256 = sha256_file(checkpoint)
-    report_sha256 = _benchmark_sha256(args.benchmark_report, checkpoint_sha256, args.dry_run)
+    report_sha256 = benchmark_sha256(args.benchmark_report, checkpoint_sha256, False, args.dry_run)
+    eval_only_report_sha256 = benchmark_sha256(args.eval_only_report, checkpoint_sha256, True, args.dry_run)
 
     cfg = benchmark_env_cfg(args.motion_file, 10.0, SELF_TEST_PIECES, seed=0)
     pieces = benchmark.load_pieces(
@@ -88,6 +104,7 @@ def main() -> None:
             checkpoint=checkpoint,
             checkpoint_sha256=checkpoint_sha256,
             benchmark_report_sha256=report_sha256,
+            eval_only_benchmark_report_sha256=eval_only_report_sha256,
             self_test_rows=rows,
             self_test_actions=actions,
             dry_run=args.dry_run,

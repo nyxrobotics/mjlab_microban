@@ -118,6 +118,10 @@ uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --check
 `leg_action_rate`（暴れの線の数字）を足した。判定（`verdicts.final`）には `kinds_above_action_rate_line`、`falls_per_minute`、
 `fall_ok` が入る。
 
+書き出し（`src/mjlab_microban/scripts/wholebody_export.py`）は、同じチェックポイントの報告を 2 つ求める。
+学習の評価用データの報告（`--benchmark-report`）と、評価だけのデータの報告（`--eval-only-report`、倒れの線が掛かるもの）で、
+どちらも HOME から始めた評価（`--start reference` ではない）で合格していること。2 つの報告の SHA-256 は ONNX のメタデータに入る。
+
 ## PICO の録画（手で置く）
 
 PICO の全身推定を G1 に写した公開録画。評価だけに使い、配らない。データの条件は 3 つとも確認できていない。
