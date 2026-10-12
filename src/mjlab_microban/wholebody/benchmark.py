@@ -72,15 +72,20 @@ rollout until the robot falls.  Every piece counts, failed ones included,
 from 1 s into the piece until it falls.
 
 Fall line.  A piece falls when the robot trunk tilts past ``FALL_TILT_RAD`` =
-45 deg while the reference trunk is within ``FALL_REF_TILT_RAD`` = 30 deg of
-upright (a reference lying down is not a fall), at any step of the piece.  On
-an evaluation-only set (the operator's motions: the PICO recordings) at most
-``MAX_FALL_SHARE`` = 6 / 144 of the pieces may fall: the share of the PICO
-policy above in its push check (standing and walking in eight directions,
-pushed every second), 6 of 144 rollouts by the same tilt rule.  On the
-training kinds' set the share is reported, not judged: it holds motions the
-operator does not ask the robot for (sprints, jumps, falls), and its success
-line already bounds the terminations.
+45 deg from vertical while the reference trunk is within
+``FALL_REF_TILT_RAD`` = 30 deg of vertical (a reference lying down is not a
+fall), at any step of the piece.  The pieces run 1-10 s (7.2 s on average on
+the PICO set) and the rollouts of the line's source 6 s, so falls are counted
+per minute standing: a kind's or a set's falls over the time its pieces ran
+before their fall (a piece's whole length when it does not fall).  On an
+evaluation-only set (the operator's motions: the PICO recordings) at most
+``MAX_FALLS_PER_MINUTE`` = 0.425: the PICO policy above in its push check (144
+rollouts of 6 s, standing and walking in eight directions, pushed by
+0.4 m/s every second) fell 6 times by the same tilt rule over 846.58 s
+standing, 6 of 144 rollouts.  On the training kinds' set the rate is
+reported, not judged: it holds motions the operator does not ask the robot
+for (sprints, jumps, falls), and its success line already bounds the
+terminations.
 
 Kinds.  Every kind of the training set and walk, run and sprint must be in
 the evaluation set; an evaluation-only set (the PICO recordings, whose kinds
@@ -134,7 +139,8 @@ MAX_LEG_ACTION_RATE = 3.36
 ACTION_RATE_FROM_S = 1.0  # the PICO policy was measured from 1 s into its rollouts
 FALL_TILT_RAD = math.radians(45.0)
 FALL_REF_TILT_RAD = math.radians(30.0)
-MAX_FALL_SHARE = 6 / 144
+# The PICO policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).
+MAX_FALLS_PER_MINUTE = 60.0 * 6 / 846.58
 
 
 def servo_no_load_speed_rad_s(vin: float = SERVO_VIN_V) -> float:
@@ -280,13 +286,15 @@ def summarize(results: Sequence[PieceResult]) -> dict[str, Any]:
         succeeded = [r for r in rows if r.success]
         judged = sum(r.judged_seconds for r in rows)
         falls = sum(r.fall_s is not None for r in rows)
+        standing = sum(r.seconds if r.fall_s is None else r.fall_s for r in rows)
         entry: dict[str, Any] = {
             "pieces": len(rows),
             "seconds": sum(r.seconds for r in rows),
             "judged_seconds": judged,
             "success_rate": sum(r.judged_seconds for r in succeeded) / judged,
             "falls": falls,
-            "fall_share": falls / len(rows),
+            "standing_seconds": standing,
+            "falls_per_minute": 60.0 * falls / standing,
             "leg_action_rate": _weighted(rows, "leg_action_rate", "action_rate_steps"),
             "non_finite_pieces": sum(r.failure_reason == "non_finite" for r in rows),
             "overspeed_share": _weighted(rows, "overspeed_share", "seconds"),
@@ -318,7 +326,7 @@ def verdicts(
 ) -> dict[str, Any]:
     """The full run's pass (every kind at least 90 % and under the error and
     action-rate lines, progress on every kind with a travelling piece, and with
-    ``hold_fall_line`` at most MAX_FALL_SHARE of all pieces fallen) and the
+    ``hold_fall_line`` at most MAX_FALLS_PER_MINUTE over all pieces) and the
     small run's checks (no kind at 0 %, the same progress, finite errors).  A
     kind expected but not evaluated fails both; walk, run and sprint are
     expected unless ``require_locomotion`` is off (an evaluation-only set)."""
@@ -328,9 +336,9 @@ def verdicts(
     progress = {k: v["progress"] for k, v in kinds.items() if v["travel_seconds"] > 0}
     progress_ok = not missing and all(v is not None and v >= MIN_PROGRESS for v in progress.values())
     finite = not any(v["non_finite_pieces"] for v in kinds.values())
-    pieces = sum(v["pieces"] for v in kinds.values())
-    fall_share = sum(v["falls"] for v in kinds.values()) / pieces if pieces else None
-    fall_ok = not hold_fall_line or (fall_share is not None and fall_share <= MAX_FALL_SHARE)
+    standing = sum(v["standing_seconds"] for v in kinds.values())
+    falls_per_minute = 60.0 * sum(v["falls"] for v in kinds.values()) / standing if standing > 0 else None
+    fall_ok = not hold_fall_line or (falls_per_minute is not None and falls_per_minute <= MAX_FALLS_PER_MINUTE)
     final = {
         "kinds_without_pieces": missing,
         "kinds_below_success_rate": sorted(k for k, v in kinds.items() if v["success_rate"] < FINAL_SUCCESS_RATE),
@@ -340,7 +348,7 @@ def verdicts(
         ),
         "progress": progress,
         "progress_ok": progress_ok,
-        "fall_share": fall_share,
+        "falls_per_minute": falls_per_minute,
         "fall_line_held": hold_fall_line,
         "fall_ok": fall_ok,
     }
@@ -360,7 +368,7 @@ def verdicts(
 
 
 KIND_COLUMNS = (
-    "kind", "pieces", "seconds", "judged_seconds", "success_rate", "fall_share", "leg_action_rate",
+    "kind", "pieces", "seconds", "judged_seconds", "success_rate", "falls_per_minute", "leg_action_rate",
     "overspeed_share", "travel_seconds", "progress", *ERROR_LINES,
 )
 
@@ -387,7 +395,7 @@ def write_outputs(
         "leg_joint_names": LEG_JOINT_NAMES,
         "fall_tilt_rad": FALL_TILT_RAD,
         "fall_ref_tilt_rad": FALL_REF_TILT_RAD,
-        "max_fall_share": MAX_FALL_SHARE,
+        "max_falls_per_minute": MAX_FALLS_PER_MINUTE,
         "verdicts": verdicts(kinds, expected_kinds, require_locomotion, hold_fall_line),
         "kinds": kinds,
         "pieces": [asdict(r) for r in results],
@@ -409,12 +417,12 @@ def format_summary(report: dict[str, Any]) -> str:
     def number(value: float | None, pattern: str) -> str:
         return "-" if value is None else format(value, pattern)
 
-    lines = [f"{'kind':<18}{'n':>5}{'min':>6}{'success':>9}{'fall':>6}{'rate':>6}{'fast':>6}{'progress':>9}"
+    lines = [f"{'kind':<18}{'n':>5}{'min':>6}{'success':>9}{'fall/min':>9}{'rate':>6}{'fast':>6}{'progress':>9}"
              + "".join(f"{n:>19}" for n in ERROR_LINES)]
     for kind, v in report["kinds"].items():
         errors = "".join(f"{number(v[n], '.3f'):>13}/{std:<5}" for n, std in ERROR_LINES.items())
         lines.append(f"{kind:<18}{v['pieces']:>5}{v['judged_seconds'] / 60:>6.1f}{100 * v['success_rate']:>8.0f}%"
-                     f"{100 * v['fall_share']:>5.0f}%{number(v['leg_action_rate'], '.2f'):>6}"
+                     f"{v['falls_per_minute']:>9.2f}{number(v['leg_action_rate'], '.2f'):>6}"
                      f"{100 * (v['overspeed_share'] or 0.0):>5.0f}%{number(v['progress'], '.2f'):>9}{errors}")
     final, small = report["verdicts"]["final"], report["verdicts"]["small_run"]
     progress = {k: None if v is None else round(v, 2) for k, v in small["progress"].items()}
@@ -422,7 +430,7 @@ def format_summary(report: dict[str, Any]) -> str:
     lines.append(f"final pass: {final['pass']}  missing kinds: {final['kinds_without_pieces']}  "
                  f"below 90%: {final['kinds_below_success_rate']}  above error lines: {final['kinds_above_error_lines']}  "
                  f"above action-rate line ({MAX_LEG_ACTION_RATE}): {final['kinds_above_action_rate_line']}  "
-                 f"fall share {100 * (final['fall_share'] or 0.0):.1f}% (<= {100 * MAX_FALL_SHARE:.1f}%){held}")
+                 f"falls {number(final['falls_per_minute'], '.2f')}/min (<= {MAX_FALLS_PER_MINUTE:.3f}){held}")
     lines.append(f"small-run checks: {small['pass']}  never succeeding: {small['kinds_never_succeeding']}  "
                  f"progress (>= {MIN_PROGRESS} where the reference travels >= {PROGRESS_TRAVEL_M:.2f} m): {progress}")
     return "\n".join(lines)

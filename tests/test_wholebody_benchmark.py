@@ -72,13 +72,14 @@ def _kind(
     progress: float | None = 1.0,
     travel_seconds: float | None = None,
     falls: int = 0,
-    pieces: int = 10,
+    standing_seconds: float = 600.0,
     rate: float | None = 0.5,
 ) -> dict:
     """A kind's summary; it travels (the progress line holds) when it has a progress."""
     travel = (60.0 if progress is not None else 0.0) if travel_seconds is None else travel_seconds
     return {"success_rate": success_rate, "non_finite_pieces": 0, "progress": progress, "travel_seconds": travel,
-            "pieces": pieces, "falls": falls, "fall_share": falls / pieces, "leg_action_rate": rate,
+            "pieces": 10, "falls": falls, "standing_seconds": standing_seconds,
+            "falls_per_minute": 60.0 * falls / standing_seconds, "leg_action_rate": rate,
             **{name: 0.5 * std for name, std in benchmark.ERROR_LINES.items()}}
 
 
@@ -168,8 +169,9 @@ def test_an_evaluation_only_set_is_judged_on_its_own_kinds():
 
 
 def test_a_kind_is_judged_on_its_judged_seconds():
-    # From HOME: success over the seconds past the settle, falls over the pieces,
-    # the action rate over its steps, travelling time on the judged seconds.
+    # From HOME: success over the seconds past the settle, falls per minute
+    # standing (a piece stands until its fall), the action rate over its
+    # steps, travelling time on the judged seconds.
     kinds = benchmark.summarize([
         _result("walk", 0.4, 0.16, seconds=10.0, settle_s=1.0, rate=1.0, rate_steps=400),
         _result("walk", 0.4, 0.16, success=False, seconds=4.0, settle_s=1.0, fall_s=3.0, rate=3.0, rate_steps=100),
@@ -178,7 +180,8 @@ def test_a_kind_is_judged_on_its_judged_seconds():
     walk = kinds["walk"]
     assert walk["judged_seconds"] == pytest.approx(13.0) and walk["seconds"] == pytest.approx(16.0)
     assert walk["success_rate"] == pytest.approx(9.0 / 13.0)
-    assert walk["falls"] == 2 and walk["fall_share"] == pytest.approx(2 / 3)
+    assert walk["falls"] == 2 and walk["standing_seconds"] == pytest.approx(10.0 + 3.0 + 0.5)
+    assert walk["falls_per_minute"] == pytest.approx(60.0 * 2 / 13.5)
     assert walk["leg_action_rate"] == pytest.approx((1.0 * 400 + 3.0 * 100) / 500)
     assert walk["travel_seconds"] == pytest.approx(12.0)
 
@@ -199,19 +202,20 @@ def test_the_action_rate_line_holds_on_every_kind():
 
 
 def test_the_fall_line_holds_on_the_operators_motions():
-    # The PICO policy fell in 6 of its 144 pushed rollouts.
-    assert benchmark.MAX_FALL_SHARE == 6 / 144
-    pico = {"picoteleopit": _kind(0.95, falls=1, pieces=40), "picotwist": _kind(0.95, falls=0, pieces=30),
-            "picoany": _kind(0.9, None, falls=1, pieces=30)}
+    # The PICO policy fell 6 times in its 144 pushed rollouts of 6 s, over 846.58 s standing.
+    assert benchmark.MAX_FALLS_PER_MINUTE == pytest.approx(0.425, abs=5e-4)
+    pico = {"picoteleopit": _kind(0.95, falls=1, standing_seconds=400.0),
+            "picotwist": _kind(0.95, falls=0, standing_seconds=300.0),
+            "picoany": _kind(0.9, None, falls=2, standing_seconds=300.0)}
     judged = benchmark.verdicts(pico, require_locomotion=False, hold_fall_line=True)["final"]
-    assert judged["fall_share"] == pytest.approx(2 / 100) and judged["fall_ok"] and judged["pass"]
-    # Over the whole set: 5 of 100 pieces fail it, even with every kind's success above 90 %.
-    falling = {**pico, "picotwist": _kind(0.95, falls=3, pieces=30)}
+    assert judged["falls_per_minute"] == pytest.approx(0.18) and judged["fall_ok"] and judged["pass"]
+    # Over the whole set: 8 falls in 1000 s fail it, even with every kind's success above 90 %.
+    falling = {**pico, "picotwist": _kind(0.95, falls=5, standing_seconds=300.0)}
     judged = benchmark.verdicts(falling, require_locomotion=False, hold_fall_line=True)["final"]
-    assert judged["fall_share"] == pytest.approx(5 / 100) and not judged["fall_ok"] and not judged["pass"]
-    # The training kinds' set reports the share without the line.
+    assert judged["falls_per_minute"] == pytest.approx(0.48) and not judged["fall_ok"] and not judged["pass"]
+    # The training kinds' set reports the rate without the line.
     reported = benchmark.verdicts(falling, require_locomotion=False)["final"]
-    assert reported["fall_share"] == pytest.approx(5 / 100) and reported["fall_ok"] and reported["pass"]
+    assert reported["falls_per_minute"] == pytest.approx(0.48) and reported["fall_ok"] and reported["pass"]
 
 
 def test_a_fall_is_a_tipped_trunk_under_an_upright_reference():
@@ -232,6 +236,9 @@ def test_the_kinds_table_carries_the_new_lines(tmp_path):
     with (tmp_path / "model-kinds.csv").open() as stream:
         rows = list(csv.DictReader(stream))
     assert list(rows[0]) == list(benchmark.KIND_COLUMNS)
-    assert float(rows[0]["fall_share"]) == 0.5 and float(rows[0]["leg_action_rate"]) == 0.5
+    # One fall over 10 s and 4 s standing.
+    assert float(rows[0]["falls_per_minute"]) == pytest.approx(60.0 / 14.0)
+    assert float(rows[0]["leg_action_rate"]) == 0.5
     assert float(rows[0]["judged_seconds"]) == 18.0
-    assert report["verdicts"]["final"]["fall_share"] == 0.5 and not report["verdicts"]["final"]["pass"]
+    assert report["verdicts"]["final"]["falls_per_minute"] == pytest.approx(60.0 / 14.0)
+    assert not report["verdicts"]["final"]["pass"]
