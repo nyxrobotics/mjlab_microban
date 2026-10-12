@@ -332,7 +332,10 @@ def poses(model: mujoco.MjModel, qs: np.ndarray, shapes: Shapes) -> Poses:
         mujoco.mj_kinematics(model, d)
         verts.append(shapes.vertices(d))
         tilt[t] = np.degrees(np.arccos(np.clip(d.xmat[root, 8], -1.0, 1.0)))
-        yaw[t] = np.arctan2(d.xmat[trunk, 3], d.xmat[trunk, 0])
+        # The heading from both horizontal axes (the trunk's turn about the vertical): defined at any tilt but
+        # upside down, where the forward axis alone flips about once it points near the vertical (a deep bow).
+        x = d.xmat[trunk]
+        yaw[t] = np.arctan2(x[3] - x[1], x[0] + x[4])
         hip[t], ankle[t] = d.site_xpos[sites[0]], d.site_xpos[sites[1]]
     return Poses(verts, tilt, np.unwrap(yaw), hip, ankle)
 
