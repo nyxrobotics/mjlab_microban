@@ -257,13 +257,13 @@ def test_amass_smplx_motion_matches_the_body_model_and_retargets(tmp_path):
     assert report["ref_to_home_max_joint_err_deg"] < 1e-3 and report["ref_to_home_root_err_mm"] < 1e-3
 
 
-def test_support_shift_puts_the_zmp_on_the_standing_foot(tmp_path):
+def test_support_changes_put_the_zmp_on_the_standing_foot(tmp_path):
     # The human lifts the right foot (hip forward, knee back) and stands on the left with the hips where they were:
     # scaled to Microban's wide stance, the zero-moment point stays near the middle, 3-4 cm outside the left sole's
-    # support.  With the support shift the trunk moves over the left foot and the zero-moment point comes to within
-    # 8 mm of the support (but in the last half window of the derivatives' fit, fitted from one side and not
-    # constrained; most frames stay 3-6 mm out, the lateral shift at its 40 mm cap and the lifted leg's hip roll at
-    # its end), the standing foot stays put and stays on the floor, and the arms keep their pose relative to the trunk.
+    # support.  With the support changes the trunk moves over the left foot (the lifted leg with it) and the
+    # zero-moment point comes into the support (the lateral shift at its 40 mm cap; what it leaves, the tilt and the
+    # foot's place bring in), the standing foot stays put, on the floor and still, and the arms keep their pose
+    # relative to the trunk.  The clip's last half window of the derivatives' fit is not judged.
     from mjlab_microban.wholebody.retarget import support
 
     frames = 60
@@ -273,19 +273,31 @@ def test_support_shift_puts_the_zmp_on_the_standing_foot(tmp_path):
              frames)
     ref = skeleton.standing_reference(b, "bvh_cmu")
     frames_, _, _ = skeleton.motion_frames(b, "bvh_cmu", FPS)
-    out = {}
-    for name, spec in (("plain", None), ("shifted", support.SupportSpec())):
-        core.retarget_frames(name, "bvh_cmu", frames_, FPS, ref, tmp_path, support_spec=spec)
+    out, reports = {}, {}
+    for name, spec in (("plain", None), ("changed", support.SupportSpec())):
+        reports[name] = core.retarget_frames(name, "bvh_cmu", frames_, FPS, ref, tmp_path, support_spec=spec)
         out[name] = np.load(tmp_path / f"{name}.npz")
-    plain, shifted = out["plain"], out["shifted"]
+    plain, changed = out["plain"], out["changed"]
     left, right = (support.PARTS.index(p) for p in ("left_foot", "right_foot"))
     one = plain["contact"][:, left] & ~plain["contact"][:, right] & np.isfinite(plain["zmp_outside"])
-    one[-support.windows(frames, FPS, support.SupportSpec.smooth_s)[0].shape[1] // 2:] = False
-    assert one.sum() >= 20 and (shifted["contact"] == plain["contact"]).all()
+    assert one.sum() >= 20 and (changed["contact"] == plain["contact"]).all()
     assert np.median(plain["zmp_outside"][one]) > 0.03
-    assert np.percentile(shifted["zmp_outside"][one], 95) < 0.008
-    assert np.median(shifted["support_shift"][one, 1]) > 0.02  # the trunk went left
+    assert np.percentile(changed["zmp_outside"][one], 95) < 0.001 and np.nanmax(changed["zmp_outside"][one]) < 0.002
+    assert ((changed["zmp_stage"][one] >= 1) & (changed["zmp_stage"][one] <= 4)).mean() > 0.9
+    assert np.median(changed["support_shift"][one, 1]) > 0.02  # the trunk went left
     sites = {name: _site_positions(out[name]["qpos"]) for name in out}
-    assert np.abs(sites["shifted"]["left_ankle_c"] - sites["plain"]["left_ankle_c"]).max() < 3e-3
-    hand = {name: s["left_hand"] - s["left_shoulder_c"] for name, s in sites.items()}
-    assert np.abs(hand["shifted"] - hand["plain"]).max() < 3e-3
+    assert np.abs(sites["changed"]["left_ankle_c"] - sites["plain"]["left_ankle_c"]).max() < 3e-3
+    assert reports["changed"]["standing_foot_speed_mm_s_p50_p90_max"][1] < 1.0
+    m = mujoco.MjModel.from_xml_path(str(model.gmr_model_xml()))
+    d = mujoco.MjData(m)
+
+    def in_trunk(qpos, v):
+        rows = []
+        for q, x in zip(qpos, v):
+            d.qpos[:] = q
+            mujoco.mj_kinematics(m, d)
+            rows.append(d.xmat[m.body("trunk").id].reshape(3, 3).T @ x)
+        return np.asarray(rows)
+
+    hand = {name: in_trunk(out[name]["qpos"], s["left_hand"] - s["left_shoulder_c"]) for name, s in sites.items()}
+    assert np.abs(hand["changed"] - hand["plain"]).max() < 3e-3
