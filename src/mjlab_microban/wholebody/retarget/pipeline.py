@@ -181,7 +181,8 @@ def retarget(name: str, root: Path = ROOT, workers: int = 12, only: set[str] | N
             return {}
     manifest = out / "manifest.json"
     if only is not None and manifest.exists():
-        had = json.loads(manifest.read_text()).get("support_shift")
+        had = json.loads(manifest.read_text())
+        had = had.get("support_shift") if isinstance(had, dict) else None  # a list: from before the support shift
         if had != _settings(support_spec):
             raise ValueError(f"{name} was retargeted with the support shift {had}, not {_settings(support_spec)}: "
                              "retarget the whole set to change it")

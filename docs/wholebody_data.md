@@ -197,7 +197,8 @@ uv run --locked python $S retarget --sets cmu --support --support-margin-mm 15  
   （寄せない解、感度を取る前後と左右、寄せて 2 回）。寄せないときは約 16 分。
 - `--support-margin-mm` は `--support` と一緒にだけ使え、0 以上の有限の値に限る。使った設定はクリップごとの `_report.json` の
   `support_shift` と `gmr/<set>/manifest.json` の `support_shift` に残る（寄せないときは null）。`retarget --only` で一部だけ
-  写し直すとき、manifest と違う設定は断る（manifest がすべてのクリップに当てはまるように）。
+  写し直すとき、manifest と違う設定は断る（manifest がすべてのクリップに当てはまるように）。寄せを入れる前の manifest
+  （クリップの一覧だけ）は、寄せなしとして読む。
 - 寄せる前後の ZMP の数字は `_report.json` の `zmp_in_support`（片足、両足、足以外も着く、部位が離れる瞬間、それぞれの S の中の
   割合と外への距離）にある。フレームごとの値は `.npz` の `zmp`、`zmp_outside`、`contact`（寄せたあと）と `zmp_before`、
   `zmp_outside_before`、`contact_before`（寄せる前）、`human_contact`（人の部位）、`contact_parts`、`support_shift`。

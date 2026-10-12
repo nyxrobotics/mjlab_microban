@@ -153,3 +153,8 @@ def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="retarget the whole set"):
         pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"}, support_spec=SupportSpec())
     assert (out / "cmuwalk_07_01.pkl").exists()
+    # A manifest from before the support shift (a list of the clips) is one without it.
+    (out / "manifest.json").write_text(json.dumps(json.loads((out / "manifest.json").read_text())["clips"]))
+    pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"})
+    with pytest.raises(ValueError, match="retarget the whole set"):
+        pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"}, support_spec=SupportSpec())
