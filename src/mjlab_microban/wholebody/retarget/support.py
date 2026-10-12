@@ -2,8 +2,10 @@
 
 Microban's feet are far apart for its size (HOME's sole centres 93 mm apart, 0.75 leg lengths; a human's
 0.2-0.25), so the human's motion, scaled, puts Microban's weight outside the foot it stands on.  The support
-shift moves the trunk horizontally, with the hands and feet where they were (core.MicrobanRetargeting._shifted),
-so that Microban's zero-moment point stays in its support:
+shift moves the trunk horizontally (forward and sideways; its orientation is kept, and its height but where a
+standing leg would not reach its foot, by at most ``max_drop_m``), the arms with it (their pose relative to the
+trunk is kept) and the feet where they were (core.MicrobanRetargeting._shifted), so that Microban's zero-moment
+point stays in its support:
 
 * The zero-moment point (ZMP) is Microban's, from its whole-body dynamics: the retargeted qpos sequence through
   mj_inverse on robot.xml (the masses and inertias the training simulates; the arms' and the trunk's angular
@@ -11,44 +13,48 @@ so that Microban's zero-moment point stays in its support:
   give, and the ZMP is the point of the floor (z = 0) about which its horizontal moment is zero.  Frames whose
   vertical force is below MIN_LOAD of the weight (falling, flight) have none.  The velocities and accelerations
   are those of a cubic fitted over ``smooth_s`` (0.3 s): with central differences the capture's frame-to-frame
-  noise moves the ZMP by 7-68 mm per frame (median; the PICO walk the most), with 0.3 s by 0.3-7.6 mm, within
-  9 mm (p95) of a 0.6 s fit.
-* The support S(t) is the convex hull of the floor contact areas of every part on the floor (feet, legs,
-  forearms, upper arms, trunk), shrunk inward by ``margin_m`` (10 mm by default; the data command's
-  ``--support-margin-mm``).  A part is on the floor when the human's is (as low as when standing for a foot, as
-  low as when lying on the floor for the others (core.CONTACT_RADIUS), and slow across the floor) and Microban's
-  is within ROBOT_CONTACT_M of the floor, or when Microban's touches the floor (ROBOT_TOUCH_M) and is slow:
-  lying on the floor (LAFAN1 ground1_subject5) the human's trunk often counts as up while Microban's touches
-  the floor, and an arm alone would be the support.  Lying and crawling (LYING_TILT_DEG) have none.  The
-  shifted clip keeps the unshifted clip's parts.  A
-  part's contact area is the part of its training collision shapes within ``band_m`` (10 mm) of its lowest
-  point, seen from above: a sole tilted less than 9 degrees counts whole (the retargeted standing foot is tilted
-  6-10 degrees at the median, 7.4 standing on one leg in CMU 49_19), a foot rolling on its heel or toes counts
-  its edge.  Where the hull is too narrow to shrink by ``margin_m``, S(t) is its deepest points (the hull
-  shrunk by its inradius: its middle line or point), so that S changes continuously as a foot rolls.
-* Before a part leaves the floor, the ZMP moves into what remains: over the last ``lift_s`` of the contact
-  phase (at most its length) the allowed area is S(t) within a distance of the remaining support that falls
-  linearly to 0 at lift-off.  After a landing the ZMP may be anywhere in the larger support.  With no part on
-  the floor (a flight) the ZMP is not constrained, and the shift only joins the frames around.
-* The shift d(t) (in the heading frame, lateral and forward) is solved over the whole clip by least squares:
-  the ZMP outside the allowed area (half-planes, aimed ``aim_m`` inside), the shift's size and its acceleration,
-  and the shift beyond ``max_lateral_m`` / ``max_forward_m``.  The ZMP's response to the shift is found
-  numerically: the clip is solved again with the shift moved by ``probe_m`` along each axis (the IK and the
-  floor alignment, each frame started from the unshifted solution), and the ZMP at t is recomputed with each
-  frame of its fit moved by 1 % of that change (one moved frame has a large acceleration and the ZMP is not
-  linear in it over the whole probe).  The clip is then solved with the new shift, its ZMP computed again and
-  the least squares solved again from there, ``iterations`` times; the shift with the least cost is kept.
-* Forward too (``axes="both"``), by the numbers on CMU 07_01, 16_18, 49_19, 132_24, LAFAN1 walk3_subject5 and
-  PICO picoteleopit_rec06: shifting sideways only leaves the ZMP 10-54 mm (p95) outside on one foot and inside
-  in 0-40 % of those frames, because the scaled walk's ZMP runs ahead of the short sole; with forward the p95
-  is 0-14 mm and 50-100 % are inside (0-4 % before).  The trunk then slows over the sole and speeds up between
-  steps (the forward speed's standard deviation 0.02 -> 0.07-0.09 m/s on the CMU walks), but the shift stays
-  within 5 cm, so the trunk never falls behind or gets ahead of the unshifted one by more.
+  noise moves the ZMP by 7-68 mm per frame (median; the PICO walk the most).
+* The parts on the floor (robot_contact): a part is on the floor when the human's is (as low as when standing for
+  a foot, as low as when lying on the floor for the others (core.CONTACT_RADIUS), and slow across the floor) and
+  Microban's is within ROBOT_CONTACT_M of the floor (the training side's support height), or when Microban's
+  touches the floor (ROBOT_TOUCH_M) and is slow.  Gaps of up to GAP_FRAMES and contacts of one frame are filled
+  and dropped.  Lying and crawling (the trunk tilted past LYING_TILT_DEG with a part other than the feet on the
+  floor) have no part on the floor.  The shifted clip's parts are found again from its own poses by the same rule.
+* The support S(t) is the convex hull of the floor contact areas of the parts on the floor, shrunk inward by
+  ``margin_m`` (10 mm by default; the data command's ``--support-margin-mm``).  A part's contact area is the part
+  of its training collision shapes within ``band_m`` (10 mm) of its lowest point, seen from above.  Where the hull
+  is too narrow to shrink by ``margin_m``, S(t) is its deepest points (its middle line or point).
+* The shift d(t) is 0 where nothing is on the floor (flight, lying, crawling) and where a part other than the feet
+  is (kneeling, a hand down: the IK's knee and hand targets are too weak to keep them on the floor under a moving
+  trunk); it goes to 0 over ``fade_s`` before and comes back over ``fade_s`` after.
+* Before a part leaves the floor (lift-off), the ZMP moves into what remains: over the last ``lift_s`` of the
+  contact phase (at most its length) the allowed area is S(t) within a distance of the remaining support that
+  falls linearly to 0 at the last frame on the floor, and that frame and the first one off the floor weigh
+  ``w_lift`` times the others.  A part that leaves the floor in the frame another lands (no frame with both) is
+  counted on the floor in both frames.
+* The shift (in the heading frame, lateral and forward) is a cubic B-spline with knots ``knot_s`` apart, solved
+  over the whole clip by least squares.  The B-spline and the acceleration term keep it smooth enough that the
+  0.3 s fit, the 0.5 s fit and central differences see the same ZMP from it (with knots 0.1 s apart the ZMP the
+  optimisation saw from the shift's 3-5 Hz part was not there with central differences).  The terms: the ZMP
+  outside the allowed area (aimed ``aim_m`` inside; squared up to ``huber_m``, linear beyond, so that a ZMP far
+  out that no shift brings in, a push-off before a jump, does not swing the shift), the shift's size (so that it
+  stays near 0 where the ZMP is already in), its acceleration and its forward speed (the trunk's progress), the
+  shift where it must be 0, and, as near-hard limits, a standing leg stretched beyond its straight length (less
+  ``reach_slack_m``; the trunk may go down by ``max_drop_m`` for it), a standing leg's hip roll within
+  ``joint_margin_deg`` of the end of its range (at the end the IK lifts the foot instead; one already there
+  unshifted is left to the IK), and the shift beyond ``max_lateral_m`` / ``max_forward_m``.  The response of the
+  ZMP and of the hip rolls to the shift is found numerically: the clip is solved again with the shift moved by
+  ``probe_m`` along each axis (the IK and the floor alignment, each frame started from the unshifted solution
+  moved by the shift), and the ZMP at t is recomputed with each frame of its fit moved by 1 % of that change.  The
+  clip is then solved with the new shift, its ZMP computed again and the least squares solved again from there,
+  ``iterations`` times; the shift with the least cost is kept.  The ZMP of the clip's first and last half window
+  of the fit is fitted from one side and not constrained.
 """
 
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import asdict, dataclass
 
 import mujoco
@@ -69,16 +75,19 @@ ROBOT_CONTACT_M = 0.025  # a part on the floor is at most this high (preprocess'
 # human's: lying on its side it lies on the trunk and an arm where the human's trunk is a little higher.
 ROBOT_TOUCH_M = 0.005
 ROBOT_TOUCH_SPEED = 0.1
-# Lying and crawling (the trunk more than this from upright with a part other than the feet on the floor) are
-# left alone, as by preprocess's unsupported rule: Microban's arms and trunk are 6-45 mm above the floor where
-# the human's lie on it, so its zero-moment point is 70-140 mm outside what touches the floor, and the shift up
-# to its limits only took LAFAN1 ground1_subject5's frames in S(t) from 12 to 16 %.
+# A part's gaps on the floor of up to this many frames are filled (a foot is not up and down again in 67 ms; the
+# robot's height condition breaks the human's contact for a frame or two where the human's is whole).
+GAP_FRAMES = 2
+# Lying and crawling (the trunk more than this from upright with a part other than the feet on the floor) have no
+# support, as by preprocess's unsupported rule: Microban's arms and trunk are 6-45 mm above the floor where the
+# human's lie on it, so its zero-moment point is 70-140 mm outside what touches the floor.
 LYING_TILT_DEG = 45.0
 # A human part is on the floor when its joints are less than CONTACT_HEIGHT leg lengths above where they are on
 # the floor and the slowest of them moves less than CONTACT_SPEED leg lengths per second across it (CMU 07_01: a
 # standing foot 0-0.02 high and below 0.3 per second, a swinging one 0.05-0.14 high and 2.6-5.4 per second).
 CONTACT_HEIGHT = 0.05
 CONTACT_SPEED = 0.8
+HARD = 1e3  # the weight of the near-hard limits, per w_outside
 
 
 @dataclass(frozen=True)
@@ -90,18 +99,32 @@ class SupportSpec:
     band_m: float = 0.010  # a part's contact area: its shapes within this of its lowest point
     smooth_s: float = 0.3  # the ZMP's velocities and accelerations: a cubic fitted over this
     lift_s: float = 0.3  # the ZMP moves into the remaining support over this before a part leaves the floor
-    # The largest shift: sideways, both feet kept, 40 mm puts the far leg's hip roll at its 25 degree limit.
+    knot_s: float = 0.2  # the shift is a cubic B-spline with knots this far apart
+    stance_s: float = 0.2  # a foot that left the floor stops lowering the trunk for its leg over this
+    reach_slack_m: float = 0.002  # a standing leg reaches its foot this short of its straight length
+    max_drop_m: float = 0.01  # the trunk goes down at most this for a standing leg to reach its foot
+    joint_margin_deg: float = 1.0  # a standing leg's hip roll is kept this far from the end of its range
     max_lateral_m: float = 0.04
     max_forward_m: float = 0.03
-    # Least squares weights, per frame: the ZMP outside (per m), the shift (per m), its acceleration (per m/s^2;
-    # lateral, forward).  The ZMP is aimed ``aim_m`` inside S (the linearisation's error).
+    # Least squares weights, per frame and squared: the ZMP outside (per m; w_lift times at a lift-off), the shift
+    # (per m), its acceleration (per m/s^2), its forward speed (per m/s) and the shift where it must be 0 (per m).
     w_outside: float = 1.0
-    w_shift: float = 1e-3
-    w_accel_lateral: float = 3e-5
-    w_accel_forward: float = 3e-5
+    w_lift: float = 3.0
+    w_shift: float = 3e-2
+    w_accel: float = 1e-4
+    w_speed_forward: float = 1e-2
+    w_zero: float = 1e3
+    fade_s: float = 0.2  # the shift goes to 0 over this before a frame where it must be 0
+    huber_m: float = 0.03  # the ZMP's distance outside counts squared up to this and linearly beyond
     aim_m: float = 0.002
     probe_m: float = 0.01
     iterations: int = 2
+
+    def __post_init__(self):
+        if not (math.isfinite(self.margin_m) and self.margin_m >= 0.0):
+            raise ValueError(f"the support margin must be a finite length >= 0, not {self.margin_m!r}")
+        if self.axes not in ("both", "lateral"):
+            raise ValueError(f"unknown support axes {self.axes!r}")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -179,7 +202,7 @@ def zmp(model: mujoco.MjModel, qs: np.ndarray, fps: float, smooth_s: float):
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Contact areas.
+# Contact areas and the parts on the floor.
 
 _BOX_SIGNS = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
 _BOX_EDGES = [(i, j) for i in range(8) for j in range(i + 1, 8) if np.sum(_BOX_SIGNS[i] != _BOX_SIGNS[j]) == 1]
@@ -226,6 +249,7 @@ def _part(model: mujoco.MjModel, body: str) -> str:
 
 PARTS = ("left_foot", "right_foot", "left_leg", "right_leg", "left_forearm", "right_forearm",
          "left_upper_arm", "right_upper_arm", "trunk")
+FEET = [PARTS.index("left_foot"), PARTS.index("right_foot")]
 # The human roles that tell when a part is on the floor (skeleton.FORMATS roles).
 PART_ROLES = {
     "left_foot": ("L.ankle", "L.toe"), "right_foot": ("R.ankle", "R.toe"),
@@ -284,6 +308,45 @@ class Shapes:
         return np.concatenate(pts)
 
 
+@dataclass
+class Poses:
+    """Per frame of a qpos sequence: the collision shapes' vertices, the trunk's tilt (degrees) and heading (rad),
+    and the hip and ankle centres (T, 2 (left, right), 3)."""
+
+    verts: list
+    tilt_deg: np.ndarray
+    yaw: np.ndarray
+    hip: np.ndarray
+    ankle: np.ndarray
+
+
+def poses(model: mujoco.MjModel, qs: np.ndarray, shapes: Shapes) -> Poses:
+    d = mujoco.MjData(model)
+    root, trunk = int(model.jnt_bodyid[0]), model.body("trunk").id
+    sites = [[model.site(f"{s}_{p}_c").id for s in ("left", "right")] for p in ("hip", "ankle")]
+    T = len(qs)
+    verts, tilt, yaw = [], np.zeros(T), np.zeros(T)
+    hip, ankle = np.zeros((T, 2, 3)), np.zeros((T, 2, 3))
+    for t in range(T):
+        d.qpos[:] = qs[t]
+        mujoco.mj_kinematics(model, d)
+        verts.append(shapes.vertices(d))
+        tilt[t] = np.degrees(np.arccos(np.clip(d.xmat[root, 8], -1.0, 1.0)))
+        yaw[t] = np.arctan2(d.xmat[trunk, 3], d.xmat[trunk, 0])
+        hip[t], ankle[t] = d.site_xpos[sites[0]], d.site_xpos[sites[1]]
+    return Poses(verts, tilt, np.unwrap(yaw), hip, ankle)
+
+
+def fill_runs(c: np.ndarray, value: bool, n: int) -> np.ndarray:
+    """``c`` (T,) with its runs of ``not value`` of at most ``n`` frames between two of ``value`` set to ``value``."""
+    c = c.copy()
+    edges = np.flatnonzero(np.diff(np.r_[value, c == value, value].astype(int)))
+    for a, b in zip(edges[::2], edges[1::2]):
+        if 0 < a and b < len(c) and b - a <= n:
+            c[a:b] = value
+    return c
+
+
 def human_contact(frames, ref, fmt, fps, floor, role_name, contact_radius) -> np.ndarray:
     """(T, P) the human's parts on the floor: the lowest of the part's joints less than CONTACT_HEIGHT leg lengths
     above its height on the floor (a foot's: as in the standing reference; the others': core.CONTACT_RADIUS) and
@@ -305,11 +368,22 @@ def human_contact(frames, ref, fmt, fps, floor, role_name, contact_radius) -> np
                 v[0] = v[1]
             speeds.append(v)
         c = (np.min(heights, 0) < CONTACT_HEIGHT * leg) & (np.min(speeds, 0) < CONTACT_SPEED * leg)
-        for value in (True, False):
-            mid = (c[:-2] == value) & (c[1:-1] != value) & (c[2:] == value)
-            c[1:-1][mid] = value
-        out[:, p] = c
+        out[:, p] = fill_runs(fill_runs(c, True, 1), False, 1)
     return out
+
+
+def robot_contact(P: Poses, human: np.ndarray, shapes: Shapes, fps: float) -> np.ndarray:
+    """(T, P) Microban's parts on the floor in the poses ``P`` (module docstring)."""
+    T = len(P.verts)
+    low = np.array([shapes.lowest(v) for v in P.verts])
+    centre = np.array([[v[shapes.part_of == p, :2].mean(0) for p in range(len(PARTS))] for v in P.verts])
+    speed = np.linalg.norm(np.gradient(centre, axis=0), axis=2) * fps if T > 1 else np.zeros((T, len(PARTS)))
+    contact = (human & (low < ROBOT_CONTACT_M)) | ((low < ROBOT_TOUCH_M) & (speed < ROBOT_TOUCH_SPEED))
+    for p in range(len(PARTS)):
+        contact[:, p] = fill_runs(fill_runs(contact[:, p], True, GAP_FRAMES), False, 1)
+    lying = (P.tilt_deg > LYING_TILT_DEG) & np.delete(contact, FEET, axis=1).any(1)
+    contact[lying] = False
+    return contact
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -377,161 +451,307 @@ def outside(z: np.ndarray, verts: np.ndarray) -> float:
 
 @dataclass
 class Supports:
-    """Per frame: the parts on the floor (T, P), the allowed area (half-planes, or None) and S(t)'s vertices."""
+    """Per frame: the parts on the floor (T, P), the allowed area (half-planes, or None), S(t)'s vertices and the
+    weight of the ZMP outside the allowed area (T,)."""
 
     contact: np.ndarray
     A: list
     h: list
     S: list
+    weight: np.ndarray
 
 
-def supports(model, qs, human, shapes: Shapes, spec: SupportSpec, fps: float, contact=None) -> Supports:
-    """S(t) and the allowed area of every frame (module docstring) from the poses ``qs`` and the human's contacts
-    (T, P); ``contact``: the parts on the floor as given (the shifted clip keeps the unshifted clip's)."""
-    d = mujoco.MjData(model)
-    T = len(qs)
-    verts, tilt_cos = [], []
-    root = int(model.jnt_bodyid[0])
-    for t in range(T):
-        d.qpos[:] = qs[t]
-        mujoco.mj_kinematics(model, d)
-        verts.append(shapes.vertices(d))
-        tilt_cos.append(d.xmat[root, 8])
-    if contact is None:
-        lying = np.degrees(np.arccos(np.clip(tilt_cos, -1.0, 1.0))) > LYING_TILT_DEG
-        low = np.array([shapes.lowest(v) for v in verts])
-        centre = np.array([[v[shapes.part_of == p, :2].mean(0) for p in range(len(PARTS))] for v in verts])
-        speed = np.linalg.norm(np.gradient(centre, axis=0), axis=2) * fps if T > 1 else np.zeros((T, len(PARTS)))
-        contact = (human & (low < ROBOT_CONTACT_M)) | ((low < ROBOT_TOUCH_M) & (speed < ROBOT_TOUCH_SPEED))
-        # Lying and crawling: no support (the frame is left alone).
-        contact[lying & contact[:, [PARTS.index(p) for p in PARTS if not p.endswith("_foot")]].any(1)] = False
+def supports(P: Poses, contact: np.ndarray, shapes: Shapes, spec: SupportSpec, fps: float, plan: bool = False) -> Supports:
+    """S(t) of every frame from the poses ``P`` and the parts on the floor ``contact``.  With ``plan``, the allowed
+    area and the weights the least squares uses (the lift-offs and the parts that change in one frame; module
+    docstring); without, the allowed area is S(t)."""
+    T = len(P.verts)
     contact = contact.copy()
+    weight = np.ones(T)
+    if plan:
+        # A part that leaves the floor as another lands: both on the floor in both frames.
+        for t1 in range(1, T):
+            before, after = contact[t1 - 1], contact[t1]
+            if (before & ~after).any() and after.any() and not (before & after).any():
+                contact[t1 - 1] |= after
+                contact[t1] |= before
     A, h, S = [None] * T, [None] * T, [np.zeros((0, 2))] * T
     for t in range(T):
         parts = np.flatnonzero(contact[t])
         if len(parts):
-            A[t], h[t] = shrink(*halfplanes(shapes.area(verts[t], parts, spec.band_m)), spec.margin_m)
+            A[t], h[t] = shrink(*halfplanes(shapes.area(P.verts[t], parts, spec.band_m)), spec.margin_m)
             S[t] = region_vertices(A[t], h[t])
-    # Before a part leaves the floor: within a distance of the remaining support falling to 0 at lift-off.
+    if not plan:
+        return Supports(contact, A, h, S, weight)
     n_lift = max(1, round(spec.lift_s * fps))
     for t1 in range(1, T):
         before, after = contact[t1 - 1], contact[t1]
         keep = before & after
         if not (before & ~after).any() or not keep.any():
             continue
-        t0 = t1 - 1
-        while t0 > 0 and t1 - t0 < n_lift and (contact[t0 - 1] == before).all():
+        last = t1 - 1  # the last frame with the part on the floor
+        t0 = last
+        while t0 > 0 and last - t0 + 1 < n_lift and (contact[t0 - 1] == before).all():
             t0 -= 1
-        for t in range(t0, t1):
-            An, hn = shrink(*halfplanes(shapes.area(verts[t], np.flatnonzero(keep), spec.band_m)), spec.margin_m)
+        far = 0.0
+        for t in range(t0, last + 1):
+            An, hn = shrink(*halfplanes(shapes.area(P.verts[t], np.flatnonzero(keep), spec.band_m)), spec.margin_m)
+            rem = region_vertices(An, hn)
             if t == t0:
-                far = max(outside(p, region_vertices(An, hn)) for p in S[t]) if len(S[t]) else 0.0
-            r = far * (t1 - t) / (t1 - t0 + 1)
-            hd = np.r_[hn, np.max(region_vertices(An, hn) @ _DIRS.T, axis=0)] + r
+                far = max(outside(p, rem) for p in S[t]) if len(S[t]) else 0.0
+            r = far * (last - t) / max(last - t0, 1)
             A[t] = np.r_[A[t], An, _DIRS]
-            h[t] = np.r_[h[t], hd]
-    return Supports(contact, A, h, S)
+            h[t] = np.r_[h[t], hn + r, np.max(rem @ _DIRS.T, axis=0) + r]
+        weight[[last, t1]] = spec.w_lift
+    return Supports(contact, A, h, S, weight)
 
 
-def heading_basis(model, qs, axes: str) -> np.ndarray:
-    """(T, 2, k) the shift's axes in the world: lateral (the trunk heading's left) and, with "both", forward."""
-    d = mujoco.MjData(model)
-    trunk = model.body("trunk").id
-    yaw = np.zeros(len(qs))
-    for t, q in enumerate(qs):
-        d.qpos[:] = q
-        mujoco.mj_kinematics(model, d)
-        yaw[t] = np.arctan2(d.xmat[trunk, 3], d.xmat[trunk, 0])
-    yaw = np.unwrap(yaw)
-    left = np.stack([-np.sin(yaw), np.cos(yaw)], 1)
-    if axes == "lateral":
-        return left[:, :, None]
-    if axes == "both":
-        return np.stack([left, np.stack([np.cos(yaw), np.sin(yaw)], 1)], 2)
-    raise ValueError(f"unknown support axes {axes!r}")
+def lift_offs(contact: np.ndarray) -> np.ndarray:
+    """The frames (first off the floor) where a part leaves the floor and another stays."""
+    before, after = contact[:-1], contact[1:]
+    return np.flatnonzero((before & ~after).any(1) & (before & after).any(1)) + 1
+
+
+def classes(contact: np.ndarray) -> dict:
+    """Frame masks by the parts on the floor: one foot, both feet, a part other than the feet, none."""
+    feet = contact[:, FEET].sum(1)
+    other = np.delete(contact, FEET, axis=1).any(1)
+    return {"single": (feet == 1) & ~other, "double": (feet == 2) & ~other, "other": other, "none": ~contact.any(1)}
+
+
+def stats(z, load, sup: Supports):
+    """Distances (T,) of the ZMP outside S(t) (nan without contact or without load)."""
+    out = np.full(len(z), np.nan)
+    for t in range(len(z)):
+        if sup.A[t] is not None and load[t] >= MIN_LOAD and np.isfinite(z[t]).all():
+            out[t] = outside(z[t], sup.S[t])
+    return out
+
+
+def evaluate(model, qs, human, fps: float, spec: SupportSpec, shapes: Shapes | None = None):
+    """(ZMP, load, the parts on the floor, the distances outside S(t)) of a qpos sequence; also its Poses."""
+    shapes = shapes or Shapes(model)
+    P = poses(model, qs, shapes)
+    contact = robot_contact(P, human, shapes, fps)
+    z, load = zmp(model, qs, fps, spec.smooth_s)
+    return (z, load, contact, stats(z, load, supports(P, contact, shapes, spec, fps))), P
+
+
+def zmp_summary(dist, contact) -> dict:
+    """Per class of frames (classes) and at the lift-offs: the frames with a ZMP, the share inside S(t) and the
+    distance outside (p95, max; mm)."""
+    def one(d):
+        d = d[np.isfinite(d)]
+        if not len(d):
+            return {"frames_with_zmp": 0}
+        return {"frames_with_zmp": len(d), "inside_share": round(float((d <= 1e-4).mean()), 4),
+                "outside_mm_p95_max": [round(1000 * float(np.percentile(d, 95)), 1), round(1000 * float(d.max()), 1)]}
+    out = {k: one(dist[m]) for k, m in classes(contact).items() if k != "none"}
+    out["lift_off"] = one(dist[lift_offs(contact)])
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------
 # The least squares.
 
 
-def _diff(T: int, k: int, order: int) -> sp.csr_matrix:
+def heading_basis(yaw: np.ndarray, axes: str) -> np.ndarray:
+    """(T, 2, k) the shift's axes in the world: lateral (the trunk heading's left) and, with "both", forward."""
+    left = np.stack([-np.sin(yaw), np.cos(yaw)], 1)
+    if axes == "lateral":
+        return left[:, :, None]
+    return np.stack([left, np.stack([np.cos(yaw), np.sin(yaw)], 1)], 2)
+
+
+def bspline(T: int, step: int) -> sp.csr_matrix:
+    """(T, K) a uniform cubic B-spline's basis at the frames, knots ``step`` frames apart."""
+    step = max(1, step)
+    K = max(-(-(T - 1) // step), 1) + 3
+    u = np.arange(T) / step
+    i = np.minimum(np.floor(u).astype(int), K - 4)
+    s = u - i
+    w = np.stack([(1 - s) ** 3, 3 * s**3 - 6 * s**2 + 4, -3 * s**3 + 3 * s**2 + 3 * s + 1, s**3], 1) / 6.0
+    rows = np.repeat(np.arange(T), 4)
+    return sp.csr_matrix((w.reshape(-1), (rows, (i[:, None] + np.arange(4)).reshape(-1))), shape=(T, K))
+
+
+def _diff(T: int, order: int) -> sp.csr_matrix:
     D = sp.eye(T, format="csr")
     for _ in range(order):
         D = (D[1:] - D[:-1]).tocsr()
-    return sp.kron(D, sp.eye(k), format="csr")
+    return D
 
 
-def solve_shift(x_k, z_k, J, idx, sup: Supports, constrained, spec: SupportSpec, fps: float, caps: np.ndarray):
-    """The shift (T, k) minimising the linearised cost around (x_k, z_k): z(x) = z_k + sum_w J[:, w] (x - x_k) at
-    the frames idx[:, w] (J (T, W, 2, k)).  Squared hinges, solved by Newton steps on the active set."""
+def hip_rolls(model: mujoco.MjModel):
+    """The hip roll joints (left, right): qpos addresses (2,) and ranges (2, 2)."""
+    ids = [model.joint(f"{s}_hip_roll").id for s in ("left", "right")]
+    return model.jnt_qposadr[ids], model.jnt_range[ids]
+
+
+def leg_length(model: mujoco.MjModel) -> float:
+    """The hip centre to ankle centre distance with the knee straight."""
+    d = mujoco.MjData(model)
+    mujoco.mj_kinematics(model, d)
+    return float(np.linalg.norm(d.site_xpos[model.site("left_hip_c").id] - d.site_xpos[model.site("left_ankle_c").id]))
+
+
+@dataclass
+class Problem:
+    """What the least squares needs besides the linearisation point: the ZMP's response to the shift (J (T, W, 2,
+    k) at the frames idx (T, W)) and the standing legs' hip roll's (Jr (T, 2, k); the legs and frames ``roll_on``
+    (T, 2), its range (lo, hi) less the margin), how much the shift must be 0 (T,; 1 where it must, fading out
+    around) and the standing legs' reach (rows (n, T k), bounds (n,))."""
+
+    J: np.ndarray
+    idx: np.ndarray
+    Jr: np.ndarray
+    roll_on: np.ndarray
+    roll_range: tuple
+    zero: np.ndarray
+    reach_rows: sp.csr_matrix
+    reach_b: np.ndarray
+
+
+def reach_limits(P: Poses, contact: np.ndarray, basis: np.ndarray, length: float, spec: SupportSpec):
+    """The shift that keeps each standing leg's hip within its reach of its ankle, as rows (n, T k) and bounds:
+    |hip + s - ankle| at most the straight length less ``reach_slack_m`` (or as far as the unshifted leg, if
+    farther), with the hip ``max_drop_m`` lower (16 tangent half-planes of that circle)."""
+    T, _, k = basis.shape
+    reach = max(length - spec.reach_slack_m, 0.0)
+    far = math.hypot(spec.max_lateral_m, spec.max_forward_m)
+    rows, cols, vals, b = [], [], [], []
+    n = 0
+    for t in range(T):
+        for side in (0, 1):
+            if not contact[t, FEET[side]]:
+                continue
+            v = P.ankle[t, side] - P.hip[t, side]
+            c = v[:2]
+            r_max = max(reach, float(np.linalg.norm(v)))
+            r = math.sqrt(max(r_max**2 - max(-v[2] - spec.max_drop_m, 0.0) ** 2, 0.0))
+            bound = r + _DIRS @ c
+            use = np.flatnonzero(bound < far)
+            if not len(use):
+                continue
+            g = _DIRS[use] @ basis[t]  # (m, k)
+            for i, row in enumerate(g):
+                rows += [n + i] * k
+                cols += list(t * k + np.arange(k))
+                vals += list(row)
+            b.append(bound[use])
+            n += len(use)
+    R = sp.csr_matrix((vals, (rows, cols)), shape=(n, T * k))
+    return R, (np.concatenate(b) if b else np.zeros(0))
+
+
+def solve_shift(x_k, z_k, roll_k, sup: Supports, constrained, prob: Problem, spec: SupportSpec, fps: float,
+                caps: np.ndarray, coef=None):
+    """The shift (T, k) and its B-spline coefficients minimising the cost linearised around (x_k, z_k, roll_k):
+    z(x) = z_k + sum_w J[:, w] (x - x_k) at the frames idx[:, w], the hip rolls (T, 2) roll_k + Jr (x - x_k).
+    Hinges, squared (the ZMP's: squared up to ``huber_m`` and linear beyond, so that a ZMP far out that the shift
+    cannot bring in, a push-off before a jump, does not swing the shift), solved by Newton steps on the active
+    set (the linear part as a reweighted square)."""
     T, k = x_k.shape
     n = T * k
+    J, idx = prob.J, prob.idx
     W = idx.shape[1]
     t, w, i, j = np.meshgrid(np.arange(T), np.arange(W), np.arange(2), np.arange(k), indexing="ij")
     Jb = sp.csr_matrix((J.reshape(-1), ((2 * t + i).reshape(-1), (k * idx[t, w] + j).reshape(-1))), shape=(2 * T, n))
-    c = z_k.reshape(-1) - Jb @ x_k.reshape(-1)
-    c = np.nan_to_num(c)
-    # The constraint rows (all half-planes of the constrained frames).
-    crow, cb = [], []
+    off = np.nan_to_num(z_k.reshape(-1) - Jb @ x_k.reshape(-1))
+    blocks, bounds, weights = [], [], []
+    # The ZMP outside the allowed area.
     for t in constrained:
         A, h = sup.A[t], sup.h[t]
-        crow.append(sp.csr_matrix(A) @ Jb[2 * t:2 * t + 2])
-        cb.append(h - spec.aim_m - A @ c[2 * t:2 * t + 2])
-    C = sp.vstack(crow).tocsr() if crow else sp.csr_matrix((0, n))
-    cb = np.concatenate(cb) if cb else np.zeros(0)
-    D2 = _diff(T, k, 2)
-    acc = sp.diags(np.tile([spec.w_accel_lateral, spec.w_accel_forward][:k], T - 2))
-    base = (spec.w_shift * sp.eye(n) + fps**4 * (D2.T @ acc @ D2)).tocsc()
+        blocks.append(sp.csr_matrix(A) @ Jb[2 * t:2 * t + 2])
+        bounds.append(h - spec.aim_m - A @ off[2 * t:2 * t + 2])
+        weights.append(np.full(len(h), spec.w_outside * sup.weight[t]))
+    n_zmp = sum(len(x) for x in bounds)
+    # The standing legs' reach and hip roll.
+    blocks.append(prob.reach_rows)
+    bounds.append(prob.reach_b)
+    weights.append(np.full(len(prob.reach_b), HARD * spec.w_outside))
+    tt, ss = np.nonzero(prob.roll_on)
+    if len(tt):
+        g = prob.Jr[tt, ss]  # (r, k)
+        G = sp.csr_matrix((g.reshape(-1), (np.repeat(np.arange(len(tt)), k), (tt[:, None] * k + np.arange(k)).reshape(-1))),
+                          shape=(len(tt), n))
+        lin = roll_k[tt, ss] - G @ x_k.reshape(-1)
+        lo, hi = prob.roll_range
+        blocks += [G, -G]
+        bounds += [hi[ss] - lin, lin - lo[ss]]
+        weights += [np.full(len(tt), HARD * spec.w_outside)] * 2
+    # The caps.
     cap = np.tile(caps, T)
+    blocks += [sp.eye(n, format="csr"), -sp.eye(n, format="csr")]
+    bounds += [cap, cap]
+    weights += [np.full(n, HARD * spec.w_outside)] * 2
+    R = sp.vstack(blocks).tocsr()
+    b = np.concatenate(bounds)
+    wr = np.concatenate(weights)
+    # The quadratic terms, on the shift; the shift is the B-spline M c.
+    B = bspline(T, round(spec.knot_s * fps))
+    M = sp.kron(B, sp.eye(k), format="csr")
+    D2, D1 = sp.kron(_diff(T, 2), sp.eye(k)), _diff(T, 1)
+    Q = spec.w_shift * sp.eye(n) + spec.w_accel * fps**4 * (D2.T @ D2)
+    if k == 2:
+        F = sp.kron(D1, sp.csr_matrix(([1.0], ([0], [1])), shape=(1, 2)))  # the forward axis's speed
+        Q = Q + spec.w_speed_forward * fps**2 * (F.T @ F)
+    Q = Q + sp.diags(spec.w_zero * np.repeat(prob.zero, k))
+    # A small ridge on the coefficients: the knots at the clip's ends act on few frames.
+    Qc = (M.T @ Q @ M + 1e-6 * sp.eye(M.shape[1])).tocsc()
+    Rc = (R @ M).tocsr()
+    huber = np.r_[np.full(n_zmp, spec.huber_m), np.full(len(b) - n_zmp, 1e6)]  # (the limits: squared)
 
-    def cost(x):
-        r = np.maximum(C @ x - cb, 0.0)
-        e = np.maximum(np.abs(x) - cap, 0.0)
-        return spec.w_outside * r @ r + x @ (base @ x) + 1e3 * spec.w_outside * e @ e
+    def cost(c):
+        r = np.maximum(Rc @ c - b, 0.0)
+        far = r > huber
+        return float(c @ (Qc @ c) + wr @ np.where(far, 2.0 * huber * r - huber**2, r * r))
 
-    x = x_k.reshape(-1).copy()
-    f = cost(x)
+    c = np.zeros(M.shape[1]) if coef is None else coef.copy()
+    f = cost(c)
     for _ in range(50):
-        act = (C @ x - cb) > 0.0
-        over = np.abs(x) > cap
-        Ca = C[act]
-        H = base + spec.w_outside * (Ca.T @ Ca) + sp.diags(1e3 * spec.w_outside * over.astype(float))
-        g = spec.w_outside * (Ca.T @ cb[act]) + 1e3 * spec.w_outside * over * np.sign(x) * cap
-        x_new = spsolve(H.tocsc(), g)
-        step, f_new = 1.0, cost(x_new)
+        r = Rc @ c - b
+        act = r > 0.0
+        Ra = Rc[act]
+        we = wr[act] * np.minimum(1.0, huber[act] / r[act])  # the linear part as a reweighted square
+        H = Qc + Ra.T @ sp.diags(we) @ Ra
+        c_new = spsolve(H.tocsc(), Ra.T @ (we * b[act]))
+        if not np.isfinite(c_new).all():
+            break
+        step, f_new = 1.0, cost(c_new)
         while f_new > f + 1e-15 and step > 1e-3:
             step *= 0.5
-            f_new = cost(x + step * (x_new - x))
-        x_next = x + step * (x_new - x)
-        done = np.abs(x_next - x).max() < 1e-6
-        x, f = x_next, f_new
+            f_new = cost(c + step * (c_new - c))
+        c_next = c + step * (c_new - c)
+        done = np.abs(M @ (c_next - c)).max() < 1e-6
+        c, f = c_next, f_new
         if done:
             break
-    return x.reshape(T, k)
+    return (M @ c).reshape(T, k), c
 
 
-def sensitivity(model, solve, qs, x, basis, fps: float, spec: SupportSpec, step: float = 0.01):
-    """J (T, W, 2, k): the ZMP at t against the shift of the frames its derivatives are fitted over (windows).
-    The clip is solved again with the shift moved by ``probe_m`` along each axis (``solve`` maps a world shift
-    (T, 2) to qpos on the floor), and the ZMP at t is recomputed with one of those frames moved by ``step`` of
-    that change (a single moved frame has a large acceleration, and the ZMP is not linear in it over a whole
-    probe)."""
-    T, k = x.shape
+def sensitivity(model, solve, qs, basis, fps: float, spec: SupportSpec, step: float = 0.01):
+    """J (T, W, 2, k): the ZMP at t against the shift of the frames its derivatives are fitted over (windows),
+    those frames (T, W), and Jr (T, 2, k): the hip rolls (left, right) against the shift.  The clip is solved again with the shift moved by ``probe_m`` along each axis (``solve``
+    maps a world shift (T, 2) to qpos on the floor), and the ZMP at t is recomputed with one of those frames moved
+    by ``step`` of that change (a single moved frame has a large acceleration, and the ZMP is not linear in it over
+    a whole probe)."""
+    T, _, k = basis.shape
     idx, pos = windows(T, fps, spec.smooth_s)
     W = idx.shape[1]
     near = qs[idx]
     z0, _ = zmp_at(model, qs, near, pos, fps)
     J = np.zeros((T, W, 2, k))
+    Jr = np.zeros((T, 2, k))
+    roll = hip_rolls(model)[0]
     v = np.zeros(model.nv)
     rows = np.arange(T)
     for j in range(k):
-        e = np.zeros(k)
-        e[j] = spec.probe_m
-        qp = solve(np.einsum("tik,tk->ti", basis, x + e))
+        qp = solve(basis[:, :, j] * spec.probe_m)
         # An arm that takes the other branch in the probe says nothing about the shift: its joints are kept.
         jump = np.abs(qp[:, 7:] - qs[:, 7:]) > 0.5
         qp[:, 7:][jump] = qs[:, 7:][jump]
+        Jr[:, :, j] = (qp[:, roll] - qs[:, roll]) / spec.probe_m
         qm = qs.copy()
         for t in range(T):
             mujoco.mj_differentiatePos(model, v, 1.0, qs[t], qp[t])
@@ -542,70 +762,92 @@ def sensitivity(model, solve, qs, x, basis, fps: float, spec: SupportSpec, step:
             centre = moved[rows, pos]
             z, _ = zmp_at(model, centre, moved, pos, fps)
             J[:, w, :, j] = np.nan_to_num((z - z0) / (step * spec.probe_m))
-    return J
+    return J, idx, Jr
 
 
-def stats(z, load, sup: Supports, frames=None):
-    """Distances (T,) of the ZMP outside S(t) (nan without contact or without load)."""
-    T = len(z)
-    out = np.full(T, np.nan)
-    for t in range(T) if frames is None else frames:
-        if sup.A[t] is not None and load[t] >= MIN_LOAD and np.isfinite(z[t]).all():
-            out[t] = outside(z[t], sup.S[t])
-    return out
+def stance(contact: np.ndarray, fps: float, stance_s: float) -> np.ndarray:
+    """(T, 2) per foot (left, right): 1 on the floor, falling linearly to 0 over ``stance_s`` from the floor."""
+    n = max(1, round(stance_s * fps))
+    return np.stack([np.clip(1.0 - _distance(contact[:, p]) / n, 0.0, 1.0) for p in FEET], 1)
 
 
-def plan(model, solve, human, fps: float, spec: SupportSpec):
-    """The support shift of a clip.  ``solve`` maps a world shift (T, 2) (None: none) to the clip's qpos on the
-    floor and ``human`` is the human's contacts (T, P).  Returns the qpos, the shift (T, 2), a summary (the ZMP in
-    S(t) before and after, the cost of each iteration), and (ZMP, load, Supports, distances outside) before and
-    after."""
+def _distance(mask: np.ndarray) -> np.ndarray:
+    """(T,) frames to the nearest True (inf without one)."""
+    T = len(mask)
+    d = np.full(T, np.inf)
+    last = -np.inf
+    for t in range(T):
+        last = t if mask[t] else last
+        d[t] = t - last
+    last = np.inf
+    for t in range(T - 1, -1, -1):
+        last = t if mask[t] else last
+        d[t] = min(d[t], last - t)
+    return d
+
+
+def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
+    """The support shift of a clip.  ``solve(shift, stance)`` maps a world shift (T, 2) and the feet's weights on
+    the floor (T, 2; stance) to the clip's qpos on the floor; ``qs`` is the unshifted clip's, and
+    ``human`` is the human's contacts (T, P).  Returns
+    the qpos, the shift (T, 2), a summary (the ZMP in S(t) before and after, the cost of each iteration), and (ZMP,
+    load, the parts on the floor, the distances outside S(t)) before and after (after: the parts found again from
+    the shifted poses)."""
     shapes = Shapes(model)
-    qs = solve(None)
     T = len(qs)
-    basis = heading_basis(model, qs, spec.axes)
+    before, P0 = evaluate(model, qs, human, fps, spec, shapes)
+    z, load, contact, _ = before
+    summary = {"margin_m": spec.margin_m, "before": zmp_summary(before[3], contact), "cost_before": None,
+               "iterations": []}
+    zero = ~contact.any(1) | np.delete(contact, FEET, axis=1).any(1)
+    # The shift fades in and out over ``fade_s`` around the frames where it is 0.
+    fade = np.clip(1.0 - _distance(zero) / max(1, round(spec.fade_s * fps)), 0.0, 1.0) ** 2
+    # The ZMP of the first and last half window is fitted from one side: not constrained.
+    edge = np.zeros(T, bool)
+    half = windows(T, fps, spec.smooth_s)[0].shape[1] // 2
+    edge[:half], edge[T - half:] = True, True
+    if (zero | edge).all() or T < 3:
+        summary["after"] = summary["before"]
+        return qs, np.zeros((T, 2)), summary, before, before
+    feet = stance(contact, fps, spec.stance_s)
+    basis = heading_basis(P0.yaw, spec.axes)
     k = basis.shape[2]
     caps = np.array([spec.max_lateral_m, spec.max_forward_m][:k])
-    z, load = zmp(model, qs, fps, spec.smooth_s)
-    sup = supports(model, qs, human, shapes, spec, fps)
-    contact = sup.contact
-    constrained = [t for t in range(T) if sup.A[t] is not None and load[t] >= MIN_LOAD]
-    dist0 = stats(z, load, sup)
-    summary = {"before": zmp_summary(dist0), "cost_before": None, "iterations": []}
-    if not constrained:
-        summary["after"] = summary["before"]
-        return qs, np.zeros((T, 2)), summary, (z, load, sup, dist0), (z, load, sup, dist0)
-    x = np.zeros((T, k))
-    J = sensitivity(model, solve, qs, x, basis, fps, spec)
-    idx, _ = windows(T, fps, spec.smooth_s)
 
-    def objective(z, load, sup):
-        """The squared distance outside the allowed area, summed over the frames with a ZMP."""
-        return float(sum(np.sum(np.maximum(sup.A[t] @ z[t] - sup.h[t], 0.0) ** 2) for t in range(T)
-                         if sup.A[t] is not None and load[t] >= MIN_LOAD and np.isfinite(z[t]).all()))
+    def world(x):
+        return np.einsum("tik,tk->ti", basis, x)
 
-    best = (objective(z, load, sup), qs, x, (z, load, sup, dist0))
-    summary["cost_before"] = round(best[0], 8)
-    first = best[3]
+    J, idx, Jr = sensitivity(model, lambda s: solve(s, feet), qs, basis, fps, spec)
+    # A standing leg's hip roll is kept off the end of its range (at the end the IK can only lift the foot), unless
+    # the unshifted clip has it there.
+    m = math.radians(spec.joint_margin_deg)
+    roll, rng = hip_rolls(model)
+    lo, hi = rng[:, 0] + m, rng[:, 1] - m
+    roll_on = contact[:, FEET] & (qs[:, roll] > lo) & (qs[:, roll] < hi) & (fade < 1.0)[:, None]
+    prob = Problem(J, idx, Jr, roll_on, (lo, hi), fade, *reach_limits(P0, contact, basis, leg_length(model), spec))
+
+    def assess(q, z, load):
+        sup = supports(poses(model, q, shapes), contact, shapes, spec, fps, plan=True)
+        frames = [t for t in range(T) if sup.A[t] is not None and load[t] >= MIN_LOAD and np.isfinite(z[t]).all()
+                  and not (zero[t] or edge[t])]
+        cost = float(sum(sup.weight[t] * np.sum(np.maximum(sup.A[t] @ z[t] - sup.h[t], 0.0) ** 2) for t in frames))
+        return sup, frames, cost
+
+    sup, constrained, cost = assess(qs, z, load)
+    summary["cost_before"] = round(cost, 8)
+    best = (cost, qs, np.zeros((T, k)), z, load)
+    x, coef, q_k = np.zeros((T, k)), None, qs
     for _ in range(spec.iterations):
-        x = solve_shift(x, np.nan_to_num(z), J, idx, sup, constrained, spec, fps, caps)
-        qs_i = solve(np.einsum("tik,tk->ti", basis, x))
-        z, load = zmp(model, qs_i, fps, spec.smooth_s)
-        sup = supports(model, qs_i, human, shapes, spec, fps, contact)
-        cost = objective(z, load, sup)
-        constrained = [t for t in range(T) if sup.A[t] is not None and load[t] >= MIN_LOAD]
+        x, coef = solve_shift(x, np.nan_to_num(z), q_k[:, roll], sup, constrained, prob, spec, fps, caps, coef)
+        q_k = solve(world(x), feet)
+        z, load = zmp(model, q_k, fps, spec.smooth_s)
+        sup, constrained, cost = assess(q_k, z, load)
         summary["iterations"].append(round(cost, 8))
         if cost < best[0]:
-            best = (cost, qs_i, x.copy(), (z, load, sup, stats(z, load, sup)))
-    _, qs_b, x_b, after = best
-    summary["after"] = zmp_summary(after[3])
-    return qs_b, np.einsum("tik,tk->ti", basis, x_b), summary, first, after
-
-
-def zmp_summary(dist):
-    """The frames with a ZMP, the share inside S(t) and the distance outside (p95, max; mm) of stats' distances."""
-    ok = np.isfinite(dist)
-    return {"frames_with_zmp": int(ok.sum()),
-            "inside_share": round(float((dist[ok] <= 1e-4).mean()), 4) if ok.any() else None,
-            "outside_mm_p95_max": [round(1000 * float(np.percentile(dist[ok], 95)), 1),
-                                   round(1000 * float(dist[ok].max()), 1)] if ok.any() else None}
+            best = (cost, q_k, x.copy(), z, load)
+    _, qs_b, x_b, z_b, load_b = best
+    P = poses(model, qs_b, shapes)
+    contact_b = robot_contact(P, human, shapes, fps)
+    after = (z_b, load_b, contact_b, stats(z_b, load_b, supports(P, contact_b, shapes, spec, fps)))
+    summary["after"] = zmp_summary(after[3], contact_b)
+    return qs_b, world(x_b), summary, before, after

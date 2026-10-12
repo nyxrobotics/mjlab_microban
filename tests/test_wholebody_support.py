@@ -63,3 +63,9 @@ def test_the_support_is_the_contact_hull_shrunk_by_the_margin():
     strip = np.array([[x, y] for x in (-0.031, 0.031) for y in (-0.0075, 0.0075)])
     length, width = _size(support.shrink(*support.halfplanes(strip), 0.010))
     assert length == pytest.approx(0.047, abs=1e-5) and width < 1e-5
+
+
+def test_the_margin_is_a_length():
+    for margin in (-0.001, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            support.SupportSpec(margin_m=margin)

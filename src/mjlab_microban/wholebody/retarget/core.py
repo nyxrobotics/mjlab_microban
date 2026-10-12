@@ -62,15 +62,15 @@ error 0).
   stays at 0 (HOME).
 * Support shift (``support_spec``, off by default; support.py): the trunk
   moved horizontally so that Microban's zero-moment point stays in its
-  support.  The trunk and what is fixed on it (hips, shoulders) move, the
-  feet and hands keep their targets, a knee or an elbow moves by the share of
-  its limb below it, and the thigh, shank and upper arm turn with their
-  limb's line.
+  support.  The trunk and the arms move (the arms keep their pose relative
+  to the trunk), the feet keep their targets, a knee moves by the share of
+  the leg below it, and the thigh and shank turn with the leg's line.
 
 Outputs of ``retarget_frames`` (in ``out_dir``): ``<name>.npz`` (qpos, joint
 names, the joints in HOME's order, the targets, the human skeleton for
 drawing, per-frame marks, the zero-moment point and the parts on the floor
-before and after the support shift), ``<name>.pkl`` (GMR's PKL with ``joint_names``,
+before and after the support shift (after: found again from the shifted
+poses)), ``<name>.pkl`` (GMR's PKL with ``joint_names``,
 read by wholebody/data/build.py), ``<name>_ik.json`` (the IK configuration)
 and ``<name>_report.json`` (the numbers).  CPU only.
 """
@@ -158,8 +158,6 @@ SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("lef
 # floor: the lowest 0.5 % of each part's height in LAFAN1's lying and falling
 # clips (ground, fallAndGetUp, pushAndFall; 13 clips).
 CONTACT_RADIUS = {"pelvis": 0.09, "spine": 0.06, "neck": 0.12, "shoulder": 0.05, "elbow": -0.02, "wrist": -0.02, "knee": 0.01}
-# The support shift (support.py) lowers the trunk by at most this where a leg would not reach its foot.
-MAX_SHIFT_DROP_M = 0.02
 
 
 def _register_robot() -> str:
@@ -367,16 +365,16 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             self.arms.append((t1[f"{side}_shoulder_c"][0], t1[f"{side}_elbow_c"][0], task, t2[f"{side}_shoulder_c"][2], adr, sign,
                               t1[f"{side}_hand"][0]))
         self.trunk_id = self.model.body("trunk").id
-        # The support shift of the current frame (support.py; zero unless asked for), world (x, y).
+        # The support shift of the current frame (support.py; zero unless asked for), world (x, y), and how much
+        # the left and right foot stand (support.stance; 1 on the floor): a standing leg is at most ``leg_reach``
+        # long, the trunk going down by at most ``max_drop`` for it to reach its foot.
         self.shift = np.zeros(2)
+        self.stance = np.zeros(2)
+        self.leg_reach, self.max_drop = np.inf, 0.0
         fmt = FORMATS[fmt_name]
-        self.limbs = [tuple(role_name(fmt, f"{s}.{p}") for p in parts)
-                      for s in "LR" for parts in (("hip", "knee", "ankle"), ("shoulder", "elbow", "wrist"))]
-        d = mujoco.MjData(self.model)
-        d.qpos[:] = home_qpos(self.model)
-        mujoco.mj_kinematics(self.model, d)
-        self.leg_reach = float(np.linalg.norm(d.site_xpos[self.model.site("left_hip_c").id]
-                                              - d.site_xpos[self.model.site("left_ankle_c").id]))
+        # (hip, knee, ankle, side) and (shoulder, elbow, wrist)
+        self.legs = [tuple(role_name(fmt, f"{s}.{p}") for p in ("hip", "knee", "ankle")) + (i,) for i, s in enumerate("LR")]
+        self.arm_parts = [tuple(role_name(fmt, f"{s}.{p}") for p in ("shoulder", "elbow", "wrist")) for s in "LR"]
 
     def reset_configuration(self):
         super().reset_configuration()
@@ -473,26 +471,29 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         return out
 
     def _shifted(self, out, root):
-        """The targets with the support shift: the trunk and what is fixed on it (hips, shoulders) move by the
-        shift, the feet and hands stay, a knee or an elbow moves by the share of its limb below it, and the
-        thigh, shank and upper arm turn with their limb's line (base -> end).  The trunk goes down where a leg
-        would have to stretch beyond its straight length (or its length before the shift, if longer) to reach
-        its foot, by at most MAX_SHIFT_DROP_M."""
+        """The targets with the support shift, horizontal: the trunk and the arms move by the shift (the arms
+        keep their pose relative to the trunk), the feet stay, a knee moves by the share of its leg below it, and
+        the thigh and shank turn with the leg's line (hip -> ankle).  Where a standing leg would have to be
+        longer than ``leg_reach`` (or than it was) to reach its foot, the trunk and the arms go down by up to
+        ``max_drop`` (support.reach_limits keeps the shift within that)."""
         s = np.array([self.shift[0], self.shift[1], 0.0])
-        for hip, _, ankle in self.limbs[::2]:
-            p = out[hip][0] + s - out[ankle][0]
-            reach = max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
-            if np.linalg.norm(p) > reach:
-                drop = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
-                s[2] = -min(max(-s[2], drop), MAX_SHIFT_DROP_M)
+        for hip, _, ankle, i in self.legs:
+            if self.max_drop > 0.0:
+                p = out[hip][0] + s - out[ankle][0]
+                reach = max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
+                need = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
+                s[2] = -min(max(-s[2], self.stance[i] * need), self.max_drop)
         out[root] = (out[root][0] + s, out[root][1])
-        for base, mid, end in self.limbs:
-            b, m, e = out[base][0], out[mid][0], out[end][0]
+        for arm in self.arm_parts:
+            for name in arm:
+                out[name] = (out[name][0] + s, out[name][1])
+        for hip, knee, ankle, _ in self.legs:
+            b, m, e = out[hip][0], out[knee][0], out[ankle][0]
             share = np.linalg.norm(e - m) / max(np.linalg.norm(m - b) + np.linalg.norm(e - m), 1e-9)
             tilt = R.align_vectors([b + s - e], [b - e])[0]
             turn = lambda q: (tilt * R.from_quat(q, scalar_first=True)).as_quat(scalar_first=True)
-            out[base] = (b + s, turn(out[base][1]))
-            out[mid] = (m + share * s, turn(out[mid][1]))
+            out[hip] = (b + s, turn(out[hip][1]))
+            out[knee] = (m + share * s, turn(out[knee][1]))
         return out
 
 
@@ -602,10 +603,11 @@ def longest_run(mask) -> int:
     return best
 
 
-def solve_frames(gmr: MicrobanRetargeting, frames: list, shift=None, seeds=None):
+def solve_frames(gmr: MicrobanRetargeting, frames: list, shift=None, seeds=None, stance=None):
     """IK of every frame from a reset: qpos (T, nq) and the targets' positions and orientations per frame, with
-    the support shift ``shift`` (T, 2) (MicrobanRetargeting.shift).  With ``seeds`` (T, nq), each frame's IK starts
-    from its seed instead of the frame before (a shifted clip solved from the unshifted solution stays on its
+    the support shift ``shift`` (T, 2) and the feet's weights on the floor ``stance`` (T, 2)
+    (MicrobanRetargeting.shift, .stance).  With ``seeds`` (T, nq), each frame's IK starts from its seed (moved by
+    the shift) instead of the frame before (a shifted clip solved from the unshifted solution stays on its
     branches: a near-straight leg's hip yaw and ankle roll, the arms)."""
     gmr.reset_configuration()
     if seeds is not None:
@@ -613,12 +615,15 @@ def solve_frames(gmr: MicrobanRetargeting, frames: list, shift=None, seeds=None)
     qs, targets, target_quats = [], [], []
     for t, f in enumerate(frames):
         gmr.shift = np.zeros(2) if shift is None else np.asarray(shift[t], float)
+        gmr.stance = np.zeros(2) if stance is None else np.asarray(stance[t], float)
         if seeds is not None:
-            gmr.configuration.update(q=seeds[t])
+            seed = seeds[t].copy()
+            seed[:2] += gmr.shift  # the trunk where the shift puts it, the arms with it
+            gmr.configuration.update(q=seed)
         qs.append(gmr.retarget(to_input(f)).copy())
         targets.append({k: np.asarray(v[0]).copy() for k, v in gmr.scaled_human_data.items()})
         target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
-    gmr.shift = np.zeros(2)
+    gmr.shift, gmr.stance = np.zeros(2), np.zeros(2)
     return np.asarray(qs), targets, target_quats
 
 
@@ -651,6 +656,9 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     cfg_path.write_text(json.dumps(cfg, indent=1))
 
     gmr = MicrobanRetargeting(cfg, cfg_path, fmt_name)
+    if support_spec is not None:
+        gmr.leg_reach = support.leg_length(model) - support_spec.reach_slack_m
+        gmr.max_drop = support_spec.max_drop_m
     # Check: the standing reference retargets to HOME.
     gmr.reset_configuration()
     for _ in range(20):
@@ -664,10 +672,10 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     lowest = LowestPoint(model)
     solved, seeds = {}, []
 
-    def solve(shift):
+    def solve(shift, stance=None):
         """The clip's qpos with a support shift (T, 2) (None: none), each frame on the floor.  The first solve is
         the unshifted clip; the later ones start each frame from it."""
-        qs, tg, tq = solve_frames(gmr, frames, shift, seeds[0] if seeds else None)
+        qs, tg, tq = solve_frames(gmr, frames, shift, seeds[0] if seeds else None, stance)
         if not seeds:
             seeds.append(qs.copy())
         put_on_floor(model, lowest, qs, tg, scale * clear)
@@ -676,19 +684,16 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
 
     human = support.human_contact(frames, ref, fmt, fps, floor, role_name, CONTACT_RADIUS)
     t0 = time.perf_counter()
+    qs = solve(None)
     if support_spec is None:
-        qs = solve(None)
         shift = np.zeros((len(qs), 2))
         spec = support.SupportSpec()
-        z, load = support.zmp(model, qs, fps, spec.smooth_s)
-        sup = support.supports(model, qs, human, support.Shapes(model), spec, fps)
-        dist = support.stats(z, load, sup)
-        summary = {"before": support.zmp_summary(dist)}
-        zmp_before, dist_before = z, dist
+        before, _ = support.evaluate(model, qs, human, fps, spec)
+        summary = {"margin_m": spec.margin_m, "before": support.zmp_summary(before[3], before[2])}
+        after = before
     else:
-        qs, shift, summary, first, after = support.plan(model, solve, human, fps, support_spec)
-        zmp_before, dist_before = first[0], first[3]
-        z, load, sup, dist = after
+        qs, shift, summary, before, after = support.plan(model, solve, qs, human, fps, support_spec)
+    z, _, contact, dist = after
     targets, target_quats = solved[id(qs)]
     ik_fps = len(solved) * len(qs) / (time.perf_counter() - t0)
     d = mujoco.MjData(model)
@@ -792,8 +797,9 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
              targets=tg_arr.astype(np.float32), target_frames=np.array(tf),
              flip=flip, joint_jump=jump, target_jump=tjump, hand_err=np.asarray(hand_err, np.float32),
              lowest_point=low_after.astype(np.float32), support_shift=shift.astype(np.float32),
-             zmp=z.astype(np.float32), zmp_outside=dist.astype(np.float32), zmp_before=zmp_before.astype(np.float32),
-             zmp_outside_before=dist_before.astype(np.float32), contact=sup.contact, contact_parts=np.array(support.PARTS),
+             zmp=z.astype(np.float32), zmp_outside=dist.astype(np.float32), contact=contact,
+             zmp_before=before[0].astype(np.float32), zmp_outside_before=before[3].astype(np.float32),
+             contact_before=before[2], human_contact=human, contact_parts=np.array(support.PARTS),
              **extra)
     with open(out_dir / f"{stem}.pkl", "wb") as fh:  # the shape of GMR's scripts/bvh_to_robot.py output
         pickle.dump({"fps": fps, "root_pos": qs[:, :3], "root_rot": qs[:, [4, 5, 6, 3]],  # xyzw
