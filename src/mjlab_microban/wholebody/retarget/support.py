@@ -48,7 +48,8 @@ point stays in its support:
   moved by the shift), and the ZMP at t is recomputed with each frame of its fit moved by 1 % of that change.  The
   clip is then solved with the new shift, its ZMP computed again and the least squares solved again from there,
   ``iterations`` times; the shift with the least cost is kept.  The ZMP of the clip's first and last half window
-  of the fit is fitted from one side and not constrained.
+  of the fit is fitted from one side and not constrained, and the shift is held there (as at the first and last
+  constrained frame): free, it moved there to make the acceleration the constrained frames' fits see.
 """
 
 from __future__ import annotations
@@ -603,7 +604,8 @@ class Problem:
     """What the least squares needs besides the linearisation point: the ZMP's response to the shift (J (T, W, 2,
     k) at the frames idx (T, W)) and the standing legs' hip roll's (Jr (T, 2, k); the legs and frames ``roll_on``
     (T, 2), its range (lo, hi) less the margin), how much the shift must be 0 (T,; 1 where it must, fading out
-    around) and the standing legs' reach (rows (n, T k), bounds (n,))."""
+    around), the frames where it is held (T,; the clip's first and last half window) and the standing legs' reach
+    (rows (n, T k), bounds (n,))."""
 
     J: np.ndarray
     idx: np.ndarray
@@ -611,6 +613,7 @@ class Problem:
     roll_on: np.ndarray
     roll_range: tuple
     zero: np.ndarray
+    hold: np.ndarray
     reach_rows: sp.csr_matrix
     reach_b: np.ndarray
 
@@ -700,6 +703,9 @@ def solve_shift(x_k, z_k, roll_k, sup: Supports, constrained, prob: Problem, spe
         F = sp.kron(D1, sp.csr_matrix(([1.0], ([0], [1])), shape=(1, 2)))  # the forward axis's speed
         Q = Q + spec.w_speed_forward * fps**2 * (F.T @ F)
     Q = Q + sp.diags(spec.w_zero * np.repeat(prob.zero, k))
+    # Held where the ZMP is not constrained (the clip's ends): its steps there weigh as the shift where it must be 0.
+    pairs = sp.diags((prob.hold[:-1] | prob.hold[1:]).astype(float))
+    Q = Q + spec.w_zero * sp.kron(D1.T @ pairs @ D1, sp.eye(k))
     # A small ridge on the coefficients: the knots at the clip's ends act on few frames.
     Qc = (M.T @ Q @ M + 1e-6 * sp.eye(M.shape[1])).tocsc()
     Rc = (R @ M).tocsr()
@@ -827,7 +833,7 @@ def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
     roll, rng = hip_rolls(model)
     lo, hi = rng[:, 0] + m, rng[:, 1] - m
     roll_on = contact[:, FEET] & (qs[:, roll] > lo) & (qs[:, roll] < hi) & (fade < 1.0)[:, None]
-    prob = Problem(J, idx, Jr, roll_on, (lo, hi), fade, *reach_limits(P0, contact, basis, leg_length(model), spec))
+    prob = Problem(J, idx, Jr, roll_on, (lo, hi), fade, edge, *reach_limits(P0, contact, basis, leg_length(model), spec))
 
     def assess(q, z, load):
         sup = supports(poses(model, q, shapes), contact, shapes, spec, fps, plan=True)
