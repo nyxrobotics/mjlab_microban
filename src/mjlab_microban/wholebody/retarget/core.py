@@ -163,14 +163,15 @@ CONTACT_RADIUS = {"pelvis": 0.09, "spine": 0.06, "neck": 0.12, "shoulder": 0.05,
 # With the support changes, the IK solves on to this error decrease (GMR's 0.001) and at most this many steps.
 SUPPORT_IK_MIN_GAIN = 1e-5
 SUPPORT_IK_MAX_ITER = 50
-# A foot held on the floor weighs this many times its IK weights (position and orientation): the trunk pulled by
-# the support changes does not drag it (x3: the standing foot still slides 2 / 6 mm/s, median / 90 %).
-LOCK_GAIN = 10.0
-# With the support changes the trunk's orientation weighs this many times GMR's: with the feet held, the IK turned
-# the trunk to take up what the legs could not reach (7.5 degrees at 95 % on CMU 07_01, 2.6 without the changes),
-# a tilt the support changes did not plan; x5 keeps it to 1.2 and the hands where they were (x20 leaves the ZMP
-# outside more often: the trunk's place gives instead).
-TRUNK_TURN_GAIN = 5.0
+HOLD_FADE_S = 0.2  # after a foot leaves the floor, its hold fades out over this
+HOLD_LEG_STEPS = 12  # solve_leg's least squares steps at most
+HOLD_LEG_TOL_M = 1e-5  # solve_leg stops within this (the turn: per HOLD_LEG_TURN_M)
+HOLD_LEG_MAX_STEP = 0.1  # solve_leg moves a joint at most this (rad) a step
+# solve_leg's damping (per m^2 of the foot's error): near a straight knee the hip yaw and the ankle trade almost
+# freely, and undamped the leg drifts along them from its seed (60 degrees of hip yaw at 1e-6).
+HOLD_LEG_DAMPING = 1e-4
+HOLD_ROUNDS = 3  # the feet held again on the feet found on the floor at most this many times (settle)
+HOLD_LEG_TURN_M = 0.03  # hold_legs weighs a foot's turn per rad as its place per this many m (the sole's half length)
 
 
 def _register_robot() -> str:
@@ -387,16 +388,19 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         # The feet's offsets (scale_human_data's) and the targets by frame: a clip solved again for some frames gets
         # the ones of its first, whole pass (``frame``: the frame being solved, None outside solve_frames).
         self.frame, self.ankle_offsets, self.target_cache = None, {}, {}
-        # The feet held on the floor (support.foot_lock; None: not): per frame and foot (left, right) the
-        # horizontal offset (T, 2, 2) and the turn about the vertical (T, 2) that hold a foot where and as it
-        # stands, and how much it stands (T, 2), which multiplies its IK weights by up to LOCK_GAIN.
-        self.lock = None
-        self.ankle_tasks = []
-        for tasks in (self.tasks1, self.tasks2):
-            for i, side in enumerate(("left", "right")):
-                task = next((t for t in tasks if t.frame_name == f"{side}_ankle_c"), None)
-                if task is not None:
-                    self.ankle_tasks.append((task, task.cost[:3].copy(), task.cost[3:].copy(), i))
+        # The feet held on the floor (support.hold_feet; None: not): the runs on the floor ``hold_on`` (T, 2; left,
+        # right), the soles' points (support.sole_points) and, in a solve, the held targets of every frame ``held``
+        # (positions (T, 2, 3), quaternions (T, 2, 4)).
+        self.hold_on, self.soles, self.held = None, None, None
+        self._feet_base = None  # held_feet's: the feet's and hips' kept targets of every frame
+        # Per leg (left, right) for hold_legs: the ankle centre's site, its six joints' qpos and dof addresses and
+        # ranges (the IK's: the knee does not bend past straight).
+        self._leg_data = mujoco.MjData(self.model)
+        self._legs_ik = []
+        for side in ("left", "right"):
+            ids = [self.model.joint(f"{side}_{j}").id for j in ("hip_yaw", "hip_roll", "hip_pitch", "knee", "ankle_pitch", "ankle_roll")]
+            self._legs_ik.append((self.model.site(f"{side}_ankle_c").id, self.model.jnt_qposadr[ids], self.model.jnt_dofadr[ids],
+                                  self.model.jnt_range[ids, 0], self.model.jnt_range[ids, 1], self.model.site(f"{side}_hip_c").id))
         fmt = FORMATS[fmt_name]
         # (hip, knee, ankle, side) and (shoulder, elbow, wrist)
         self.legs = [tuple(role_name(fmt, f"{s}.{p}") for p in ("hip", "knee", "ankle")) + (i,) for i, s in enumerate("LR")]
@@ -424,12 +428,7 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         data, arm_costs = kept
         for (_, _, task, *_), cost in zip(self.arms, arm_costs):
             task.set_orientation_cost(cost)
-        stand = np.zeros(2) if self.lock is None or self.frame is None else self.lock[2][self.frame]
-        for task, pos_cost, rot_cost, i in self.ankle_tasks:
-            gain = 1.0 + (LOCK_GAIN - 1.0) * stand[i]
-            task.set_position_cost(pos_cost * gain)
-            task.set_orientation_cost(rot_cost * gain)
-        if (self.lock is not None and self.frame is not None) or self.adjust is not None:
+        if self.adjust is not None or (self.held is not None and self.frame is not None):
             data = self._adjusted(dict(data), self.human_root_name)
         self.scaled_human_data = data
         for table, use in ((self.human_body_to_task1, self.use_ik_match_table1), (self.human_body_to_task2, self.use_ik_match_table2)):
@@ -532,58 +531,114 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             self._arm_costs.append(weight * (d[1] / np.linalg.norm(d)) ** 2)
         return out
 
-    def _adjusted(self, out, root):
-        """The targets with the feet held on the floor (``lock``) and the support changes (``adjust``,
-        support.Adjust's frame; None: none): the trunk and the arms turn
-        by ``tilt`` about the hips' midpoint and move by ``shift`` (the arms keep their pose relative to the
-        trunk), each foot turns by its ``ankle`` rotation about its centre and moves by its ``foot`` offset (a foot
-        off the floor also moves with the trunk, by 1 - its stance weight, smoothed), a knee moves by the share of
-        its leg below it, and the thigh and shank turn with the leg's line (hip -> ankle).
-        Where a standing leg would have to be longer than ``leg_reach`` (or than it was, to the foot before the
-        hold) to reach its foot, the trunk and the arms go down by up to ``max_drop`` (support.reach_rows keeps the
-        changes within that)."""
-        free = {ankle: out[ankle][0] for _, _, ankle, _ in self.legs}  # the feet's targets before the hold
-        if self.lock is not None and self.frame is not None:
-            offset, turn, _ = self.lock
-            for _, _, ankle, i in self.legs:
-                rz = R.from_rotvec([0.0, 0.0, turn[self.frame, i]])
-                out[ankle] = (out[ankle][0] + [offset[self.frame, i, 0], offset[self.frame, i, 1], 0.0],
-                              (rz * R.from_quat(out[ankle][1], scalar_first=True)).as_quat(scalar_first=True))
-        if self.adjust is None:
-            return out
+    def hold_legs(self, q):
+        """``q`` with the legs of the feet on the floor (``hold_on``) solved again, alone (their six joints, the
+        trunk where the IK put it), to put each foot on its held target (``held``): the IK weighs the held feet
+        against the other targets and leaves them a few mm off, which the next frame turns into a slide."""
+        on = self.hold_on[self.frame]
+        if not on.any():
+            return q
+        self._leg_data.qpos[:] = q
+        for i in np.flatnonzero(on):
+            self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], True)
+        return self._leg_data.qpos.copy()
+
+    def solve_leg(self, i, goal_p, goal_quat, standing):
+        """Solve leg ``i`` (left 0, right 1) alone in ``_leg_data`` (its qpos the pose; the trunk stays) to put its
+        foot (the ankle centre's site) at ``goal_p``, ``goal_quat``: damped least squares within the joints' ranges
+        (HOLD_LEG_STEPS at most).  A ``standing`` foot beyond the leg's reach (``leg_reach``) is raised to it, off the
+        floor (Microban's legs are shorter for its steps than the human's: a trailing foot held on its toes at the
+        push-off leaves the floor a little sooner); beyond it horizontally, as near as it gets."""
+        m, d = self.model, self._leg_data
+        site, adr, dof, lo, hi, hip = self._legs_ik[i]
+        goal_p = np.array(goal_p, float)
+        mujoco.mj_kinematics(m, d)
+        if standing:
+            v = d.site_xpos[hip] - goal_p
+            horizontal = float(np.hypot(v[0], v[1]))
+            if horizontal < self.leg_reach and v @ v > self.leg_reach**2:
+                goal_p[2] = d.site_xpos[hip][2] - np.sqrt(self.leg_reach**2 - horizontal**2)
+        jac, now, inv, diff, turn = np.zeros((6, m.nv)), np.empty(4), np.empty(4), np.empty(4), np.empty(3)
+        err = np.empty(6)
+        for k in range(HOLD_LEG_STEPS):
+            if k:
+                mujoco.mj_kinematics(m, d)
+            mujoco.mju_mat2Quat(now, d.site_xmat[site])
+            mujoco.mju_negQuat(inv, now)
+            mujoco.mju_mulQuat(diff, goal_quat, inv)  # the turn still to go, world frame
+            mujoco.mju_quat2Vel(turn, diff, 1.0)
+            err[:3], err[3:] = goal_p - d.site_xpos[site], turn * HOLD_LEG_TURN_M
+            if np.abs(err).max() < HOLD_LEG_TOL_M:
+                break
+            mujoco.mj_comPos(m, d)
+            mujoco.mj_jacSite(m, d, jac[:3], jac[3:], site)
+            j = jac[:, dof]
+            j[3:] *= HOLD_LEG_TURN_M
+            step = j.T @ np.linalg.solve(j @ j.T + HOLD_LEG_DAMPING * np.eye(6), err)
+            step *= min(1.0, HOLD_LEG_MAX_STEP / max(np.abs(step).max(), 1e-12))  # (near a straight knee: no leap to another branch)
+            d.qpos[adr] = np.clip(d.qpos[adr] + step, lo, hi)
+
+    def _place(self, out):
+        """The map of a point by the trunk's change (turn by ``tilt`` about the hips' midpoint, move by ``shift``)
+        of the current frame, by a share of it."""
         a = self.adjust
-        turn_trunk = R.from_rotvec(a.tilt)
+        turn = R.from_rotvec(a.tilt) if a is not None else R.identity()
         pivot = 0.5 * (out[self.legs[0][0]][0] + out[self.legs[1][0]][0])
-        move = np.array([a.shift[0], a.shift[1], 0.0])
+        move = np.array([a.shift[0], a.shift[1], 0.0]) if a is not None else np.zeros(3)
 
         def place(x, share=1.0):
-            return x + share * (pivot + turn_trunk.apply(x - pivot) + move - x)
+            return x + share * (pivot + turn.apply(x - pivot) + move - x)
+        return place, turn
+
+    def desired_feet(self, out):
+        """The feet's targets of the current frame before the hold: the human's turned by the foot's ``ankle``
+        rotation and moved by its ``foot`` offset, and, off the floor, with the trunk (by 1 - its stance weight,
+        smoothed: the leg keeps its pose relative to the trunk, and the foot comes back to where it lands)."""
+        a = self.adjust
+        if a is None:
+            return {i: out[ankle] for _, _, ankle, i in self.legs}
+        place, _ = self._place(out)
+        feet = {}
+        for _, _, ankle, i in self.legs:
+            off = 1.0 - self.stance[i]
+            follow = off * off * (3.0 - 2.0 * off)
+            turn = R.from_rotvec(a.ankle[i]) * R.from_rotvec(follow * np.asarray(a.tilt))
+            feet[i] = (place(out[ankle][0], follow) + [a.foot[i][0], a.foot[i][1], 0.0],
+                       (turn * R.from_quat(out[ankle][1], scalar_first=True)).as_quat(scalar_first=True))
+        return feet
+
+    def _adjusted(self, out, root):
+        """The targets with the support changes (``adjust``, support.Adjust's frame; None: none) and the feet held
+        (``held``; None: desired_feet): the trunk and the arms turn by ``tilt`` about the hips' midpoint and move
+        by ``shift`` (the arms keep their pose relative to the trunk), a knee moves by the share of its leg below
+        it, and the thigh and shank turn with the leg's line (hip -> ankle).  Where a standing leg would have to be
+        longer than ``leg_reach`` (or than it was) to reach its foot, the trunk and the arms go down by up to
+        ``max_drop`` (support.reach_rows keeps the changes within that)."""
+        if self.held is not None and self.frame is not None:
+            feet = {i: (self.held[0][self.frame, i], self.held[1][self.frame, i]) for i in range(2)}
+        else:
+            feet = self.desired_feet(out)
+        place, turn = self._place(out)
 
         def rotate(rot, q):
             return (rot * R.from_quat(q, scalar_first=True)).as_quat(scalar_first=True)
 
-        feet = {}
-        for _, _, ankle, i in self.legs:
-            # A foot off the floor moves with the trunk (the leg keeps its pose relative to the trunk), and back to
-            # where it lands over the stance weight's ramp (support.stance), smoothly.
-            off = 1.0 - self.stance[i]
-            follow = off * off * (3.0 - 2.0 * off)
-            feet[i] = (place(out[ankle][0], follow) + [a.foot[i][0], a.foot[i][1], 0.0],
-                       rotate(R.from_rotvec(a.ankle[i]) * R.from_rotvec(follow * np.asarray(a.tilt)), out[ankle][1]))
         drop = 0.0
         if self.max_drop > 0.0:
             for hip, _, ankle, i in self.legs:
                 p = place(out[hip][0]) - feet[i][0]
-                reach = max(self.leg_reach, float(np.linalg.norm(out[hip][0] - free[ankle])))
+                # (Held, a foot is where the leg must reach; otherwise a leg the human's motion already stretched past
+                # its length is left to the IK.)
+                reach = self.leg_reach if self.held is not None else max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
                 need = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
                 drop = min(max(drop, self.stance[i] * need), self.max_drop)
         down = np.array([0.0, 0.0, drop])
-        out[root] = (place(out[root][0]) - down, rotate(turn_trunk, out[root][1]))
+        out[root] = (place(out[root][0]) - down, rotate(turn, out[root][1]))
         for arm in self.arm_parts:
             for name in arm:
-                out[name] = (place(out[name][0]) - down, rotate(turn_trunk, out[name][1]))
+                out[name] = (place(out[name][0]) - down, rotate(turn, out[name][1]))
         for hip, knee, ankle, i in self.legs:
-            b, m, e = out[hip][0], out[knee][0], free[ankle]
+            b, m, e = out[hip][0], out[knee][0], out[ankle][0]
             b2, e2 = place(b) - down, feet[i][0]
             share = np.linalg.norm(e - m) / max(np.linalg.norm(m - b) + np.linalg.norm(e - m), 1e-9)
             line = R.align_vectors([b2 - e2], [b - e])[0]
@@ -699,20 +754,30 @@ def longest_run(mask) -> int:
     return best
 
 
-def solve_frames(gmr: MicrobanRetargeting, frames: list, adjust=None, seeds=None, stance=None, subset=None):
-    """IK of every frame (or of the frames ``subset``) from a reset: qpos (n, nq) and the targets' positions and
-    orientations per frame, with the support changes ``adjust`` (support.Changes) and the feet's weights on the
-    floor ``stance`` (T, 2) (MicrobanRetargeting.adjust, .stance).  With ``seeds`` (T, nq), each frame's IK starts
-    from its seed (with the trunk changed as ``adjust`` changes it) instead of the frame before (a changed clip
-    solved from the unchanged solution stays on its branches: a near-straight leg's hip yaw and ankle roll, the
-    arms)."""
+def solve_frames(gmr: MicrobanRetargeting, frames: list, adjust=None, seeds=None, stance=None, subset=None,
+                 base_held=None):
+    """IK of every frame (or of the frames ``subset``) from a reset: qpos (n, nq), the targets' positions and
+    orientations per frame, the feet's held targets (``gmr.held``; None without the hold) and the frames solved,
+    with the support changes ``adjust`` (support.Changes) and the feet's weights on the floor ``stance`` (T, 2)
+    (MicrobanRetargeting.adjust, .stance).  With ``seeds`` (T, nq), each frame's IK starts from its seed (with the
+    trunk changed as ``adjust`` changes it) instead of the frame before (a changed clip solved from the unchanged
+    solution stays on its branches: a near-straight leg's hip yaw and ankle roll, the arms).  With the feet held
+    (``gmr.hold_on``), the held targets are found over the whole clip first (support.hold_feet: a run's frames hold
+    on the frames before them), and the frames whose held feet differ from ``base_held`` are solved too."""
     gmr.reset_configuration()
+    T = len(frames)
+    gmr.held = None
     if seeds is not None:
         gmr._warmup_needed = False
         data = mujoco.MjData(gmr.model)
         hips = [gmr.model.site(f"{s}_hip_c").id for s in ("left", "right")]
+        if gmr.hold_on is not None:
+            held = held_feet(gmr, adjust, stance)
+            if subset is not None and base_held is not None:
+                subset = np.union1d(subset, np.flatnonzero(held_moved(held, base_held))).astype(int)
+            gmr.held = held
     qs, targets, target_quats = [], [], []
-    for t in (range(len(frames)) if subset is None else subset):
+    for t in (range(T) if subset is None else subset):
         gmr.frame = t
         gmr.adjust = None if adjust is None else adjust.at(t)
         gmr.stance = np.zeros(2) if stance is None else np.asarray(stance[t], float)
@@ -726,16 +791,113 @@ def solve_frames(gmr: MicrobanRetargeting, frames: list, adjust=None, seeds=None
                 seed[:3] = pivot + turn.apply(seed[:3] - pivot) + [*gmr.adjust.shift, 0.0]
                 seed[3:7] = (turn * R.from_quat(seed[3:7], scalar_first=True)).as_quat(scalar_first=True)
             gmr.configuration.update(q=seed)
-        qs.append(gmr.retarget(to_input(frames[t])).copy())
+        q = gmr.retarget(to_input(frames[t])).copy()
+        if gmr.held is not None:
+            q = gmr.hold_legs(q)
+        qs.append(q)
         targets.append({k: np.asarray(v[0]).copy() for k, v in gmr.scaled_human_data.items()})
         target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
-    gmr.frame, gmr.adjust, gmr.stance = None, None, np.zeros(2)
-    return np.asarray(qs), targets, target_quats
+    held = gmr.held
+    gmr.frame, gmr.adjust, gmr.stance, gmr.held = None, None, np.zeros(2), None
+    return np.asarray(qs), targets, target_quats, held, (np.arange(T) if subset is None else np.asarray(subset, int))
+
+
+def held_feet(gmr: MicrobanRetargeting, adjust, stance):
+    """The feet's held targets of every frame (support.hold_feet) with the changes ``adjust`` and the stance
+    weights ``stance``: the desired feet (MicrobanRetargeting.desired_feet, for all frames at once on the frames'
+    kept targets) held on the runs ``gmr.hold_on``."""
+    T = len(gmr.hold_on)
+    if gmr._feet_base is None:
+        ankle_p, ankle_q, hips = np.zeros((T, 2, 3)), np.zeros((T, 2, 4)), np.zeros((T, 2, 3))
+        for t in range(T):
+            data = gmr.target_cache[t][0]
+            for hip, _, ankle, i in gmr.legs:
+                ankle_p[t, i], ankle_q[t, i] = data[ankle]
+                hips[t, i] = data[hip][0]
+        gmr._feet_base = ankle_p, ankle_q, hips
+    ankle_p, ankle_q, hips = gmr._feet_base
+    shift, tilt, ankle_turn = adjust.world()
+    off = 1.0 - np.asarray(stance, float)
+    follow = off * off * (3.0 - 2.0 * off)  # (T, 2)
+    pivot = hips.mean(1)  # (T, 3)
+    move = np.c_[shift, np.zeros(T)]
+    pos, quat = np.zeros((T, 2, 3)), np.zeros((T, 2, 4))
+    turn = Rotation_from_rotvec(tilt)
+    for i in range(2):
+        rel = ankle_p[:, i] - pivot
+        moved = pivot + turn.apply(rel) + move - ankle_p[:, i]
+        pos[:, i] = ankle_p[:, i] + follow[:, i, None] * moved + np.c_[adjust.foot[:, i], np.zeros(T)]
+        rot = (Rotation_from_rotvec(ankle_turn[:, i]) * Rotation_from_rotvec(follow[:, i, None] * tilt)
+               * R.from_quat(ankle_q[:, i], scalar_first=True))
+        quat[:, i] = rot.as_quat(scalar_first=True)
+    return support.hold_feet(pos, quat, gmr.hold_on, gmr.soles, max(1, round(HOLD_FADE_S * gmr.fps)))
+
+
+def Rotation_from_rotvec(v) -> R:  # noqa: N802
+    return R.from_rotvec(np.asarray(v, float).reshape(-1, 3))
+
+
+def targets_of(gmr: MicrobanRetargeting, frames, adjust, stance, held, names):
+    """The IK targets' positions (T, n, 3) and orientations (T, n, 4) (``names``' order) of every frame with the
+    changes ``adjust``, the stance weights ``stance`` and the held feet ``held``, IK space."""
+    T = len(frames)
+    tg, tq = np.zeros((T, len(names), 3)), np.zeros((T, len(names), 4))
+    gmr.held = held
+    for t in range(T):
+        gmr.frame, gmr.adjust, gmr.stance = t, adjust.at(t), np.asarray(stance[t], float)
+        gmr.update_targets(to_input(frames[t]))
+        for k, name in enumerate(names):
+            tg[t, k], tq[t, k] = gmr.scaled_human_data[name]
+    gmr.frame, gmr.adjust, gmr.stance, gmr.held = None, None, np.zeros(2), None
+    return tg, tq
+
+
+def held_moved(held, base_held) -> np.ndarray:
+    """(T,) the frames whose held feet differ."""
+    T = len(held[0])
+    return (np.abs(held[0] - base_held[0]).reshape(T, -1).max(1) > 1e-7) | (np.abs(held[1] - base_held[1]).reshape(T, -1).max(1) > 1e-7)
+
+
+def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -> np.ndarray:
+    """The frames ``subset`` with the support changes, without the IK: each from its seed (the unchanged solution),
+    the trunk turned and moved as ``adjust`` says (the arms and the head with it: their pose relative to the trunk
+    is kept, as the IK keeps it) and lowered for a standing leg's reach (by up to ``max_drop``), and each leg
+    solved alone to its foot's target in ``held`` (MicrobanRetargeting.solve_leg: a leg has six joints for its
+    foot's six coordinates, so the IK's legs differ only by its other targets' pull).  qpos (n, nq), IK space."""
+    m, d = gmr.model, gmr._leg_data
+    hips = [m.site(f"{s}_hip_c").id for s in ("left", "right")]
+    out = np.empty((len(subset), m.nq))
+    for k, t in enumerate(subset):
+        q = seeds[t].copy()
+        a = adjust.at(t)
+        d.qpos[:] = q
+        mujoco.mj_kinematics(m, d)
+        pivot = d.site_xpos[hips].mean(0)
+        turn = R.from_rotvec(a.tilt)
+        q[:3] = pivot + turn.apply(q[:3] - pivot) + [a.shift[0], a.shift[1], 0.0]
+        q[3:7] = (turn * R.from_quat(q[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        d.qpos[:] = q
+        mujoco.mj_kinematics(m, d)
+        drop = 0.0
+        for i in range(2):
+            v = d.site_xpos[hips[i]] - held[0][t, i]
+            need = v[2] - np.sqrt(max(gmr.leg_reach**2 - v[0] ** 2 - v[1] ** 2, 0.0))
+            drop = min(max(drop, stance[t, i] * need), gmr.max_drop)
+        d.qpos[:] = q
+        d.qpos[2] -= drop
+        for i in range(2):
+            # A leg off the floor and not coming back to it yet moves with the trunk as it is (its pose relative to
+            # the trunk kept); the others are solved to their foot's target.
+            if gmr.hold_on[t, i] or stance[t, i] > 0.0 or drop > 0.0:
+                gmr.solve_leg(i, held[0][t, i], held[1][t, i], bool(gmr.hold_on[t, i]))
+        out[k] = d.qpos
+    return out
 
 
 def put_on_floor(model, lowest: LowestPoint, qs, targets, height) -> None:
     """Floor: each frame's lowest point (training collision shapes) at ``height`` (the human clearance x root
-    scale); the joints are unchanged, only the root height (and the targets' positions (T, n, 3)) move.  In place."""
+    scale); the joints are unchanged, only the root height (and the targets' positions (T, n, 3)) move.  In place;
+    returns the heights moved down (T,)."""
     d = mujoco.MjData(model)
     lows = []
     for q in qs:
@@ -744,7 +906,9 @@ def put_on_floor(model, lowest: LowestPoint, qs, targets, height) -> None:
         lows.append(lowest(d))
     dz = np.asarray(lows) - height
     qs[:, 2] -= dz
-    targets[:, :, 2] -= dz[:, None]
+    if targets is not None:
+        targets[:, :, 2] -= dz[:, None]
+    return dz
 
 
 def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dict, out_dir: Path,
@@ -763,10 +927,6 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     if support_spec is not None:
         gmr.leg_reach = support.leg_length(model) - support_spec.reach_slack_m
         gmr.max_drop = support_spec.max_drop_m
-        for tasks in (gmr.tasks1, gmr.tasks2):
-            for task in tasks:
-                if task.frame_name == "trunk":
-                    task.set_orientation_cost(task.cost[3:] * TRUNK_TURN_GAIN)
     # Check: the standing reference retargets to HOME.
     gmr.reset_configuration()
     for _ in range(20):
@@ -779,14 +939,39 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     clear, floor = human_clearance(frames, ref, fmt, fps)
     lowest = LowestPoint(model)
     solved, seeds, target_names, frames_solved = {}, [], [], [0]
+    kinematic = False
 
     def solve(adjust=None, stance=None, subset=None, base=None, reseed=False):
         """The clip's qpos with the support changes ``adjust`` (support.Changes; None: none), each frame on the
         floor: of every frame, or of the frames ``subset`` with the others as in the solution ``base``.  The first
-        solve is the unchanged clip; the later ones start each frame from it (``reseed``: and this one is it)."""
-        qn, tg, tq = solve_frames(gmr, frames, adjust, seeds[0] if seeds else None, stance, subset)
+        solve is the unchanged clip; the later ones start each frame from it (``reseed``: and this one is it).
+        Once ``kinematic`` is set, the frames are moved from the unchanged solution (move_frames) instead of solved
+        by the IK, and their targets are made for the final solution only."""
+        if kinematic:
+            T = len(frames)
+            held = held_feet(gmr, adjust, stance)
+            sub = np.arange(T) if subset is None else np.asarray(subset, int)
+            if base is not None:
+                sub = np.union1d(sub, np.flatnonzero(held_moved(held, solved[id(base)][3]))).astype(int)
+            qn = move_frames(gmr, seeds[0], adjust, stance, held, sub)
+            frames_solved[0] += len(qn)
+            if reseed:
+                seeds[0][sub] = qn
+            qs = base.copy() if base is not None else np.empty((T, model.nq))
+            dz = solved[id(base)][4].copy() if base is not None else np.zeros(T)
+            dz[sub] = put_on_floor(model, lowest, qn, None, scale * clear[sub])
+            qs[sub] = qn
+            solved[id(qs)] = (qs, None, None, held, dz)
+            return qs
+        base_held = solved[id(base)][3] if base is not None else None
+        qn, tg, tq, held, solved_frames = solve_frames(gmr, frames, adjust, seeds[0] if seeds else None, stance, subset,
+                                                       base_held)
+        subset = None if subset is None else solved_frames
         if reseed:
-            seeds[0] = qn.copy()
+            if subset is None:
+                seeds[0] = qn.copy()
+            else:
+                seeds[0][subset] = qn
         if not target_names:
             target_names.extend(tg[0])
         n = len(target_names)
@@ -796,37 +981,61 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         if subset is None:
             if not seeds:
                 seeds.append(qn.copy())
-            put_on_floor(model, lowest, qn, tg, scale * clear)
+            dz = put_on_floor(model, lowest, qn, tg, scale * clear)
             qs = qn
         else:
-            put_on_floor(model, lowest, qn, tg, scale * clear[subset])
-            _, tg_base, tq_base = solved[id(base)]
-            qs = base.copy()
-            qs[subset] = qn
+            dz_sub = put_on_floor(model, lowest, qn, tg, scale * clear[subset])
+            _, tg_base, tq_base, _, dz = solved[id(base)]
+            qs, dz = base.copy(), dz.copy()
+            qs[subset], dz[subset] = qn, dz_sub
             tg_base, tq_base = tg_base.copy(), tq_base.copy()
             tg_base[subset], tq_base[subset] = tg, tq
             tg, tq = tg_base, tq_base
-        solved[id(qs)] = (qs, tg, tq)
+        solved[id(qs)] = (qs, tg, tq, held, dz)
         return qs
 
     human = support.human_contact(frames, ref, fmt, fps, floor, role_name, CONTACT_RADIUS)
     t0 = time.perf_counter()
     qs = solve()
-    lock = None
+    base_slide = None
     if support_spec is not None:
-        # The feet held where they stand (support.foot_lock: the part of the sole on the floor, and the heading),
-        # on the parts on the floor of this first pass.
+        # The feet held where they stand (support.hold_feet) over the runs on the floor of this first pass.
         shapes = support.Shapes(model)
         contact = support.robot_contact(support.poses(model, qs, shapes), human, shapes, fps)
-        _, tg0, tq0 = solved[id(qs)]
-        feet = [target_names.index(fmt[s_]["ankle"]) for s_ in "LR"]
-        lock = support.foot_lock(contact, tg0[:, feet], tq0[:, feet], support.sole_points(model, shapes))
-        gmr.lock = lock
+        on = support.feet_on_floor(contact, support.feet_soles(model, qs, shapes))
+        gmr.hold_on, gmr.soles, gmr.fps = on, support.sole_points(model, shapes), fps
         # Each frame solved again from its first solution, to convergence: the first pass, each frame from the
         # one before and stopped by GMR's error decrease, is up to 70 mrad from it (a near-straight knee), and the
         # changed clip, solved from it, would carry that scatter into its accelerations (support.Dyn).
         gmr.min_gain, gmr.max_iter = SUPPORT_IK_MIN_GAIN, SUPPORT_IK_MAX_ITER
-        qs = solve(support.Changes.none(len(qs)), support.stance(contact, fps, support_spec.stance_s), reseed=True)
+        stance = support.stance(contact, fps, support_spec.stance_s)
+        none = support.Changes.none(len(qs))
+        qs = solve(none, stance, reseed=True)
+        kinematic = True  # (the changes from here on move the frames from this solution: move_frames)
+
+        def settle(qs, changes, reseed=False):
+            """The feet held again on the feet on the floor found from the poses ``qs`` where they differ from the
+            ones held, and those frames solved again, until they agree (HOLD_ROUNDS at most): holding a foot (or
+            raising one beyond reach) moves it on or off the floor."""
+            n = 0
+            for _ in range(HOLD_ROUNDS):
+                on = support.feet_on_floor(support.robot_contact(support.poses(model, qs, shapes), human, shapes, fps),
+                                           support.feet_soles(model, qs, shapes))
+                again = np.flatnonzero((on != gmr.hold_on).any(1))
+                if not len(again):
+                    break
+                gmr.hold_on = on
+                qs = solve(changes, stance, again, qs, reseed=reseed)
+                n += len(again)
+            return qs, n
+
+        # The feet held before the changes: the unchanged clip settled on its own feet on the floor, and their slide.
+        qs, held_again = settle(qs, none, reseed=True)
+        base_contact = support.robot_contact(support.poses(model, qs, shapes), human, shapes, fps)
+        soles = support.feet_soles(model, qs, shapes)
+        speed = support.slide_speed(soles, support.feet_on_floor(base_contact, soles), fps)
+        speed = speed[np.isfinite(speed)]
+        base_slide = [round(float(np.percentile(speed, p_)), 1) for p_ in (50, 90, 100)] if len(speed) else None
     if support_spec is None:
         changes = support.Changes.none(len(qs))
         spec = support.SupportSpec()
@@ -834,9 +1043,19 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         summary = {"margin_m": spec.margin_m, "before": support.zmp_summary(before[3], before[2])}
         after, stage = before, np.full(len(qs), -1, np.int8)
     else:
-        qs, changes, summary, before, after, stage = support.plan(model, solve, qs, human, fps, support_spec)
+        qs, changes, summary, before, after, stage, rejudge = support.plan(model, solve, qs, human, fps, support_spec)
+        # The feet on the floor found again from the changed poses: where they changed, the feet are held again on
+        # them (those frames solved again) and the ZMP is judged again.
+        qs, again = settle(qs, changes)
+        if again:
+            after, stage = rejudge(qs)
+        summary["held_again_frames"] = {"before_changes": held_again, "after_changes": again}
     z, _, contact, dist = after
-    _, tg_all, tq_all = solved[id(qs)]
+    _, tg_all, tq_all, held_all, dz_all = solved[id(qs)]
+    if tg_all is None:  # moved without the IK: the targets of the final solution
+        tg_all, tq_all = targets_of(gmr, frames, changes, support.stance(before[2], fps, support_spec.stance_s), held_all,
+                                    target_names)
+        tg_all[:, :, 2] -= dz_all[:, None]
     targets = [dict(zip(target_names, x)) for x in tg_all]
     target_quats = [dict(zip(target_names, x)) for x in tq_all]
     solved.clear()
@@ -871,16 +1090,11 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         v_ = shapes_.vertices(d)
         soles_w.append([v_[on_] for on_ in foot_on])
     lows = np.minimum(sole["left"], sole["right"])
-    # A standing foot's slide: the horizontal speed (mm/s; central differences) of its sole's part on the floor (its
-    # points within 1 mm of its lowest), where it is on the floor in the frame and the ones before and after (the
-    # parts on the floor found from the final poses).
-    on = contact[:, support.FEET] & np.r_[contact[:1, support.FEET], contact[:-1, support.FEET]] & np.r_[contact[1:, support.FEET], contact[-1:, support.FEET]]
-    standing = []
-    for t, i in zip(*np.nonzero(on)):
-        if 0 < t < len(qs) - 1:
-            low_ = soles_w[t][i][:, 2] <= soles_w[t][i][:, 2].min() + 0.001
-            standing.append(1000 * fps / 2 * np.linalg.norm((soles_w[t + 1][i][low_] - soles_w[t - 1][i][low_])[:, :2], axis=1).mean())
-    standing = np.asarray(standing)
+    # A standing foot's slide (support.slide_speed, the points support.hold_feet holds), on the parts on the floor
+    # found from the final poses, and the frames where one slides (support.sliding).
+    slide = support.slide_speed(np.asarray(soles_w), support.feet_on_floor(contact, np.asarray(soles_w)), fps)
+    standing = slide[np.isfinite(slide)]
+    slid = support.sliding(slide)
     low_after = np.asarray(low_after)
     w = {f: WEIGHTS[role.split(".")[-1]] for f, _, role, *_ in TARGETS}
     near = (np.minimum(qs[:, 7:] - lo, hi - qs[:, 7:]) < np.radians(1.0)).sum(0)
@@ -929,6 +1143,8 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
                                             (low_after.min(), np.percentile(low_after, 50), np.percentile(low_after, 99), low_after.max())],
         "contact_ankle_slide_vs_human_mm_s_med_p90": contact_slide(model, qs, frames, ref, fmt, scale, fps, floor),
         "standing_foot_speed_mm_s_p50_p90_max": [round(float(np.percentile(standing, p_)), 1) for p_ in (50, 90, 100)] if len(standing) else None,
+        "standing_foot_held_before_changes_mm_s_p50_p90_max": base_slide,
+        "frames_sliding_share": round(float(slid.mean()), 4),
         "joint_speed_rad_s_p99_max": [round(float(np.percentile(speed, 99)), 2), round(float(speed.max()), 2)],
         "joint_jump_frames": int(jump.sum()),
         "target_jump_frames": int(tjump.sum()),
@@ -955,7 +1171,7 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
              joint_pos_home_order=qs[:, [7 + jn.index(n) for n in home_order]], home_joint_names=np.array(home_order),
              targets=tg_arr.astype(np.float32), target_frames=np.array(tf),
              flip=flip, joint_jump=jump, target_jump=tjump, hand_err=np.asarray(hand_err, np.float32),
-             lowest_point=low_after.astype(np.float32), **changes.arrays(), zmp_stage=stage,
+             lowest_point=low_after.astype(np.float32), **changes.arrays(), zmp_stage=stage, sliding=slid,
              zmp=z.astype(np.float32), zmp_outside=dist.astype(np.float32), contact=contact,
              zmp_before=before[0].astype(np.float32), zmp_outside_before=before[3].astype(np.float32),
              contact_before=before[2], human_contact=human, contact_parts=np.array(support.PARTS),

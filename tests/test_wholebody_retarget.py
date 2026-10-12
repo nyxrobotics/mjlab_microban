@@ -261,9 +261,9 @@ def test_support_changes_put_the_zmp_on_the_standing_foot(tmp_path):
     # The human lifts the right foot (hip forward, knee back) and stands on the left with the hips where they were:
     # scaled to Microban's wide stance, the zero-moment point stays near the middle, 3-4 cm outside the left sole's
     # support.  With the support changes the trunk moves over the left foot (the lifted leg with it) and the
-    # zero-moment point comes into the support (the lateral shift at its 40 mm cap; what it leaves, the tilt and the
-    # foot's place bring in), the standing foot stays put, on the floor and still, and the arms keep their pose
-    # relative to the trunk.  The clip's last half window of the derivatives' fit is not judged.
+    # zero-moment point comes into the support (the lateral shift near its 40 mm cap), the standing foot stays put,
+    # on the floor and still, and the arms keep their pose relative to the trunk.  The clip's last half window of the
+    # derivatives' fit is not judged.
     from mjlab_microban.wholebody.retarget import support
 
     frames = 60
@@ -280,7 +280,9 @@ def test_support_changes_put_the_zmp_on_the_standing_foot(tmp_path):
     plain, changed = out["plain"], out["changed"]
     left, right = (support.PARTS.index(p) for p in ("left_foot", "right_foot"))
     one = plain["contact"][:, left] & ~plain["contact"][:, right] & np.isfinite(plain["zmp_outside"])
-    assert one.sum() >= 20 and (changed["contact"] == plain["contact"]).all()
+    # The standing foot is on the floor as before; the lifted one, held until it leaves, may leave a frame or two later.
+    assert one.sum() >= 20 and (changed["contact"][:, left] == plain["contact"][:, left]).all()
+    assert (changed["contact"] != plain["contact"]).any(1).sum() <= 2
     assert np.median(plain["zmp_outside"][one]) > 0.03
     assert np.percentile(changed["zmp_outside"][one], 95) < 0.001 and np.nanmax(changed["zmp_outside"][one]) < 0.002
     assert ((changed["zmp_stage"][one] >= 1) & (changed["zmp_stage"][one] <= 4)).mean() > 0.9

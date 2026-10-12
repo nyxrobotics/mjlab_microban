@@ -91,33 +91,38 @@ def test_the_changes_acceleration_moves_the_zmp_by_its_own_differences(robot):
 
 
 def test_a_standing_foot_is_held_where_it_stands_and_rolls_on_its_toes(robot):
-    # The left foot stands over frames 0-14: flat and sliding forward 2 mm a frame with its heading wavering by 1
-    # degree over 0-9, then its heel rising to 40 degrees over 10-14 with the ankle going on forward.  Held: flat,
-    # the ankle at its median there and the heading at the run's; heel up, the toe's edge stays where the flat foot
-    # had it.  After the run the hold blends back without a jump.
+    # The left foot stands over frames 0-14: flat while its desired target slides forward 2 mm a frame and turns
+    # by a degree to and fro (0-9), then its heel rises to 40 degrees (10-14).  Held, the middle of the sole points
+    # on the floor in a frame and the one before does not move (the slide, measured on the same points, is 0): the
+    # flat foot stays put, turning about it as the human's turns, and rises on its toes' edge.  After the run the
+    # hold fades out without a jump.
     T = 25
-    contact = np.zeros((T, len(support.PARTS)), bool)
-    contact[:15, support.FEET[0]] = True
+    on = np.zeros((T, 2), bool)
+    on[:15, 0] = True
     pos = np.zeros((T, 2, 3))
     pos[:, 0, 0] = 0.002 * np.arange(T)
+    pos[:, :, 2] = 0.03
     pitch = np.radians(np.r_[np.zeros(10), np.linspace(10.0, 40.0, 5), np.full(10, 40.0)])
-    yaw = np.radians(np.r_[np.where(np.arange(10) % 2, 0.5, -0.5), np.zeros(15)])
-    rot = R.from_euler("ZY", np.c_[yaw, pitch])
+    yaw = np.radians(np.r_[np.where(np.arange(10) % 2, 1.0, -1.0), np.zeros(15)])
+    rot = R.from_rotvec(np.c_[np.zeros((T, 2)), yaw]) * R.from_rotvec(np.c_[np.zeros(T), pitch, np.zeros(T)])
     quat = np.zeros((T, 2, 4))
     quat[:, 0] = rot.as_quat(scalar_first=True)
     quat[:, 1, 0] = 1.0
     soles = support.sole_points(robot, support.Shapes(robot))
-    offset, turn, stand = support.foot_lock(contact, pos, quat, soles)
-    held = pos[:, 0, :2] + offset[:, 0]
-    assert np.abs(held[:10] - np.median(pos[:10, 0, :2], 0)).max() < 1e-9
-    assert np.degrees(np.abs(yaw[:15] + turn[:15, 0])).max() < 0.01
-    bottom = soles[0][soles[0][:, 2] <= soles[0][:, 2].min() + 0.001]
-    toe = np.r_[bottom[:, 0].max(), bottom.mean(0)[1:]]
-    turned = R.from_rotvec(np.c_[np.zeros((5, 2)), yaw[10:15] + turn[10:15, 0]]) * R.from_rotvec(np.c_[np.zeros(5), pitch[10:15], np.zeros(5)])
-    toe_at = held[10:15] + turned.apply(toe)[:, :2]
-    assert np.abs(toe_at - (held[0] + toe[:2])).max() < 1e-9
-    assert np.abs(np.diff(held[14:, 0])).max() < 0.01 and not offset[:, 1].any() and not turn[:, 1].any()
-    assert stand[:, 0].tolist() == contact[:, support.FEET[0]].astype(float).tolist() and not stand[:, 1].any()
+    held_pos, held_quat = support.hold_feet(pos, quat, on, soles, fade=6)
+    m = R.from_quat(held_quat.reshape(-1, 4), scalar_first=True).as_matrix().reshape(T, 2, 3, 3)
+    world = np.stack([held_pos[:, i, None] + np.einsum("tij,vj->tvi", m[:, i], soles[i]) for i in range(2)], 1)
+    speed = support.slide_speed(world, on, FPS)
+    # (The toe's edge is the corners of the sole's stacked plates, a little round: rolling, the points on the floor
+    # shift by hundredths of a mm a frame.)
+    assert np.isfinite(speed[1:15, 0]).all() and np.nanmax(speed[:10]) < 1e-6 and np.nanmax(speed) < 2.0
+    assert np.abs(held_pos[:10, 0] - held_pos[0, 0]).max() < 1e-5  # flat: put (turning about its middle)
+    heading = np.unwrap(np.arctan2(m[:, 0, 1, 0], m[:, 0, 0, 0]))
+    assert np.abs(heading[:15] - yaw[:15]).max() < 1e-9  # turning as the human's
+    toe = world[14, 0, support.floor_points(world[14, 0])]
+    assert toe[:, 0].min() > held_pos[14, 0, 0]  # on its toes at the end
+    assert np.abs(np.diff(held_pos[14:, 0, 0])).max() < 0.01 and (held_pos[:, 1] == pos[:, 1]).all()
+    assert not support.sliding(speed).any()
 
 
 def test_a_frame_comes_in_at_the_stage_from_which_it_stays_in():

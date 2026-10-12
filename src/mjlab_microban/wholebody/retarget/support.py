@@ -18,12 +18,13 @@ Each change is capped (``max_lateral_m``, ``max_forward_m``, ``max_tilt_deg``, `
 ``max_foot_m``; the data command's ``--support-max-*``).  A foot off the floor moves with the trunk (its leg keeps
 its pose relative to the trunk) and back to where it lands before it lands, as part of 1.
 
-The feet on the floor are held where they stand (foot_lock): over each run on the floor a foot's target keeps its
-sole's place and its heading (within HOLD_TURN_DEG of the human's), rolling over its toes (heels) as the human's
-foot pitches; 4 moves a run's place.  The IK (core) then weighs a held foot LOCK_GAIN times and the trunk's
-orientation TRUNK_TURN_GAIN times their usual weights, and solves the unchanged clip again from itself to
-convergence before the changes are found (its first pass is not converged, and the changes, solved from it, would
-carry the scatter).
+The feet on the floor are held where they stand (hold_feet): over each run on the floor, the sole points on the
+floor (within CONTACT_BAND_M of the foot's lowest) in a frame and the one before do not move horizontally, so a
+flat foot keeps its place and heading, a foot rolling over its toes (heel) keeps them where they were, and only
+on one point may it turn; the slide is measured on the same points (slide_speed).  4 moves a run's place (the run
+is held there).  The IK (core) weighs a held foot LOCK_GAIN times and the trunk's orientation TRUNK_TURN_GAIN
+times their usual weights, and solves the unchanged clip again from itself to convergence before the changes are
+found (its first pass is not converged, and the changes, solved from it, would carry the scatter).
 
 * The ZMP is Microban's, from its whole-body dynamics: the qpos sequence through mj_inverse on robot.xml (the
   masses and inertias the training simulates; the arms' and the trunk's angular momentum included), without
@@ -134,7 +135,7 @@ class SupportSpec:
     knot_s: float = 0.1  # the per-frame changes are cubic B-splines with knots this far apart
     stance_s: float = 0.2  # a foot that left the floor stops lowering the trunk for its leg over this
     reach_slack_m: float = 0.002  # a standing leg reaches its foot this short of its straight length
-    max_drop_m: float = 0.01  # the trunk goes down at most this for a standing leg to reach its foot
+    max_drop_m: float = 0.02  # the trunk goes down at most this for a standing leg to reach its (held) foot
     joint_margin_deg: float = 1.0  # a standing leg's hip roll is kept this far from the end of its range
     # The caps of the changes, in the order they are allowed (STAGES).
     max_lateral_m: float = 0.04
@@ -427,6 +428,25 @@ class Poses:
     yaw: np.ndarray
     hip: np.ndarray
     ankle: np.ndarray
+    keys: list  # each frame's qpos (bytes): _region's cache key
+
+
+# The poses and regions of a clip's frames, kept for the qpos they were found for (a frame's last few): the plan
+# judges the clip again after each solve, most of whose frames it did not change.  Cleared by plan.
+_KEPT: dict = {}
+_KEEP = 2
+
+
+def _kept(key, make):
+    """``make()``, kept under ``key`` = (name, frame, qpos bytes, ...) (the frame's last _KEEP)."""
+    slot = _KEPT.setdefault(key[:2], [])
+    for k, v in slot:
+        if k == key:
+            return v
+    v = make()
+    slot.append((key, v))
+    del slot[:-_KEEP]
+    return v
 
 
 def poses(model: mujoco.MjModel, qs: np.ndarray, shapes: Shapes) -> Poses:
@@ -434,19 +454,24 @@ def poses(model: mujoco.MjModel, qs: np.ndarray, shapes: Shapes) -> Poses:
     root, trunk = int(model.jnt_bodyid[0]), model.body("trunk").id
     sites = [[model.site(f"{s}_{p}_c").id for s in ("left", "right")] for p in ("hip", "ankle")]
     T = len(qs)
-    verts, tilt, yaw = [], np.zeros(T), np.zeros(T)
+    verts, tilt, yaw, keys = [], np.zeros(T), np.zeros(T), []
     hip, ankle = np.zeros((T, 2, 3)), np.zeros((T, 2, 3))
-    for t in range(T):
+
+    def one(t):
         d.qpos[:] = qs[t]
         mujoco.mj_kinematics(model, d)
-        verts.append(shapes.vertices(d))
-        tilt[t] = np.degrees(np.arccos(np.clip(d.xmat[root, 8], -1.0, 1.0)))
+        x = d.xmat[trunk]
         # The heading from both horizontal axes (the trunk's turn about the vertical): defined at any tilt but
         # upside down, where the forward axis alone flips about once it points near the vertical (a deep bow).
-        x = d.xmat[trunk]
-        yaw[t] = np.arctan2(x[3] - x[1], x[0] + x[4])
-        hip[t], ankle[t] = d.site_xpos[sites[0]], d.site_xpos[sites[1]]
-    return Poses(verts, tilt, np.unwrap(yaw), hip, ankle)
+        return (shapes.vertices(d), np.degrees(np.arccos(np.clip(d.xmat[root, 8], -1.0, 1.0))),
+                np.arctan2(x[3] - x[1], x[0] + x[4]), d.site_xpos[sites[0]].copy(), d.site_xpos[sites[1]].copy())
+
+    for t in range(T):
+        key = qs[t].tobytes()
+        v, tilt[t], yaw[t], hip[t], ankle[t] = _kept(("pose", t, key), lambda: one(t))
+        verts.append(v)
+        keys.append(key)
+    return Poses(verts, tilt, np.unwrap(yaw), hip, ankle, keys)
 
 
 def fill_runs(c: np.ndarray, value: bool, n: int) -> np.ndarray:
@@ -584,10 +609,13 @@ class Supports:
 
 
 def _region(P: Poses, t: int, parts, shapes: Shapes, spec: SupportSpec):
-    """S of the parts ``parts`` at frame t: (A, h, the half-planes' foot weights)."""
-    pts, part = shapes.area(P.verts[t], parts, spec.band_m)
-    A, h = shrink(*halfplanes(pts), spec.margin_m)
-    return A, h, foot_weights(A, pts, part), pts, part
+    """S of the parts ``parts`` at frame t: (A, h, the half-planes' foot weights, the area's points and their
+    parts, S's vertices)."""
+    def make():
+        pts, part = shapes.area(P.verts[t], parts, spec.band_m)
+        A, h = shrink(*halfplanes(pts), spec.margin_m)
+        return A, h, foot_weights(A, pts, part), pts, part, region_vertices(A, h)
+    return _kept(("region", t, P.keys[t], tuple(int(x) for x in parts), spec.margin_m, spec.band_m), make)
 
 
 def supports(P: Poses, contact: np.ndarray, shapes: Shapes, spec: SupportSpec, fps: float, plan: bool = False) -> Supports:
@@ -608,8 +636,7 @@ def supports(P: Poses, contact: np.ndarray, shapes: Shapes, spec: SupportSpec, f
     for t in range(T):
         parts = np.flatnonzero(contact[t])
         if len(parts):
-            A[t], h[t], feet[t], _, _ = _region(P, t, parts, shapes, spec)
-            S[t] = region_vertices(A[t], h[t])
+            A[t], h[t], feet[t], _, _, S[t] = _region(P, t, parts, shapes, spec)
     if not plan:
         return Supports(contact, A, h, feet, S, weight)
     n_lift = max(1, round(spec.lift_s * fps))
@@ -624,8 +651,7 @@ def supports(P: Poses, contact: np.ndarray, shapes: Shapes, spec: SupportSpec, f
             t0 -= 1
         far = 0.0
         for t in range(t0, last + 1):
-            An, hn, fn, pts, part = _region(P, t, np.flatnonzero(keep), shapes, spec)
-            rem = region_vertices(An, hn)
+            An, hn, fn, pts, part, rem = _region(P, t, np.flatnonzero(keep), shapes, spec)
             if t == t0:
                 far = max(outside(p, rem) for p in S[t]) if len(S[t]) else 0.0
             r = far * (last - t) / max(last - t0, 1)
@@ -814,59 +840,112 @@ def sole_points(model: mujoco.MjModel, shapes: "Shapes") -> list:
     return out
 
 
-ROLL_PIVOT_DEG = 2.0  # a held foot pitched this much rolls on its toe's (heel's) edge, less on a point between
-# A held foot's heading is held within about this of the human's (tanh): turning while it stands, the human's foot
-# pivots 17 degrees over a run (median; 49 at 90 %, LAFAN1 walk3), and a heading held there twists the leg.
-HOLD_TURN_DEG = 10.0
+CONTACT_BAND_M = 0.001  # a sole point within this of its foot's lowest is on the floor (the hold and the slide)
+HOLD_SPREAD_M = 0.002  # sole points on the floor this close together are one: the foot may turn on it
+HOLD_PIVOT = True  # a held foot turns about the middle of its points on the floor as the human's turns
 
 
-def foot_lock(contact: np.ndarray, pos: np.ndarray, quat: np.ndarray, soles: list):
-    """The feet held where they stand, rolling as the human's: each run on the floor (``contact``) of a foot holds
-    its sole where it lies flat (its ankle at the median over the run's flattest frames, its heading at the run's
-    median within about HOLD_TURN_DEG of the human's) and lets it roll as the human's foot pitches: heel up, about
-    its toe's edge, toe up, about its heel's (the edge's place where the flat sole has it; the human's ankle moves
-    5-35 mm over a run while the foot pitches 40-80 degrees, and a held ankle stretches the leg instead).  Between runs the hold blends (smoothstep) from the
-    one before to the one after, so that the target does not jump where the foot lands or leaves.  ``pos`` (T, 2,
-    3) and ``quat`` (T, 2, 4; wxyz) are the feet's (left, right) targets, ``soles`` the sole points in their frames
-    (sole_points).  Returns per frame and foot the horizontal offset of the target (T, 2, 2), its turn about the
-    vertical (T, 2) and 1 where the foot stands (T, 2) (core.MicrobanRetargeting.lock)."""
-    T = len(contact)
-    offset, turn, stand = np.zeros((T, 2, 2)), np.zeros((T, 2)), np.zeros((T, 2))
-    for i, p in enumerate(FEET):
-        runs = _runs(contact[:, p])
+def floor_points(world: np.ndarray) -> np.ndarray:
+    """(V,) which of a foot's sole points (V, 3; world) are on the floor: within CONTACT_BAND_M of its lowest."""
+    return world[:, 2] <= world[:, 2].min() + CONTACT_BAND_M
+
+
+def hold_feet(pos: np.ndarray, quat: np.ndarray, on: np.ndarray, soles: list, fade: int):
+    """The feet's targets held on the floor.  Over each run where a foot is on the floor (``on`` (T, 2)), from the
+    run's second frame on, the foot's desired target (``pos`` (T, 2, 3), ``quat`` (T, 2, 4; wxyz)) is turned about
+    the vertical and moved so that its sole points on the floor in that frame and the frame before (floor_points,
+    the same as slide_speed's) stay where they were (and not below their height; the human lifting the foot lifts
+    it): a flat foot stays put and keeps its heading, a
+    foot rolling over its toes (heel) keeps them there, and on one point (closer together than HOLD_SPREAD_M) it may
+    turn.  After a run the hold fades out over ``fade`` frames (smoothstep; less if the foot lands again sooner).
+    ``soles`` are the feet's sole points in their frames (sole_points).  Returns the held (pos, quat)."""
+    out_pos, out_quat = pos.copy(), quat.copy()
+    for i in range(2):
+        runs = _runs(on[:, i])
         if not runs:
             continue
-        bottom = soles[i][soles[i][:, 2] <= soles[i][:, 2].min() + 0.001]
-        toe, heel = bottom[:, 0].max(), bottom[:, 0].min()
-        middle = bottom.mean(0)
-        rot = Rotation.from_quat(quat[:, i], scalar_first=True)
-        m = rot.as_matrix()
-        yaw = np.unwrap(np.arctan2(m[:, 1, 0], m[:, 0, 0]))
-        pitch = np.degrees(-np.arcsin(np.clip(m[:, 2, 0], -1.0, 1.0)))  # heel up > 0
-        hold = np.zeros((T, 3))
-        cap = math.radians(HOLD_TURN_DEG)
-        for a, b in runs:
-            d_yaw = cap * np.tanh((np.median(yaw[a:b]) - yaw[a:b]) / cap)
-            flat = np.abs(pitch[a:b]) <= np.percentile(np.abs(pitch[a:b]), 30)
-            ankle0 = np.median(pos[a:b, i, :2][flat], 0)
-            w = np.clip(pitch[a:b] / ROLL_PIVOT_DEG, -1.0, 1.0)
-            pivot = np.tile(middle, (b - a, 1))
-            pivot[:, 0] += np.where(w > 0, w * (toe - middle[0]), -w * (heel - middle[0]))
-            about_z = lambda angle: Rotation.from_rotvec(np.c_[np.zeros((len(angle), 2)), angle])  # noqa: E731
-            held = about_z(d_yaw) * rot[a:b]  # the target turned to the held heading
-            flat_rot = about_z(yaw[a:b] + d_yaw)
-            ankle = ankle0 + (flat_rot.apply(pivot) - held.apply(pivot))[:, :2]
-            hold[a:b, :2] = ankle - pos[a:b, i, :2]
-            hold[a:b, 2] = d_yaw
-            stand[a:b, i] = 1.0
-        hold[:runs[0][0]] = hold[runs[0][0]]
-        hold[runs[-1][1]:] = hold[runs[-1][1] - 1]
-        for (_, b0), (a1, _) in zip(runs, runs[1:]):
-            u = np.arange(1, a1 - b0 + 1) / (a1 - b0 + 1)
-            s = (u * u * (3.0 - 2.0 * u))[:, None]
-            hold[b0:a1] = (1.0 - s) * hold[b0 - 1] + s * hold[a1]
-        offset[:, i], turn[:, i] = hold[:, :2], hold[:, 2]
-    return offset, turn, stand
+        local = soles[i]
+        m = Rotation.from_quat(quat[:, i], scalar_first=True).as_matrix()
+        held_p, held_m = pos[:, i].copy(), m.copy()
+        for k, (a, b) in enumerate(runs):
+            prev = held_p[a] + local @ held_m[a].T
+            prev_on = floor_points(prev)
+            for t in range(a + 1, b):
+                turned = local @ m[t].T
+                now_on = floor_points(turned)
+                keep = prev_on & now_on
+                if not keep.any():
+                    keep = now_on
+                src, dst = turned[keep, :2], prev[keep, :2]
+                psi = 0.0
+                if not HOLD_PIVOT and np.ptp(src, axis=0).max() >= HOLD_SPREAD_M:
+                    h = (src - src.mean(0)).T @ (dst - dst.mean(0))
+                    psi = math.atan2(h[0, 1] - h[1, 0], h[0, 0] + h[1, 1])
+                c, s_ = math.cos(psi), math.sin(psi)
+                held_m[t] = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]]) @ m[t]
+                turned = local @ held_m[t].T
+                held_p[t] = (prev[keep] - turned[keep]).mean(0)
+                # At least at their height (rolling on the floor, not into it); higher where the human lifts the foot.
+                held_p[t, 2] = max(held_p[t, 2], pos[t, i, 2])
+                prev, prev_on = held_p[t] + turned, now_on
+            # After the run: the hold's offset fades out.
+            end = runs[k + 1][0] if k + 1 < len(runs) else len(pos)
+            n = min(fade, end - b)
+            if n > 0:
+                d_pos = held_p[b - 1] - pos[b - 1, i]
+                d_rot = Rotation.from_matrix(held_m[b - 1] @ m[b - 1].T).as_rotvec()
+                u = np.arange(1, n + 1) / (n + 1)
+                keep_share = 1.0 - u * u * (3.0 - 2.0 * u)
+                held_p[b:b + n] = pos[b:b + n, i] + keep_share[:, None] * d_pos
+                held_m[b:b + n] = Rotation.from_rotvec(keep_share[:, None] * d_rot).as_matrix() @ m[b:b + n]
+        out_pos[:, i] = held_p
+        out_quat[:, i] = Rotation.from_matrix(held_m).as_quat(scalar_first=True)
+    return out_pos, out_quat
+
+
+SLIDE_MM_S = 5.0  # a standing foot sliding faster than this (0.17 mm a frame at 30 fps) slides
+
+
+def slide_speed(soles: np.ndarray, on: np.ndarray, fps: float) -> np.ndarray:
+    """(T, 2) the standing feet's slide (mm/s) into each frame: for a foot on the floor (``on`` (T, 2)) in a frame
+    and the one before, the horizontal speed of its sole points on the floor in both (floor_points; the points
+    hold_feet keeps), averaged over them; nan otherwise.  ``soles`` (T, 2, V, 3): the feet's sole points, world."""
+    out = np.full(on.shape, np.nan)
+    for t, i in zip(*np.nonzero(on[1:] & on[:-1])):
+        keep = floor_points(soles[t, i]) & floor_points(soles[t + 1, i])
+        if keep.any():
+            if HOLD_PIVOT:  # the middle of the points (a turn about it is not a slide)
+                out[t + 1, i] = 1000.0 * fps * np.linalg.norm(soles[t + 1, i, keep, :2].mean(0) - soles[t, i, keep, :2].mean(0))
+            else:
+                out[t + 1, i] = 1000.0 * fps * np.linalg.norm(soles[t + 1, i, keep, :2] - soles[t, i, keep, :2], axis=1).mean()
+    return out
+
+
+def sliding(speed: np.ndarray) -> np.ndarray:
+    """(T,) frames where a standing foot slides (slide_speed over SLIDE_MM_S into or out of the frame)."""
+    fast = np.nan_to_num(speed, nan=0.0).max(1) > SLIDE_MM_S
+    return fast | np.r_[fast[1:], False]
+
+
+def feet_on_floor(contact: np.ndarray, soles: np.ndarray) -> np.ndarray:
+    """(T, 2) the feet (left, right) standing on the floor, for the hold and the slide: the feet on the floor by
+    robot_contact (``contact`` (T, P)), the parts the support and the training count.  (Also requiring the foot to
+    touch, within ROBOT_TOUCH_M, made the hold and the judgement chase each other: a foot held, or raised beyond its
+    leg's reach, left the floor, unheld it came back.)  ``soles`` (T, 2, V, 3) is not used."""
+    return contact[:, FEET].copy()
+
+
+def feet_soles(model: mujoco.MjModel, qs: np.ndarray, shapes: "Shapes") -> np.ndarray:
+    """(T, 2, V, 3) the feet's (left, right) shape vertices of a qpos sequence, world."""
+    d = mujoco.MjData(model)
+    on = [shapes.part_of == p for p in FEET]
+    out = []
+    for q in qs:
+        d.qpos[:] = q
+        mujoco.mj_kinematics(model, d)
+        v = shapes.vertices(d)
+        out.append([v[o] for o in on])
+    return np.asarray(out)
 
 
 def foot_phases(contact: np.ndarray, zero: np.ndarray):
@@ -1166,7 +1245,8 @@ def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
     qpos, the changes (Changes), a summary (the ZMP in S(t) before, after each stage and after, the stage each
     frame came in at, the cost of each iteration), (ZMP, load, the parts on the floor, the distances outside S(t))
     before and after (after: the parts found again from the changed poses), and the stage each frame came into
-    S(t) at (stage_reached)."""
+    S(t) at (stage_reached), and a function that judges changed poses solved again (rejudge)."""
+    _KEPT.clear()
     shapes = Shapes(model)
     T = len(qs)
     dyn = Dyn(model, qs, fps, spec.smooth_s, spec.change_s) if T >= 3 else None
@@ -1183,7 +1263,7 @@ def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
     if (zero | edge).all() or T < 3:
         summary["after"] = summary["before"]
         stage = stage_reached([dist0])
-        return qs, changes, summary, before, before, stage
+        return qs, changes, summary, before, before, stage, lambda q: (before, stage)
     feet = stance(contact, fps, spec.stance_s)
     yaw = P0.yaw
     phases = foot_phases(contact, zero)
@@ -1338,4 +1418,12 @@ def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
     summary["after"] = zmp_summary(dist_a, contact_a)
     stage = stage_reached(dists)
     summary["stage_reached"] = stage_summary(stage, contact_a)
-    return q_b, Changes(X_b, F_b, yaw), summary, before, after, stage
+
+    def rejudge(q):
+        """(after, stage) of the changed poses ``q`` solved again (the last stage's judgement replaced)."""
+        (z_, load_, contact_, dist_), _ = evaluate(model, q, human, fps, spec, shapes, dyn)
+        stage_ = stage_reached(dists[:-1] + [dist_])
+        summary["after"] = zmp_summary(dist_, contact_)
+        summary["stage_reached"] = stage_summary(stage_, contact_)
+        return (z_, load_, contact_, dist_), stage_
+    return q_b, Changes(X_b, F_b, yaw), summary, before, after, stage, rejudge
