@@ -167,6 +167,10 @@ HOLD_FADE_S = 0.2  # after a foot leaves the floor, its hold fades out over this
 HOLD_LEG_STEPS = 12  # solve_leg's least squares steps at most
 HOLD_LEG_TOL_M = 1e-5  # solve_leg stops within this (the turn: per HOLD_LEG_TURN_M)
 HOLD_LEG_MAX_STEP = 0.1  # solve_leg moves a joint at most this (rad) a step
+# A held foot its leg alone cannot bring within this of its target is out of reach there (hip pitch or roll at its
+# end, the leg straight): the IK's leg is kept (the foot slides there; LAFAN1 walk3, its hips at their pitch ends in
+# 55 % of the frames unchanged, otherwise took 7 % of its frames to joint jumps and 5 % to overlapping legs).
+HOLD_FAIL_M = 0.002
 # solve_leg's damping (per m^2 of the foot's error): near a straight knee the hip yaw and the ankle trade almost
 # freely, and undamped the leg drifts along them from its seed (60 degrees of hip yaw at 1e-6).
 HOLD_LEG_DAMPING = 1e-4
@@ -393,6 +397,9 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         # (positions (T, 2, 3), quaternions (T, 2, 4)).
         self.hold_on, self.soles, self.held = None, None, None
         self._feet_base = None  # held_feet's: the feet's and hips' kept targets of every frame
+        # The geom pairs the IK keeps apart, one by one (move_frames checks a moved frame on them).
+        pairs = np.array([(a, b) for ga, gb in self_collision_pairs(self.model) for a in ga for b in gb])
+        self._coll_pairs = pairs, self.model.geom_rbound[pairs].sum(1)
         # Per leg (left, right) for hold_legs: the ankle centre's site, its six joints' qpos and dof addresses and
         # ranges (the IK's: the knee does not bend past straight).
         self._leg_data = mujoco.MjData(self.model)
@@ -531,6 +538,14 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             self._arm_costs.append(weight * (d[1] / np.linalg.norm(d)) ** 2)
         return out
 
+    def penetrates(self) -> bool:
+        """Whether two of the parts the IK keeps apart overlap in ``_leg_data`` (mj_kinematics has run)."""
+        m, d = self.model, self._leg_data
+        pairs, reach = self._coll_pairs
+        near = np.linalg.norm(d.geom_xpos[pairs[:, 0]] - d.geom_xpos[pairs[:, 1]], axis=1) < reach  # bounding spheres meet
+        fromto = np.empty(6)
+        return any(mujoco.mj_geomDistance(m, d, a, b, 0.002, fromto) < 0.0 for a, b in pairs[near])
+
     def hold_legs(self, q):
         """``q`` with the legs of the feet on the floor (``hold_on``) solved again, alone (their six joints, the
         trunk where the IK put it), to put each foot on its held target (``held``): the IK weighs the held feet
@@ -540,7 +555,10 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             return q
         self._leg_data.qpos[:] = q
         for i in np.flatnonzero(on):
-            self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], True)
+            adr = self._legs_ik[i][1]
+            before = self._leg_data.qpos[adr].copy()
+            if self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], True) > HOLD_FAIL_M:
+                self._leg_data.qpos[adr] = before  # out of the leg's reach: the IK's leg, nearest the human's
         return self._leg_data.qpos.copy()
 
     def solve_leg(self, i, goal_p, goal_quat, standing):
@@ -548,7 +566,8 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         foot (the ankle centre's site) at ``goal_p``, ``goal_quat``: damped least squares within the joints' ranges
         (HOLD_LEG_STEPS at most).  A ``standing`` foot beyond the leg's reach (``leg_reach``) is raised to it, off the
         floor (Microban's legs are shorter for its steps than the human's: a trailing foot held on its toes at the
-        push-off leaves the floor a little sooner); beyond it horizontally, as near as it gets."""
+        push-off leaves the floor a little sooner); beyond it horizontally, as near as it gets.  Returns how far
+        the foot is left from its target (m)."""
         m, d = self.model, self._leg_data
         site, adr, dof, lo, hi, hip = self._legs_ik[i]
         goal_p = np.array(goal_p, float)
@@ -570,6 +589,8 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             err[:3], err[3:] = goal_p - d.site_xpos[site], turn * HOLD_LEG_TURN_M
             if np.abs(err).max() < HOLD_LEG_TOL_M:
                 break
+            if k == HOLD_LEG_STEPS - 1:
+                break
             mujoco.mj_comPos(m, d)
             mujoco.mj_jacSite(m, d, jac[:3], jac[3:], site)
             j = jac[:, dof]
@@ -577,6 +598,7 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             step = j.T @ np.linalg.solve(j @ j.T + HOLD_LEG_DAMPING * np.eye(6), err)
             step *= min(1.0, HOLD_LEG_MAX_STEP / max(np.abs(step).max(), 1e-12))  # (near a straight knee: no leap to another branch)
             d.qpos[adr] = np.clip(d.qpos[adr] + step, lo, hi)
+        return float(np.abs(err[:3]).max())
 
     def _place(self, out):
         """The map of a point by the trunk's change (turn by ``tilt`` about the hips' midpoint, move by ``shift``)
@@ -863,10 +885,13 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
     the trunk turned and moved as ``adjust`` says (the arms and the head with it: their pose relative to the trunk
     is kept, as the IK keeps it) and lowered for a standing leg's reach (by up to ``max_drop``), and each leg
     solved alone to its foot's target in ``held`` (MicrobanRetargeting.solve_leg: a leg has six joints for its
-    foot's six coordinates, so the IK's legs differ only by its other targets' pull).  qpos (n, nq), IK space."""
+    foot's six coordinates, so the IK's legs differ only by its other targets' pull).  qpos (n, nq), IK space, and
+    the frames (n,) to solve by the IK instead: where two parts the IK keeps apart overlap (the legs solved alone
+    do not avoid each other) or a foot is beyond its leg's reach (HOLD_FAIL_M)."""
     m, d = gmr.model, gmr._leg_data
     hips = [m.site(f"{s}_hip_c").id for s in ("left", "right")]
     out = np.empty((len(subset), m.nq))
+    overlap = np.zeros(len(subset), bool)
     for k, t in enumerate(subset):
         q = seeds[t].copy()
         a = adjust.at(t)
@@ -885,13 +910,18 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
             drop = min(max(drop, stance[t, i] * need), gmr.max_drop)
         d.qpos[:] = q
         d.qpos[2] -= drop
+        missed = 0.0
         for i in range(2):
             # A leg off the floor and not coming back to it yet moves with the trunk as it is (its pose relative to
-            # the trunk kept); the others are solved to their foot's target.
-            if gmr.hold_on[t, i] or stance[t, i] > 0.0 or drop > 0.0:
-                gmr.solve_leg(i, held[0][t, i], held[1][t, i], bool(gmr.hold_on[t, i]))
+            # the trunk kept); the others are solved to their foot's target (a held foot out of reach: by the IK).
+            standing = bool(gmr.hold_on[t, i])
+            if standing or stance[t, i] > 0.0 or drop > 0.0:
+                miss = gmr.solve_leg(i, held[0][t, i], held[1][t, i], standing)
+                missed = max(missed, miss if standing else 0.0)
         out[k] = d.qpos
-    return out
+        mujoco.mj_kinematics(m, d)
+        overlap[k] = missed > HOLD_FAIL_M or gmr.penetrates()
+    return out, overlap
 
 
 def put_on_floor(model, lowest: LowestPoint, qs, targets, height) -> None:
@@ -938,7 +968,7 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     fallbacks0 = COLLISION_FALLBACKS[0]
     clear, floor = human_clearance(frames, ref, fmt, fps)
     lowest = LowestPoint(model)
-    solved, seeds, target_names, frames_solved = {}, [], [], [0]
+    solved, seeds, target_names, frames_solved, ik_frames = {}, [], [], [0], [0]
     kinematic = False
 
     def solve(adjust=None, stance=None, subset=None, base=None, reseed=False):
@@ -953,8 +983,11 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
             sub = np.arange(T) if subset is None else np.asarray(subset, int)
             if base is not None:
                 sub = np.union1d(sub, np.flatnonzero(held_moved(held, solved[id(base)][3]))).astype(int)
-            qn = move_frames(gmr, seeds[0], adjust, stance, held, sub)
+            qn, overlap = move_frames(gmr, seeds[0], adjust, stance, held, sub)
             frames_solved[0] += len(qn)
+            if overlap.any():  # solved by the IK, which keeps the parts apart
+                qn[overlap] = solve_frames(gmr, frames, adjust, seeds[0], stance, sub[overlap])[0]
+                ik_frames[0] += int(overlap.sum())
             if reseed:
                 seeds[0][sub] = qn
             qs = base.copy() if base is not None else np.empty((T, model.nq))
@@ -1156,6 +1189,7 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         "root_z_m_min_max": [round(float(qs[:, 2].min()), 3), round(float(qs[:, 2].max()), 3)],
         "root_xy_end_m": np.round(qs[-1, :2], 3).tolist(),
         "ik_frames_solved_per_frame": round(frames_solved[0] / max(len(qs), 1), 2),
+        "moved_frames_solved_by_the_ik_again": ik_frames[0],
         "support_shift": None if support_spec is None else support_spec.to_dict(),
         "support_changes": changes.summary(),
         "zmp_in_support": summary,
