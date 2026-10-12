@@ -11,10 +11,15 @@
 Pieces.  Each evaluation section (one window of the evaluation shard) is cut
 in consecutive, non-overlapping pieces of at most ``clip_seconds``.
 
-Start.  The robot starts every piece as it starts on the robot: at rest at
-HOME (joint velocities 0, the trunk at HOME's height and tilt), under the
+Start.  The robot is placed for every piece as on the robot: at rest at HOME
+(joint velocities 0, the trunk at HOME's height and tilt), under the
 reference trunk's horizontal position and facing the reference's heading
-(``start="home"``).  The reference plays from the piece's first frame.  The
+(``start="home"``).  The reference plays from the piece's first frame.  Only
+the placement is the robot's: the reference reaches the policy unchanged, so
+on the first step it jumps from HOME to the reference pose, where a robot
+that slews the reference joints from its measured angles at the start (as
+planned, at most 0.104 rad per step, the XC330's no-load speed at 11.1 V)
+meets a gentler start; the evaluation is the harsher of the two.  The
 first ``SETTLE_S`` = 1 s is the robot's way from HOME to the reference pose
 and is not judged: no termination fails the piece in it and no error is
 taken.  From HOME 49-59 % of the pieces are past a termination line (5 cm of
@@ -23,7 +28,12 @@ reference's pose is not HOME; the share falls to 14-15 % by 0.6 s and then
 grows only slowly, with the falls (15-21 % at 2 s; the PICO and the training
 kinds' evaluation sets, the small and the full run's checkpoints).  A piece of at
 most 1 s has nothing judged and is left out (the PICO set keeps 3030 of its
-3541 s, the training kinds' set, of short sections, 5807 of 8586 s).
+3541 s, the training kinds' set, of short sections, 5807 of 8586 s).  Every
+piece starts from HOME, as the robot meets every reference from rest, so on
+the training kinds' set (1481 of its 2735 sections under 2 s) 30 % of the
+judged time is the second right after the settle, against 15 % on the PICO
+set: its success line weighs the way from HOME into each motion more than
+steady tracking.
 
 ``start="reference"`` (kept to compare with earlier reports) places the robot
 on the reference's first frame, joint velocities included, and judges from
@@ -35,9 +45,14 @@ Conditions.  Observation noise, pushes and the physics randomization of
 training are off.  The robot's own conditions (battery voltage and its drop,
 actuator and sensor delays) are drawn from their training ranges with the
 seed.  No env is reset during a run, so the draws do not depend on the
-policy: two checkpoints meet the same conditions piece by piece.  A piece
-that ended (a termination) keeps running to its end for the fall and
-action-rate measures.
+policy: two checkpoints meet the same conditions piece by piece.  The
+physics on the GPU is not bit-reproducible (its sums run in a varying
+order; torch's deterministic settings do not change it), so two runs of one
+checkpoint and seed differ piece by piece (the full run's model_10000 on the
+PICO set, twice: 5 of 489 pieces changed success, picotwist 91 and 88 %,
+1.32 and 1.34 falls per minute).  A value within a few points of a line can
+fall on either side of it in another run.  A piece that ended (a
+termination) keeps running to its end for the fall and action-rate measures.
 
 Success and error lines.  A piece succeeds when no termination fires in its
 judged steps (the end of the reference is a time-out, not a failure).  A
@@ -66,13 +81,14 @@ the 12 leg joints of the squared change of the servo target in one step (the
 form of the action_rate_l2 reward, rad^2) is at most ``MAX_LEG_ACTION_RATE``
 = 3.36: the PICO policy that runs on the robot without violent motion
 (mjlab_microban_teleop_v12 run 2026-10-11_23-19-20_home_481503d292_pico_v13_v13g2,
-model_14999) walking (standing and eight directions, arms at HOME, 128
-rollouts of 10 s) measures 3.355 over the same steps: from 1 s into a
-rollout until the robot falls.  Every piece counts, failed ones included,
-from 1 s into the piece until it falls.
+model_14999) walking (its eight walking commands, arms at HOME, 128 rollouts
+of 10 s; standing, left out, measures 0.0003, and with it the 144 rollouts
+2.98) measures 3.355 over the same steps: from 1 s into a rollout until the
+robot falls.  Every piece counts, failed ones included, from 1 s into the
+piece until it falls.
 
 Fall line.  A piece falls when the robot trunk tilts past ``FALL_TILT_RAD`` =
-45 deg from vertical while the reference trunk is within
+45 deg from vertical (HOME stands at 10 deg) while the reference trunk is within
 ``FALL_REF_TILT_RAD`` = 30 deg of vertical (a reference lying down is not a
 fall), at any step of the piece.  The pieces run 1-10 s (7.2 s on average on
 the PICO set) and the rollouts of the line's source 6 s, so falls are counted
