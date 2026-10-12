@@ -260,9 +260,10 @@ def test_amass_smplx_motion_matches_the_body_model_and_retargets(tmp_path):
 def test_support_shift_puts_the_zmp_on_the_standing_foot(tmp_path):
     # The human lifts the right foot (hip forward, knee back) and stands on the left with the hips where they were:
     # scaled to Microban's wide stance, the zero-moment point stays near the middle, 3-4 cm outside the left sole's
-    # support.  With the support shift the trunk moves over the left foot and the zero-moment point comes to the
-    # support (but in the last half window of the derivatives' fit, fitted from one side and not constrained), the
-    # standing foot stays put and stays on the floor, and the arms keep their pose relative to the trunk.
+    # support.  With the support shift the trunk moves over the left foot and the zero-moment point comes to within
+    # 8 mm of the support (but in the last half window of the derivatives' fit, fitted from one side and not
+    # constrained; most frames stay 3-6 mm out, the lateral shift at its 40 mm cap and the lifted leg's hip roll at
+    # its end), the standing foot stays put and stays on the floor, and the arms keep their pose relative to the trunk.
     from mjlab_microban.wholebody.retarget import support
 
     frames = 60
