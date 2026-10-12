@@ -113,7 +113,7 @@ class SupportSpec:
     w_lift: float = 3.0
     w_shift: float = 3e-2
     w_accel: float = 1e-4
-    w_speed_forward: float = 1e-2
+    w_speed_forward: float = 0.3  # 1e-2 let the trunk stop and go at every step (forward speed std x1.9)
     w_zero: float = 1e3
     fade_s: float = 0.2  # the shift goes to 0 over this before a frame where it must be 0
     huber_m: float = 0.03  # the ZMP's distance outside counts squared up to this and linearly beyond
