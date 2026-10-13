@@ -559,30 +559,44 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         mujoco.mj_collision(tm, td)
         return any(robot[c.geom1] and robot[c.geom2] and -c.dist > HOLD_OVERLAP_M for c in td.contact[:td.ncon])
 
+    def leg_weight(self, t) -> np.ndarray:
+        """(2,) how much each leg of frame ``t`` is put on its foot's target (hold_legs, move_frames): 1 on the
+        floor (``hold_on``), easing to 0 over HOLD_FADE_S before it lands and after it leaves (smoothstep): a leg
+        switched at once from the IK's (or the trunk's) to its target jumps near a straight knee, where a few mm
+        of the foot are tens of degrees of the knee."""
+        n = max(1, round(HOLD_FADE_S * self.fps))
+        a, b = max(0, t - n), min(len(self.hold_on), t + n + 1)
+        w = np.zeros(2)
+        for i in range(2):
+            on = np.flatnonzero(self.hold_on[a:b, i])
+            if len(on):
+                x = float(np.clip(1.0 - np.abs(on + a - t).min() / n, 0.0, 1.0))
+                w[i] = x * x * (3.0 - 2.0 * x)
+        return w
+
     def hold_legs(self, q):
         """``q`` with the legs of the feet on the floor (``hold_on``) solved again, alone (their six joints, the
         trunk where the IK put it), to put each foot on its held target (``held``): the IK weighs the held feet
-        against the other targets and leaves them a few mm off, which the next frame turns into a slide.  A leg
-        that cannot reach its foot, or reaches it only through two parts overlapping (a thigh into the trunk in a
-        deep crouch, the ankles of a narrow stance), is left as the IK put it, nearest the human's (the foot slides
-        there)."""
+        against the other targets and leaves them a few mm off, which the next frame turns into a slide.  Around
+        the floor the legs ease in and out of it (leg_weight).  A leg that cannot reach its foot, or reaches it only
+        through two parts overlapping (a thigh into the trunk in a deep crouch, the feet in a narrow stance), is
+        left as the IK put it, nearest the human's (the foot slides there)."""
         on = self.hold_on[self.frame]
-        if not on.any():
+        w = self.leg_weight(self.frame)
+        if not w.any():
             return q
-        m, d = self.model, self._leg_data
+        d = self._leg_data
         d.qpos[:] = q
-        mujoco.mj_kinematics(m, d)
         apart = not self.penetrates()
-        for i in np.flatnonzero(on):
+        for i in np.flatnonzero(w):
             adr = self._legs_ik[i][1]
             before = d.qpos[adr].copy()
-            if self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], True) > HOLD_FAIL_M:
+            if self.solve_leg(i, self.held[0][self.frame, i], self.held[1][self.frame, i], bool(on[i])) > HOLD_FAIL_M:
                 d.qpos[adr] = before
                 continue
-            if apart:
-                mujoco.mj_kinematics(m, d)
-                if self.penetrates():
-                    d.qpos[adr] = before
+            d.qpos[adr] = before + w[i] * (d.qpos[adr] - before)
+            if apart and self.penetrates():
+                d.qpos[adr] = before
         return d.qpos.copy()
 
     def solve_leg(self, i, goal_p, goal_quat, standing):
@@ -935,15 +949,18 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
         d.qpos[:] = q
         d.qpos[2] -= drop
         missed = 0.0
-        for i in range(2):
+        w = gmr.leg_weight(t)
+        for i in np.flatnonzero(w):
             # A leg off the floor and not coming back to it yet moves with the trunk as it is (its pose relative to
-            # the trunk kept); the others are solved to their foot's target (a held foot out of reach: by the IK).
+            # the trunk kept); the others are solved to their foot's target, easing in and out of it as in
+            # hold_legs (a held foot out of reach: by the IK).
+            adr = gmr._legs_ik[i][1]
+            before = d.qpos[adr].copy()
             standing = bool(gmr.hold_on[t, i])
-            if standing or stance[t, i] > 0.0 or drop > 0.0:
-                miss = gmr.solve_leg(i, held[0][t, i], held[1][t, i], standing)
-                missed = max(missed, miss if standing else 0.0)
+            miss = gmr.solve_leg(i, held[0][t, i], held[1][t, i], standing)
+            missed = max(missed, miss if standing else 0.0)
+            d.qpos[adr] = before + w[i] * (d.qpos[adr] - before)
         out[k] = d.qpos
-        mujoco.mj_kinematics(m, d)
         overlap[k] = missed > HOLD_FAIL_M or gmr.penetrates()
     return out, overlap
 
