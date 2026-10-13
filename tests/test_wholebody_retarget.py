@@ -261,8 +261,8 @@ def test_support_changes_put_the_zmp_on_the_standing_foot(tmp_path):
     # The human lifts the right foot (hip forward, knee back) and stands on the left with the hips where they were:
     # scaled to Microban's wide stance, the zero-moment point stays near the middle, 3-4 cm outside the left sole's
     # support.  With the support changes the trunk moves over the left foot (the lifted leg with it) and the
-    # zero-moment point comes into the support (the lateral shift near its 40 mm cap), the standing foot stays put,
-    # on the floor and still, and the arms keep their pose relative to the trunk.  The clip's last half window of the
+    # zero-moment point comes into the support (the lateral shift near its 40 mm cap), the standing foot stays put
+    # (but for its placement change), on the floor and still, and the arms keep their pose relative to the trunk.  The clip's last half window of the
     # derivatives' fit is not judged.
     from mjlab_microban.wholebody.retarget import support
 
@@ -288,7 +288,9 @@ def test_support_changes_put_the_zmp_on_the_standing_foot(tmp_path):
     assert ((changed["zmp_stage"][one] >= 1) & (changed["zmp_stage"][one] <= 4)).mean() > 0.9
     assert np.median(changed["support_shift"][one, 1]) > 0.02  # the trunk went left
     sites = {name: _site_positions(out[name]["qpos"]) for name in out}
-    assert np.abs(sites["changed"]["left_ankle_c"] - sites["plain"]["left_ankle_c"]).max() < 3e-3
+    # (Moved only by its placement change, the fourth stage: one offset for its run on the floor.)
+    placed = np.c_[changed["support_foot"][:, 0], np.zeros(len(changed["support_foot"]))]
+    assert np.abs(sites["changed"]["left_ankle_c"] - placed - sites["plain"]["left_ankle_c"]).max() < 3e-3
     assert reports["changed"]["standing_foot_speed_mm_s_p50_p90_max"][1] < 1.0
     m = mujoco.MjModel.from_xml_path(str(model.gmr_model_xml()))
     d = mujoco.MjData(m)
