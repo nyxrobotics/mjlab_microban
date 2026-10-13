@@ -6,7 +6,6 @@ import json
 import pickle
 
 import numpy as np
-import pytest
 
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody.data.fk import quat_wxyz_to_xyzw
@@ -119,7 +118,7 @@ def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
     (tmp_path / "raw" / "cmu" / "cmu-mocap-index-text.txt").write_text("07_01\twalk\n07_02\twalk\n07_03\twalk\n")
     failing: set[str] = set()
 
-    def fake_run(path, fmt, fps, out_dir, stem, smplx_model_dir=None, support_spec=None):
+    def fake_run(path, fmt, fps, out_dir, stem, smplx_model_dir=None):
         if stem in failing:
             raise RuntimeError("IK failed")
         for suffix in pipeline.CLIP_OUTPUTS:
@@ -147,14 +146,3 @@ def test_retargeting_leaves_no_stale_output(tmp_path, monkeypatch):
     # Names of another set leave this one alone.
     assert pipeline.retarget("cmu", tmp_path, workers=2, only={"walk1_subject1"}) == {}
     assert list(json.loads((out / "errors.json").read_text())) == ["cmuwalk_07_02"]
-    # Redoing some clips with other support shift settings than the set's is refused (the manifest holds for all).
-    from mjlab_microban.wholebody.retarget.support import SupportSpec
-
-    with pytest.raises(ValueError, match="retarget the whole set"):
-        pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"}, support_spec=SupportSpec())
-    assert (out / "cmuwalk_07_01.pkl").exists()
-    # A manifest from before the support shift (a list of the clips) is one without it.
-    (out / "manifest.json").write_text(json.dumps(json.loads((out / "manifest.json").read_text())["clips"]))
-    pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"})
-    with pytest.raises(ValueError, match="retarget the whole set"):
-        pipeline.retarget("cmu", tmp_path, workers=2, only={"cmuwalk_07_01"}, support_spec=SupportSpec())
