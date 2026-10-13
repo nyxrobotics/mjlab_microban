@@ -171,6 +171,9 @@ HOLD_LEG_MAX_STEP = 0.1  # solve_leg moves a joint at most this (rad) a step
 # end, the leg straight): the IK's leg is kept (the foot slides there; LAFAN1 walk3, its hips at their pitch ends in
 # 55 % of the frames unchanged, otherwise took 7 % of its frames to joint jumps and 5 % to overlapping legs).
 HOLD_FAIL_M = 0.002
+# A moved or held pose whose parts overlap deeper than this on the training's collision shapes is solved by the IK
+# instead (the training cuts frames past 5 mm: preprocess.ExclusionSpec.self_penetration_m).
+HOLD_OVERLAP_M = 0.003
 # solve_leg's damping (per m^2 of the foot's error): near a straight knee the hip yaw and the ankle trade almost
 # freely, and undamped the leg drifts along them from its seed (60 degrees of hip yaw at 1e-6).
 HOLD_LEG_DAMPING = 1e-4
@@ -397,9 +400,15 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         # (positions (T, 2, 3), quaternions (T, 2, 4)).
         self.hold_on, self.soles, self.held = None, None, None
         self._feet_base = None  # held_feet's: the feet's and hips' kept targets of every frame
-        # The geom pairs the IK keeps apart, one by one (move_frames checks a moved frame on them).
-        pairs = np.array([(a, b) for ga, gb in self_collision_pairs(self.model) for a in ga for b in gb])
-        self._coll_pairs = pairs, self.model.geom_rbound[pairs].sum(1)
+        # The training's collision shapes (env_cfg.training_collision_model, on which the training cuts the frames
+        # whose parts overlap): a moved or held pose is checked on them (penetrates).  Its qpos: the root, then the
+        # hinges by name.
+        from mjlab_microban.wholebody.env_cfg import training_collision_model
+        tm = training_collision_model()
+        hinges = [j for j in range(tm.njnt) if int(tm.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_HINGE)]
+        robot = (tm.geom_bodyid != 0) & ((tm.geom_contype != 0) | (tm.geom_conaffinity != 0))
+        self._train = (tm, mujoco.MjData(tm), np.array([self.model.jnt_qposadr[self.model.joint(tm.joint(j).name).id] for j in hinges]),
+                       robot)
         # Per leg (left, right) for hold_legs: the ankle centre's site, its six joints' qpos and dof addresses and
         # ranges (the IK's: the knee does not bend past straight).
         self._leg_data = mujoco.MjData(self.model)
@@ -539,19 +548,24 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         return out
 
     def penetrates(self) -> bool:
-        """Whether two of the parts the IK keeps apart overlap in ``_leg_data`` (mj_kinematics has run)."""
-        m, d = self.model, self._leg_data
-        pairs, reach = self._coll_pairs
-        near = np.linalg.norm(d.geom_xpos[pairs[:, 0]] - d.geom_xpos[pairs[:, 1]], axis=1) < reach  # bounding spheres meet
-        fromto = np.empty(6)
-        return any(mujoco.mj_geomDistance(m, d, a, b, 0.002, fromto) < 0.0 for a, b in pairs[near])
+        """Whether two of the robot's parts overlap deeper than HOLD_OVERLAP_M on the training's collision shapes
+        in the pose ``_leg_data.qpos`` (the IK keeps its own shapes 2 mm apart, which leaves the training's ankle
+        blocks and shins of a narrow stance overlapping)."""
+        tm, td, adr, robot = self._train
+        q = self._leg_data.qpos
+        td.qpos[:7] = q[:7]
+        td.qpos[7:] = q[adr]
+        mujoco.mj_kinematics(tm, td)
+        mujoco.mj_collision(tm, td)
+        return any(robot[c.geom1] and robot[c.geom2] and -c.dist > HOLD_OVERLAP_M for c in td.contact[:td.ncon])
 
     def hold_legs(self, q):
         """``q`` with the legs of the feet on the floor (``hold_on``) solved again, alone (their six joints, the
         trunk where the IK put it), to put each foot on its held target (``held``): the IK weighs the held feet
         against the other targets and leaves them a few mm off, which the next frame turns into a slide.  A leg
-        that cannot reach its foot, or reaches it only through a part the IK keeps apart (a thigh into the trunk
-        in a deep crouch), is left as the IK put it, nearest the human's (the foot slides there)."""
+        that cannot reach its foot, or reaches it only through two parts overlapping (a thigh into the trunk in a
+        deep crouch, the ankles of a narrow stance), is left as the IK put it, nearest the human's (the foot slides
+        there)."""
         on = self.hold_on[self.frame]
         if not on.any():
             return q
@@ -896,8 +910,8 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
     is kept, as the IK keeps it) and lowered for a standing leg's reach (by up to ``max_drop``), and each leg
     solved alone to its foot's target in ``held`` (MicrobanRetargeting.solve_leg: a leg has six joints for its
     foot's six coordinates, so the IK's legs differ only by its other targets' pull).  qpos (n, nq), IK space, and
-    the frames (n,) to solve by the IK instead: where two parts the IK keeps apart overlap (the legs solved alone
-    do not avoid each other) or a foot is beyond its leg's reach (HOLD_FAIL_M)."""
+    the frames (n,) to solve by the IK instead: where two parts overlap (MicrobanRetargeting.penetrates; the legs
+    solved alone do not avoid each other) or a foot is beyond its leg's reach (HOLD_FAIL_M)."""
     m, d = gmr.model, gmr._leg_data
     hips = [m.site(f"{s}_hip_c").id for s in ("left", "right")]
     out = np.empty((len(subset), m.nq))
