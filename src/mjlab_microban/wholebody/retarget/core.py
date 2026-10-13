@@ -400,6 +400,9 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         # (positions (T, 2, 3), quaternions (T, 2, 4)).
         self.hold_on, self.soles, self.held = None, None, None
         self._feet_base = None  # held_feet's: the feet's and hips' kept targets of every frame
+        # held_feet's: how far each leg's hip target must go down to reach its held foot, of the leg's nearest frame
+        # on the floor (T, 2)
+        self.drop_need = None
         # The training's collision shapes (env_cfg.training_collision_model, on which the training cuts the frames
         # whose parts overlap): a moved or held pose is checked on them (penetrates).  Its qpos: the root, then the
         # hinges by name.
@@ -691,10 +694,11 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
                 # its length is left to the IK.)
                 reach = self.leg_reach if self.held is not None else max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
                 need = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
-                # Only a leg on the floor: a foot that has just left it is still far behind, and lowering the trunk
-                # for it put the swing foot down on the floor.
-                on = self.hold_on[self.frame, i] if self.hold_on is not None and self.frame is not None else self.stance[i] >= 1.0
-                drop = min(max(drop, float(on) * need), self.max_drop)
+                # Held, a leg off the floor keeps the need of its nearest frame on the floor (held_feet's drop_need;
+                # as in move_frames).
+                if self.held is not None and self.frame is not None and self.drop_need is not None:
+                    need = self.drop_need[self.frame, i]
+                drop = min(max(drop, self.stance[i] * need), self.max_drop)
         down = np.array([0.0, 0.0, drop])
         out[root] = (place(out[root][0]) - down, rotate(turn, out[root][1]))
         for arm in self.arm_parts:
@@ -893,7 +897,31 @@ def held_feet(gmr: MicrobanRetargeting, adjust, stance):
         rot = (Rotation_from_rotvec(ankle_turn[:, i]) * Rotation_from_rotvec(follow[:, i, None] * tilt)
                * R.from_quat(ankle_q[:, i], scalar_first=True))
         quat[:, i] = rot.as_quat(scalar_first=True)
-    return support.hold_feet(pos, quat, gmr.hold_on, gmr.soles, max(1, round(HOLD_FADE_S * gmr.fps)))
+    held = support.hold_feet(pos, quat, gmr.hold_on, gmr.soles, max(1, round(HOLD_FADE_S * gmr.fps)))
+    gmr.drop_need = np.zeros((T, 2))
+    for i in range(2):
+        v = pivot + turn.apply(hips[:, i] - pivot) + move - held[0][:, i]
+        need = v[:, 2] - np.sqrt(np.maximum(gmr.leg_reach**2 - v[:, 0] ** 2 - v[:, 1] ** 2, 0.0))
+        f = nearest_on(gmr.hold_on[:, i])
+        gmr.drop_need[:, i] = np.where(f >= 0, need[np.maximum(f, 0)], 0.0)
+    return held
+
+
+def nearest_on(on: np.ndarray) -> np.ndarray:
+    """(T,) each frame's nearest frame where ``on`` (T,) is True (the earlier of two as near; -1 without one)."""
+    T = len(on)
+    last, nxt = np.full(T, -1), np.full(T, -1)
+    k = -1
+    for t in range(T):
+        k = t if on[t] else k
+        last[t] = k
+    k = -1
+    for t in range(T - 1, -1, -1):
+        k = t if on[t] else k
+        nxt[t] = k
+    idx = np.arange(T)
+    use_next = (nxt >= 0) & ((last < 0) | (nxt - idx < idx - last))
+    return np.where(use_next, nxt, last)
 
 
 def Rotation_from_rotvec(v) -> R:  # noqa: N802
@@ -933,22 +961,46 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
     hips = [m.site(f"{s}_hip_c").id for s in ("left", "right")]
     out = np.empty((len(subset), m.nq))
     overlap = np.zeros(len(subset), bool)
-    for k, t in enumerate(subset):
+    near = [nearest_on(gmr.hold_on[:, i]) for i in range(2)]
+    other = mujoco.MjData(m)
+    needs = {}
+
+    def moved(t, data):
+        """Frame ``t``'s seed with the trunk turned and moved by its changes, kinematics run in ``data``."""
         q = seeds[t].copy()
         a = adjust.at(t)
-        d.qpos[:] = q
-        mujoco.mj_kinematics(m, d)
-        pivot = d.site_xpos[hips].mean(0)
+        data.qpos[:] = q
+        mujoco.mj_kinematics(m, data)
+        pivot = data.site_xpos[hips].mean(0)
         turn = R.from_rotvec(a.tilt)
         q[:3] = pivot + turn.apply(q[:3] - pivot) + [a.shift[0], a.shift[1], 0.0]
         q[3:7] = (turn * R.from_quat(q[3:7], scalar_first=True)).as_quat(scalar_first=True)
-        d.qpos[:] = q
-        mujoco.mj_kinematics(m, d)
+        data.qpos[:] = q
+        mujoco.mj_kinematics(m, data)
+        return q
+
+    def need(t, i, data):
+        """How far leg ``i``'s hip must go down for the leg to reach its held foot at frame ``t``."""
+        v = data.site_xpos[hips[i]] - held[0][t, i]
+        return v[2] - np.sqrt(max(gmr.leg_reach**2 - v[0] ** 2 - v[1] ** 2, 0.0))
+
+    for k, t in enumerate(subset):
+        q = moved(t, d)
         drop = 0.0
         for i in range(2):
-            v = d.site_xpos[hips[i]] - held[0][t, i]
-            need = v[2] - np.sqrt(max(gmr.leg_reach**2 - v[0] ** 2 - v[1] ** 2, 0.0))
-            drop = min(max(drop, float(gmr.hold_on[t, i]) * need), gmr.max_drop)  # (a leg on the floor only, as in _adjusted)
+            # A leg off the floor keeps, eased out by its stance weight, the need of its nearest frame on the floor
+            # (the need of its swing target, far behind just after it leaves, put the swing foot down on the floor).
+            if gmr.hold_on[t, i]:
+                n = need(t, i, d)
+            elif stance[t, i] > 0.0 and near[i][t] >= 0:
+                f = int(near[i][t])
+                if (f, i) not in needs:
+                    moved(f, other)
+                    needs[f, i] = need(f, i, other)
+                n = needs[f, i]
+            else:
+                continue
+            drop = min(max(drop, stance[t, i] * n), gmr.max_drop)
         d.qpos[:] = q
         d.qpos[2] -= drop
         missed = 0.0
