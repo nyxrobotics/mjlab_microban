@@ -691,7 +691,10 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
                 # its length is left to the IK.)
                 reach = self.leg_reach if self.held is not None else max(self.leg_reach, float(np.linalg.norm(out[hip][0] - out[ankle][0])))
                 need = p[2] - np.sqrt(max(reach**2 - p[0] ** 2 - p[1] ** 2, 0.0))
-                drop = min(max(drop, self.stance[i] * need), self.max_drop)
+                # Only a leg on the floor: a foot that has just left it is still far behind, and lowering the trunk
+                # for it put the swing foot down on the floor.
+                on = self.hold_on[self.frame, i] if self.hold_on is not None and self.frame is not None else self.stance[i] >= 1.0
+                drop = min(max(drop, float(on) * need), self.max_drop)
         down = np.array([0.0, 0.0, drop])
         out[root] = (place(out[root][0]) - down, rotate(turn, out[root][1]))
         for arm in self.arm_parts:
@@ -945,21 +948,17 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
         for i in range(2):
             v = d.site_xpos[hips[i]] - held[0][t, i]
             need = v[2] - np.sqrt(max(gmr.leg_reach**2 - v[0] ** 2 - v[1] ** 2, 0.0))
-            drop = min(max(drop, stance[t, i] * need), gmr.max_drop)
+            drop = min(max(drop, float(gmr.hold_on[t, i]) * need), gmr.max_drop)  # (a leg on the floor only, as in _adjusted)
         d.qpos[:] = q
         d.qpos[2] -= drop
         missed = 0.0
-        w = gmr.leg_weight(t)
-        for i in np.flatnonzero(w):
-            # A leg off the floor and not coming back to it yet moves with the trunk as it is (its pose relative to
-            # the trunk kept); the others are solved to their foot's target, easing in and out of it as in
-            # hold_legs (a held foot out of reach: by the IK).
-            adr = gmr._legs_ik[i][1]
-            before = d.qpos[adr].copy()
+        for i in range(2):
+            # Each leg solved to its foot's target from its pose moved with the trunk: a swing leg moved with the
+            # trunk as it is (or partly, easing in and out) was dragged off its target, down and sideways over the
+            # floor, by the trunk's shift and lowering (a held foot out of reach: by the IK).
             standing = bool(gmr.hold_on[t, i])
             miss = gmr.solve_leg(i, held[0][t, i], held[1][t, i], standing)
             missed = max(missed, miss if standing else 0.0)
-            d.qpos[adr] = before + w[i] * (d.qpos[adr] - before)
         out[k] = d.qpos
         overlap[k] = missed > HOLD_FAIL_M or gmr.penetrates()
     return out, overlap
