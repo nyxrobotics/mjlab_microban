@@ -866,9 +866,9 @@ def solve_frames(gmr: MicrobanRetargeting, frames: list, adjust=None, seeds=None
 
 
 def held_feet(gmr: MicrobanRetargeting, adjust, stance):
-    """The feet's held targets of every frame (support.hold_feet) with the changes ``adjust`` and the stance
-    weights ``stance``: the desired feet (MicrobanRetargeting.desired_feet, for all frames at once on the frames'
-    kept targets) held on the runs ``gmr.hold_on``."""
+    """The feet's held targets of every frame (support.hold_feet) with the changes ``adjust``: the desired feet
+    (MicrobanRetargeting.desired_feet, for all frames at once on the frames' kept targets; a foot off the floor
+    moves with the trunk's changes by support.swing_follow, not by ``stance``) held on the runs ``gmr.hold_on``."""
     T = len(gmr.hold_on)
     if gmr._feet_base is None:
         ankle_p, ankle_q, hips = np.zeros((T, 2, 3)), np.zeros((T, 2, 4)), np.zeros((T, 2, 3))
@@ -880,8 +880,9 @@ def held_feet(gmr: MicrobanRetargeting, adjust, stance):
         gmr._feet_base = ankle_p, ankle_q, hips
     ankle_p, ankle_q, hips = gmr._feet_base
     shift, tilt, ankle_turn = adjust.world()
-    off = 1.0 - np.asarray(stance, float)
-    follow = off * off * (3.0 - 2.0 * off)  # (T, 2)
+    # The swing's progress (the human's foot along its step) and how much the foot off the floor moves with the trunk.
+    progress = support.swing_progress(ankle_p[..., :2], gmr.hold_on)
+    follow = support.swing_follow(progress, gmr.hold_on)  # (T, 2)
     pivot = hips.mean(1)  # (T, 3)
     move = np.c_[shift, np.zeros(T)]
     pos, quat = np.zeros((T, 2, 3)), np.zeros((T, 2, 4))
@@ -893,7 +894,7 @@ def held_feet(gmr: MicrobanRetargeting, adjust, stance):
         rot = (Rotation_from_rotvec(ankle_turn[:, i]) * Rotation_from_rotvec(follow[:, i, None] * tilt)
                * R.from_quat(ankle_q[:, i], scalar_first=True))
         quat[:, i] = rot.as_quat(scalar_first=True)
-    return support.hold_feet(pos, quat, gmr.hold_on, gmr.soles, max(1, round(HOLD_FADE_S * gmr.fps)))
+    return support.hold_feet(pos, quat, gmr.hold_on, gmr.soles, max(1, round(HOLD_FADE_S * gmr.fps)), progress)
 
 
 def Rotation_from_rotvec(v) -> R:  # noqa: N802
