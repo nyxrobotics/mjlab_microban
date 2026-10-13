@@ -1007,10 +1007,11 @@ def move_frames(gmr: MicrobanRetargeting, seeds, adjust, stance, held, subset) -
         for i in range(2):
             # Each leg solved to its foot's target from its pose moved with the trunk: a swing leg moved with the
             # trunk as it is (or partly, easing in and out) was dragged off its target, down and sideways over the
-            # floor, by the trunk's shift and lowering (a held foot out of reach: by the IK).
+            # floor, by the trunk's shift and lowering.  A foot out of its leg's reach, held or swinging (its hip at
+            # an end): by the IK (the leg alone there turns from end to end between frames).
             standing = bool(gmr.hold_on[t, i])
             miss = gmr.solve_leg(i, held[0][t, i], held[1][t, i], standing)
-            missed = max(missed, miss if standing else 0.0)
+            missed = max(missed, miss)
         out[k] = d.qpos
         overlap[k] = missed > HOLD_FAIL_M or gmr.penetrates()
     return out, overlap
