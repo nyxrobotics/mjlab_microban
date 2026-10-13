@@ -843,8 +843,6 @@ def sole_points(model: mujoco.MjModel, shapes: "Shapes") -> list:
 CONTACT_BAND_M = 0.001  # a sole point within this of its foot's lowest is on the floor (the hold and the slide)
 HOLD_SPREAD_M = 0.002  # sole points on the floor this close together are one: the foot may turn on it
 HOLD_PIVOT = True  # a held foot turns about the middle of its points on the floor as the human's turns
-SWING_MIN_M = 0.02  # a swing whose reference foot lands less than this from where it left goes with the time
-SWING_FOLLOW = 0.25  # the share of a swing over which the foot comes to (and leaves) moving with the trunk's changes
 
 
 def floor_points(world: np.ndarray) -> np.ndarray:
@@ -852,16 +850,14 @@ def floor_points(world: np.ndarray) -> np.ndarray:
     return world[:, 2] <= world[:, 2].min() + CONTACT_BAND_M
 
 
-def hold_feet(pos: np.ndarray, quat: np.ndarray, on: np.ndarray, soles: list, fade: int, progress: np.ndarray | None = None):
+def hold_feet(pos: np.ndarray, quat: np.ndarray, on: np.ndarray, soles: list, fade: int):
     """The feet's targets held on the floor.  Over each run where a foot is on the floor (``on`` (T, 2)), from the
     run's second frame on, the foot's desired target (``pos`` (T, 2, 3), ``quat`` (T, 2, 4; wxyz)) is turned about
     the vertical and moved so that its sole points on the floor in that frame and the frame before (floor_points,
     the same as slide_speed's) stay where they were (and not below their height; the human lifting the foot lifts
     it): a flat foot stays put and keeps its heading, a
     foot rolling over its toes (heel) keeps them there, and on one point (closer together than HOLD_SPREAD_M) it may
-    turn.  After a run the hold's offset (where the foot is held less where the human's is) goes as the foot goes
-    through its swing to the next run (``progress`` (T, 2), swing_progress; smoothstep), so that the foot catches up
-    in the air with the swing, not over the floor; without it, or after the last run, over ``fade`` frames.
+    turn.  After a run the hold fades out over ``fade`` frames (smoothstep; less if the foot lands again sooner).
     ``soles`` are the feet's sole points in their frames (sole_points).  Returns the held (pos, quat)."""
     out_pos, out_quat = pos.copy(), quat.copy()
     for i in range(2):
@@ -892,13 +888,13 @@ def hold_feet(pos: np.ndarray, quat: np.ndarray, on: np.ndarray, soles: list, fa
                 # At least at their height (rolling on the floor, not into it); higher where the human lifts the foot.
                 held_p[t, 2] = max(held_p[t, 2], pos[t, i, 2])
                 prev, prev_on = held_p[t] + turned, now_on
-            # After the run: the hold's offset goes.
+            # After the run: the hold's offset fades out.
             end = runs[k + 1][0] if k + 1 < len(runs) else len(pos)
-            n = end - b if progress is not None and end < len(pos) else min(fade, end - b)
+            n = min(fade, end - b)
             if n > 0:
                 d_pos = held_p[b - 1] - pos[b - 1, i]
                 d_rot = Rotation.from_matrix(held_m[b - 1] @ m[b - 1].T).as_rotvec()
-                u = progress[b:b + n, i] if progress is not None and end < len(pos) else np.arange(1, n + 1) / (n + 1)
+                u = np.arange(1, n + 1) / (n + 1)
                 keep_share = 1.0 - u * u * (3.0 - 2.0 * u)
                 held_p[b:b + n] = pos[b:b + n, i] + keep_share[:, None] * d_pos
                 held_m[b:b + n] = Rotation.from_rotvec(keep_share[:, None] * d_rot).as_matrix() @ m[b:b + n]
@@ -952,44 +948,10 @@ def feet_soles(model: mujoco.MjModel, qs: np.ndarray, shapes: "Shapes") -> np.nd
     return np.asarray(out)
 
 
-def swing_progress(xy: np.ndarray, on: np.ndarray) -> np.ndarray:
-    """(T, 2) per foot (left, right), how far each frame off the floor is through its swing: 0 on the floor, from 0
-    after leaving it to 1 at landing as the reference foot ``xy`` (T, 2, 2) moves horizontally along its line from
-    where it left to where it lands (never back), or as the time goes where it moves less than SWING_MIN_M (a step in
-    place) or does not land again (``on`` (T, 2): the feet on the floor)."""
-    T = len(on)
-    out = np.zeros((T, 2))
-    for i in range(2):
-        runs = _runs(on[:, i])
-        bounds = [0] + [x for r in runs for x in r] + [T]
-        for b0, a1 in zip(bounds[::2], bounds[1::2]):
-            if a1 <= b0:
-                continue
-            u = np.arange(1, a1 - b0 + 1) / (a1 - b0 + 1)
-            if b0 > 0 and a1 < T:
-                d = xy[a1, i] - xy[b0 - 1, i]
-                length = float(np.linalg.norm(d))
-                if length >= SWING_MIN_M:
-                    u = np.maximum.accumulate(np.clip((xy[b0:a1, i] - xy[b0 - 1, i]) @ d / length**2, 0.0, 1.0))
-            out[b0:a1, i] = u
-    return out
-
-
-def swing_follow(progress: np.ndarray, on: np.ndarray) -> np.ndarray:
-    """(T, 2) how much each foot moves with the trunk's changes (the support shift and tilt): 0 on the floor, rising
-    to 1 over the first SWING_FOLLOW of its swing (swing_progress) and back to 0 over the last (smoothstep), so that
-    it leaves and lands where it would and moves with the trunk while it goes, not over the floor."""
-    x = np.clip(np.minimum(progress, 1.0 - progress) / SWING_FOLLOW, 0.0, 1.0)
-    w = x * x * (3.0 - 2.0 * x)
-    w[on] = 0.0
-    return w
-
-
-def foot_phases(contact: np.ndarray, zero: np.ndarray, progress: np.ndarray | None = None):
+def foot_phases(contact: np.ndarray, zero: np.ndarray):
     """Per foot (left, right): its runs on the floor [(start, end)] and the weights (T, runs) that give each frame's
-    offset: a run's offset while the foot is on the floor, blended (smoothstep) between runs while it is off (by the
-    swing's ``progress`` (T, 2; swing_progress), else by the time), 0 where the changes must be 0 (and blended to and
-    from it)."""
+    offset: a run's offset while the foot is on the floor, blended (smoothstep) between runs while it is off, 0
+    where the changes must be 0 (and blended to and from it)."""
     T = len(contact)
     out = []
     for p in FEET:
@@ -1002,8 +964,6 @@ def foot_phases(contact: np.ndarray, zero: np.ndarray, progress: np.ndarray | No
         for (_, b0, j0), (a1, _, j1) in zip(anchors, anchors[1:]):
             if a1 > b0:
                 u = np.arange(1, a1 - b0 + 1) / (a1 - b0 + 1)
-                if progress is not None and j0 is not None and j1 is not None:
-                    u = progress[b0:a1, FEET.index(p)]
                 s = u * u * (3.0 - 2.0 * u)
                 if j0 is not None:
                     W[b0:a1, j0] = 1.0 - s
@@ -1306,7 +1266,7 @@ def plan(model, solve, qs, human, fps: float, spec: SupportSpec):
         return qs, changes, summary, before, before, stage, lambda q: (before, stage)
     feet = stance(contact, fps, spec.stance_s)
     yaw = P0.yaw
-    phases = foot_phases(contact, zero, swing_progress(P0.ankle[..., :2], contact[:, FEET]))
+    phases = foot_phases(contact, zero)
     lay = Layout(T, fps, spec, phases)
     C = lay.C
     caps = spec.caps()
