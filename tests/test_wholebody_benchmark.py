@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody import benchmark
 from mjlab_microban.wholebody.data.hdf5 import FRAME_KEYS, write_motion_shard
 
@@ -29,6 +30,7 @@ def _section(name: str, frames: int, fps: int = 30, moving: slice | None = None)
     clip = {key: np.zeros((frames, 2) if key.startswith("joint") else (frames, len(BODIES), 4 if "quat" in key else 3))
             for key in FRAME_KEYS}
     clip["body_quat_w"][..., 0] = 1.0
+    clip["body_pos_w"][:, 0, 2] = HOME.root_pos[2]
     quat, heights = _standing_feet()
     for index, body in enumerate(BODIES[1:], start=1):
         clip["body_quat_w"][:, index] = quat
@@ -42,19 +44,21 @@ def _write(path, sections) -> None:
     write_motion_shard(sections, path, body_names=BODIES, joint_names=JOINTS, max_window_frames=None)
 
 
-def test_a_standing_frame_has_both_soles_down_and_the_trunk_upright_and_still(tmp_path):
-    # Frame 0 stands; 1 lifts a foot 12 mm; 2 tilts the trunk 35 deg; 3 moves it at 0.06 m/s;
-    # 4 is at the lines (a foot 10 mm up, 30 deg, 0.05 m/s).
-    section = _section("dance1_subject5", 5)
+def test_a_standing_frame_has_both_soles_down_and_the_trunk_upright_high_and_still(tmp_path):
+    # Frame 0 stands; 1 lifts a foot 12 mm; 2 tilts the trunk 35 deg; 3 moves it at 0.06 m/s; 5 squats
+    # (the trunk 2.5 cm below HOME's height); 4 is at the lines (a foot 10 mm up, 30 deg, 0.05 m/s, 2 cm down).
+    section = _section("dance1_subject5", 6)
     section["body_pos_w"][1, 1, 2] += 0.012
     for frame, degrees in ((2, 35.0), (4, 29.9)):
         section["body_quat_w"][frame, 0] = (math.cos(math.radians(degrees) / 2), 0.0, math.sin(math.radians(degrees) / 2), 0.0)
     section["body_lin_vel_w"][3, 0] = (0.0, 0.06, 0.0)
     section["body_lin_vel_w"][4, 0] = (0.0, 0.0, 0.0499)
     section["body_pos_w"][4, 2, 2] += 0.0099
+    section["body_pos_w"][4, 0, 2] -= 0.0199
+    section["body_pos_w"][5, 0, 2] -= 0.025
     _write(tmp_path / "motion.h5", [section])
     with h5py.File(tmp_path / "motion.h5", "r") as h5:
-        assert benchmark.standing_frames(h5).tolist() == [True, False, False, False, True]
+        assert benchmark.standing_frames(h5).tolist() == [True, False, False, False, True, False]
 
 
 def test_pieces_start_where_the_reference_stands_and_run_on_without_a_break(tmp_path):
@@ -285,7 +289,6 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
     from mjlab.utils.lab_api.math import quat_mul, yaw_quat
 
     from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, joint_ranges
-    from mjlab_microban.robot.home_pose import HOME
     from mjlab_microban.scripts.wholebody_benchmark import benchmark_env_cfg
     from mjlab_microban.wholebody.env_cfg import TRACKED_BODY_NAMES
 

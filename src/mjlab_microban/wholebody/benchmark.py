@@ -13,7 +13,7 @@ robot at rest at HOME and the operator standing, and from then on the robot
 sees the operator's motion without a break: the reference never jumps from
 HOME into a pose in motion.  So every piece starts at a frame where the
 reference stands quietly (``standing_frames``: both soles on the floor, the
-trunk near upright and slow).  The robot is placed at rest at HOME (joint
+trunk near upright, at standing height and slow).  The robot is placed at rest at HOME (joint
 velocities 0, the trunk at HOME's height and tilt) under the reference
 trunk's horizontal position, facing the reference's heading.  For the first
 ``SETTLE_S`` = 1 s the reference holds the piece's first frame (the operator
@@ -29,13 +29,13 @@ standing frame, and a new one at the first standing frame at least
 ``clip_seconds`` to the section's end.  A piece runs to the next one's start
 (or the section's end), so a motion that keeps the operator from standing
 (lying on the floor and getting up, a fight, a run) stays whole in one piece
-however long it is (the PICO set's pieces run 1.1-203 s, 11.6 s on average;
+however long it is (the PICO set's pieces run 1.1-203 s, 12.0 s on average;
 the training kinds' set's 1.0-36 s).  The frames before a section's first
 standing frame are not evaluated (the robot cannot meet them from HOME
 without a jump of the reference) and a section without a standing frame is
 left out: the CMU sections are the last 20 % of their takes and the LAFAN1
 ones are cut at the frames the data excludes, so many start in motion.  The
-PICO set keeps 2877 of its 3543 s, the training kinds' set 4895 of 8604 s,
+PICO set keeps 2739 of its 3543 s, the training kinds' set 4729 of 8604 s,
 and every kind keeps judged seconds (the fewest: cmurun, 6 s).  The earlier
 start (pieces every 10 s from any frame, the reference playing from the
 first step) judged 3030 and 5807 s, but 49-59 % of its pieces were past a
@@ -131,7 +131,7 @@ import mujoco
 import numpy as np
 
 from mjlab_microban.policy_contract import ACTION_JOINT_NAMES
-from mjlab_microban.robot.home_pose import FOOT_BODIES, MICROBAN_XML, SOLE_GEOMS
+from mjlab_microban.robot.home_pose import FOOT_BODIES, HOME, MICROBAN_XML, SOLE_GEOMS
 from mjlab_microban.wholebody.data.hdf5 import find_motion_shards, motion_category, read_strings
 from mjlab_microban.wholebody.env_cfg import (
     ACTOR_GROUP,
@@ -171,6 +171,9 @@ STAND_SOLE_M = 0.010
 STAND_TILT_RAD = FALL_REF_TILT_RAD
 # Still: a third of the walking pace (the walk kinds' median trunk speed 0.12-0.16 m/s).
 STAND_TRUNK_SPEED_M_S = 0.05
+# Standing, not squatting: the trunk at most 2 cm below HOME's height (0.170 m); the PICO set's standing frames
+# gather at 0.15-0.18 m, its squats and kneels (soles down, trunk upright) at 0.10-0.13 m.
+STAND_TRUNK_DROP_M = 0.02
 
 
 def servo_no_load_speed_rad_s(vin: float = SERVO_VIN_V) -> float:
@@ -273,7 +276,8 @@ def _rotate(quat: np.ndarray, points: np.ndarray) -> np.ndarray:
 
 
 def standing_frames(h5: h5py.File, anchor_body: str = ANCHOR_BODY_NAME) -> np.ndarray:
-    """(frames,) the reference stands quietly: both soles on the floor, the trunk near upright and slow."""
+    """(frames,) the reference stands quietly: both soles on the floor, the trunk near upright, at standing
+    height and slow."""
     bodies = read_strings(h5, "body_names")
     pos = np.asarray(h5["body_pos_w"], dtype=np.float64)
     quat = np.asarray(h5["body_quat_w"], dtype=np.float64)
@@ -285,6 +289,7 @@ def standing_frames(h5: h5py.File, anchor_body: str = ANCHOR_BODY_NAME) -> np.nd
     trunk = bodies.index(anchor_body)
     x, y = quat[:, trunk, 1], quat[:, trunk, 2]
     standing &= np.arccos(np.clip(1.0 - 2.0 * (x**2 + y**2), -1.0, 1.0)) <= STAND_TILT_RAD
+    standing &= pos[:, trunk, 2] >= HOME.root_pos[2] - STAND_TRUNK_DROP_M
     standing &= np.linalg.norm(np.asarray(h5["body_lin_vel_w"][:, trunk]), axis=-1) <= STAND_TRUNK_SPEED_M_S
     return standing
 
@@ -472,6 +477,7 @@ def write_outputs(
         "stand_sole_m": STAND_SOLE_M,
         "stand_tilt_rad": STAND_TILT_RAD,
         "stand_trunk_speed_m_s": STAND_TRUNK_SPEED_M_S,
+        "stand_trunk_drop_m": STAND_TRUNK_DROP_M,
         "max_leg_action_rate": MAX_LEG_ACTION_RATE,
         "leg_joint_names": LEG_JOINT_NAMES,
         "fall_tilt_rad": FALL_TILT_RAD,
