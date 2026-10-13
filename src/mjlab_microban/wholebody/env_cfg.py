@@ -97,6 +97,9 @@ SELF_CONTACT_FORCE_N = 0.03  # 1 N
 HEIGHT_TERMINATION_M = 0.05  # 0.25 m: trunk, feet and hands
 ORI_STD_RAD = 0.4
 JOINT_POS_STD_RAD = 0.5
+# Not Teleopit's: a training episode ends when the trunk lags this far across the floor.  After 10 s the policy
+# without it lags 0.13-0.14 m walking forward, 0.81 m standing on a backward walk (medians, PICO and mix eval sets).
+ANCHOR_XY_TERMINATION_M = 0.4
 
 ANCHOR_BODY_NAME = "trunk"
 # Teleopit's 14 G1 bodies on Microban (no waist, no wrists): pelvis and torso
@@ -421,6 +424,12 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # The window ran out (Teleopit moved the robot to a new window instead).
         "clip_end": TerminationTermCfg(func=term.clip_end, params={"command_name": "motion"}, time_out=True),
     }
+    if not play:
+        # Training only: over a whole piece the lag adds up without a bound (the actor sees no position), and the
+        # benchmark's progress line judges it.
+        terminations["anchor_xy"] = TerminationTermCfg(
+            func=term.bad_anchor_pos_xy, params={"command_name": "motion", "threshold": ANCHOR_XY_TERMINATION_M}
+        )
 
     # Get-up's self-contact sensor (every trunk-subtree pair), with Teleopit's
     # per-substep force history.
