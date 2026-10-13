@@ -5,8 +5,9 @@
       --benchmark-report artifacts/wholebody/<run>/model_29999.json \\
       --eval-only-report artifacts/wholebody_pico/<run>/model_29999.json --output wholebody.onnx
 
-Both benchmark reports must be this checkpoint's, start the pieces at HOME
-and pass the full-run lines: ``--benchmark-report`` on the training kinds'
+Both benchmark reports must be this checkpoint's, start the pieces as in
+teleoperation (at HOME, the reference from a standing frame) and pass the
+full-run lines: ``--benchmark-report`` on the training kinds'
 evaluation set, ``--eval-only-report`` on an evaluation-only set (the PICO
 recordings, ``--eval-only-set``), the one that holds the fall line.
 ``--dry-run`` accepts any report of the checkpoint and marks the file not
@@ -44,14 +45,14 @@ SELF_TEST_PIECES = 4
 
 def benchmark_sha256(path: Path, checkpoint_sha256: str, eval_only_set: bool, dry_run: bool) -> str:
     """The SHA-256 of this checkpoint's benchmark report; unless ``dry_run`` it
-    must start at HOME, be on the set asked for and pass the full-run lines."""
+    must start as in teleoperation, be on the set asked for and pass the full-run lines."""
     report = json.loads(path.read_text(encoding="utf-8"))
     metadata = report["metadata"]
     if metadata["checkpoint_sha256"] != checkpoint_sha256:
         raise PolicyContractError(f"{path} is not the benchmark of this checkpoint")
     if not dry_run:
-        if metadata.get("start") != "home":
-            raise PolicyContractError(f"{path} does not start the pieces at HOME")
+        if metadata.get("start") != benchmark.START:
+            raise PolicyContractError(f"{path} does not start the pieces from a standing reference at HOME")
         if bool(metadata.get("eval_only_set")) != eval_only_set:
             kind = "an evaluation-only set" if eval_only_set else "the training kinds' set"
             raise PolicyContractError(f"{path} is not the benchmark on {kind}")

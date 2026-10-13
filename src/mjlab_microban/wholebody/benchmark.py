@@ -1,45 +1,46 @@
 # Adapted from Teleopit f926386 train_mimic/benchmarking.py and
 # train_mimic/scripts/benchmark.py (Apache-2.0,
 # https://github.com/BotRunner64/Teleopit).  Changes: the evaluation set run
-# in consecutive pieces, results per motion kind, error lines equal to the
-# reward stds, a progress line on every piece whose reference travels, no
-# reset during a run, the robot started at rest at HOME, a fall line and a
-# line on the leg targets' step-to-step change.
+# in pieces that start where the reference stands quietly, results per motion
+# kind, error lines equal to the reward stds, a progress line on every piece
+# whose reference travels, no reset during a run, the robot started at rest
+# at HOME, a fall line and a line on the leg targets' step-to-step change.
 
 """Evaluate a checkpoint on the evaluation set, per motion kind.
 
+Start (as in teleoperation).  On the robot, teleoperation starts with the
+robot at rest at HOME and the operator standing, and from then on the robot
+sees the operator's motion without a break: the reference never jumps from
+HOME into a pose in motion.  So every piece starts at a frame where the
+reference stands quietly (``standing_frames``: both soles on the floor, the
+trunk near upright and slow).  The robot is placed at rest at HOME (joint
+velocities 0, the trunk at HOME's height and tilt) under the reference
+trunk's horizontal position, facing the reference's heading.  For the first
+``SETTLE_S`` = 1 s the reference holds the piece's first frame (the operator
+stands while the robot comes from HOME into the operator's pose) and nothing
+is judged: no termination fails the piece and no error is taken.  Then the
+reference plays on from that frame without a break, and every one of its
+steps is judged.
+
 Pieces.  Each evaluation section (one window of the evaluation shard) is cut
-in consecutive, non-overlapping pieces of at most ``clip_seconds``.
-
-Start.  The robot is placed for every piece as on the robot: at rest at HOME
-(joint velocities 0, the trunk at HOME's height and tilt), under the
-reference trunk's horizontal position and facing the reference's heading
-(``start="home"``).  The reference plays from the piece's first frame.  Only
-the placement is the robot's: the reference reaches the policy unchanged, so
-on the first step it jumps from HOME to the reference pose, where a robot
-that slews the reference joints from its measured angles at the start (as
-planned, at most 0.104 rad per step, the XC330's no-load speed at 11.1 V)
-meets a gentler start; the evaluation is the harsher of the two.  The
-first ``SETTLE_S`` = 1 s is the robot's way from HOME to the reference pose
-and is not judged: no termination fails the piece in it and no error is
-taken.  From HOME 49-59 % of the pieces are past a termination line (5 cm of
-height of trunk, feet or hands) on the first step, only because the
-reference's pose is not HOME; the share falls to 14-15 % by 0.6 s and then
-grows only slowly, with the falls (15-21 % at 2 s; the PICO and the training
-kinds' evaluation sets, the small and the full run's checkpoints).  A piece of at
-most 1 s has nothing judged and is left out (the PICO set keeps 3030 of its
-3541 s, the training kinds' set, of short sections, 5807 of 8586 s).  Every
-piece starts from HOME, as the robot meets every reference from rest, so on
-the training kinds' set (1481 of its 2735 sections under 2 s) 30 % of the
-judged time is the second right after the settle, against 15 % on the PICO
-set: its success line weighs the way from HOME into each motion more than
-steady tracking.
-
-``start="reference"`` (kept to compare with earlier reports) places the robot
-on the reference's first frame, joint velocities included, and judges from
-the first step.  The robot never meets that start: put into a moving pose,
-15 % of the PICO pieces and 17 % of the training kinds' fall within 1 s,
-against 0.5 % and 4 % from HOME (the small run's checkpoint).
+at its standing frames: the first piece starts at the section's first
+standing frame, and a new one at the first standing frame at least
+``clip_seconds`` (10 s) after the previous start that leaves at least
+``clip_seconds`` to the section's end.  A piece runs to the next one's start
+(or the section's end), so a motion that keeps the operator from standing
+(lying on the floor and getting up, a fight, a run) stays whole in one piece
+however long it is (the PICO set's pieces run 1.1-203 s, 11.6 s on average;
+the training kinds' set's 1.0-36 s).  The frames before a section's first
+standing frame are not evaluated (the robot cannot meet them from HOME
+without a jump of the reference) and a section without a standing frame is
+left out: the CMU sections are the last 20 % of their takes and the LAFAN1
+ones are cut at the frames the data excludes, so many start in motion.  The
+PICO set keeps 2877 of its 3543 s, the training kinds' set 4895 of 8604 s,
+and every kind keeps judged seconds (the fewest: cmurun, 6 s).  The earlier
+start (pieces every 10 s from any frame, the reference playing from the
+first step) judged 3030 and 5807 s, but 49-59 % of its pieces were past a
+termination line on their first step, only because the reference jumped
+from HOME to a pose in motion.
 
 Conditions.  Observation noise, pushes and the physics randomization of
 training are off.  The robot's own conditions (battery voltage and its drop,
@@ -49,10 +50,11 @@ policy: two checkpoints meet the same conditions piece by piece.  The
 physics on the GPU is not bit-reproducible (its sums run in a varying
 order; torch's deterministic settings do not change it), so two runs of one
 checkpoint and seed differ piece by piece (the full run's model_10000 on the
-PICO set, twice: 5 of 489 pieces changed success, picotwist 91 and 88 %,
-1.32 and 1.34 falls per minute).  A value within a few points of a line can
-fall on either side of it in another run.  A piece that ended (a
-termination) keeps running to its end for the fall and action-rate measures.
+PICO set's earlier pieces, twice: 5 of 489 pieces changed success, picotwist
+91 and 88 %, 1.32 and 1.34 falls per minute).  A value within a few points
+of a line can fall on either side of it in another run.  A piece that ended
+(a termination) keeps running to its end for the fall and action-rate
+measures.
 
 Success and error lines.  A piece succeeds when no termination fires in its
 judged steps (the end of the reference is a time-out, not a failure).  A
@@ -85,23 +87,23 @@ model_14999) walking (its eight walking commands, arms at HOME, 128 rollouts
 of 10 s; standing, left out, measures 0.0003, and with it the 144 rollouts
 2.98) measures 3.355 over the same steps: from 1 s into a rollout until the
 robot falls.  Every piece counts, failed ones included, from 1 s into the
-piece until it falls.
+piece (the judged steps) until it falls.
 
 Fall line.  A piece falls when the robot trunk tilts past ``FALL_TILT_RAD`` =
 45 deg from vertical (HOME stands at 10 deg) while the reference trunk is within
 ``FALL_REF_TILT_RAD`` = 30 deg of vertical (a reference lying down is not a
-fall), at any step of the piece.  The pieces run 1-10 s (7.2 s on average on
-the PICO set) and the rollouts of the line's source 6 s, so falls are counted
-per minute standing: a kind's or a set's falls over the time its pieces ran
-before their fall (a piece's whole length when it does not fall).  On an
-evaluation-only set (the operator's motions: the PICO recordings) at most
-``MAX_FALLS_PER_MINUTE`` = 0.425: the PICO policy above in its push check (144
-rollouts of 6 s, standing and walking in eight directions, pushed by
-0.4 m/s every second) fell 6 times by the same tilt rule over 846.58 s
-standing, 6 of 144 rollouts.  On the training kinds' set the rate is
-reported, not judged: it holds motions the operator does not ask the robot
-for (sprints, jumps, falls), and its success line already bounds the
-terminations.
+fall), at any step of the piece, the first second included.  The pieces'
+lengths vary and the rollouts of the line's source ran 6 s, so falls are
+counted per minute standing: a kind's or a set's falls over the time its
+pieces ran before their fall (a piece's whole run, the first second
+included, when it does not fall).  On an evaluation-only set (the operator's
+motions: the PICO recordings) at most ``MAX_FALLS_PER_MINUTE`` = 0.425: the
+PICO policy above in its push check (144 rollouts of 6 s, standing and
+walking in eight directions, pushed by 0.4 m/s every second) fell 6 times by
+the same tilt rule over 846.58 s standing, 6 of 144 rollouts.  On the
+training kinds' set the rate is reported, not judged: it holds motions the
+operator does not ask the robot for (sprints, jumps, falls), and its success
+line already bounds the terminations.
 
 Kinds.  Every kind of the training set and walk, run and sprint must be in
 the evaluation set; an evaluation-only set (the PICO recordings, whose kinds
@@ -115,17 +117,21 @@ speed is reported per kind; it is not a line.
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Iterable, Sequence
 
 import h5py
+import mujoco
 import numpy as np
 
 from mjlab_microban.policy_contract import ACTION_JOINT_NAMES
+from mjlab_microban.robot.home_pose import FOOT_BODIES, MICROBAN_XML, SOLE_GEOMS
 from mjlab_microban.wholebody.data.hdf5 import find_motion_shards, motion_category, read_strings
 from mjlab_microban.wholebody.env_cfg import (
     ACTOR_GROUP,
@@ -148,7 +154,8 @@ LOCOMOTION_KINDS = ("walk", "run", "sprint")
 MIN_PROGRESS = 0.5
 PROGRESS_TRAVEL_M = BODY_POS_STD_M / (1.0 - MIN_PROGRESS)
 SERVO_VIN_V = 11.1
-Start = Literal["home", "reference"]
+# The start recorded in a report's metadata: at rest at HOME, the reference from a standing frame.
+START = "standing"
 SETTLE_S = 1.0
 LEG_JOINT_NAMES = tuple(name for name in ACTION_JOINT_NAMES if "shoulder" not in name and "elbow" not in name)
 MAX_LEG_ACTION_RATE = 3.36
@@ -157,6 +164,13 @@ FALL_TILT_RAD = math.radians(45.0)
 FALL_REF_TILT_RAD = math.radians(30.0)
 # The PICO policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).
 MAX_FALLS_PER_MINUTE = 60.0 * 6 / 846.58
+# A standing frame (a piece's start).  A sole is on the floor when its lowest corner is within 10 mm of it:
+# the PICO set's slow upright frames have the higher sole within 7 mm in 75 % and 13 mm in 90 % (tracking noise).
+STAND_SOLE_M = 0.010
+# Near upright: within the fall line's upright reference (30 deg; HOME stands at 10 deg).
+STAND_TILT_RAD = FALL_REF_TILT_RAD
+# Still: a third of the walking pace (the walk kinds' median trunk speed 0.12-0.16 m/s).
+STAND_TRUNK_SPEED_M_S = 0.05
 
 
 def servo_no_load_speed_rad_s(vin: float = SERVO_VIN_V) -> float:
@@ -165,11 +179,9 @@ def servo_no_load_speed_rad_s(vin: float = SERVO_VIN_V) -> float:
     return vin / float(params["kt"])
 
 
-def settle_steps(start: Start, step_dt: float) -> int:
-    """Steps not judged at a piece's start: the way from HOME to the reference pose."""
-    if start not in ("home", "reference"):
-        raise ValueError(f"unknown start {start!r}")
-    return round(SETTLE_S / step_dt) if start == "home" else 0
+def settle_steps(step_dt: float) -> int:
+    """Steps not judged at a piece's start: the way from HOME into the reference's standing pose."""
+    return round(SETTLE_S / step_dt)
 
 
 @dataclass(frozen=True)
@@ -178,10 +190,10 @@ class Piece:
     window_id: int
     clip_name: str
     kind: str
-    start_s: float
-    steps: int
+    start_s: float  # the standing frame the piece starts at (s into the window)
+    steps: int  # run: settle_steps, then one judged step per reference step
     seconds: float
-    settle_steps: int  # not judged (the way from HOME)
+    settle_steps: int  # not judged (the way from HOME; the reference holds its first frame)
     judged_seconds: float
     overspeed_share: float
     ref_travel_m: float  # the reference trunk's horizontal displacement over the judged steps
@@ -234,6 +246,60 @@ def _trunk_xy(trunk_xy: np.ndarray, start: int, length: int, fps: float, time_s:
     return (1.0 - weight) * trunk_xy[start + lower] + weight * trunk_xy[start + upper]
 
 
+@lru_cache(maxsize=1)
+def sole_corners() -> dict[str, np.ndarray]:
+    """{foot body: (48, 3)} the corners of its six sole boxes in the foot body's frame."""
+    model = mujoco.MjModel.from_xml_path(str(MICROBAN_XML))
+    signs = np.array(list(itertools.product((-1.0, 1.0), repeat=3)))
+    corners = {}
+    for side, body in FOOT_BODIES.items():
+        boxes = []
+        for name in SOLE_GEOMS[side]:
+            geom = model.geom(name)
+            if model.geom_bodyid[geom.id] != model.body(body).id:
+                raise ValueError(f"{name} is not on {body}")
+            rotation = np.zeros(9)
+            mujoco.mju_quat2Mat(rotation, geom.quat)
+            boxes.append(geom.pos + (signs * geom.size) @ rotation.reshape(3, 3).T)
+        corners[body] = np.concatenate(boxes)
+    return corners
+
+
+def _rotate(quat: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """(T, P, 3): ``points`` (P, 3) turned by each of the (T, 4) (w, x, y, z) quaternions."""
+    w, v = quat[:, None, :1], np.broadcast_to(quat[:, None, 1:], (len(quat), len(points), 3))
+    t = 2.0 * np.cross(v, points[None])
+    return points[None] + w * t + np.cross(v, t)
+
+
+def standing_frames(h5: h5py.File, anchor_body: str = ANCHOR_BODY_NAME) -> np.ndarray:
+    """(frames,) the reference stands quietly: both soles on the floor, the trunk near upright and slow."""
+    bodies = read_strings(h5, "body_names")
+    pos = np.asarray(h5["body_pos_w"], dtype=np.float64)
+    quat = np.asarray(h5["body_quat_w"], dtype=np.float64)
+    standing = np.ones(len(pos), dtype=bool)
+    for body, corners in sole_corners().items():
+        index = bodies.index(body)
+        lowest = pos[:, index, None, 2] + _rotate(quat[:, index], corners)[..., 2]
+        standing &= lowest.min(axis=1) <= STAND_SOLE_M
+    trunk = bodies.index(anchor_body)
+    x, y = quat[:, trunk, 1], quat[:, trunk, 2]
+    standing &= np.arccos(np.clip(1.0 - 2.0 * (x**2 + y**2), -1.0, 1.0)) <= STAND_TILT_RAD
+    standing &= np.linalg.norm(np.asarray(h5["body_lin_vel_w"][:, trunk]), axis=-1) <= STAND_TRUNK_SPEED_M_S
+    return standing
+
+
+def piece_starts(standing: np.ndarray, clip_seconds: float, fps: float) -> list[int]:
+    """A section's piece starts (frames): its first standing frame, then the first standing frame at least
+    ``clip_seconds`` after the previous start that leaves at least ``clip_seconds`` to the section's end."""
+    last = len(standing) - 1
+    starts: list[int] = []
+    for frame in np.flatnonzero(standing).tolist():
+        if not starts or (frame - starts[-1] >= clip_seconds * fps and last - frame >= clip_seconds * fps):
+            starts.append(frame)
+    return starts
+
+
 def load_pieces(
     motion_file: str | Path,
     joint_names: Sequence[str],
@@ -241,11 +307,10 @@ def load_pieces(
     step_dt: float,
     no_load_speed: float,
     anchor_body: str = ANCHOR_BODY_NAME,
-    start: Start = "home",
 ) -> list[Piece]:
-    """Every window (in MotionLib's order) cut into consecutive pieces of at most
-    ``clip_seconds``; with ``start="home"`` a piece with nothing past the settle is left out."""
-    settle = settle_steps(start, step_dt)
+    """Every window (in MotionLib's order) cut at its standing frames (``piece_starts``); a piece runs to
+    the next one's start or the window's end, after ``settle_steps`` holding its first frame."""
+    settle = settle_steps(step_dt)
     pieces: list[Piece] = []
     window_id = 0
     for shard in find_motion_shards(motion_file):
@@ -254,33 +319,30 @@ def load_pieces(
             shard_joints = read_strings(h5, "joint_names")
             columns = [shard_joints.index(name) for name in joint_names]
             fast = np.any(np.abs(np.asarray(h5["joint_vel"])[:, columns]) > no_load_speed, axis=1)
+            standing = standing_frames(h5, anchor_body)
             anchor = read_strings(h5, "body_names").index(anchor_body)
             trunk_xy = np.asarray(h5["body_pos_w"][:, anchor, :2], dtype=np.float64)
             for first_frame, length, fps, source in zip(
                 np.asarray(h5["clip_starts"]), np.asarray(h5["clip_lengths"]), np.asarray(h5["clip_fps"]),
                 np.asarray(h5["source_clip_ids"]), strict=True,
             ):
-                duration = (int(length) - 1) / float(fps)
-                index = 0
-                while True:
-                    begin = index * clip_seconds
-                    steps = int(math.floor(min(clip_seconds, duration - begin) / step_dt + 1e-6))
-                    if steps < 1:
-                        break
-                    index += 1
-                    if steps <= settle:
+                first_frame, length, fps = int(first_frame), int(length), float(fps)
+                starts = piece_starts(standing[first_frame : first_frame + length], clip_seconds, fps)
+                for start, end in zip(starts, [*starts[1:], length - 1]):
+                    judged = int(math.floor((end - start) / fps / step_dt + 1e-6))
+                    if judged < 1:
                         continue
-                    seconds = steps * step_dt
-                    first = int(first_frame) + int(math.floor(begin * fps))
-                    last = int(first_frame) + min(int(math.ceil((begin + seconds) * fps)), int(length) - 1)
-                    travel = _trunk_xy(trunk_xy, int(first_frame), int(length), float(fps), begin + seconds) - _trunk_xy(
-                        trunk_xy, int(first_frame), int(length), float(fps), begin + settle * step_dt
+                    begin = start / fps
+                    last = min(int(math.ceil((begin + judged * step_dt) * fps)), length - 1)
+                    # The judged steps' targets: the reference from begin + step_dt to begin + judged * step_dt.
+                    travel = _trunk_xy(trunk_xy, first_frame, length, fps, begin + judged * step_dt) - _trunk_xy(
+                        trunk_xy, first_frame, length, fps, begin + step_dt
                     )
                     pieces.append(Piece(
                         piece_id=len(pieces), window_id=window_id, clip_name=names[source],
-                        kind=motion_category(names[source]), start_s=begin, steps=steps, seconds=seconds,
-                        settle_steps=settle, judged_seconds=(steps - settle) * step_dt,
-                        overspeed_share=float(np.mean(fast[first : last + 1])),
+                        kind=motion_category(names[source]), start_s=begin, steps=settle + judged,
+                        seconds=(settle + judged) * step_dt, settle_steps=settle, judged_seconds=judged * step_dt,
+                        overspeed_share=float(np.mean(fast[first_frame + start : first_frame + last + 1])),
                         ref_travel_m=float(np.linalg.norm(travel)),
                     ))
                 window_id += 1
@@ -407,6 +469,9 @@ def write_outputs(
         "min_progress": MIN_PROGRESS,
         "progress_travel_m": PROGRESS_TRAVEL_M,
         "settle_s": SETTLE_S,
+        "stand_sole_m": STAND_SOLE_M,
+        "stand_tilt_rad": STAND_TILT_RAD,
+        "stand_trunk_speed_m_s": STAND_TRUNK_SPEED_M_S,
         "max_leg_action_rate": MAX_LEG_ACTION_RATE,
         "leg_joint_names": LEG_JOINT_NAMES,
         "fall_tilt_rad": FALL_TILT_RAD,
@@ -483,13 +548,11 @@ def rollout(
     policy: Any,
     pieces: Sequence[Piece],
     *,
-    start: Start = "home",
     record_every: int = 0,
 ) -> tuple[list[PieceResult], list[Any]]:
-    """Run ``pieces`` (one env each) from their start for their steps.
+    """Run ``pieces`` (one env each, cut by ``load_pieces``) from HOME for their steps.
 
-    ``env`` is the unwrapped ManagerBasedRlEnv (``auto_reset=False``).  The
-    pieces must be cut for ``start`` (``load_pieces``).  With
+    ``env`` is the unwrapped ManagerBasedRlEnv (``auto_reset=False``).  With
     ``record_every`` > 0 the actor history of env 0 is recorded every that
     many steps until the longest piece ends.
     """
@@ -499,17 +562,16 @@ def rollout(
 
     n = len(pieces)
     device = env.device
-    settle = settle_steps(start, env.step_dt)
+    settle = settle_steps(env.step_dt)
     if any(p.settle_steps != settle for p in pieces):
-        raise ValueError(f"the pieces were not cut for start={start!r}")
+        raise ValueError(f"the pieces were not cut for a step of {env.step_dt} s")
     rate_from = round(ACTION_RATE_FROM_S / env.step_dt)
     env.reset()
     command = env.command_manager.get_term("motion")
     ids = torch.arange(n, device=device)
-    command.reset_to_motion(ids, torch.tensor([p.window_id for p in pieces], device=device),
-                            torch.tensor([p.start_s for p in pieces], device=device))
-    if start == "home":
-        _place_at_home(env, command)
+    start_s = torch.tensor([p.start_s for p in pieces], device=device, dtype=command.motion_times.dtype)
+    command.reset_to_motion(ids, torch.tensor([p.window_id for p in pieces], device=device), start_s)
+    _place_at_home(env, command)
     # env.reset's sequence for the placed envs: the reference one step ahead,
     # the neck target, then fresh observation histories.
     env.scene.write_data_to_sim()
@@ -519,7 +581,7 @@ def rollout(
     env.sim.sense()
     env.observation_manager.reset(ids)
     obs = TensorDict(env.observation_manager.compute(update_history=True), batch_size=[n])
-    # The robot trunk sits on the reference's (x, y) of the start in both starts.
+    # Set at the settle's end, where the judged steps start.
     robot_start_xy = command.robot_anchor_pos_w[:, :2].clone()
     ref_start_xy = robot_start_xy.clone()
 
@@ -540,6 +602,10 @@ def rollout(
     for step in range(int(budgets.max())):
         if record_every and step % record_every == record_every - 1:
             recorded.append(obs[ACTOR_GROUP][0].detach().cpu().clone())
+        if step < settle:
+            # The operator stands at the piece's first frame while the robot comes from HOME: the step's
+            # advance puts the reference back on it (one step ahead, as placed).
+            command.motion_times[:] = start_s
         # The step's target, which its rewards and terminations compare the robot with.
         ref = {
             "body_pos": command.body_pos_relative_w.clone(),

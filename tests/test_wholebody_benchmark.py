@@ -1,10 +1,11 @@
-"""The whole-body evaluation: every evaluation frame is run once, and the verdicts judge every kind."""
+"""The whole-body evaluation: pieces start where the reference stands, and the verdicts judge every kind."""
 
 from __future__ import annotations
 
 import csv
 import math
 
+import h5py
 import numpy as np
 import pytest
 import torch
@@ -13,58 +14,85 @@ from mjlab_microban.wholebody import benchmark
 from mjlab_microban.wholebody.data.hdf5 import FRAME_KEYS, write_motion_shard
 
 JOINTS = ("a", "b")
+BODIES = ("trunk", "foot", "foot_2")
 
 
-def _section(name: str, frames: int, fps: int = 30) -> dict:
-    clip = {key: np.zeros((frames, 2) if key.startswith("joint") else (frames, 1, 4 if "quat" in key else 3))
+def _standing_feet() -> tuple[np.ndarray, dict[str, float]]:
+    """A foot quaternion with the sole facing down, and each foot body's height with its sole on the floor."""
+    quat = np.array([math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0])  # the body's -y down
+    rotation = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    return quat, {body: -float((c @ rotation.T)[:, 2].min()) for body, c in benchmark.sole_corners().items()}
+
+
+def _section(name: str, frames: int, fps: int = 30, moving: slice | None = None) -> dict:
+    """Standing quietly (soles on the floor, trunk upright and still), the trunk moving in ``moving``."""
+    clip = {key: np.zeros((frames, 2) if key.startswith("joint") else (frames, len(BODIES), 4 if "quat" in key else 3))
             for key in FRAME_KEYS}
     clip["body_quat_w"][..., 0] = 1.0
+    quat, heights = _standing_feet()
+    for index, body in enumerate(BODIES[1:], start=1):
+        clip["body_quat_w"][:, index] = quat
+        clip["body_pos_w"][:, index, 2] = heights[body]
+    if moving is not None:
+        clip["body_lin_vel_w"][moving, 0, 0] = 0.2
     return {"name": name, "fps": fps, **clip}
 
 
-def test_pieces_cover_each_section_once(tmp_path):
-    # 25 s and 2.97 s sections at 30 fps: pieces of 10, 10 and 5 s, and 2.96 s.
+def _write(path, sections) -> None:
+    write_motion_shard(sections, path, body_names=BODIES, joint_names=JOINTS, max_window_frames=None)
+
+
+def test_a_standing_frame_has_both_soles_down_and_the_trunk_upright_and_still(tmp_path):
+    # Frame 0 stands; 1 lifts a foot 12 mm; 2 tilts the trunk 35 deg; 3 moves it at 0.06 m/s;
+    # 4 is at the lines (a foot 10 mm up, 30 deg, 0.05 m/s).
+    section = _section("dance1_subject5", 5)
+    section["body_pos_w"][1, 1, 2] += 0.012
+    for frame, degrees in ((2, 35.0), (4, 29.9)):
+        section["body_quat_w"][frame, 0] = (math.cos(math.radians(degrees) / 2), 0.0, math.sin(math.radians(degrees) / 2), 0.0)
+    section["body_lin_vel_w"][3, 0] = (0.0, 0.06, 0.0)
+    section["body_lin_vel_w"][4, 0] = (0.0, 0.0, 0.0499)
+    section["body_pos_w"][4, 2, 2] += 0.0099
+    _write(tmp_path / "motion.h5", [section])
+    with h5py.File(tmp_path / "motion.h5", "r") as h5:
+        assert benchmark.standing_frames(h5).tolist() == [True, False, False, False, True]
+
+
+def test_pieces_start_where_the_reference_stands_and_run_on_without_a_break(tmp_path):
+    # 50 s at 30 fps, moving for its first 3 s and from 13.3 to 30 s: pieces from 3 s (the first standing
+    # frame), 13 s (10 s later), 30 s (the next standing frame) and 40 s (leaving 10 s).  A section never
+    # standing has none; one standing from 2 s to its end at 2.97 s has one; one standing only on its last
+    # frame has nothing to judge.
     path = tmp_path / "motion.h5"
-    write_motion_shard([_section("walk1_subject5__f0-751", 751), _section("run1_subject5__f0-90", 90)], path,
-                       body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
-    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0, start="reference")
-    assert [(p.window_id, p.kind, p.start_s, p.steps) for p in pieces] == [
-        (0, "walk", 0.0, 500), (0, "walk", 10.0, 500), (0, "walk", 20.0, 250), (1, "run", 0.0, 148),
+    _write(path, [
+        _section("walk1_subject5__f0-1501", 1501, moving=slice(0, 90)),
+        _section("run1_subject5__f0-90", 90, moving=slice(None)),
+        _section("run2_subject5__f0-90", 90, moving=slice(0, 60)),
+        _section("run3_subject5__f0-31", 31, moving=slice(0, 30)),
+    ])
+    # The 13.3-30 s motion (frames 400-899).
+    with h5py.File(path, "r+") as h5:
+        h5["body_lin_vel_w"][400:900, 0, 0] = 0.2
+    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
+    assert benchmark.settle_steps(0.02) == 50
+    assert [(p.window_id, p.kind, round(p.start_s, 6), p.steps - p.settle_steps) for p in pieces] == [
+        (0, "walk", 3.0, 500), (0, "walk", 13.0, 850), (0, "walk", 30.0, 500), (0, "walk", 40.0, 500),
+        (2, "run", 2.0, 48),
     ]
-    assert all(p.settle_steps == 0 and p.judged_seconds == p.seconds for p in pieces)
+    # Every reference step is judged, after the settle (the reference held on the first frame).
+    assert all(p.settle_steps == 50 and p.seconds == pytest.approx(p.steps * 0.02) for p in pieces)
+    assert [round(p.judged_seconds, 6) for p in pieces] == [10.0, 17.0, 10.0, 10.0, 0.96]
 
 
 def test_pieces_measure_the_reference_trunks_travel(tmp_path):
-    # The trunk walks along x at 0.03 m/s for 10 s, then stands: 0.3 m, then 0.
+    # The trunk walks along x at 0.03 m/s for 10 s, then stands: over the judged steps (the reference
+    # from 0.02 s into the piece) 0.2994 m, then 0.
     section = _section("dance1_subject5__f0-601", 601)
     t = np.arange(601) / 30.0
     section["body_pos_w"][:, 0, 0] = 0.03 * np.minimum(t, 10.0)
     path = tmp_path / "motion.h5"
-    write_motion_shard([section], path, body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
-    pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0, start="reference")
-    assert [round(p.ref_travel_m, 6) for p in pieces] == [0.3, 0.0]
-
-
-def test_a_home_start_judges_each_piece_after_its_first_second(tmp_path):
-    # From HOME the first second of a piece is the way to the reference pose:
-    # 25 s at 0.03 m/s for 10 s, then standing; a 1.0 s section (nothing past
-    # the settle, left out) and a 1.07 s one (0.06 s judged).
-    section = _section("dance1_subject5__f0-751", 751)
-    t = np.arange(751) / 30.0
-    section["body_pos_w"][:, 0, 0] = 0.03 * np.minimum(t, 10.0)
-    path = tmp_path / "motion.h5"
-    write_motion_shard([section, _section("run1_subject5__f0-31", 31), _section("run2_subject5__f0-33", 33)], path,
-                       body_names=("trunk",), joint_names=JOINTS, max_window_frames=None)
+    _write(path, [section])
     pieces = benchmark.load_pieces(path, JOINTS, 10.0, 0.02, no_load_speed=10.0)
-    assert benchmark.settle_steps("home", 0.02) == 50 and benchmark.settle_steps("reference", 0.02) == 0
-    assert [(p.window_id, p.start_s, p.steps, p.settle_steps) for p in pieces] == [
-        (0, 0.0, 500, 50), (0, 10.0, 500, 50), (0, 20.0, 250, 50), (2, 0.0, 53, 50),
-    ]
-    assert [round(p.judged_seconds, 6) for p in pieces] == [9.0, 9.0, 4.0, 0.06]
-    # The reference's travel over the judged steps only: 0.3 m less the first second's 0.03 m.
-    assert [round(p.ref_travel_m, 6) for p in pieces[:2]] == [0.27, 0.0]
-    with pytest.raises(ValueError):
-        benchmark.settle_steps("crouched", 0.02)
+    assert [round(p.ref_travel_m, 6) for p in pieces] == [0.2994, 0.0]
 
 
 def _kind(
@@ -244,13 +272,15 @@ def test_the_kinds_table_carries_the_new_lines(tmp_path):
     assert not report["verdicts"]["final"]["pass"]
 
 
-def test_a_rollout_starts_at_rest_at_home_and_judges_after_the_settle(tmp_path):
-    # On the simulator (CPU), two pieces of 65 and 85 steps whose reference
-    # trunk, tilted 20 deg and heading 60 deg, lies on the floor for 0.88 s
-    # (the trunk height termination fires) and then stands at HOME's height
-    # (the end points' termination is left out: the other bodies stay at 0).
-    # The policy alternates every action by +-0.05 rad and knocks the second
-    # robot over at step 60, the first at step 70 (past its piece).
+def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after_the_settle(tmp_path):
+    # On the simulator (CPU), two references at 50 fps whose trunk, tilted
+    # 20 deg and heading 60 deg, stands at HOME's height on the floor (the end
+    # points' termination is left out: the arms stay at 0), the right elbow
+    # at 0.1 rad per second of the reference (its time).  The first moves for
+    # its first 0.2 s: its piece starts there, 55 judged steps; the second's,
+    # 85.  The policy alternates every action by +-0.05 rad, lifts
+    # the first robot 10 cm in the settle (steps 10-14) and puts it back,
+    # knocks the second over at step 60 and the first at step 110 (past its piece).
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.utils.lab_api.math import quat_mul, yaw_quat
 
@@ -266,38 +296,50 @@ def test_a_rollout_starts_at_rest_at_home_and_judges_after_the_settle(tmp_path):
 
     joints, bodies = tuple(joint_ranges()), len(TRACKED_BODY_NAMES)
     trunk_quat = quat_mul(axis_quat(math.radians(60.0), 2), axis_quat(math.radians(20.0), 0))
+    foot_quat, foot_heights = _standing_feet()
 
-    def clip(name: str, frames: int) -> dict:
+    def clip(name: str, frames: int, moving_frames: int) -> dict:
         section = {"name": name, "fps": 50, "joint_pos": np.zeros((frames, len(joints))),
                    "joint_vel": np.zeros((frames, len(joints))), "body_pos_w": np.zeros((frames, bodies, 3)),
                    "body_quat_w": np.tile([1.0, 0.0, 0.0, 0.0], (frames, bodies, 1)),
                    "body_lin_vel_w": np.zeros((frames, bodies, 3)), "body_ang_vel_w": np.zeros((frames, bodies, 3))}
         section["body_pos_w"][:, 0] = (0.3, -0.2, HOME.root_pos[2])
-        section["body_pos_w"][:44, 0, 2] = 0.0
         section["body_quat_w"][:, 0] = trunk_quat.numpy()
+        section["body_lin_vel_w"][:moving_frames, 0, 0] = 0.2
+        section["joint_pos"][:, joints.index("right_elbow")] = 0.1 * np.arange(frames) / 50.0
+        for body, height in foot_heights.items():
+            section["body_pos_w"][:, TRACKED_BODY_NAMES.index(body), 2] = height
+            section["body_quat_w"][:, TRACKED_BODY_NAMES.index(body)] = foot_quat
         return section
 
     path = tmp_path / "motion.h5"
-    write_motion_shard([clip("walk1_subject5", 66), clip("run1_subject5", 86)], path, body_names=TRACKED_BODY_NAMES,
-                       joint_names=joints, max_window_frames=None)
+    write_motion_shard([clip("walk1_subject5", 66, 10), clip("run1_subject5", 86, 0)], path,
+                       body_names=TRACKED_BODY_NAMES, joint_names=joints, max_window_frames=None)
     cfg = benchmark_env_cfg(str(path), 10.0, 2, 0)
     del cfg.terminations["ee_body_pos"]
     env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
     try:
         pieces = benchmark.load_pieces(path, ACTION_JOINT_NAMES, 10.0, env.step_dt, no_load_speed=10.0)
-        assert [p.steps for p in pieces] == [65, 85]
+        assert [(p.start_s, p.steps) for p in pieces] == [(0.2, 50 + 55), (0.0, 50 + 85)]
         command = env.command_manager.get_term("motion")
         robot = command.robot
-        start = {}
+        start, times = {}, []
+        elbow = robot.joint_names.index("right_elbow")
 
         def policy(obs):
             step = start.setdefault("calls", 0)
             start["calls"] += 1
+            times.append(command.all_joint_pos[:, elbow] / 0.1)  # the reference's time the policy sees
             if step == 0:  # placed, before the first step
                 start.update(trunk=robot.data.root_link_pose_w.clone(), vel=robot.data.root_link_vel_w.clone(),
                              joint_pos=robot.data.joint_pos.clone(), joint_vel=robot.data.joint_vel.clone(),
                              ref_xy=command.anchor_pos_w[:, :2].clone())
-            if step in (60, 70):
+            if step in (10, 15):  # lifted, then back where it was placed
+                state = torch.cat([start["trunk"][:1], torch.zeros(1, 6)], dim=-1)
+                state[0, 2] += 0.1 if step == 10 else 0.0
+                robot.write_root_state_to_sim(state, env_ids=torch.tensor([0]))
+                robot.write_joint_state_to_sim(start["joint_pos"][:1], start["joint_vel"][:1], env_ids=torch.tensor([0]))
+            if step in (60, 110):
                 index = 1 if step == 60 else 0
                 lying = torch.zeros(1, 13)
                 lying[0, :3] = robot.data.root_link_pose_w[index, :3] * torch.tensor([1.0, 1.0, 0.0])
@@ -315,13 +357,20 @@ def test_a_rollout_starts_at_rest_at_home_and_judges_after_the_settle(tmp_path):
         assert torch.allclose(start["trunk"][:, 3:7], expected_quat, atol=1e-5)
         assert torch.allclose(start["joint_pos"], robot.data.default_joint_pos, atol=1e-6)
         assert not start["joint_vel"].any() and not start["vel"].any()
-        # The termination of the first second fails no piece; the fall does
-        # (on step 60, the 11th judged step), and the piece runs to its end.
-        assert [(r.steps, r.success, r.failure_reason) for r in results] == [(15, True, None), (11, False, "anchor_pos")]
+        # The reference holds the piece's first frame (one step ahead) through
+        # the settle, then plays on from it.
+        dt, first = env.step_dt, torch.tensor([0.2, 0.0])
+        for call in (0, 25, 50):
+            assert torch.allclose(times[call], first + dt, atol=1e-5)
+        for call in (51, 90):
+            assert torch.allclose(times[call], first + (call - 49) * dt, atol=1e-5)
+        # The termination of the settle fails no piece; the fall does (on
+        # step 60, the 11th judged step), and the piece runs to its end.
+        assert [(r.steps, r.success, r.failure_reason) for r in results] == [(55, True, None), (11, False, "anchor_pos")]
         # The fall and the leg targets' change (12 leg joints x 0.1 rad per
         # step) are taken from 1 s into each piece until its end or its fall.
-        assert results[0].fall_s is None and results[1].fall_s == pytest.approx(61 * env.step_dt)
-        assert [r.action_rate_steps for r in results] == [65 - 51, 60 - 51]
+        assert results[0].fall_s is None and results[1].fall_s == pytest.approx(61 * dt)
+        assert [r.action_rate_steps for r in results] == [105 - 51, 60 - 51]
         assert [r.leg_action_rate for r in results] == pytest.approx([12 * 0.1**2] * 2, rel=1e-4)
     finally:
         env.close()

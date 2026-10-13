@@ -105,10 +105,10 @@ def test_export_matches_torch_and_carries_the_contract(tmp_path):
 
 def test_export_asks_for_both_sets_started_at_home(tmp_path):
     # The fall line holds only on an evaluation-only set (the PICO recordings),
-    # and only a start at HOME is the robot's.
+    # and only a start at HOME from a standing reference is teleoperation's.
     from mjlab_microban.scripts.wholebody_export import benchmark_sha256
 
-    def report(name: str, eval_only_set: bool = False, start: str | None = "home", passed: bool = True,
+    def report(name: str, eval_only_set: bool = False, start: str | None = "standing", passed: bool = True,
                sha: str = "a" * 64):
         metadata = {"checkpoint_sha256": sha, "eval_only_set": eval_only_set, "start": start}
         path = tmp_path / f"{name}.json"
@@ -124,8 +124,9 @@ def test_export_asks_for_both_sets_started_at_home(tmp_path):
     for path, eval_only_set, problem in (
         (train, True, "not the benchmark on an evaluation-only set"),  # the training set's report has no fall line
         (pico, False, "not the benchmark on the training kinds' set"),
-        (report("reference", start="reference"), False, "does not start the pieces at HOME"),
-        (report("earlier", start=None), False, "does not start the pieces at HOME"),  # before the start was recorded
+        (report("reference", start="reference"), False, "does not start the pieces from a standing"),
+        (report("home", start="home"), False, "does not start the pieces from a standing"),  # from any frame
+        (report("earlier", start=None), False, "does not start the pieces from a standing"),  # not recorded
         (report("failed", eval_only_set=True, passed=False), True, "does not pass"),
         (report("other", sha="b" * 64), False, "not the benchmark of this checkpoint"),
     ):
