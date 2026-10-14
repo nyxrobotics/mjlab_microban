@@ -6,7 +6,8 @@
 # neck target snap after a reset; an env placed on the reference sees it one
 # control step ahead whether env.step or env.reset placed it; the end of a
 # window holds its last frame and ends the episode as a time-out (Teleopit
-# placed the robot on a new window inside the command update).
+# placed the robot on a new window inside the command update); the reference
+# can be held on its frame, standing still (``hold``, the evaluation's start).
 
 """Reference motion: a clip library on the device and the motion command.
 
@@ -189,6 +190,8 @@ class MotionCommand(CommandTerm):
         # The window ran out: the reference holds its last frame and the
         # clip_end termination (a time-out) ends the episode.
         self.clip_ended = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Held (``hold``): the reference stays on its frame and its velocities read 0.
+        self.held = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._step_dt = env.step_dt
         self._elapsed_s = env.step_dt
         self._cached_frames: dict[str, torch.Tensor] = {}
@@ -204,7 +207,24 @@ class MotionCommand(CommandTerm):
         self._ghost_model: mujoco.MjModel | None = None
 
     def _refresh_frame_cache(self) -> None:
-        self._cached_frames = self.motion.get_frames(self.motion_ids, self.motion_times)
+        frames = self.motion.get_frames(self.motion_ids, self.motion_times)
+        for key in ("joint_vel", "body_lin_vel_w", "body_ang_vel_w"):
+            held = self.held.view(-1, *([1] * (frames[key].ndim - 1)))
+            frames[key] = torch.where(held, torch.zeros_like(frames[key]), frames[key])
+        self._cached_frames = frames
+
+    def hold(self, held: torch.Tensor) -> None:
+        """Hold the reference of the envs in the mask ``held`` (N,) and let the others play.
+
+        A held reference keeps its time and shows its frame standing still:
+        the joint, trunk and body velocities read 0 (the evaluation's first
+        second, where the operator stands at a frame while the robot comes
+        from HOME; the frame's own velocities are those of the motion that
+        passes through it).  An env placed while held still moves one control
+        step past its placed time.  Takes effect from the next update, so a
+        step's observed target and the target it is judged on stay the same.
+        """
+        self.held.copy_(held.to(device=self.device, dtype=torch.bool))
 
     # Reference (interpolated).
 
@@ -419,8 +439,9 @@ class MotionCommand(CommandTerm):
     def _update_command(self):
         # An env placed since the last update (in env.step or env.reset) moves
         # one control step past its placed state; every other env by the
-        # elapsed time.
+        # elapsed time, or not at all while held.
         advance = torch.full_like(self.motion_times, self._elapsed_s)
+        advance[self.held] = 0.0
         advance[self._placed] = self._step_dt
         self._placed.zero_()
         self.motion_times += advance

@@ -262,6 +262,23 @@ def test_a_fall_is_a_tipped_trunk_under_an_upright_reference():
     assert not bool(benchmark.fell(tilted(90.0), tilted(40.0))[0])
 
 
+def test_a_robot_down_past_a_leaning_reference_is_down():
+    def tilted(degrees: float) -> torch.Tensor:
+        half = math.radians(degrees) / 2.0
+        return torch.tensor([[math.cos(half), math.sin(half), 0.0, 0.0]])
+
+    def down(robot_deg: float, ref_deg: float, robot_z: float = 0.15, ref_z: float = 0.15) -> bool:
+        return bool(benchmark.down_past_reference(tilted(robot_deg), tilted(ref_deg), torch.tensor([robot_z]),
+                                                  torch.tensor([ref_z]))[0])
+
+    # Lying under a reference bent 40 deg over on its feet: 50 deg past it.
+    assert down(90.0, 40.0)
+    # Following a reference leaning 70 deg, or lying under one on all fours (tilts taken up to 90 deg).
+    assert not down(75.0, 70.0) and not down(110.0, 75.0, 0.09, 0.11)
+    # 7 cm below the reference's trunk, though only 10 deg past its tilt; not past 45 deg, no fall.
+    assert down(50.0, 40.0, 0.08, 0.15) and not down(40.0, 40.0, 0.05, 0.15)
+
+
 def test_the_kinds_table_carries_the_new_lines(tmp_path):
     results = [_result("picotwist", 0.4, 0.16, settle_s=1.0), _result("picotwist", 0.0, 0.0, settle_s=1.0, fall_s=4.0)]
     report = benchmark.write_outputs(tmp_path, "model", {}, results, (), require_locomotion=False, hold_fall_line=True)
@@ -280,9 +297,10 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
     # On the simulator (CPU), two references at 50 fps whose trunk, tilted
     # 20 deg and heading 60 deg, stands at HOME's height on the floor (the end
     # points' termination is left out: the arms stay at 0), the right elbow
-    # at 0.1 rad per second of the reference (its time).  The first moves for
+    # at 0.1 rad per second of the reference (its time) and the trunk turning
+    # at 0.5 rad/s about the vertical.  The first moves for
     # its first 0.2 s: its piece starts there, 55 judged steps; the second's,
-    # 85.  The policy alternates every action by +-0.05 rad, lifts
+    # 85, its trunk bent 50 deg over from its 0.1 s on.  The policy alternates every action by +-0.05 rad, lifts
     # the first robot 10 cm in the settle (steps 10-14) and puts it back,
     # knocks the second over at step 60 and the first at step 110 (past its piece).
     from mjlab.envs import ManagerBasedRlEnv
@@ -299,24 +317,29 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
 
     joints, bodies = tuple(joint_ranges()), len(TRACKED_BODY_NAMES)
     trunk_quat = quat_mul(axis_quat(math.radians(60.0), 2), axis_quat(math.radians(20.0), 0))
+    lean_quat = quat_mul(axis_quat(math.radians(60.0), 2), axis_quat(math.radians(50.0), 0))
     foot_quat, foot_heights = _standing_feet()
 
-    def clip(name: str, frames: int, moving_frames: int) -> dict:
+    def clip(name: str, frames: int, moving_frames: int, lean_from: int | None = None) -> dict:
         section = {"name": name, "fps": 50, "joint_pos": np.zeros((frames, len(joints))),
                    "joint_vel": np.zeros((frames, len(joints))), "body_pos_w": np.zeros((frames, bodies, 3)),
                    "body_quat_w": np.tile([1.0, 0.0, 0.0, 0.0], (frames, bodies, 1)),
                    "body_lin_vel_w": np.zeros((frames, bodies, 3)), "body_ang_vel_w": np.zeros((frames, bodies, 3))}
         section["body_pos_w"][:, 0] = (0.3, -0.2, HOME.root_pos[2])
         section["body_quat_w"][:, 0] = trunk_quat.numpy()
+        if lean_from is not None:
+            section["body_quat_w"][lean_from:, 0] = lean_quat.numpy()
         section["body_lin_vel_w"][:moving_frames, 0, 0] = 0.2
         section["joint_pos"][:, joints.index("right_elbow")] = 0.1 * np.arange(frames) / 50.0
+        section["joint_vel"][:, joints.index("right_elbow")] = 0.1
+        section["body_ang_vel_w"][:, 0, 2] = 0.5
         for body, height in foot_heights.items():
             section["body_pos_w"][:, TRACKED_BODY_NAMES.index(body), 2] = height
             section["body_quat_w"][:, TRACKED_BODY_NAMES.index(body)] = foot_quat
         return section
 
     path = tmp_path / "motion.h5"
-    write_motion_shard([clip("walk1_subject5", 66, 10), clip("run1_subject5", 86, 0)], path,
+    write_motion_shard([clip("walk1_subject5", 66, 10), clip("run1_subject5", 86, 0, lean_from=5)], path,
                        body_names=TRACKED_BODY_NAMES, joint_names=joints, max_window_frames=None)
     cfg = benchmark_env_cfg(str(path), 10.0, 2, 0)
     del cfg.terminations["ee_body_pos"]
@@ -326,13 +349,15 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
         assert [(p.start_s, p.steps) for p in pieces] == [(0.2, 50 + 55), (0.0, 50 + 85)]
         command = env.command_manager.get_term("motion")
         robot = command.robot
-        start, times = {}, []
+        start, times, speeds = {}, [], []
         elbow = robot.joint_names.index("right_elbow")
 
         def policy(obs):
             step = start.setdefault("calls", 0)
             start["calls"] += 1
             times.append(command.all_joint_pos[:, elbow] / 0.1)  # the reference's time the policy sees
+            speeds.append(torch.stack([command.joint_vel[:, ACTION_JOINT_NAMES.index("right_elbow")],
+                                       command.anchor_ang_vel_w[:, 2], command.body_ang_vel_w[:, 0, 2]], -1))
             if step == 0:  # placed, before the first step
                 start.update(trunk=robot.data.root_link_pose_w.clone(), vel=robot.data.root_link_vel_w.clone(),
                              joint_pos=robot.data.joint_pos.clone(), joint_vel=robot.data.joint_vel.clone(),
@@ -361,14 +386,17 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
         assert torch.allclose(start["joint_pos"], robot.data.default_joint_pos, atol=1e-6)
         assert not start["joint_vel"].any() and not start["vel"].any()
         # The reference holds the piece's first frame (one step ahead) through
-        # the settle, then plays on from it.
+        # the settle, standing still (its velocities 0), then plays on from it.
         dt, first = env.step_dt, torch.tensor([0.2, 0.0])
         for call in (0, 25, 50):
             assert torch.allclose(times[call], first + dt, atol=1e-5)
+            assert not speeds[call].any()
         for call in (51, 90):
             assert torch.allclose(times[call], first + (call - 49) * dt, atol=1e-5)
+            assert torch.allclose(speeds[call], torch.tensor([0.1, 0.5, 0.5]).expand(2, 3), atol=1e-6)
         # The termination of the settle fails no piece; the fall does (on
-        # step 60, the 11th judged step), and the piece runs to its end.
+        # step 60, the 11th judged step, under the bent-over reference: counted
+        # 0.5 s later from step 60 on), and the piece runs to its end.
         assert [(r.steps, r.success, r.failure_reason) for r in results] == [(55, True, None), (11, False, "anchor_pos")]
         # The fall and the leg targets' change (12 leg joints x 0.1 rad per
         # step) are taken from 1 s into each piece until its end or its fall.

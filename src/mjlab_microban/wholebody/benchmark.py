@@ -17,8 +17,11 @@ trunk near upright, at standing height and slow).  The robot is placed at rest a
 velocities 0, the trunk at HOME's height and tilt) under the reference
 trunk's horizontal position, facing the reference's heading.  For the first
 ``SETTLE_S`` = 1 s the reference holds the piece's first frame (the operator
-stands while the robot comes from HOME into the operator's pose) and nothing
-is judged: no termination fails the piece and no error is taken.  Then the
+stands while the robot comes from HOME into the operator's pose), standing
+still: its joint, trunk and body velocities read 0 (the frame's own are those
+of the motion through it, up to 21.5 rad/s at a joint and 7.8 rad/s at the
+trunk on the training kinds' set), and nothing is judged: no termination
+fails the piece and no error is taken.  Then the
 reference plays on from that frame without a break, and every one of its
 steps is judged.
 
@@ -91,8 +94,16 @@ piece (the judged steps) until it falls.
 
 Fall line.  A piece falls when the robot trunk tilts past ``FALL_TILT_RAD`` =
 45 deg from vertical (HOME stands at 10 deg) while the reference trunk is within
-``FALL_REF_TILT_RAD`` = 30 deg of vertical (a reference lying down is not a
-fall), at any step of the piece, the first second included.  The pieces'
+``FALL_REF_TILT_RAD`` = 30 deg of vertical, or when, past 45 deg, it stays
+for ``FALL_PAST_REF_S`` = 0.5 s more than ``FALL_PAST_REF_TILT_RAD`` = 30 deg
+past the reference trunk's tilt (tilts taken up to 90 deg) or
+``FALL_BELOW_REF_M`` = 6 cm below the reference trunk (the fall then dates
+from the first of those steps), at any step of the piece, the first second
+included.  A robot that follows a reference leaning or lying down is no
+fall; one down on the floor under a reference leaning on its feet is, without
+waiting for the reference to come back upright (the upright rule alone
+counted 25 such falls 0.06-12.7 s late and missed those whose piece ended
+first; the numbers are at FALL_PAST_REF_TILT_RAD).  The pieces'
 lengths vary and the rollouts of the line's source ran 6 s, so falls are
 counted per minute standing: a kind's or a set's falls over the time its
 pieces ran before their fall (a piece's whole run, the first second
@@ -100,7 +111,8 @@ included, when it does not fall).  On an evaluation-only set (the operator's
 motions: the PICO recordings) at most ``MAX_FALLS_PER_MINUTE`` = 0.425: the
 PICO policy above in its push check (144 rollouts of 6 s, standing and
 walking in eight directions, pushed by 0.4 m/s every second) fell 6 times by
-the same tilt rule over 846.58 s standing, 6 of 144 rollouts.  On the
+the same tilt rule over 846.58 s standing, 6 of 144 rollouts (its reference
+is upright, so the rule under a leaning reference adds none there).  On the
 training kinds' set the rate is reported, not judged: it holds motions the
 operator does not ask the robot for (sprints, jumps, falls), and its success
 line already bounds the terminations.
@@ -162,7 +174,23 @@ MAX_LEG_ACTION_RATE = 3.36
 ACTION_RATE_FROM_S = 1.0  # the PICO policy was measured from 1 s into its rollouts
 FALL_TILT_RAD = math.radians(45.0)
 FALL_REF_TILT_RAD = math.radians(30.0)
-# The PICO policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).
+# Under a reference past FALL_REF_TILT_RAD, the robot is down past it: its trunk past FALL_TILT_RAD and past the
+# reference trunk's tilt by FALL_PAST_REF_TILT_RAD (tilts taken up to 90 deg: lying is lying, so a robot lying under a
+# reference lying or on all fours is no fall) or FALL_BELOW_REF_M below the reference trunk, for FALL_PAST_REF_S.
+# Measured on the PICO set (model_29999 of runs 2026-10-12_07-24-30_wholebody_main and
+# 2026-10-14_00-39-43_wholebody_v4) and the training kinds' set (the first), the reference held still in the first
+# second: in the 181 runs past 45 deg the robot followed a leaning reference and came back up from, it was at most 12
+# deg past the reference's tilt (99 %: 9) and at most 3.0 cm below it; in the 25 falls that the upright rule counted
+# only when the reference came back within 30 deg (0.06-12.7 s after the robot passed 45 deg), every one went past 30
+# deg or 6 cm (up to 60 deg and 15 cm).  30 deg and 6 cm are 2.5 and 2 times the following's largest, which never
+# reaches them even for a step; 0.5 s is longer than a fall takes from 45 deg to the floor (a body other than the feet
+# touches it 0.08 s later at the median, 0.28 s at 90 %), so a robot passing through is not counted, and a fall in a
+# piece's last second is.
+FALL_PAST_REF_TILT_RAD = math.radians(30.0)
+FALL_BELOW_REF_M = 0.06
+FALL_PAST_REF_S = 0.5
+# The PICO policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).  Its reference (stand, walk) is
+# upright, where a robot past 45 deg is a fall at once, so the rule under a leaning reference adds none there.
 MAX_FALLS_PER_MINUTE = 60.0 * 6 / 846.58
 # A standing frame (a piece's start).  A sole is on the floor when its lowest corner is within 10 mm of it:
 # the PICO set's slow upright frames have the higher sole within 7 mm in 75 % and 13 mm in 90 % (tracking noise).
@@ -482,6 +510,9 @@ def write_outputs(
         "leg_joint_names": LEG_JOINT_NAMES,
         "fall_tilt_rad": FALL_TILT_RAD,
         "fall_ref_tilt_rad": FALL_REF_TILT_RAD,
+        "fall_past_ref_tilt_rad": FALL_PAST_REF_TILT_RAD,
+        "fall_below_ref_m": FALL_BELOW_REF_M,
+        "fall_past_ref_s": FALL_PAST_REF_S,
         "max_falls_per_minute": MAX_FALLS_PER_MINUTE,
         "verdicts": verdicts(kinds, expected_kinds, require_locomotion, hold_fall_line),
         "kinds": kinds,
@@ -533,6 +564,17 @@ def fell(robot_quat: Any, ref_quat: Any) -> Any:
     return (tilt_rad(robot_quat) > FALL_TILT_RAD) & (tilt_rad(ref_quat) < FALL_REF_TILT_RAD)
 
 
+def down_past_reference(robot_quat: Any, ref_quat: Any, robot_z: Any, ref_z: Any) -> Any:
+    """The robot trunk past FALL_TILT_RAD and past the reference trunk's tilt by FALL_PAST_REF_TILT_RAD or below its
+    height by FALL_BELOW_REF_M (a fall when it lasts FALL_PAST_REF_S)."""
+    robot_tilt = tilt_rad(robot_quat)
+    lying = math.pi / 2.0
+    return (robot_tilt > FALL_TILT_RAD) & (
+        (robot_tilt.clamp(max=lying) - tilt_rad(ref_quat).clamp(max=lying) > FALL_PAST_REF_TILT_RAD)
+        | (ref_z - robot_z > FALL_BELOW_REF_M)
+    )
+
+
 def _place_at_home(env: Any, command: Any) -> None:
     """Put the robot at rest at HOME under the reference trunk, facing the reference's heading."""
     import torch
@@ -572,10 +614,13 @@ def rollout(
     if any(p.settle_steps != settle for p in pieces):
         raise ValueError(f"the pieces were not cut for a step of {env.step_dt} s")
     rate_from = round(ACTION_RATE_FROM_S / env.step_dt)
+    past_steps = round(FALL_PAST_REF_S / env.step_dt)
     env.reset()
     command = env.command_manager.get_term("motion")
     ids = torch.arange(n, device=device)
     start_s = torch.tensor([p.start_s for p in pieces], device=device, dtype=command.motion_times.dtype)
+    # The operator stands at the piece's first frame while the robot comes from HOME: held, standing still.
+    command.hold(torch.ones(n, dtype=torch.bool, device=device))
     command.reset_to_motion(ids, torch.tensor([p.window_id for p in pieces], device=device), start_s)
     _place_at_home(env, command)
     # env.reset's sequence for the placed envs: the reference one step ahead,
@@ -600,6 +645,10 @@ def rollout(
     fall_step = torch.full((n,), -1, dtype=torch.long, device=device)
     rate_sum = torch.zeros(n, device=device)
     rate_steps = torch.zeros(n, dtype=torch.long, device=device)
+    # The current run of down_past_reference: its length and its steps' share of the action-rate sums.
+    past_run = torch.zeros(n, dtype=torch.long, device=device)
+    past_rate_sum = torch.zeros(n, device=device)
+    past_rate_steps = torch.zeros(n, dtype=torch.long, device=device)
     robot_end_xy = torch.zeros(n, 2, device=device)
     ref_end_xy = torch.zeros(n, 2, device=device)
     previous_target = command.robot.data.joint_pos_target[:, leg_ids].clone()
@@ -608,10 +657,9 @@ def rollout(
     for step in range(int(budgets.max())):
         if record_every and step % record_every == record_every - 1:
             recorded.append(obs[ACTOR_GROUP][0].detach().cpu().clone())
-        if step < settle:
-            # The operator stands at the piece's first frame while the robot comes from HOME: the step's
-            # advance puts the reference back on it (one step ahead, as placed).
-            command.motion_times[:] = start_s
+        if step == settle:
+            # The reference plays on from its frame: this step's target is still the held frame, the next one moves.
+            command.hold(torch.zeros(n, dtype=torch.bool, device=device))
         # The step's target, which its rewards and terminations compare the robot with.
         ref = {
             "body_pos": command.body_pos_relative_w.clone(),
@@ -619,6 +667,7 @@ def rollout(
             "joint_pos": command.joint_pos.clone(),
             "trunk_lin_vel": command.anchor_lin_vel_w.clone(),
             "trunk_xy": command.anchor_pos_w[:, :2].clone(),
+            "trunk_z": command.anchor_pos_w[:, 2].clone(),
         }
         with torch.inference_mode():
             actions = policy(obs)
@@ -630,12 +679,24 @@ def rollout(
         in_piece = step < budgets
         fell_now = in_piece & (fall_step < 0) & fell(command.robot_anchor_quat_w, ref["trunk_quat"])
         fall_step[fell_now] = step
+        past = down_past_reference(
+            command.robot_anchor_quat_w, ref["trunk_quat"], command.robot_anchor_pos_w[:, 2], ref["trunk_z"]
+        )
+        past_run = torch.where(past, past_run + 1, torch.zeros_like(past_run))
         # The leg targets' change from the previous step, while standing from 1 s on.
         target = command.robot.data.joint_pos_target[:, leg_ids].clone()
         counted = in_piece & (fall_step < 0) & (step > rate_from)
-        rate_sum += torch.where(counted, torch.square(target - previous_target).sum(-1), torch.zeros_like(rate_sum))
+        change = torch.where(counted, torch.square(target - previous_target).sum(-1), torch.zeros_like(rate_sum))
+        rate_sum += change
         rate_steps += counted.long()
+        past_rate_sum = torch.where(past, past_rate_sum + change, torch.zeros_like(past_rate_sum))
+        past_rate_steps = torch.where(past, past_rate_steps + counted.long(), torch.zeros_like(past_rate_steps))
         previous_target = target
+        # Down past the reference for FALL_PAST_REF_S: fallen since the run's first step, which no longer stands.
+        fell_past = in_piece & (fall_step < 0) & (past_run >= past_steps)
+        fall_step[fell_past] = step - past_steps + 1
+        rate_sum -= torch.where(fell_past, past_rate_sum, torch.zeros_like(rate_sum))
+        rate_steps -= torch.where(fell_past, past_rate_steps, torch.zeros_like(rate_steps))
         judged = running & (step >= settle)
         errors = {
             "body_pos_m": torch.square(ref["body_pos"] - command.robot_body_pos_w).sum(-1).mean(-1),
