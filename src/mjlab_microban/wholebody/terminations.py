@@ -1,7 +1,6 @@
 # Adapted from Teleopit f926386 train_mimic/tasks/tracking/mdp/terminations.py
 # (Apache-2.0, https://github.com/BotRunner64/Teleopit).  Changes: only the
-# terms the task uses (height-only anchor and end points, gravity z) and the
-# trunk's lag across the floor (training only, see env_cfg.py); the end
+# terms the task uses (height-only anchor and end points, gravity z); the end
 # points may sit off their body's origin (Microban's hands are points on the
 # forearms); the end of a window is a time-out.
 
@@ -24,12 +23,6 @@ if TYPE_CHECKING:
 def bad_anchor_pos_z_only(env: ManagerBasedRlEnv, command_name: str, threshold: float) -> torch.Tensor:
     command = cast(MotionCommand, env.command_manager.get_term(command_name))
     return torch.abs(command.anchor_pos_w[:, -1] - command.robot_anchor_pos_w[:, -1]) > threshold
-
-
-def bad_anchor_pos_xy(env: ManagerBasedRlEnv, command_name: str, threshold: float) -> torch.Tensor:
-    """The robot trunk is more than ``threshold`` across the floor from the reference trunk."""
-    command = cast(MotionCommand, env.command_manager.get_term(command_name))
-    return torch.linalg.norm(command.anchor_pos_w[:, :2] - command.robot_anchor_pos_w[:, :2], dim=-1) > threshold
 
 
 def bad_anchor_ori(env: ManagerBasedRlEnv, command_name: str, threshold: float) -> torch.Tensor:
