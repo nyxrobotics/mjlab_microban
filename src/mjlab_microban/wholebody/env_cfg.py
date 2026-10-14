@@ -259,6 +259,8 @@ def actor_terms() -> dict[str, ObservationTermCfg]:
         "ref_anchor_ang_vel_b": _ref(obs.ref_anchor_ang_vel_b),
         "ref_projected_gravity_b": _ref(obs.ref_projected_gravity_b),
         "ref_anchor_height": _ref(obs.ref_anchor_height),
+        # Experiment: the robot's own trunk velocity (no estimator on the robot), to test the observation.
+        "base_lin_vel": ObservationTermCfg(func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_lin_vel"}),
     }
 
 
