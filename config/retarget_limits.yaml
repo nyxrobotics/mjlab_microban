@@ -3,7 +3,8 @@
 # values against their sources.  Editing a value changes the retargeting: rebuild the data (docs/wholebody_data.md).
 #
 # robot: inside Microban's IK (src/mjlab_microban/wholebody/retarget/core.py), besides robot.xml's joint ranges.
-# human: limits on the human skeleton's joint angles before retargeting (anatomical axes); not used yet.
+# human: limits on the human skeleton's joint angles before retargeting, per anatomical axis, from the literature
+#   (imported as written; not applied, see docs/wholebody_limits.md).
 robot:
   hip_yaw_outward_max_deg:
     value: 105.0
@@ -49,6 +50,572 @@ robot:
         left_knee: 109.0
         left_ankle_pitch: 113.8
         left_ankle_roll: 114.4
+human:
+  # 人の関節の可動範囲・最大角速度・最大角加速度（文献から集めた値）
+  # 用途
+  #   Microban の全身トラッキングで、写す前の人の骨格の関節角に当てる制限。
+  #   1) モーションキャプチャの誤り（ありえない角度・速さ）を除く。
+  #   2) PICO の体の追跡の跳びを除く。
+  #   ロボットの関節ではなく、人の解剖学の軸（屈曲・伸展、外転・内転、内旋・外旋など）で書いた。
+  #
+  # 角度の決め方
+  #   - 解剖学的基本肢位（直立、Neutral Zero）を 0 度とする。
+  #   - 各軸の正の向きは positive に書いた。rom.adopted の lower / upper はその向きでの符号付きの値（度）。
+  #   - 左右は同じ値とする。
+  #
+  # 単位: 角度 deg、角速度 deg/s、角加速度 deg/s^2
+  #
+  # 各記録の項目
+  #   src        : 出典の鍵（ファイル末尾の sources）
+  #   value      : 論文の数字（そのまま写した）。mean / sd は平均と標準偏差。range は範囲。
+  #   mode       : active（自動）/ passive（他動）/ dynamic（運動中に実際に出た角度）
+  #   verified   : full_text（本文・表を開いて確認）/ abstract（要旨で確認）
+  #                / secondary（別の文献で確認。原典は開けず）/ no（確認できず）
+  #   upper_2sd  : 平均 + 2SD を自分で計算した値（論文の数字ではない）。
+  #   p97_5      : CDC が公開している Soucie 2011 の元データから計算した 97.5 パーセンタイル（論文の数字ではない）。
+  #   computed   : true なら、その記録の value は自分で計算した値（式は note）。
+  #
+  # 採用（adopted）の方針
+  #   - 用途が「ありえない値を除く」なので、健常者で大きい側の値を採った。小さい値を採ると、本物の動きを誤りとして捨てるため。
+  #   - 可動範囲: 次の候補のうち最大を採った。
+  #       a) 標準値: 日本整形外科学会・日本リハビリテーション医学会 2022、AAOS 1965、渡辺 1979（日本人の平均）
+  #       b) 健常な若い成人の上側のばらつき: 平均 + 2SD（計算）、97.5 または 95 パーセンタイル
+  #          使った研究: Soucie/CDC、Boone & Azen、Roaas & Andersson、Svenningsen、McKay、Han、Menadue、
+  #          Medina McKeon、Vairo、zarate2023、ferrario2002、mousavi2018
+  #     測り方で値が 2 倍近く変わる軸がある（others_note に書いた）。外れた値の目立つ研究（修士論文、SD の不自然な研究）は採用の計算に入れなかった。
+  #   - 角速度: 健常者の速い動き（競技を含む）で報告された群の値のうち、原典で確かめた最大。
+  #     二次引用だけの値と、1 人だけの値は候補に並べるにとどめた。けが（捻挫）の瞬間の値は採らず、参考として別に書いた。
+  #   - 角加速度: 速い動きで測った値があればそれを採り、なければ推定した（estimated: true）。
+  #   - 余裕（マージン）は足していない。足すかどうかは使う側で決める。
+  #   - 角速度・角加速度の多くは群の平均なので、個人の最大はそれより大きい。分かる場合は upper_2sd や個人の最大を併記した。
+  #
+  # 角加速度の推定のしかた（速い動きで測った値がない軸）
+  #   角加速度と角速度の両方の採用値がある 8 軸で、比 alpha / omega を計算すると 5.4〜13.8 /s だった
+  #   （股屈曲伸展 13.8、肩内旋 13.1、体幹回旋 12.1、首回旋 10.9、肘伸展 10.3、足首背屈底屈 7.4、膝 6.7、肩屈曲 5.4）。
+  #   値のない軸は、この最大の 13.8 /s を、その軸の角速度の採用値に掛けた（整数に丸めた）。
+  #   出典の違う値どうしの比なので、目安にとどまる。
+  #
+  # 測り方による違いの注意
+  #   - 光学式の多くは 10〜15 Hz 前後で平滑化しており、角速度・角加速度のピークは低めに出る（branco2019 は 5 Hz）。
+  #   - 「全体座標での体節の角速度」と「隣の体節に対する関節の角速度」は違う。各記録の note に書いた。
+  #   - 臨床の可動域（ゴニオメーター）は、肩甲骨・骨盤・体幹の動きを含むことがある。モーションキャプチャの関節角と定義が同じとは限らない。
+
+  meta:
+    version: draft-2
+    created: 2026-10-14
+    units: {angle: deg, angular_velocity: deg/s, angular_acceleration: deg/s^2}
+    counts: {joints: 7, axes: 16}
+    alpha_over_omega_for_estimate: 13.8   # /s。上の「角加速度の推定のしかた」
+
+  joints:
+
+    # ==================================================================
+    hip:
+      flexion_extension:
+        positive: 屈曲
+        rom:
+          adopted: {lower: -35, upper: 155, note: "屈曲は svenningsen1989 の女性の平均+2SD 155、伸展は同じく 35"}
+          flexion:
+            - {src: joa_jarm2022, value: 125, mode: passive, verified: full_text, note: "参考可動域。背臥位、膝屈曲位"}
+            - {src: aaos1965, value: 120, verified: secondary, note: "joa_jarm2022 の参考値一覧表（注4）で確認"}
+            - {src: watanabe1979, value: 132, verified: secondary, note: "日本人健常者 10〜79 歳の平均。joa_jarm2022 の一覧表（注5）で確認"}
+            - {src: soucie2011, mean: 133.8, ci95_of_mean: [132.5, 135.1], p97_5: 148.0, max: 155, mode: passive, verified: full_text, note: "20〜44 歳の女性（男性 130.4、p97.5 143.0）。平均は CDC の表で確認。p97.5 と最大は元データから計算"}
+            - {src: boone1979, mean: 121.3, sd: 6.4, upper_2sd: 134.1, mode: active, verified: full_text, note: "19 歳超の男性 56 人。Table I"}
+            - {src: roaas1982, mean: 120.4, sd: 8.3, upper_2sd: 137.0, mode: passive, verified: full_text, note: "30〜40 歳の男性 105 人。Table 1"}
+            - {src: svenningsen1989, mean: 141, range_2sd: [127, 155], mode: passive, verified: full_text, note: "女性 104 人、平均 23 歳。括弧は論文の平均±2SD（男性 137、125〜148）"}
+            - {src: mckay2017, mean: 123, sd: 10.0, upper_2sd: 143.0, mode: active, verified: full_text, note: "20〜59 歳の女性（男性 120 (8.7)）"}
+          extension:
+            - {src: joa_jarm2022, value: 15, mode: passive, verified: full_text, note: "腹臥位、膝伸展位"}
+            - {src: aaos1965, value: 30, verified: secondary}
+            - {src: watanabe1979, value: 15, verified: secondary}
+            - {src: soucie2011, mean: 18.1, ci95_of_mean: [17.0, 19.2], p97_5: 31.9, max: 39, mode: passive, verified: full_text, note: "20〜44 歳の女性、側臥位（男性 17.4、p97.5 30.0）"}
+            - {src: boone1979, mean: 12.1, sd: 5.4, upper_2sd: 22.9, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 9.5, sd: 5.2, range: [0, 35], upper_2sd: 19.9, mode: passive, verified: full_text, note: "腹臥位、膝屈曲"}
+            - {src: svenningsen1989, mean: 26, range_2sd: [16, 35], mode: passive, verified: full_text, note: "女性、腹臥位・膝伸展（男性 23、16〜30）"}
+        max_velocity:
+          adopted: {flexion: 964, extension: 850}
+          flexion:
+            - {src: cheng2026, mean: 964, sd: 118, upper_2sd: 1200, verified: full_text, task: "散打の蹴り（Table 3）。250 Hz、15 Hz で平滑化"}
+            - {src: orloff2007, mean: 896, sd: 156, verified: full_text, task: "サッカーのインステップキック。20 人のうち 1 群の値（Table 1）。2 次元 60 Hz、関節の相対角"}
+            - {src: miyashiro2019, mean: 792, sd: 47, range: [641, 887], verified: full_text, task: "最大速度の疾走、男子 79 人、300 Hz", note: "大腿の絶対角（体節）の角速度で、関節角ではない"}
+            - {src: kivi2001, mean: 727, sd: 46, verified: full_text, task: "トレッドミル疾走、最大速度の 90%"}
+          extension:
+            - {src: miyashiro2019, mean: 850, sd: 73, range: [615, 992], verified: full_text, task: "最大速度の疾走の支持期（Table 1）"}
+            - {src: ho2019, mean: 769.2, sd: 266.6, upper_2sd: 1302.4, verified: full_text, task: "立ち幅跳び、男子バスケットボール選手 26 人、200 Hz"}
+        max_acceleration:
+          adopted: {both: 13270.99}
+          records:
+            - {src: branco2019, mean: 13270.99, sd: 7566.46, verified: full_text, task: "空手の前蹴り、若い選手。2 次元 210 Hz、5 Hz で平滑化（Table 2）", note: "矢状面の関節角。向き（屈曲か伸展か）は書かれていない。同じ表の股の角速度の最大は 340.28 ± 295.68 と小さい"}
+            - {src: grimmer2020, value: 4400, verified: full_text, note: "実測の最大ではなく、日常生活の動作に要る値として著者が示した数字。採らない"}
+
+      abduction_adduction:
+        positive: 外転
+        rom:
+          adopted: {lower: -45.1, upper: 52.8, note: "外転・内転とも roaas1982 の平均+2SD"}
+          abduction:
+            - {src: joa_jarm2022, value: 45, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: watanabe1979, value: 46, verified: secondary}
+            - {src: boone1979, mean: 40.5, sd: 6.0, upper_2sd: 52.5, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 38.8, sd: 7.0, range: [15, 55], upper_2sd: 52.8, mode: passive, verified: full_text}
+            - {src: svenningsen1989, mean: 42, range_2sd: [35, 50], mode: passive, verified: full_text, note: "女性（男性 40、33〜47）"}
+          adduction:
+            - {src: joa_jarm2022, value: 20, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 30, verified: secondary}
+            - {src: watanabe1979, value: 23, verified: secondary}
+            - {src: boone1979, mean: 25.6, sd: 3.6, upper_2sd: 32.8, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 30.5, sd: 7.3, upper_2sd: 45.1, mode: passive, verified: full_text}
+            - {src: svenningsen1989, mean: 30, range_2sd: [24, 37], mode: passive, verified: full_text, note: "女性（男性 29、23〜35）"}
+          others_note: "moromizato2016 は内転 13.8±6.3・外転 33.0±4.8、macedo2007（修士論文）は外転 62.0 (7.3) と、他と大きく違う。採用の計算に入れていない"
+        max_velocity:
+          adopted: {abduction: 422.5, adduction: 852.0}
+          abduction:
+            - {src: detjareny2013, mean: 422.5, sd: 36.8, verified: full_text, task: "テコンドーの後ろ蹴り、熟練者 6 人、100 Hz"}
+            - {src: gavagan2017, mean: 330, sd: 46, verified: full_text, task: "ムエタイの回し蹴り、500 Hz（表では -330）"}
+          adduction:
+            - {src: kageyama2015, mean: 852.0, sd: 213.9, verified: full_text, task: "野球の投球の踏み出し脚、中学生（大学生は 830.6±160.9）。500 Hz、13.4 Hz"}
+            - {src: detjareny2013, mean: 369.3, sd: 46.4, verified: full_text, task: "テコンドーの後ろ蹴り"}
+        max_acceleration:
+          adopted: {abduction: 5831, adduction: 11758, estimated: true, note: "速い動きでの値はなし。角速度の採用値 × 13.8 /s"}
+
+      rotation:
+        positive: 内旋
+        rom:
+          adopted: {lower: -74.7, upper: 71, note: "内旋は svenningsen1989 の女性の平均+2SD 71（腹臥位）、外旋は han2015 の腹臥位の平均+2SD 74.7（計算）"}
+          internal:
+            - {src: joa_jarm2022, value: 45, mode: passive, verified: full_text, note: "背臥位、股と膝を 90 度屈曲"}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: watanabe1979, value: 38, verified: secondary}
+            - {src: boone1979, mean: 44.4, sd: 4.3, upper_2sd: 53.0, mode: active, verified: full_text, note: "座位"}
+            - {src: roaas1982, mean: 32.6, sd: 8.2, upper_2sd: 49.0, mode: passive, verified: full_text, note: "腹臥位"}
+            - {src: svenningsen1989, mean: 52, range_2sd: [34, 71], mode: passive, verified: full_text, note: "女性、腹臥位（股伸展・膝 90 度）。男性 38（23〜53）"}
+            - {src: mckay2017, mean: 40, sd: 8.8, upper_2sd: 57.6, mode: active, verified: full_text, note: "女性（男性 36 (7.9)）"}
+            - {src: han2015, mean: 47.4, sd: 9.8, upper_2sd: 67.0, mode: passive, verified: full_text, note: "日本人 151 人、腹臥位・右（座位は 43.5±8.0）"}
+          external:
+            - {src: joa_jarm2022, value: 45, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: watanabe1979, value: 46, verified: secondary}
+            - {src: boone1979, mean: 44.2, sd: 4.8, upper_2sd: 53.8, mode: active, verified: full_text, note: "座位"}
+            - {src: roaas1982, mean: 33.7, sd: 6.7, upper_2sd: 47.1, mode: passive, verified: full_text, note: "腹臥位"}
+            - {src: svenningsen1989, mean: 43, range_2sd: [29, 56], mode: passive, verified: full_text, note: "男性、腹臥位（女性 41、25〜56）"}
+            - {src: han2015, mean: 51.9, sd: 11.4, upper_2sd: 74.7, mode: passive, verified: full_text, note: "腹臥位・左（座位は 42.8±8.1）"}
+          others_note: "腹臥位（股伸展）で測るほうが、座位（股 90 度屈曲）より大きく出る"
+        max_velocity:
+          adopted: {internal: 499.7, external: 636.0}
+          internal:
+            - {src: kageyama2015, mean: 499.7, sd: 157.3, verified: full_text, task: "野球の投球の踏み出し脚、大学生"}
+            - {src: radzak2020, mean: 307.92, sd: 117.07, verified: full_text, task: "走行 4.0 m/s、男子 38 人"}
+          external:
+            - {src: nunome2002, mean_rad_s: 11.1, sd_rad_s: 2.4, value: 636.0, verified: abstract, task: "サッカーのサイドフットキック（インステップは 6.0±2.0 rad/s）", note: "rad/s を deg/s に換算"}
+            - {src: detjareny2013, mean: 373.1, sd: 176.4, verified: full_text, task: "テコンドーの後ろ蹴り"}
+        max_acceleration:
+          adopted: {internal: 6896, external: 8777, estimated: true, note: "なし。角速度の採用値 × 13.8 /s"}
+
+    # ==================================================================
+    knee:
+      flexion_extension:
+        positive: 屈曲
+        rom:
+          adopted: {lower: -12.1, upper: 156.6, note: "屈曲は roaas1982 の平均+2SD、過伸展は medina2009 の女性の平均+2SD"}
+          flexion:
+            - {src: joa_jarm2022, value: 130, mode: passive, verified: full_text, note: "股関節屈曲位"}
+            - {src: aaos1965, value: 135, verified: secondary}
+            - {src: watanabe1979, value: 154, verified: secondary}
+            - {src: soucie2011, mean: 141.9, ci95_of_mean: [140.9, 142.9], p97_5: 154.0, max: 164, mode: passive, verified: full_text, note: "20〜44 歳の女性（男性 137.7、p97.5 150.3）"}
+            - {src: boone1979, mean: 141.2, sd: 5.3, upper_2sd: 151.8, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 143.8, sd: 6.4, upper_2sd: 156.6, mode: passive, verified: full_text}
+            - {src: mckay2017, mean: 137, sd: 6.2, upper_2sd: 149.4, mode: active, verified: full_text}
+          extension:
+            note: "過伸展（0 度を越えて伸びる角度）"
+            records:
+              - {src: joa_jarm2022, value: 0, mode: passive, verified: full_text}
+              - {src: aaos1965, value: 10, verified: secondary}
+              - {src: watanabe1979, value: 0, verified: secondary}
+              - {src: soucie2011, mean: 1.6, ci95_of_mean: [1.1, 2.1], p97_5: 9.0, max: 11, mode: passive, verified: full_text, note: "20〜44 歳の女性。全年齢の過伸展の最大は 17〜19"}
+              - {src: roaas1982, mean: 1.7, sd: 3.0, range: [0, 10], upper_2sd: 7.7, mode: passive, verified: full_text}
+              - {src: mckay2017, mean: 2, sd: 2.7, upper_2sd: 7.4, mode: active, verified: full_text, note: "符号の定義なし"}
+              - {src: medina2009, mean: 5.7, sd: 3.2, range: [-5.0, 12.0], upper_2sd: 12.1, mode: active, verified: full_text, note: "女性、立位で最大伸展（男性 3.1±2.5）"}
+        max_velocity:
+          adopted: {flexion: 1185, extension: 1627.2}
+          extension:
+            - {src: jessop2016, mean_rad_s: 28.4, sd_rad_s: 3.6, value: 1627.2, upper_2sd: 2039.8, verified: full_text, task: "武道の選手 7 人が膝を最大の速さで伸ばす。2 次元 500 Hz"}
+            - {src: manolopoulos2006, mean: 1874, sd: 155, verified: secondary, note: "kellis2007 の Table 4 で確認。インステップキック。原典は開けず、採らない"}
+            - {src: levanon1998, mean: 1805, sd: 289, verified: secondary, note: "kellis2007 の Table 4。jessop2016 は同じ論文を 30.5±4.9 rad/s（1747.5）と引いており食い違う"}
+            - {src: sinclair2014, mean: 1563.13, sd: 579.19, verified: full_text, task: "インステップキック、男子 22 人、500 Hz"}
+            - {src: alt2026, mean: 1206, sd: 122, verified: full_text, task: "最大速度の疾走", note: "膝パワーが最大の時点の値で、最大値ではない"}
+          flexion:
+            - {src: miyashiro2019, mean: 1185, sd: 92, range: [874, 1397], verified: full_text, task: "最大速度の疾走の遊脚期（表では負）"}
+            - {src: preuschl2016, value: 1389, verified: full_text, task: "テコンドーのかかと落とし。個人の最大（中央値 447）"}
+        max_acceleration:
+          adopted: {both: 10842.34}
+          records:
+            - {src: branco2019, mean: 10842.34, sd: 3607.07, upper_2sd: 18056.48, verified: full_text, task: "空手の前蹴り、5 Hz で平滑化", note: "強い平滑化で低めに出ているはず。推定（1627.2 × 13.8 = 22455）や下の体節の値より小さい"}
+            - {src: tamura2016, mean: -6964.1, sd: 1408.4, verified: full_text, task: "40 cm からの片脚着地と跳躍、240 Hz"}
+            - {src: meamarbashi2010, mean_rad_s2: 586.4, sd_rad_s2: 121.9, value: 33598, verified: full_text, task: "インステップキック、加速度計", note: "下腿（体節）の角加速度で、関節角ではない"}
+            - {src: grimmer2020, value: 11200, verified: full_text, note: "日常生活の動作に要る値として著者が示した数字（実測の最大ではない）。採らない"}
+
+    # ==================================================================
+    ankle:
+      dorsi_plantar:
+        positive: 背屈
+        rom:
+          adopted: {lower: -80.0, upper: 44.2, note: "底屈は soucie2011 の 20〜44 歳女性の p97.5、背屈は mckay2017 の男性の平均+2SD"}
+          dorsiflexion:
+            - {src: joa_jarm2022, value: 20, mode: passive, verified: full_text, note: "膝屈曲位"}
+            - {src: aaos1965, value: 20, verified: secondary}
+            - {src: watanabe1979, value: 26, verified: secondary}
+            - {src: soucie2011, mean: 12.7, ci95_of_mean: [11.6, 13.8], p97_5: 25.0, max: 28, mode: passive, verified: full_text, note: "20〜44 歳の男性、座位で膝 30 度以上屈曲（女性 13.8、p97.5 24.9）"}
+            - {src: boone1979, mean: 12.2, sd: 4.1, upper_2sd: 20.4, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 15.3, sd: 5.8, upper_2sd: 26.9, mode: passive, verified: full_text, note: "膝を軽く屈曲"}
+            - {src: mckay2017, mean: 32, sd: 6.1, upper_2sd: 44.2, mode: active, verified: full_text, note: "男性（女性 29 (6.4)）。荷重したランジで測った可能性がある（未確認）。深くしゃがむ動きではこの程度の背屈が出る"}
+          plantarflexion:
+            - {src: joa_jarm2022, value: 45, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 50, verified: secondary}
+            - {src: watanabe1979, value: 57, verified: secondary}
+            - {src: soucie2011, mean: 62.1, ci95_of_mean: [60.6, 63.6], p97_5: 80.0, max: 90, mode: passive, verified: full_text, note: "20〜44 歳の女性（男性 54.6、p97.5 70.3）"}
+            - {src: boone1979, mean: 54.3, sd: 5.9, upper_2sd: 66.1, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 39.7, sd: 7.5, upper_2sd: 54.7, mode: passive, verified: full_text}
+            - {src: mckay2017, mean: 62, sd: 8.9, upper_2sd: 79.8, mode: active, verified: full_text, note: "女性（男性 56 (7.5)）"}
+          others_note: "背屈は測り方で 12〜15（膝屈曲・非荷重）から 29〜32（mckay2017）まで違う"
+        max_velocity:
+          adopted: {dorsiflexion: 989.79, plantarflexion: 1041.1}
+          plantarflexion:
+            - {src: ho2019, mean: 1041.1, sd: 120.4, verified: full_text, task: "立ち幅跳び、男子 26 人、200 Hz"}
+            - {src: miyashiro2019, mean: 1009, sd: 92, range: [798, 1236], verified: full_text, task: "最大速度の疾走の支持期"}
+            - {src: vaningenschenau1985, value: 970, verified: abstract, task: "垂直跳び、鍛えた 12 人（平均の最大角速度）"}
+            - {src: chan2014, value: 1600, verified: full_text, task: "テニス選手 1 人の横方向の切り返し（通常の動き）。背屈も 1600", note: "1 人の値なので採らない（学会抄録）"}
+          dorsiflexion:
+            - {src: duchene2026, mean: 989.79, sd: 124.70, verified: full_text, task: "反動跳びの着地"}
+        max_acceleration:
+          adopted: {both: 7736.15}
+          records:
+            - {src: branco2019, mean: 7736.15, sd: 2735.61, upper_2sd: 13207.37, verified: full_text, task: "空手の前蹴り、5 Hz で平滑化"}
+            - {src: grimmer2020, value: 8300, verified: full_text, note: "日常生活に要る値として著者が示した数字。採らない"}
+
+      inversion_eversion:
+        positive: 内がえし（内反）
+        definition: "日整会 2022 は前額面の動き（足底が内方を向く＝内がえし）。研究により前足部を含むか（座位で前面から測る）、踵骨だけか（伏臥位）で値が 2 倍違う"
+        rom:
+          adopted: {lower: -37.9, upper: 49.1, note: "内反は menadue2006 の座位（前足部を含む）の平均+2SD、外反は roaas1982 の平均+2SD"}
+          inversion:
+            - {src: joa_jarm2022, value: 30, mode: passive, verified: full_text, note: "膝屈曲位、足関節 0 度"}
+            - {src: boone1979, mean: 36.2, sd: 4.2, upper_2sd: 44.6, mode: active, verified: full_text, note: "前足部"}
+            - {src: roaas1982, mean: 27.8, sd: 6.9, upper_2sd: 41.6, mode: passive, verified: full_text, note: "varus"}
+            - {src: menadue2006, mean: 31.5, sd: 8.8, upper_2sd: 49.1, mode: active, verified: full_text, note: "座位で前面から測る（前足部を含む）。伏臥位で踵骨を測ると 15.0±6.1"}
+          eversion:
+            - {src: joa_jarm2022, value: 20, mode: passive, verified: full_text}
+            - {src: boone1979, mean: 19.2, sd: 4.9, upper_2sd: 29.0, mode: active, verified: full_text}
+            - {src: roaas1982, mean: 27.9, sd: 5.0, upper_2sd: 37.9, mode: passive, verified: full_text, note: "valgus、左"}
+            - {src: menadue2006, mean: 11.1, sd: 7.4, upper_2sd: 25.9, mode: active, verified: full_text, note: "座位"}
+        max_velocity:
+          adopted: {inversion: 638, eversion: 484}
+          inversion:
+            - {src: fong2009, value: 638, verified: full_text, task: "走ってからの方向転換、男子 1 人の通常の 3 試行（著者稿の表 1）", note: "1 人の値だが、通常の動きで確かめた最大。他の論文はこの人の捻挫の瞬間を 632 と引くが、著者稿では 638 は通常の試行の値"}
+            - {src: kristianslund2011, value: [166, 221], verified: full_text, task: "フェイントのサイドステップ、女子 1 人の対照の 2 試行"}
+            - {src: chu2010, value: 85.1, verified: full_text, task: "走行。被験者の平均波形の最大（ピークは低く出る）"}
+          eversion:
+            - {src: flores2026, mean: 484, sd: 247, verified: full_text, task: "楽な速さの走行、424 人、200 Hz（表では -484）。速い群の第 1 四分位は 849"}
+            - {src: digby2005, mean_rad_s: 7.70, sd_rad_s: 2.61, value: 441.2, verified: full_text, task: "裸足の走行 3.35 m/s、1000 Hz（学会抄録）"}
+          injury_reference:
+            note: "捻挫の瞬間の値。通常の動きの上限ではないので採らない"
+            records:
+              - {src: lysdal2022, mean: 974, range: [468, 1752], verified: full_text, note: "24 例をまとめた総説の要旨の値。本文では 928（SD 418、21 例）"}
+              - {src: fong2012, value: [1488, 509, 837, 724, 800], verified: full_text, note: "テニスの 5 例。内旋の角速度は最大 2124"}
+              - {src: ha2013, value: 2687, verified: full_text, note: "バスケットボールのテレビ映像 1 例（学会抄録）"}
+        max_acceleration:
+          adopted: {inversion: 8804, eversion: 6679, estimated: true, note: "なし。角速度の採用値 × 13.8 /s"}
+
+    # ==================================================================
+    shoulder:
+      note: "臨床の可動域は肩甲骨の動き（肩複合体）を含む。胸郭に対する上腕で見るモーションキャプチャの関節角と近い"
+      flexion_extension:
+        positive: 屈曲（前方挙上）
+        rom:
+          adopted: {lower: -73.5, upper: 185.65, note: "屈曲は vairo2012 の女性の 95 パーセンタイル、伸展は boone1979 の平均+2SD"}
+          flexion:
+            - {src: joa_jarm2022, value: 180, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 180, verified: secondary}
+            - {src: watanabe1979, value: 173, verified: secondary}
+            - {src: soucie2011, mean: 172.0, ci95_of_mean: [170.9, 173.1], p97_5: 182.0, max: 183, mode: passive, verified: full_text, note: "20〜44 歳の女性、肩甲骨を固定（男性 168.8、最大 185）"}
+            - {src: boone1979, mean: 165.0, sd: 5.0, upper_2sd: 175.0, mode: active, verified: full_text}
+            - {src: vairo2012, mean: 170.55, sd: 7.68, p95: 185.65, mode: passive, verified: full_text, note: "士官学校の学生 622 人（18〜19 歳）。95 パーセンタイルは女性 185.65、男性 185.00"}
+            - {src: fleisig2023, mean: 182.3, ci95_of_mean: [181.5, 183.1], mode: active, verified: full_text, note: "20〜29 歳の男性・右、立位、マーカーレスのモーションキャプチャ"}
+          extension:
+            - {src: joa_jarm2022, value: 50, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 60, verified: secondary}
+            - {src: watanabe1979, value: 72, verified: secondary}
+            - {src: boone1979, mean: 57.3, sd: 8.1, upper_2sd: 73.5, mode: active, verified: full_text}
+            - {src: fleisig2023, mean: 56.3, ci95_of_mean: [55.3, 57.4], mode: active, verified: full_text, note: "20〜29 歳の女性・右"}
+        max_velocity:
+          adopted: {flexion: 1369.7, extension: 1071.4}
+          flexion:
+            - {src: woo1997, mean: 1369.7, sd: 104.2, verified: full_text, task: "ソフトボールのウインドミル投法、高校女子 18 人、60 Hz"}
+            - {src: wagner2010, mean: 1112, sd: 219, verified: full_text, task: "ハンドボールのジャンプシュート、上位の男子 12 人"}
+            - {src: barrentine1998, value: ">5000", verified: secondary, note: "ウインドミル投法。barfield2018 の引用でのみ確認、軸の記載なし。採らない"}
+          extension:
+            - {src: jessop2016, mean_rad_s: 18.7, sd_rad_s: 2.8, value: 1071.4, verified: full_text, task: "単関節の全力の伸展、男子 7 人"}
+        max_acceleration:
+          adopted: {flexion: 7367, extension: 14785, extension_estimated: true}
+          records:
+            - {src: eriksson2015, mean: 7367, sd: 1923, verified: full_text, task: "両腕をできるだけ速く挙げる、男子 11 人、150 Hz（Table 1）", note: "同じ動きの最大の減速は 5912 (1576)"}
+          note: "伸展は速い動きでの値なし。角速度の採用値 × 13.8 /s"
+
+      abduction_adduction:
+        positive: 外転（側方挙上）
+        rom:
+          adopted: {lower: -75, upper: 200.7, note: "外転は boone1979 の平均+2SD（180 を超えるのは体幹の側屈などが入るため）。内転は AAOS 1965 と日整会の別法の 75（体の前で測る）"}
+          abduction:
+            - {src: joa_jarm2022, value: 180, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 180, verified: secondary}
+            - {src: watanabe1979, value: 184, verified: secondary}
+            - {src: boone1979, mean: 182.7, sd: 9.0, upper_2sd: 200.7, mode: active, verified: full_text}
+            - {src: fleisig2023, mean: 181.4, mode: active, verified: full_text, note: "20〜29 歳の女性・右"}
+          adduction:
+            - {src: joa_jarm2022, value: 0, mode: passive, verified: full_text, note: "基本の測り方。別法（肩 20 度または 45 度屈曲位）では 75"}
+            - {src: aaos1965, value: 75, verified: secondary}
+            - {src: watanabe1979, value: 0, verified: secondary}
+            - {src: gunal1996, mean: 56.6, sd: 7.0, mode: passive, verified: secondary, note: "donnelly2013 の Table 2 で確認。どの面での動きか不明"}
+        max_velocity:
+          adopted: {abduction: 1360, adduction: 1300}
+          abduction:
+            - {src: gasparutto2015, mean: 1360, sd: 435, verified: full_text, task: "野球の投球、16 歳 8 人、100 Hz", note: "肩甲骨に対する上腕の挙上（ISB の分解）。表では -1360。符号の定義は確かめていない"}
+          adduction:
+            - {src: gasparutto2015, mean: 1300, sd: 670, verified: full_text, note: "肩甲骨に対する上腕の下制"}
+          horizontal_reference:
+            - {src: kohler2024, mean: 1055, sd: 162.6, verified: full_text, task: "やり投げ、10 人、300 Hz", note: "水平内転（軸が違うので参考）"}
+        max_acceleration:
+          adopted: {abduction: 18768, adduction: 13990.41, abduction_estimated: true}
+          records:
+            - {src: kaizu2018, mean: 13990.41, sd: 25820.74, verified: full_text, task: "アマチュアの投球、19 人、250 Hz、13 Hz で平滑化", note: "内転向き。SD が平均より大きい"}
+            - {src: kaizu2018, mean: 15146.95, sd: 13554.37, verified: full_text, note: "水平内転向き（参考）"}
+          note: "外転は値なし。角速度の採用値 × 13.8 /s"
+
+      rotation:
+        positive: 内旋
+        rom:
+          adopted: {lower: -130.65, upper: 91.0, note: "外旋は vairo2012 の肩 90 度外転位の女性の 95 パーセンタイル、内旋は mckay2017 の女性の平均+2SD（肢位の記載なし）"}
+          internal:
+            - {src: joa_jarm2022, value: 80, mode: passive, verified: full_text, note: "下垂位、肘 90 度屈曲"}
+            - {src: joa_jarm2022, value: 70, mode: passive, verified: full_text, note: "肩 90 度外転、肘 90 度屈曲（その他の検査法）"}
+            - {src: aaos1965, value: 80, verified: secondary, note: "下垂位。肩 90 度外転位は 70"}
+            - {src: watanabe1979, value: 81, verified: secondary, note: "肩 90 度外転位"}
+            - {src: boone1979, mean: 67.1, sd: 4.1, upper_2sd: 75.3, mode: active, verified: full_text, note: "外転角の記載なし"}
+            - {src: vairo2012, mean: 58.91, sd: 14.04, p95: 84.65, mode: passive, verified: full_text, note: "肩 90 度外転、利き腕"}
+            - {src: mckay2017, mean: 63, sd: 14.0, upper_2sd: 91.0, mode: active, verified: full_text, note: "女性（男性 58 (12.0)）。肢位の記載なし"}
+            - {src: fleisig2023, mean: 75.0, mode: active, verified: full_text, note: "20〜29 歳の女性・左、肩 90 度外転"}
+          external:
+            - {src: joa_jarm2022, value: 60, mode: passive, verified: full_text, note: "下垂位"}
+            - {src: joa_jarm2022, value: 90, mode: passive, verified: full_text, note: "肩 90 度外転位"}
+            - {src: aaos1965, value: 60, verified: secondary, note: "下垂位。肩 90 度外転位は 90"}
+            - {src: watanabe1979, value: 103, verified: secondary, note: "肩 90 度外転位"}
+            - {src: boone1979, mean: 99.6, sd: 7.6, upper_2sd: 114.8, mode: active, verified: full_text}
+            - {src: vairo2012, mean: 104.64, sd: 10.83, p95: 130.65, mode: passive, verified: full_text, note: "肩 90 度外転。95 パーセンタイルは女性 130.65、男性 120.05。下垂位は 82.28±12.34"}
+            - {src: mckay2017, mean: 83, sd: 15.8, upper_2sd: 114.6, mode: active, verified: full_text, note: "女性"}
+          others_note: "肩甲骨を固定すると内旋 55〜68、肩複合体として測ると 94〜110（macedo2007、gunal1996 の二次引用）"
+          dynamic_reference:
+            note: "投げる動作では静的な可動域を大きく超える外旋が出る（肩甲骨・体幹の動きを含む）。胸郭に対する上腕で見る場合は、これを誤りとして捨てないよう注意"
+            records:
+              - {src: dillman1993, value: 175, mode: dynamic, verified: abstract, task: "投球の最大外旋、熟練した投手 29 人"}
+              - {src: fleisig2003, value: 172, mode: dynamic, verified: abstract, task: "テニスのサーブの最大外旋、五輪の 20 人"}
+        max_velocity:
+          adopted: {internal: 7250, external: 2400}
+          internal:
+            - {src: fleisig2006, mean: 7250, sd: 1600, upper_2sd: 10450, verified: full_text, task: "少年野球の投球（4 oz の球）、34 人、240 Hz"}
+            - {src: fleisig1999, mean: 7430, sd: 1270, verified: secondary, note: "大学生 115 人。fleisig2006 の Table 4 で確認（原典の要旨に数字なし）"}
+            - {src: dillman1993, value: 7000, verified: abstract, note: "\"near 7,000 degrees/sec\"、熟練した投手 29 人"}
+            - {src: pappas1985, value: 6180, verified: abstract, note: "MLB の投手 15 人の平均"}
+            - {src: berkson_imu, value: 12000, verified: full_text, note: "プロ 1 人、腕の IMU 1000 Hz。査読の有無は不明。採らない"}
+            - {src: gasparutto2015, mean: 3100, sd: 1000, verified: full_text, note: "肩甲骨に対する上腕（定義が違う）"}
+          external:
+            - {src: gasparutto2015, mean: 2400, sd: 810, verified: full_text, note: "肩甲骨に対する上腕、投球"}
+        max_acceleration:
+          adopted: {internal: 95246.28, external: 33120, external_estimated: true}
+          records:
+            - {src: kaizu2018, mean: 95246.28, sd: 55165.56, verified: full_text, task: "アマチュアの投球、最大外旋の直前（本文）", note: "同じ論文の次の文で、肘伸展の角速度がこれと同じ数字（95,246.28 °/s）になっており、そちらは写し間違いとみられる。この値は図とは照合していない"}
+            - {src: pappas1985, value: "300000-500000", verified: secondary, note: "berkson_imu が Pappas 1985 を出典として引く値。採らない"}
+          note: "外旋は値なし。角速度の採用値 × 13.8 /s"
+
+    # ==================================================================
+    elbow:
+      flexion_extension:
+        positive: 屈曲
+        rom:
+          adopted: {lower: -14.9, upper: 160.0, note: "屈曲・過伸展とも soucie2011 の 20〜44 歳女性の p97.5"}
+          flexion:
+            - {src: joa_jarm2022, value: 145, mode: passive, verified: full_text, note: "前腕回外位"}
+            - {src: aaos1965, value: 150, verified: secondary}
+            - {src: watanabe1979, value: 146, verified: secondary}
+            - {src: soucie2011, mean: 150.0, ci95_of_mean: [149.1, 150.9], p97_5: 160.0, max: 166, mode: passive, verified: full_text, note: "20〜44 歳の女性（男性 144.6、p97.5 156.3）"}
+            - {src: boone1979, mean: 140.5, sd: 4.9, upper_2sd: 150.3, mode: active, verified: full_text}
+            - {src: mckay2017, mean: 149, sd: 5.4, upper_2sd: 159.8, mode: active, verified: full_text, note: "女性"}
+            - {src: zwerus2019, mean: 155, mode: passive, verified: full_text, note: "18〜29 歳の女性（SD の記載なし）"}
+          extension:
+            note: "過伸展（0 度を越えて伸びる角度）"
+            records:
+              - {src: joa_jarm2022, value: 5, mode: passive, verified: full_text}
+              - {src: aaos1965, value: 0, verified: secondary}
+              - {src: watanabe1979, value: 4, verified: secondary}
+              - {src: soucie2011, mean: 4.7, ci95_of_mean: [3.9, 5.5], p97_5: 14.9, max: 20, mode: passive, verified: full_text, note: "20〜44 歳の女性（男性 0.8、p97.5 10.3）。全年齢の最大 22"}
+              - {src: boone1979, mean: 0.3, sd: 2.7, upper_2sd: 5.7, mode: active, verified: full_text}
+              - {src: mckay2017, mean: 4, sd: 5.1, upper_2sd: 14.2, mode: active, verified: full_text, note: "女性"}
+              - {src: zwerus2019, mean: 12, mode: passive, verified: full_text, note: "18〜29 歳の女性、平均（95% CI 10〜14）"}
+        max_velocity:
+          adopted: {flexion: 1492.5, extension: 4595}
+          extension:
+            - {src: pappas1985, value: 4595, verified: abstract, task: "MLB の投手 15 人の平均。高速度フィルム", note: "採った。新しい研究（2000〜2800）より大きい。新しい研究の多くは 13 Hz 前後で平滑化してピークが低く出るため、上限には大きい方を使う"}
+            - {src: fleisig2025, value: 2790, verified: full_text, note: "標準誤差 81（SD ではない）。5 oz の標準球の投球（Table 3）"}
+            - {src: fleisig2019, mean: 2631, sd: 292, verified: full_text, note: "対照群の投球（Table 3）"}
+            - {src: fleisig2011, mean: 2573, sd: 203, verified: abstract, note: "最も遠くへ投げる遠投"}
+            - {src: cheraghi2014, mean: 2363, sd: 536, range: [1800, 3500], verified: full_text, task: "ボクシングの右ストレート、国際級 8 人、250 Hz"}
+            - {src: jessop2016, mean_rad_s: 27.9, sd_rad_s: 3.7, value: 1598.6, verified: full_text, task: "単関節の全力"}
+          flexion:
+            - {src: woo1997, value: 1492.5, verified: full_text, task: "ソフトボールのウインドミル投法（SD の記載なし）"}
+            - {src: jessop2016, mean_rad_s: 19.9, sd_rad_s: 1.5, value: 1140.2, verified: full_text, task: "単関節の全力"}
+        max_acceleration:
+          adopted: {extension: 47335.13, flexion: 20597, flexion_estimated: true}
+          records:
+            - {src: kaizu2018, mean: 47335.13, sd: 8264.23, verified: full_text, task: "アマチュアの投球、最大外旋の後（本文）"}
+          note: "屈曲は値なし。角速度の採用値 × 13.8 /s"
+
+    # ==================================================================
+    trunk:
+      definition: "骨盤に対する胸郭（胸腰椎全体）。日整会は第 1 胸椎と第 5 腰椎の棘突起を結ぶ線と仙骨の角度"
+      flexion_extension:
+        positive: 屈曲（前屈）
+        rom:
+          adopted: {lower: -30, upper: 80, note: "屈曲は AAOS 1965 の 80、伸展は日整会の 30"}
+          flexion:
+            - {src: joa_jarm2022, value: 45, mode: passive, verified: full_text, note: "股関節の動きが入らないように測る"}
+            - {src: aaos1965, value: 80, verified: secondary}
+            - {src: mousavi2018, value: 54.5, mode: active, computed: true, verified: full_text, note: "光学式、健常 19 人（24〜74 歳）。胸椎（T1-L1）7.1 と腰椎（L1-仙骨）47.4 の和（Table 1、和は自分で計算）"}
+          extension:
+            - {src: joa_jarm2022, value: 30, mode: passive, verified: full_text}
+            - {src: aaos1965, value: "20-30", verified: secondary}
+            - {src: mousavi2018, value: 20.4, mode: active, computed: true, verified: full_text, note: "胸椎 9.5 と腰椎 10.9 の和"}
+        max_velocity:
+          adopted: {flexion: 506.7, extension: 253.3}
+          flexion:
+            - {src: fett2021, mean: 506.7, sd: 69.0, verified: full_text, task: "テニスのサーブ（アドサイド）、ドイツのジュニア男子 14 人、300 Hz", note: "Trunk flexion ω。骨盤に対する相対か全体座標かは確かめていない"}
+            - {src: wagner2010, mean: 474, sd: 100, verified: full_text, task: "ハンドボール", note: "全体座標"}
+          extension:
+            - {src: connolly2021, value: 253.3, verified: full_text, task: "テニスのサーブの腰椎の伸展（少人数のジュニア）", note: "表では負"}
+            - {src: marras1995, mean: 96, sd: 48, verified: full_text, task: "健常 339 人が楽にできる最速で動く"}
+        max_acceleration:
+          adopted: {flexion: 6992, extension: 3496, estimated: true, note: "速い動きでの値なし。角速度の採用値 × 13.8 /s。下の持ち上げ作業の値は遅い作業なので上限に使わない"}
+          records:
+            - {src: marras1993, value: 1341.92, verified: full_text, task: "工場の持ち上げ作業の矢状面、作業ごとの最大"}
+            - {src: marras1995, mean: 414, sd: 254, verified: full_text, task: "楽にできる最速、伸展"}
+
+      lateral_flexion:
+        positive: 右側屈
+        rom:
+          adopted: {lower: -50, upper: 50, note: "日整会の 50"}
+          each_side:
+            - {src: joa_jarm2022, value: 50, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 35, verified: secondary}
+            - {src: mousavi2018, value: 42.4, mode: active, computed: true, verified: full_text, note: "左右合計の胸椎 56.2 と腰椎 28.6 の和を 2 で割った（Table 2）"}
+        max_velocity:
+          adopted: {each_side: 424.0}
+          records:
+            - {src: fett2021, mean: 424.0, sd: 96.5, verified: full_text, task: "テニスのサーブ（デュースサイド、Trunk tilt ω）。アドは 421.0±99.6"}
+            - {src: horan2012, mean: 416, sd: 51, verified: full_text, task: "ゴルフ、胸郭の全体座標"}
+        max_acceleration:
+          adopted: {each_side: 5851, estimated: true, note: "速い動きでの値なし。424.0 × 13.8 /s"}
+          records:
+            - {src: marras1993, value: 1030.29, verified: full_text, task: "持ち上げ作業、作業ごとの最大"}
+
+      rotation:
+        positive: 右回旋
+        rom:
+          adopted: {lower: -64.6, upper: 64.6, note: "mousavi2018 の光学式の実測（計算）。投球中の骨盤と上部体幹のねじれ 55±6（fleisig2013）も AAOS の 45 を超える"}
+          each_side:
+            - {src: joa_jarm2022, value: 40, mode: passive, verified: full_text, note: "座位で骨盤を固定"}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: mousavi2018, value: 64.6, mode: active, computed: true, verified: full_text, note: "左右合計の胸椎 108 と腰椎 21.2 の和を 2 で割った（Table 3）"}
+            - {src: fleisig2013, mean: 55, sd: 6, mode: dynamic, verified: abstract, note: "投球中の骨盤と上部体幹の水平面の角度の差の最大、プロ 40 人（打撃は 46±9）"}
+        max_velocity:
+          adopted: {each_side: 954.8}
+          records:
+            - {src: kageyama2014, mean: 954.8, sd: 127.8, verified: full_text, task: "投球、大学の投手 10 人、500 Hz", note: "骨盤と上部体幹の角度の差を微分（相対）。全体座標では上部体幹 1360.8 (106.8)、骨盤 738.2 (72.8)"}
+            - {src: fleisig2003, value: 870, verified: abstract, note: "テニスのサーブの上部体幹の回旋（全体座標）"}
+        max_acceleration:
+          adopted: {each_side: 11600}
+          records:
+            - {src: fleisig2013, mean: 11600, sd: 3100, verified: abstract, task: "投球の体幹のねじれの角加速度、プロ 40 人、240 Hz（打撃は 7200±2800）"}
+
+    # ==================================================================
+    neck:
+      definition: "胸郭に対する頭（頸椎全体）"
+      flexion_extension:
+        positive: 屈曲（前屈）
+        rom:
+          adopted: {lower: -82.74, upper: 66.67, note: "zarate2023 の 18〜25 歳の平均+2SD（計算）。日整会（屈曲 60、伸展 50）より大きい"}
+          flexion:
+            - {src: joa_jarm2022, value: 60, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: zarate2023, mean: 46.75, sd: 9.96, upper_2sd: 66.67, mode: active, verified: full_text, note: "CROM、18〜25 歳（Table 3）。全年齢（18〜75 歳、122 人）は 39.94 (9.84)"}
+            - {src: chen1999, value: 61, mode: active, verified: secondary, note: "メタ分析（傾斜計、20〜50 歳）。zarate2023 の考察で確認"}
+          extension:
+            - {src: joa_jarm2022, value: 50, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: zarate2023, mean: 67.68, sd: 7.53, upper_2sd: 82.74, mode: active, verified: full_text, note: "18〜25 歳。全年齢は 60.49 (10.28)"}
+            - {src: chen1999, value: 77, mode: active, verified: secondary}
+          total_reference:
+            - {src: ferrario2002, value: 136, mode: active, verified: abstract, note: "屈曲と伸展の合計。光学式、若い女性 30 人（男性 30 人は 130）。頭と胸郭を分けて測る"}
+        max_velocity:
+          adopted: {both: 780, estimated: true, note: "最速の前屈・後屈の値はなし。grossman1988 は縦の激しい首振りも測り、頻度は横と同程度と書くが、要旨に数字はない。横の 780 を流用した"}
+          records:
+            - {src: carriot2014, mean: 306, sd: 20.1, verified: full_text, task: "サッカー中の頭（全体座標）、8 人", note: "垂直の半規管の面の値で、ピッチとロールが混ざる"}
+            - {src: bussone2010, value: 516.8, verified: abstract, task: "日常動作の頭の 3 軸を合わせた大きさ（9.02 rad/s）。頷きで最大"}
+            - {src: vikne2013, value: "131.6-139.6", verified: full_text, note: "最大の速さで動いたときの平均角速度（最大値ではない）"}
+        max_acceleration:
+          adopted: {both: 10764, estimated: true, note: "なし。角速度の推定値 780 × 13.8 /s"}
+          records:
+            - {src: bussone2010, value: 53342, verified: abstract, note: "日常動作の頭の 3 軸を合わせた大きさ（931 rad/s^2）。最大は跳躍のときで衝撃を含むので採らない"}
+
+      lateral_flexion:
+        positive: 右側屈
+        rom:
+          adopted: {lower: -50, upper: 50, note: "日整会の 50"}
+          each_side:
+            - {src: joa_jarm2022, value: 50, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 45, verified: secondary}
+            - {src: ferrario2002, value: 45.5, mode: active, computed: true, verified: abstract, note: "若い女性の左右合計 91 を 2 で割った（要旨に「ほぼ左右対称」とある）。男性は合計 77"}
+        max_velocity:
+          adopted: {each_side: 780, estimated: true, note: "速い動きの値はなし。回旋の 780 を流用"}
+          records:
+            - {src: meisingset2015, value: 85.7, ci95: [80.6, 90.7], verified: full_text, note: "自分のペースで動いたときの最大（速い動きではない）"}
+        max_acceleration:
+          adopted: {each_side: 10764, estimated: true, note: "なし。780 × 13.8 /s"}
+
+      rotation:
+        positive: 右回旋
+        rom:
+          adopted: {lower: -81, upper: 81, note: "ferrario2002 の若い女性の左右合計 162 を 2 で割った（要旨に「左右対称」とある）"}
+          each_side:
+            - {src: joa_jarm2022, value: 60, mode: passive, verified: full_text}
+            - {src: aaos1965, value: 60, verified: secondary}
+            - {src: ferrario2002, value: 81, mode: active, computed: true, verified: abstract, note: "合計 162（女性）、155（男性）。光学式"}
+            - {src: sforza2002, value: 80, mode: active, computed: true, verified: abstract, note: "男子 16 歳前後の合計 160 を 2 で割った（23 歳 155、37 歳 153）"}
+        max_velocity:
+          adopted: {each_side: 780}
+          records:
+            - {src: grossman1988, value: 780, verified: abstract, task: "激しい自発の横の首振り（2.6 Hz 以下）、健常 20 人の群の中央値", note: "頭の全体座標"}
+            - {src: roijezon2010, mean: 348, sd: 92, verified: abstract, task: "できるだけ速く 1 回振り向く、健常女性 49 人", note: "頭と胸郭の相対"}
+            - {src: forsberg2023, mean: 355.1, sd: 157.2, verified: full_text, task: "できるだけ速く左右に、20 人（頸部痛 7 人を含む）。PICO G2 4K の HMD で測った左（光学式は 343.4 (134.1)）", note: "550 を超えた例がある"}
+        max_acceleration:
+          adopted: {each_side: 8500}
+          records:
+            - {src: zangemeister1986, value: 8500, verified: abstract, task: "速い自発の横の首振り 400 回、健常 30 人の最大"}
+
+  # ----------------------------------------------------------------------
+  # VR（PICO などの HMD）での頭の動きの参考
+  vr_head_reference:
+    - {src: marinsek2024, value: 646, verified: full_text, note: "VR ゲーム 3 本での頭の角速度（ヨーとピッチの合成）の最大（P100）。P99 は 197〜224。33 人、HTC Vive Pro 2（Table III）"}
+    - {src: marinsek2024, value_rad_s2: 800, value: 45837, verified: full_text, note: "同じ論文が外れ値として除いた HMD の角加速度のしきい値（アマチュアの競技の最大として）。図 4 では 800 deg/s^2 と書かれ、単位が合わない"}
+    - {src: forsberg2023, verified: full_text, note: "PICO G2 4K の HMD と光学式で、速い首の回旋の最大角速度はほぼ同じ（neck.rotation）"}
+
+  # ----------------------------------------------------------------------
 sources:
   lafan1:
     authors: "Harvey FG, Yurick M, Nowrouzezahrai D, Pal C"
@@ -75,3 +642,541 @@ sources:
   microban_mjcf:
     title: "Microban's model and HOME: link masses and inertias, HOME's joint angles"
     file: "src/mjlab_microban/robot/microban/robot.xml, config/home_pose.yaml"
+  # ---- 可動範囲
+  joa_jarm2022:
+    authors: "日本リハビリテーション医学会・日本整形外科学会・日本足の外科学会"
+    year: 2021
+    title: "関節可動域表示ならびに測定法改訂について（2022年4月改訂）"
+    journal: "Jpn J Rehabil Med 58(10):1188-1200（日本足の外科学会雑誌 42:S372-S385、日整会誌 96:75-86 にも掲載）"
+    doi: "10.2490/jjrmc.58.1188"
+    url: "https://www.jarm.or.jp/member/document/kadou/03.pdf（本体）、02.pdf（原則）、04.pdf（参考値一覧表）"
+    note: "原則として他動運動で測る（02.pdf の I-4-1）。正常値ではなく参考可動域"
+  aaos1965:
+    authors: "American Academy of Orthopaedic Surgeons, Committee on Joint Motion"
+    year: 1965
+    title: "Joint Motion: Method of Measuring and Recording"
+    journal: "AAOS（1966 年に British Orthopaedic Association が再版）"
+    note: "原典は開けず。値は joa_jarm2022 の参考値一覧表（注4）で確認。Greene & Heckman 1994（The Clinical Measurement of Joint Motion, AAOS）も開けなかった。botman2020 が版を書かずに AAOS の値として載せる表は、股伸展 20・股外転 40 で 1965 年版（30・45）と違う"
+  watanabe1979:
+    authors: "渡辺英夫 ほか"
+    year: 1979
+    title: "健康日本人における四肢関節可動域について. 年齢による変化"
+    journal: "日本整形外科学会雑誌 53:275-291"
+    note: "原典は開けず。値は joa_jarm2022 の参考値一覧表（注5、10 歳以上 80 歳未満の平均）で確認"
+  botman2020:
+    authors: "Botman M, Hendriks TCC, de Haas LEM, et al."
+    year: 2020
+    title: "The Effectiveness of Burn Scar Contracture Release Surgery in Low- and Middle-income Countries"
+    journal: "Plast Reconstr Surg Glob Open 8(7):e2907（Supplementary Digital Content 1）"
+    doi: "10.1097/GOX.0000000000002907"
+  soucie2011:
+    authors: "Soucie JM, Wang C, Forsyth A, Funk S, Denny M, Roach KE, Boone D; Hemophilia Treatment Center Network"
+    year: 2011
+    title: "Range of motion measurements: reference values and a database for comparison studies"
+    journal: "Haemophilia 17(3):500-507"
+    doi: "10.1111/j.1365-2516.2010.02399.x"
+    url: "https://archive.cdc.gov/www_cdc_gov/ncbddd/jointrom/index.html（CDC の参考値の表）、https://web.archive.org/web/2020/https://www.cdc.gov/ncbddd/jointrom/documents/Normal-Dataset.xls（元データ）"
+    note: "論文本体は有料で開けず。要旨で他動・ゴニオメーター・674 人を確認。平均と 95% CI は CDC の表で確認。95% CI は平均の信頼区間で上限には使えないため、p97.5 と最大を元データから計算した（左右の脚を 1 件ずつ数える）"
+  boone1979:
+    authors: "Boone DC, Azen SP"
+    year: 1979
+    title: "Normal range of motion of joints in male subjects"
+    journal: "J Bone Joint Surg Am 61(5):756-759"
+    doi: "10.2106/00004623-197961050-00017"
+    url: "https://web.archive.org/web/20100705014922/http://www.ejbjs.org/cgi/reprint/61/5/756.pdf"
+  roaas1982:
+    authors: "Roaas A, Andersson GBJ"
+    year: 1982
+    title: "Normal range of motion of the hip, knee and ankle joints in male subjects, 30-40 years of age"
+    journal: "Acta Orthop Scand 53(2):205-208"
+    doi: "10.3109/17453678208992202"
+  svenningsen1989:
+    authors: "Svenningsen S, et al."
+    year: 1989
+    title: "Hip motion related to age and sex"
+    journal: "Acta Orthop Scand 60(1):97-100"
+    doi: "10.3109/17453678909150103"
+  mckay2017:
+    authors: "McKay MJ, et al."
+    year: 2017
+    title: "Normative reference values for strength and flexibility of 1,000 children and adults"
+    journal: "Neurology 88(1):36-43"
+    doi: "10.1212/WNL.0000000000003466"
+  han2015:
+    authors: "Han H, et al."
+    year: 2015
+    title: "Hip rotation range of motion in sitting and prone positions in healthy Japanese adults"
+    journal: "J Phys Ther Sci 27(2):441-445"
+    doi: "10.1589/jpts.27.441"
+  menadue2006:
+    authors: "Menadue C, et al."
+    year: 2006
+    title: "Reliability of two goniometric methods of measuring active inversion and eversion range of motion at the ankle"
+    journal: "BMC Musculoskelet Disord 7:60"
+    doi: "10.1186/1471-2474-7-60"
+  medina2009:
+    authors: "Medina McKeon JM, Hertel J"
+    year: 2009
+    title: "Sex differences and representative values for 6 lower extremity alignment measures"
+    journal: "J Athl Train 44(3):249-255"
+    doi: "10.4085/1062-6050-44.3.249"
+  vairo2012:
+    authors: "Vairo GL, Duffey ML, Owens BD, Cameron KL"
+    year: 2012
+    title: "Clinical descriptive measures of shoulder range of motion for a healthy, young and physically active cohort"
+    journal: "Sports Med Arthrosc Rehabil Ther Technol 4:33"
+    doi: "10.1186/1758-2555-4-33"
+  fleisig2023:
+    authors: "Fleisig GS, et al."
+    year: 2023
+    title: "Active range of motion of the shoulder: a cross-sectional study of 6635 subjects"
+    journal: "JSES Int 7(1):132-137"
+    doi: "10.1016/j.jseint.2022.09.008"
+  zwerus2019:
+    authors: "Zwerus EL, et al."
+    year: 2019
+    title: "Normative values and affecting factors for the elbow range of motion"
+    journal: "Shoulder Elbow 11(3):215-224"
+    doi: "10.1177/1758573217728711"
+  gunal1996:
+    authors: "Gunal I, et al."
+    year: 1996
+    title: "Normal range of motion of the joints of the upper extremity in male subjects, with special reference to side"
+    journal: "J Bone Joint Surg Am 78(9):1401-1404"
+    doi: "10.2106/00004623-199609000-00017"
+    note: "原典は開けず。値は Donnelly TD, et al. Open Orthop J 2013;7:310-315（doi:10.2174/1874325001307010310）の Table 2 で確認"
+  moromizato2016:
+    authors: "Moromizato K, et al."
+    year: 2016
+    title: "Whole-body patterns of the range of joint motion in young adults: masculine type and feminine type"
+    journal: "J Physiol Anthropol 35:23"
+    doi: "10.1186/s40101-016-0112-8"
+  macedo2007:
+    authors: "Macedo LG"
+    year: 2007
+    title: "Normal range of motion of joints in female subjects in different age groups（修士論文、University of Alberta）"
+    doi: "10.7939/r3-5xgt-1w55"
+    note: "論文版（Physiother Theory Pract 2009;25(2):145-164）は開けず"
+  mousavi2018:
+    authors: "Mousavi SJ, Tromp R, Swann MC, White AP, Anderson DE"
+    year: 2018
+    title: "Between-session reliability of opto-electronic motion capture in measuring sagittal posture and 3-D ranges of motion of the thoracolumbar spine"
+    journal: "J Biomech 79:248-252"
+    doi: "10.1016/j.jbiomech.2018.08.033"
+  zarate2023:
+    authors: "Zárate-Tejero C, Rodríguez-Rubio PR, Brandt L, Krauss J, Hernández-Secorún M, Lucha-López O, Hidalgo-García C"
+    year: 2023
+    title: "Association between Age, Sex and Cervical Spine Sagittal Plane Motion: A Descriptive and Correlational Study in Healthy Volunteers"
+    journal: "Life 13(2):461"
+    doi: "10.3390/life13020461"
+  chen1999:
+    authors: "Chen J, Solinger AB, Poncet JF, Lantz CA"
+    year: 1999
+    title: "Meta-analysis of normative cervical motion"
+    journal: "Spine 24:1571-1578"
+    doi: "10.1097/00007632-199908010-00011"
+    note: "原典は開けず。値は zarate2023 の考察で確認"
+  ferrario2002:
+    authors: "Ferrario VF, Sforza C, Serrao G, Grassi G, Mossi E"
+    year: 2002
+    title: "Active range of motion of the head and cervical spine: a three-dimensional investigation in healthy young adults"
+    journal: "J Orthop Res 20(1):122-129"
+    doi: "10.1016/S0736-0266(01)00079-1"
+    note: "要旨で確認。本文は開けず（SD は不明）"
+  sforza2002:
+    authors: "Sforza C, Grassi G, Fragnito N, Turci M, Ferrario VF"
+    year: 2002
+    title: "Three-dimensional analysis of active head and cervical spine range of motion: effect of age in healthy male subjects"
+    journal: "Clin Biomech 17(8):611-614"
+    doi: "10.1016/s0268-0033(02)00071-2"
+
+  # ---- 角速度・角加速度（下肢）
+  cheng2026:
+    authors: "Cheng G, et al."
+    year: 2026
+    title: "Biomechanical adaptations of kicks following vertical and single-leg plyometric training in competitive Wushu sanda athletes"
+    journal: "Front Physiol 17:1888868"
+    doi: "10.3389/fphys.2026.1888868"
+  orloff2007:
+    authors: "Orloff H, Habibi L, Kramer B"
+    year: 2007
+    title: "Comparison Between Ground Reaction Force Patterns and Angular, Approach, and Ball Velocities for In-Step Kicking"
+    journal: "ISBS 2007（25th International Symposium on Biomechanics in Sports）"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/561"
+  miyashiro2019:
+    authors: "Miyashiro K, Nagahara R, Yamamoto K, Nishijima T"
+    year: 2019
+    title: "Kinematics of Maximal Speed Sprinting With Different Running Speed, Leg Length, and Step Characteristics"
+    journal: "Front Sports Act Living 1:37"
+    doi: "10.3389/fspor.2019.00037"
+  kivi2001:
+    authors: "Kivi D, Maraj B, Gervais P, Moreau M"
+    year: 2001
+    title: "Lower extremity kinematics during high speed treadmill sprinting over a range of velocities"
+    journal: "ISBS 2001, pp.102-105"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/3786"
+  alt2026:
+    authors: "Alt T, Clark KP, Augustsson J, Mendiguchia J"
+    year: 2026
+    title: "Maximum Sprints Elicit Higher Peak Knee Joint Power than Resistance Training Exercises"
+    journal: "Sports 14(6):221"
+    doi: "10.3390/sports14060221"
+  ho2019:
+    authors: "Ho M, Kong PW, et al."
+    year: 2019
+    title: "Foot orthoses alter lower limb biomechanics but not jump performance in basketball players with and without flat feet"
+    journal: "J Foot Ankle Res 12:24"
+    doi: "10.1186/s13047-019-0334-1"
+  branco2019:
+    authors: "Branco MAC, et al."
+    year: 2019
+    title: "Effect of Aging on the Lower Limb Kinematics in Karate Practitioners: Comparing Athletes and Their Senseis"
+    journal: "J Healthc Eng 2019:2672185"
+    doi: "10.1155/2019/2672185"
+  grimmer2020:
+    authors: "Grimmer M, et al."
+    year: 2020
+    title: "Human Lower Limb Joint Biomechanics in Daily Life Activities"
+    journal: "Front Robot AI 7:13"
+    doi: "10.3389/frobt.2020.00013"
+  detjareny2013:
+    authors: "Detjareny T, Limroongreungrat W, et al."
+    year: 2013
+    title: "（テコンドーの後ろ蹴りの運動学。題は未確認）"
+    journal: "ISBS 2013"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/5736"
+  gavagan2017:
+    authors: "Gavagan CJ, Sayers MGL"
+    year: 2017
+    title: "A biomechanical analysis of the roundhouse kicking technique of expert practitioners: A comparison between the martial arts disciplines of Muay Thai, Karate, and Taekwondo"
+    journal: "PLoS ONE 12:e0182645"
+    doi: "10.1371/journal.pone.0182645"
+  kageyama2015:
+    authors: "Kageyama M, Sugiyama T, Kanehisa H, Maeda A"
+    year: 2015
+    title: "Difference Between Adolescent and Collegiate Baseball Pitchers in the Kinematics and Kinetics of the Lower Limbs and Trunk During Pitching Motion"
+    journal: "J Sports Sci Med 14:246-255"
+    url: "https://www.jssm.org/jssm-14-246.xml"
+  radzak2020:
+    authors: "Radzak KN, Stickley CD"
+    year: 2020
+    title: "Fatigue-Induced Hip-Abductor Weakness and Changes in Biomechanical Risk Factors for Running-Related Injuries"
+    journal: "J Athl Train 55(12)"
+    doi: "10.4085/1062-6050-531-19"
+  nunome2002:
+    authors: "Nunome H, Asai T, Ikegami Y, Sakurai S"
+    year: 2002
+    title: "Three-dimensional kinetic analysis of side-foot and instep soccer kicks"
+    journal: "Med Sci Sports Exerc 34(12):2028-2036"
+    doi: "10.1097/00005768-200212000-00025"
+  jessop2016:
+    authors: "Jessop DM, Pain MTG"
+    year: 2016
+    title: "Maximum Velocities in Flexion and Extension Actions for Sport"
+    journal: "J Hum Kinet 50:37-44"
+    doi: "10.1515/hukin-2015-0139"
+  kellis2007:
+    authors: "Kellis E, Katis A"
+    year: 2007
+    title: "Biomechanical characteristics and determinants of instep soccer kick"
+    journal: "J Sports Sci Med 6(2):154-165"
+    url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC3786235/"
+  manolopoulos2006:
+    authors: "Manolopoulos E, et al."
+    year: 2006
+    title: "（インステップキックの研究。原典は開けず）"
+    note: "値は kellis2007 の Table 4 で確認"
+  levanon1998:
+    authors: "Levanon J, Dapena J"
+    year: 1998
+    title: "Comparison of the kinematics of the full-instep and pass kicks in soccer"
+    journal: "Med Sci Sports Exerc 30:917-927"
+    note: "原典は開けず。値は kellis2007 と jessop2016 で確認（両者で食い違う）"
+  sinclair2014:
+    authors: "Sinclair J, Fewtrell D, Taylor PJ, Bottoms L, Atkins S, Hobbs SJ"
+    year: 2014
+    title: "Three-dimensional kinematic correlates of ball velocity during maximal instep soccer kicking in males"
+    journal: "Eur J Sport Sci 14:799-805"
+    doi: "10.1080/17461391.2014.908956"
+  preuschl2016:
+    authors: "Preuschl E, Hassmann M, Baca A"
+    year: 2016
+    title: "A Kinematic Analysis of the Jumping Front-Leg Axe-Kick in Taekwondo"
+    journal: "J Sports Sci Med 15(1):92-101"
+    url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC4763851/"
+  tamura2016:
+    authors: "Tamura A, et al."
+    year: 2016
+    title: "Fatigue Alters Landing Shock Attenuation During a Single-Leg Vertical Drop Jump"
+    journal: "Orthop J Sports Med 4:2325967115626412"
+    doi: "10.1177/2325967115626412"
+  meamarbashi2010:
+    authors: "Meamarbashi A, Attarzadeh Hossaini SR"
+    year: 2010
+    title: "Application of Novel Inertial Technique to Compare the Kinematics and Kinetics of the Legs in the Soccer Instep Kick"
+    journal: "J Hum Kinet 23:3-12"
+    doi: "10.2478/v10078-010-0001-x"
+  vaningenschenau1985:
+    authors: "van Ingen Schenau GJ, Bobbert MF, Huijing PA, Woittiez RD"
+    year: 1985
+    title: "The instantaneous torque-angular velocity relation in plantar flexion during jumping"
+    journal: "Med Sci Sports Exerc 17(4):422-426"
+    doi: "10.1249/00005768-198508000-00003"
+  duchene2026:
+    authors: "Duchene Y, et al."
+    year: 2026
+    title: "Effect of Consecutive Jumping Trials on Metatarsophalangeal, Ankle, Knee and Hip Biomechanics During Take-Off and Landing"
+    journal: "Eur J Sport Sci 26:e70217"
+    doi: "10.1002/ejsc.70217"
+  chan2014:
+    authors: "Chan ZYS, Ha SCW, Fong DTP, Chan KM"
+    year: 2014
+    title: "Comparison of ankle joint kinematics of a single athlete during an ankle inversion sprain incident and normal non-injury motions"
+    journal: "J Foot Ankle Res 7(Suppl 1):A28"
+    url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC4101581/"
+  fong2009:
+    authors: "Fong DTP, Hong Y, Shima Y, Krosshaug T, Yung PSH, Chan KM"
+    year: 2009
+    title: "Biomechanics of supination ankle sprain: a case report of an accidental injury event in the laboratory"
+    journal: "Am J Sports Med 37(4):822-827"
+    doi: "10.1177/0363546508328102"
+    note: "Loughborough 大学のリポジトリの著者稿の表 1 で確認"
+  kristianslund2011:
+    authors: "Kristianslund E, Bahr R, Krosshaug T"
+    year: 2011
+    title: "Kinematics and kinetics of an accidental lateral ankle sprain"
+    journal: "J Biomech 44:2576-2578"
+    doi: "10.1016/j.jbiomech.2011.07.014"
+  chu2010:
+    authors: "Chu VWS, Fong DTP, et al."
+    year: 2010
+    title: "Differentiation of ankle sprain motion and common sporting motion by ankle inversion velocity"
+    journal: "J Biomech 43(10):2035-2038"
+    doi: "10.1016/j.jbiomech.2010.03.029"
+  flores2026:
+    authors: "Flores N, Morio CYM"
+    year: 2026
+    title: "Which pronator are you? New perspectives from an unsupervised clustering approach in running"
+    journal: "Front Sports Act Living 7:1682315"
+    doi: "10.3389/fspor.2025.1682315"
+  digby2005:
+    authors: "Digby CJ, Lake MJ, Lees A"
+    year: 2005
+    title: "High-speed coupling characteristics of the foot and shank during the stance phase of running"
+    journal: "ISB 2005（学会抄録）"
+    url: "https://media.isbweb.org/images/conf/2005/abstracts/0996.pdf"
+  lysdal2022:
+    authors: "Lysdal FG, Wang Y, Delahunt E, Gehring D, Kosik KB, Krosshaug T, Li Y, Mok KM, Pasanen K, Remus A, Terada M, Fong DTP"
+    year: 2022
+    title: "What have we learnt from quantitative case reports of acute lateral ankle sprains injuries and episodes of 'giving-way' of the ankle joint, and what shall we further investigate?"
+    journal: "Sports Biomech 21(4)"
+    doi: "10.1080/14763141.2022.2035801"
+  fong2012:
+    authors: "Fong DTP, Ha SCW, Mok KM, Chan CWL, Chan KM"
+    year: 2012
+    title: "Kinematics analysis of ankle inversion ligamentous sprain injuries in sports: five cases from televised tennis competitions"
+    journal: "Am J Sports Med 40:2627-2632"
+    doi: "10.1177/0363546512458259"
+  ha2013:
+    authors: "Ha SCW, Tao L, Fong DTP"
+    year: 2013
+    title: "Kinematics analysis of an ankle inversion ligamentous sprain injury case in basketball"
+    journal: "ISBS 2013（学会抄録）"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/5536"
+
+  # ---- 角速度・角加速度（上肢・体幹・首）
+  pappas1985:
+    authors: "Pappas AM, Zawacki RM, Sullivan TJ"
+    year: 1985
+    title: "Biomechanics of baseball pitching. A preliminary report"
+    journal: "Am J Sports Med 13(4):216-222"
+    doi: "10.1177/036354658501300402"
+  dillman1993:
+    authors: "Dillman CJ, Fleisig GS, Andrews JR"
+    year: 1993
+    title: "Biomechanics of pitching with emphasis upon shoulder kinematics"
+    journal: "J Orthop Sports Phys Ther 18(2):402-408"
+    doi: "10.2519/jospt.1993.18.2.402"
+  fleisig1999:
+    authors: "Fleisig GS, Barrentine SW, Zheng N, Escamilla RF, Andrews JR"
+    year: 1999
+    title: "Kinematic and kinetic comparison of baseball pitching among various levels of development"
+    journal: "J Biomech 32(12):1371-1375"
+    doi: "10.1016/S0021-9290(99)00127-X"
+    note: "要旨に数字なし。値は fleisig2006 の Table 4 で確認"
+  fleisig2006:
+    authors: "Fleisig GS, et al."
+    year: 2006
+    title: "Kinematics and kinetics of youth baseball pitching with standard and lightweight balls"
+    journal: "Sports Engineering 9:155-163"
+  fleisig2011:
+    authors: "Fleisig GS, et al."
+    year: 2011
+    title: "Biomechanical comparison of baseball pitching and long-toss"
+    journal: "J Orthop Sports Phys Ther 41(5):296-303"
+    doi: "10.2519/jospt.2011.3568"
+  fleisig2019:
+    authors: "Fleisig GS, Diffendaffer AZ, Drogosz M, Cain EL Jr, Emblom BA, Dugas JR"
+    year: 2019
+    title: "Baseball Pitching Biomechanics Shortly After Ulnar Collateral Ligament Repair"
+    journal: "Orthop J Sports Med 7(8):2325967119866199"
+    doi: "10.1177/2325967119866199"
+  fleisig2025:
+    authors: "Fleisig GS, Slowik JS, Hall JB, Beason DP, Cain EL Jr"
+    year: 2025
+    title: "Increases in Ball Weight and Size Decrease Elbow Varus Torque During Baseball Pitching"
+    journal: "Orthop J Sports Med 13(9):23259671251368999"
+    doi: "10.1177/23259671251368999"
+  berkson_imu:
+    authors: "Berkson E, Aylward R, Zachazewski J, Paradiso J, Gill TJ"
+    year: 2006
+    title: "IMU Arrays: The Biomechanics of Baseball Pitching"
+    journal: "MIT Media Lab（掲載誌は未確認）"
+    url: "https://resenv.media.mit.edu/pubs/papers/2006-06-IMU-Baseball.pdf"
+  gasparutto2015:
+    authors: "Gasparutto X, et al."
+    year: 2015
+    title: "Shoulder joint velocity during fastball pitching in baseball"
+    journal: "ISBS 2015, pp.907-910"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/6550"
+  woo1997:
+    authors: "Woo SY, Brown EW"
+    year: 1997
+    title: "A three-dimensional analysis of the windmill style of softball delivery for fast and change-up pitching"
+    journal: "ISBS 1997"
+    url: "https://ojs.ub.uni-konstanz.de/cpa/article/view/3739"
+  barrentine1998:
+    authors: "Barrentine SW, et al."
+    year: 1998
+    title: "（ウインドミル投法の研究。原典は開けず）"
+    note: "Barfield 2018 の引用でのみ確認"
+  wagner2010:
+    authors: "Wagner H, Buchecker M, von Duvillard SP, Müller E"
+    year: 2010
+    title: "Kinematic description of elite vs. low level players in team-handball jump throw"
+    journal: "J Sports Sci Med 9(1):15-23"
+    url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC3737958/"
+  eriksson2015:
+    authors: "Eriksson Crommert M, Halvorsen K, Ekblom MM"
+    year: 2015
+    title: "Trunk Muscle Activation at the Initiation and Braking of Bilateral Shoulder Flexion Movements of Different Amplitudes"
+    journal: "PLoS One 10(11):e0141777"
+    doi: "10.1371/journal.pone.0141777"
+  kohler2024:
+    authors: "Köhler HP, Schödlbauer M, Witt M"
+    year: 2024
+    title: "How the acceleration phase influences energy flow and the resulting joint moments of the throwing shoulder in the deceleration phase of the javelin throw"
+    journal: "Front Sports Act Living 6:1445455"
+    doi: "10.3389/fspor.2024.1445455"
+  kaizu2018:
+    authors: "Kaizu Y, Watanabe H, Yamaji T"
+    year: 2018
+    title: "Correlation of upper limb joint load with simultaneous throwing mechanics including acceleration parameters in amateur baseball pitchers"
+    journal: "J Phys Ther Sci 30(2):223-230"
+    doi: "10.1589/jpts.30.223"
+  fleisig2003:
+    authors: "Fleisig G, Nicholls R, Elliott B, Escamilla R"
+    year: 2003
+    title: "Kinematics used by world class tennis players to produce high-velocity serves"
+    journal: "Sports Biomech 2(1):51-64"
+    doi: "10.1080/14763140308522807"
+  cheraghi2014:
+    authors: "Cheraghi M, et al."
+    year: 2014
+    title: "Kinematics of Straight Right Punch in Boxing"
+    journal: "Ann Appl Sport Sci 2(2):39-50"
+  fett2021:
+    authors: "Fett J, Oberschelp N, Vuong JL, Wiewelhove T, Ferrauti A"
+    year: 2021
+    title: "Kinematic characteristics of the tennis serve from the ad and deuce court service positions in elite junior players"
+    journal: "PLoS One 16(7):e0252650"
+    doi: "10.1371/journal.pone.0252650"
+  connolly2021:
+    authors: "Connolly M, Middleton K, Spence G, Cant O, Reid M"
+    year: 2021
+    title: "Effects of Lumbar Spine Abnormality and Serve Types on Lumbar Kinematics in Elite Adolescent Tennis Players"
+    journal: "Sports Med Open 7(1):7"
+    doi: "10.1186/s40798-020-00295-2"
+  marras1993:
+    authors: "Marras WS, Lavender SA, Leurgans SE, Rajulu SL, Allread WG, Fathallah FA, et al."
+    year: 1993
+    title: "The role of dynamic three-dimensional trunk motion in occupationally-related low back disorders"
+    journal: "Spine 18(5):617-628"
+    doi: "10.1097/00007632-199304000-00015"
+  marras1995:
+    authors: "Marras WS, Parnianpour M, Ferguson SA, Kim JY, Crowell RR, Bose S, et al."
+    year: 1995
+    title: "The classification of anatomic- and symptom-based low back disorders using motion measure models"
+    journal: "Spine 20(23):2531-2546"
+    doi: "10.1097/00007632-199512000-00013"
+  horan2012:
+    authors: "Horan SA, Kavanagh JJ"
+    year: 2012
+    title: "（ゴルフのスイングの胸郭と骨盤の運動。題は未確認）"
+    journal: "Sports Biomech 11:165-174"
+    note: "値は Horan の学位論文（Griffith 大学、doi:10.25904/1912/43）で確認"
+  kageyama2014:
+    authors: "Kageyama M, Sugiyama T, Takai Y, Kanehisa H, Maeda A"
+    year: 2014
+    title: "Kinematic and Kinetic Profiles of Trunk and Lower Limbs during Baseball Pitching in Collegiate Pitchers"
+    journal: "J Sports Sci Med 13(4):742-750"
+    url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC4234942/"
+  fleisig2013:
+    authors: "Fleisig GS, Hsu WK, Fortenbaugh D, Cordover A, Press JM"
+    year: 2013
+    title: "Trunk axial rotation in baseball pitching and batting"
+    journal: "Sports Biomech 12(4):324-333"
+    doi: "10.1080/14763141.2013.838693"
+  roijezon2010:
+    authors: "Röijezon U, Djupsjöbacka M, Björklund M, Häger-Ross C, Grip H, Liebermann DG"
+    year: 2010
+    title: "Kinematics of fast cervical rotations in persons with chronic neck pain: a cross-sectional and reliability study"
+    journal: "BMC Musculoskelet Disord 11:222"
+    doi: "10.1186/1471-2474-11-222"
+  grossman1988:
+    authors: "Grossman GE, Leigh RJ, Abel LA, Lanska DJ, Thurston SE"
+    year: 1988
+    title: "Frequency and velocity of rotational head perturbations during locomotion"
+    journal: "Exp Brain Res 70(3):470-476"
+    doi: "10.1007/BF00247595"
+  zangemeister1986:
+    authors: "Zangemeister WH, Phlebs U, Huefner G, Kunze K"
+    year: 1986
+    title: "Active head turning and correlated cerebral potentials. Experimental and clinical aspects"
+    journal: "Acta Otolaryngol 101(5-6):403-415"
+    doi: "10.3109/00016488609108625"
+  forsberg2023:
+    authors: "Forsberg K, Jirlén J, Jacobson I, Röijezon U"
+    year: 2023
+    title: "Concurrent Validity of Cervical Movement Tests Using VR Technology-Taking the Lab to the Clinic"
+    journal: "Sensors 23(24):9864"
+    doi: "10.3390/s23249864"
+  carriot2014:
+    authors: "Carriot J, Jamali M, Chacron MJ, Cullen KE"
+    year: 2014
+    title: "Statistics of the vestibular input experienced during natural self-motion: implications for neural processing"
+    journal: "J Neurosci 34(24):8347-8357"
+    doi: "10.1523/JNEUROSCI.0692-14.2014"
+  bussone2010:
+    authors: "Bussone WR, Duma SM"
+    year: 2010
+    title: "（日常動作での頭の角速度・角加速度。題は未確認）"
+    journal: "Biomed Sci Instrum 46:166-171"
+  vikne2013:
+    authors: "Vikne H, Bakke ES, Liestøl K, Engen SR, Vøllestad N"
+    year: 2013
+    title: "Muscle activity and head kinematics in unconstrained movements in subjects with chronic neck pain; cervical motor dysfunction or low exertion motor output?"
+    journal: "BMC Musculoskelet Disord 14:314"
+    doi: "10.1186/1471-2474-14-314"
+  meisingset2015:
+    authors: "Meisingset I, Woodhouse A, Stensdotter AK, Stavdahl Ø, Lorås H, Gismervik S, et al."
+    year: 2015
+    title: "Evidence for a general stiffening motor control pattern in neck pain: a cross sectional study"
+    journal: "BMC Musculoskelet Disord 16:56"
+    doi: "10.1186/s12891-015-0517-2"
+  marinsek2024:
+    authors: "Marinsek A, De Kunst S, Callebaut G, De Strycker L, Van der Perre L"
+    year: 2024
+    title: "MmWave for Extended Reality: Open User Mobility Dataset, Characterisation, and Impact on Link Quality"
+    journal: "arXiv:2407.02636v2"
+    url: "https://arxiv.org/abs/2407.02636"

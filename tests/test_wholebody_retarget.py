@@ -186,9 +186,16 @@ def test_the_servo_limits_follow_their_sources():
     assert set(servo["acceleration_rad_s2"]["value"]) == set(measured)
     for joint, value in servo["acceleration_rad_s2"]["value"].items():
         assert value == pytest.approx(measured[joint], abs=0.05), joint
-    # Every value names its sources, and every source is listed.
+    # Every robot value names its sources, and every source key (the human side's records too) is listed.
     entries = [limits["robot"]["hip_yaw_outward_max_deg"], servo["speed_rad_s"], servo["acceleration_rad_s2"]]
-    assert all(entry["src"] and set(entry["src"]) <= set(limits["sources"]) for entry in entries)
+    assert all(entry["src"] for entry in entries)
+
+    def keys(node):
+        if isinstance(node, dict):
+            return set().union(*(([v] if isinstance(v, str) else v) if k == "src" else keys(v) for k, v in node.items()))
+        return set().union(*map(keys, node)) if isinstance(node, list) else set()
+
+    assert keys(limits["robot"]) | keys(limits["human"]) <= set(limits["sources"])
 
 
 def test_heading_and_position_do_not_change_the_joints(tmp_path):
