@@ -143,7 +143,7 @@ def test_the_human_left_drives_the_robot_left(tmp_path):
     assert sites["left_hand"][-1, 1] - sites["left_hand"][0, 1] > 0.03
 
 
-def test_a_thigh_swung_round_does_not_turn_the_hip_past_the_human_reach(tmp_path, monkeypatch):
+def test_a_thigh_swung_round_stays_in_the_human_reach_and_the_servos_speed(tmp_path, monkeypatch):
     # The right thigh raised forward with the knee bent, then swept 200 degrees about the vertical: out to the
     # right side and on behind the body (as CMU 132_56's wild legs).
     frames = 46
@@ -163,9 +163,28 @@ def test_a_thigh_swung_round_does_not_turn_the_hip_past_the_human_reach(tmp_path
     assert np.degrees(-q[:, yaw]).max() > 180.0
     # ... and stops at the human reach: the leg turned outward by at most 105 degrees, every joint in its range.
     monkeypatch.undo()
-    _, q = _retarget(tmp_path, "swing", frames_, ref)
+    report, q = _retarget(tmp_path, "swing", frames_, ref)
     assert core.HIP_YAW_OUT_MAX_DEG == 105.0 and np.degrees(-q[:, yaw]).max() <= 105.0 + 1e-6
     assert np.all((q[:, 7:] >= lo) & (q[:, 7:] <= hi))
+    # Three times as fast (0.27 s round), the swing is past the servos: they follow it at their speed and
+    # acceleration (from the frame after the reset's placing).
+    report, q = _retarget(tmp_path, "fast", frames_[::3], ref)
+    assert report["servo_speed_bound_frames"] > 0 and report["servo_accel_bound_frames"] > 0
+    servo = model.retarget_limits()["robot"]["servo"]
+    accel = np.array([servo["acceleration_rad_s2"][m.joint(j).name] for j in range(1, m.njnt)])
+    assert np.abs(np.diff(q[:, 7:], axis=0)).max() <= servo["speed_rad_s"] / FPS + 1e-6
+    assert np.all(np.abs(np.diff(q[1:, 7:], 2, axis=0)) <= accel / FPS**2 + 1e-6)
+
+
+def test_the_servo_limits_follow_their_sources():
+    from mjlab_microban.wholebody import benchmark
+
+    limits = model.retarget_limits()["robot"]
+    assert limits["servo"]["speed_rad_s"] == pytest.approx(benchmark.servo_no_load_speed_rad_s(), abs=0.005)
+    measured = model.servo_accelerations()
+    assert set(limits["servo"]["acceleration_rad_s2"]) == set(measured)
+    for joint, value in limits["servo"]["acceleration_rad_s2"].items():
+        assert value == pytest.approx(measured[joint], abs=0.05), joint
 
 
 def test_heading_and_position_do_not_change_the_joints(tmp_path):

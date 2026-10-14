@@ -43,6 +43,13 @@ error 0).
   inward end would have stopped it, up to the 240 degree end (past 120
   degrees in 0.3 % of CMU's evaluation frames).  105 degrees is the farthest LAFAN1's motions turn a
   leg outward (104), so they are unchanged.
+* What the servos can do: between two frames (h = 1 / fps) a joint moves at
+  most the XC330's speed x h and changes its per-frame motion by at most its
+  acceleration x h^2 (``ServoLimit``; the values and their sources are in
+  config/retarget_limits.yaml).  A motion faster than the servos is followed
+  late; without it the IK swung a joint by up to 91 degrees in one frame
+  (the hip yaw of CMU 132_56) and branch switches of the solution reached the
+  data as joint jumps.
 * Self-collision: mink's CollisionAvoidanceLimit in the IK (no closer than
   2 mm, active from 30 mm; it cannot push apart a pair already in contact, so
   the small overlaps the box approximation lets in remain and are cut on the
@@ -97,6 +104,7 @@ from mjlab_microban.wholebody.retarget.gmr import params as gparams
 from mjlab_microban.wholebody.retarget.model import (
     gmr_model_xml,
     home_qpos,
+    retarget_limits,
     training_collision_geoms,
 )
 from mjlab_microban.wholebody.retarget.skeleton import (
@@ -153,10 +161,11 @@ WEIGHTS = {
 # robot's ranges (elbow +-125, knee -45..135, hip yaw -60..240 outward degrees) are unchanged.
 ELBOW_MAX_DEG = 0.0  # the elbow bends the human way only (HOME is -20)
 KNEE_MIN_DEG = 0.0  # the knee does not bend past straight (HOME's 0)
-# The hip yaw turns the leg outward (left +, right -) by at most LAFAN1's largest (104 degrees), not round to the
-# robot's 240 degree end (see the module docstring).  On CMU's frames that went past it (0.15 % of the leg frames, 49
-# clips) the knee and ankle are then 26.5 mm from their targets on average (28.9 mm before); LAFAN1 does not change.
-HIP_YAW_OUT_MAX_DEG = 105.0
+# The hip yaw turns a leg outward (left +, right -) by at most this (config/retarget_limits.yaml: LAFAN1's largest, 104
+# degrees), not round to the robot's 240 degree end (see the module docstring).  On CMU's frames that went past it
+# (0.15 % of the leg frames, 49 clips) the knee and ankle are then 26.5 mm from their targets on average (28.9 mm
+# before); LAFAN1 does not change.
+HIP_YAW_OUT_MAX_DEG = float(retarget_limits()["robot"]["hip_yaw_outward_max_deg"])
 G1_LEG_M = 0.654  # GMR's g1_mocap_29dof.xml, hip_pitch_link to ankle_roll_link height
 SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("left", "right")}
 # Joint heights of the parts other than the feet when they lie on the floor,
@@ -325,11 +334,81 @@ def self_collision_pairs(model: mujoco.MjModel):
     return pairs
 
 
+class ServoLimit(mink.Limit):
+    """The hinge joints within their ranges and within what the servos can do between two frames (h = 1 / fps):
+    from the previous frame at most the speed x h, and from the previous frame's motion at most the acceleration x
+    h^2 more or less (config/retarget_limits.yaml), and no faster towards an end of the range than lets the joint
+    stop there at that acceleration.  Where all cannot be met (an arm moved onto its other branch) the range, the
+    speed and the stop hold.  After a reset only the range holds (the first frame places the robot), on
+    the frame after it the speed and the stop too.  It takes the place of mink's ConfigurationLimit: a hinge
+    integrates exactly, so the box needs no gain.
+
+    Per frame: ``begin`` sets the box, ``move`` shifts it with a switch of branch tried on the frame (the arm's
+    other branch keeps the same budget from its own start), ``end`` records the frame's angles and returns
+    whether the speed and whether the acceleration bound (at the bound, 1e-6 rad)."""
+
+    def __init__(self, model: mujoco.MjModel, fps: float):
+        servo = retarget_limits()["robot"]["servo"]
+        hinges = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
+        self.qpos = model.jnt_qposadr[hinges]
+        rows = np.eye(model.nv)[model.jnt_dofadr[hinges]]
+        self.G = np.vstack([rows, -rows])
+        self.lo, self.hi = model.jnt_range[hinges, 0].copy(), model.jnt_range[hinges, 1].copy()
+        self.step = np.full(len(hinges), float(servo["speed_rad_s"]) / fps)
+        self.turn = np.array([float(servo["acceleration_rad_s2"][model.joint(j).name]) for j in hinges]) / fps**2
+        self.reset()
+
+    def reset(self) -> None:
+        self.previous: list[np.ndarray] = []  # the last two frames' angles, the latest last
+        self.begin()
+
+    def begin(self) -> None:
+        self.offset = np.zeros(len(self.qpos))
+        self._box()
+
+    def move(self, delta: np.ndarray) -> None:
+        self.offset = self.offset + delta[self.qpos]
+        self._box()
+
+    def _box(self) -> None:
+        lower, upper = self.lo, self.hi
+        if self.previous:
+            centre = self.previous[-1] + self.offset
+            # Moving s per frame (a per frame squared), a joint stops within s^2 / (2 a) after this frame's s; keeping
+            # s + s^2 / (2 a) within the room to the end leaves the next frame's s - a its room too.
+            stop = lambda room: self.turn * (np.sqrt(1.0 + 2.0 * np.maximum(room, 0.0) / self.turn) - 1.0)
+            lower = np.maximum(lower, centre - np.minimum(self.step, stop(centre - self.lo)))
+            upper = np.minimum(upper, centre + np.minimum(self.step, stop(self.hi - centre)))
+            if len(self.previous) == 2:
+                motion = self.previous[-1] - self.previous[-2]
+                low, high = np.maximum(lower, centre + motion - self.turn), np.minimum(upper, centre + motion + self.turn)
+                met = low <= high
+                lower, upper = np.where(met, low, lower), np.where(met, high, upper)
+        self.lower, self.upper = lower, upper
+
+    def end(self, q: np.ndarray) -> tuple[bool, bool]:
+        angles = q[self.qpos]
+        speed = accel = False
+        if self.previous:
+            move = angles - (self.previous[-1] + self.offset)
+            speed = bool(np.any(np.abs(move) >= self.step - 1e-6))
+            if len(self.previous) == 2:
+                accel = bool(np.any(np.abs(move - (self.previous[-1] - self.previous[-2])) >= self.turn - 1e-6))
+            self.previous = [self.previous[-1] + self.offset]
+        self.previous = [*self.previous, angles.copy()]
+        return speed, accel
+
+    def compute_qp_inequalities(self, configuration, dt):
+        del dt
+        angles = configuration.q[self.qpos]
+        return mink.Constraint(G=self.G, h=np.concatenate([self.upper - angles, angles - self.lower]))
+
+
 class MicrobanRetargeting(GeneralMotionRetargeting):
     """GMR with its position scaling (scale_human_data) replaced and the arm branch handling added.
     The IK, the orientation and position offsets and tables 1 and 2 are GMR's."""
 
-    def __init__(self, cfg: dict, cfg_path: Path, fmt_name: str, **kw):
+    def __init__(self, cfg: dict, cfg_path: Path, fmt_name: str, fps: float, **kw):
         _register_robot()
         gparams.IK_CONFIG_DICT.setdefault(fmt_name, {})[ROBOT] = cfg_path
         super().__init__(src_human=fmt_name, tgt_robot=ROBOT, actual_human_height=None, verbose=False, **kw)
@@ -359,7 +438,8 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             # Outward is + for the left hip yaw and - for the right.
             self.model.jnt_range[self.model.joint(f"{side}_hip_yaw").id, int(side == "left")] = (
                 np.radians(HIP_YAW_OUT_MAX_DEG) * (1.0 if side == "left" else -1.0))
-        self.limits_plain = [mink.ConfigurationLimit(self.model)]
+        self.servo = ServoLimit(self.model, fps)
+        self.limits_plain = [self.servo]
         self.limits_coll = self.limits_plain + [mink.CollisionAvoidanceLimit(self.model, self_collision_pairs(self.model),
                                                                             minimum_distance_from_collisions=0.002,
                                                                             collision_detection_distance=0.03)]
@@ -378,13 +458,18 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
     def reset_configuration(self):
         super().reset_configuration()
         self.ankle_offset = {}
+        self.servo.reset()
 
     def retarget(self, human_data, offset_to_ground=False):
+        """The frame's qpos; ``servo_bound`` is then whether the servos' speed and whether their acceleration
+        bounded it."""
         first = self._warmup_needed
+        self.servo.begin()
         q = super().retarget(human_data, offset_to_ground)
         arms = list(range(len(self.arms))) if first else [i for i in range(len(self.arms)) if self._arm_suspect(i)]
         if arms:
             q = self._pick_arm_branch(arms)
+        self.servo_bound = self.servo.end(q)
         return q
 
     def _arm_suspect(self, i) -> bool:
@@ -420,6 +505,7 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             tw[a_p] = (cur[a_p] + 2 * np.pi) % (2 * np.pi) - np.pi
             tw[a_r] = sign * np.pi - cur[a_r]
             tw[a_e] = min(-cur[a_e], np.radians(ELBOW_MAX_DEG))
+            self.servo.move(tw - cur)
             self.configuration.update(q=tw)
             err = self.error2()
             for _ in range(self._warmup_max_iter):
@@ -431,6 +517,7 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
                 err = nxt
             if self._cost2() >= c_cur:
                 self.configuration.update(q=cur)
+                self.servo.move(cur - tw)
         return self.configuration.data.qpos.copy()
 
     def scale_human_data(self, human_data, human_root_name, human_scale_table):
@@ -586,7 +673,7 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
     cfg_path = out_dir / f"{stem}_ik.json"
     cfg_path.write_text(json.dumps(cfg, indent=1))
 
-    gmr = MicrobanRetargeting(cfg, cfg_path, fmt_name)
+    gmr = MicrobanRetargeting(cfg, cfg_path, fmt_name, fps)
     # Check: the standing reference retargets to HOME.
     gmr.reset_configuration()
     for _ in range(20):
@@ -597,17 +684,22 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
 
     gmr.reset_configuration()
     fallbacks0 = COLLISION_FALLBACKS[0]
-    qs, targets, target_quats = [], [], []
+    qs, targets, target_quats, bound = [], [], [], []
     t0 = time.perf_counter()
     for f in frames:
         qs.append(gmr.retarget(to_input(f)).copy())
+        bound.append(gmr.servo_bound)
         targets.append({k: np.asarray(v[0]).copy() for k, v in gmr.scaled_human_data.items()})
         target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
     ik_fps = len(qs) / (time.perf_counter() - t0)
     qs = np.asarray(qs)
-    # mink's limits hold the joints in range only to its tolerance (up to 5e-6 rad past an end in LAFAN1, CMU and
-    # PICO): the angles are clipped to the robot's ranges (the MJCF's, not the IK's narrower ones).
     jn = [model.joint(j).name for j in range(1, model.njnt)]
+    # The frames the servos' speed, their acceleration and the hip yaw's outward limit bounded.
+    speed_bound, accel_bound = np.asarray(bound, dtype=bool).reshape(-1, 2).T
+    outward = np.stack([qs[:, 7 + jn.index("left_hip_yaw")], -qs[:, 7 + jn.index("right_hip_yaw")]], 1)
+    hip_yaw_bound = np.any(outward >= np.radians(HIP_YAW_OUT_MAX_DEG) - 1e-6, axis=1)
+    # The IK holds the joints in range only to its solver's tolerance (mink's limits let them past an end by up to
+    # 5e-6 rad in LAFAN1, CMU and PICO): the angles are clipped to the robot's ranges (the MJCF's, not the IK's).
     lo, hi = model.jnt_range[1:, 0], model.jnt_range[1:, 1]
     qs[:, 7:] = np.clip(qs[:, 7:], lo, hi)
 
@@ -698,6 +790,9 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         "contact_ankle_slide_vs_human_mm_s_med_p90": contact_slide(model, qs, frames, ref, fmt, scale, fps, floor),
         "joint_speed_rad_s_p99_max": [round(float(np.percentile(speed, 99)), 2), round(float(speed.max()), 2)],
         "joint_jump_frames": int(jump.sum()),
+        "servo_speed_bound_frames": int(speed_bound.sum()),
+        "servo_accel_bound_frames": int(accel_bound.sum()),
+        "hip_yaw_bound_frames": int(hip_yaw_bound.sum()),
         "target_jump_frames": int(tjump.sum()),
         "arm_flip_frames_longest": [int(flip.sum()), longest_run(flip)],
         "hand_err_mm_p99_max": [round(1000 * float(np.percentile(hand_err, 99)), 1), round(1000 * float(np.max(hand_err)), 1)],
@@ -717,7 +812,8 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
              qpos=qs, fps=fps, joint_names=np.array(jn),
              joint_pos_home_order=qs[:, [7 + jn.index(n) for n in home_order]], home_joint_names=np.array(home_order),
              targets=tg_arr.astype(np.float32), target_frames=np.array(tf),
-             flip=flip, joint_jump=jump, target_jump=tjump, hand_err=np.asarray(hand_err, np.float32),
+             flip=flip, joint_jump=jump, target_jump=tjump, speed_bound=speed_bound, accel_bound=accel_bound,
+             hip_yaw_bound=hip_yaw_bound, hand_err=np.asarray(hand_err, np.float32),
              lowest_point=low_after.astype(np.float32), **extra)
     with open(out_dir / f"{stem}.pkl", "wb") as fh:  # the shape of GMR's scripts/bvh_to_robot.py output
         pickle.dump({"fps": fps, "root_pos": qs[:, :3], "root_rot": qs[:, [4, 5, 6, 3]],  # xyzw

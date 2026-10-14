@@ -1,0 +1,45 @@
+# Limits the whole-body retargeting (src/mjlab_microban/wholebody/retarget/core.py) puts on Microban's joints inside
+# its IK, each with where it comes from.  The joint ranges are robot.xml's and are not repeated here.
+# tests/test_wholebody_retarget.py checks the servo numbers against their sources.  Editing a value changes the
+# retargeting: rebuild the data (docs/wholebody_data.md).
+robot:
+  # The farthest the hip yaw turns a leg outward (left +, right -), degrees.  The robot's range runs from 60 degrees
+  # inward to 240 outward; a thigh swung out to the side and on behind (CMU 132_56, kicks, animal imitations) was
+  # followed outward up to the 240 degree end.  Source: the human data, LAFAN1's retargeted motions (all 77 files,
+  # retargeting of 2aa2f61 without this limit) turn a leg outward by at most 104 degrees.
+  hip_yaw_outward_max_deg: 105.0
+  # What the XC330-T288-T servos can do between two frames of the motion (h = 1 / fps): a joint moves at most
+  # speed x h from the previous frame and changes its per-frame motion by at most acceleration x h^2.
+  servo:
+    # The no-load speed at the 3S pack's nominal 11.1 V: vin / kt, kt = 1.0425 Nm/A of the BAM identification
+    # (src/mjlab_microban/robot/xc330_params.json); the evaluation's servo_no_load_speed_rad_s (benchmark.py).
+    speed_rad_s: 10.65
+    # Per joint: the torque at the firmware current limit, max_current x kt = 0.91 A x 1.0425 Nm/A = 0.949 Nm (the
+    # training actuator, robot/microban_constants.py), over the joint's inertia at HOME: the servo's reflected
+    # inertia (the BAM armature, 0.00828 kg m^2) plus the links it carries, the joint's diagonal entry of MuJoCo's
+    # joint-space inertia matrix with the other joints held (retarget/model.py servo_accelerations).  The armature
+    # is 83 % (hip pitch) to over 99 % of it.
+    acceleration_rad_s2:
+      head: 112.9
+      neck_roll: 114.2
+      neck_pitch: 114.3
+      right_shoulder_pitch: 111.2
+      right_shoulder_roll: 111.2
+      right_elbow: 114.1
+      right_hip_yaw: 112.7
+      right_hip_roll: 95.9
+      right_hip_pitch: 95.4
+      right_knee: 109.0
+      right_ankle_pitch: 113.8
+      right_ankle_roll: 114.4
+      left_shoulder_pitch: 111.2
+      left_shoulder_roll: 111.2
+      left_elbow: 114.1
+      left_hip_yaw: 112.7
+      left_hip_roll: 95.9
+      left_hip_pitch: 95.4
+      left_knee: 109.0
+      left_ankle_pitch: 113.8
+      left_ankle_roll: 114.4
+# The human side (limits on the human skeleton's joint angles per anatomical axis before retargeting, against capture
+# errors and tracking jumps) goes in a section `human:` here once its values are checked.

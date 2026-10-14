@@ -9,6 +9,7 @@
 | `home_pose.yaml` | 唯一の入力。21関節の角度（度）、体幹ピッチ、名前、ラベル |
 | `home_pose_tool.py` | `show`: 派生値と「この学習ラインで再学習できるか」の表示。`write-robot`: ロボット側 `config/home_pose.yaml` の生成 |
 | `balance_home_pose.py` | 股・足首ピッチだけを動かして重心を足裏の前後中央に合わせ、`home_pose.yaml` を書き換える |
+| `retarget_limits.yaml` | 全身の写し（`wholebody/retarget/core.py`）が IK で関節に掛ける制限（股のヨーの外向きの上限、サーボの速さと加速度）と、その出どころ |
 
 ## yamlから計算される値
 

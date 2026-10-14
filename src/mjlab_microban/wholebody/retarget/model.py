@@ -6,7 +6,8 @@ HOME (x forward, y left, z up).  It is built from robot.xml at run time and
 written once per process to a temporary file, because GMR loads its model
 from a path.  The collision shapes are the whole-body task's
 (``training_collision_model``), so the floor and the self-collision pairs of
-the retargeting are the ones the training data are cut with.
+the retargeting are the ones the training data are cut with.  The limits the
+IK puts on the joints besides their ranges are in config/retarget_limits.yaml.
 """
 
 from __future__ import annotations
@@ -17,10 +18,15 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import json
+
 import mujoco
 import numpy as np
+import yaml
 
-from mjlab_microban.robot.home_pose import MICROBAN_XML, load_home_pose
+from mjlab_microban.robot.home_pose import MICROBAN_XML, REPO_ROOT, load_home_pose
+
+RETARGET_LIMITS_YAML = REPO_ROOT / "config" / "retarget_limits.yaml"
 
 
 def home_qpos(model: mujoco.MjModel) -> np.ndarray:
@@ -120,3 +126,29 @@ def training_collision_geoms() -> tuple[dict, ...]:
             "quat": model.geom_quat[g].tolist(),
         })
     return tuple(out)
+
+
+@functools.cache
+def retarget_limits() -> dict:
+    """config/retarget_limits.yaml."""
+    with open(RETARGET_LIMITS_YAML, encoding="utf-8") as stream:
+        return yaml.safe_load(stream)
+
+
+def servo_accelerations() -> dict[str, float]:
+    """Per hinge joint, the XC330's acceleration on Microban at HOME (rad/s^2): the torque at the training actuator's
+    firmware current limit (max_current x kt) over the joint's diagonal entry of the joint-space inertia matrix, with
+    the servo's reflected inertia (the BAM armature) on every hinge.  The source of retarget_limits.yaml's values."""
+    from mjlab_microban.robot.microban_constants import actuators
+
+    params = json.loads((Path(MICROBAN_XML).parents[1] / "xc330_params.json").read_text())
+    model = mujoco.MjModel.from_xml_path(str(MICROBAN_XML))
+    hinges = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
+    model.dof_armature[model.jnt_dofadr[hinges]] = params["armature"]
+    data = mujoco.MjData(model)
+    data.qpos[:] = home_qpos(model)
+    mujoco.mj_forward(model, data)
+    inertia = np.zeros((model.nv, model.nv))
+    mujoco.mj_fullM(model, data, inertia)
+    torque = actuators.max_current * params["kt"]
+    return {model.joint(j).name: float(torque / inertia[model.jnt_dofadr[j], model.jnt_dofadr[j]]) for j in hinges}
