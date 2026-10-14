@@ -19,8 +19,8 @@ each output frame uses only what came before it; the parts that differ:
 
 PICO's 24 joints become the pseudo-bones of pico.py (skeleton.FORMATS["g1"]), the joint whose global rotation is
 the bone's rotation: thigh = hip, shin = knee, foot = ankle, upper arm = shoulder, forearm = elbow, hand = wrist; the
-torso is spine_1 (position) with spine_3's (chest) rotation, the neck base the neck joint, the toe the foot joint
-with the ankle's rotation.
+torso is spine_1 (position) with spine_3's (chest) rotation, the neck base the neck joint, the head the head joint
+(the neck's target), the toe the foot joint with the ankle's rotation.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ PICO_JOINTS = (
 )
 # pseudo-bone -> (position joint, orientation joint)
 PICO_BONES = {
-    "pelvis": ("pelvis", "pelvis"), "torso": ("spine_1", "spine_3"), "neck": ("neck", "spine_3"),
+    "pelvis": ("pelvis", "pelvis"), "torso": ("spine_1", "spine_3"), "neck": ("neck", "spine_3"), "head": ("head", "head"),
     **{f"{s}_{p}": (f"{side}_{a}", f"{side}_{b}") for s, side in (("L", "left"), ("R", "right")) for p, a, b in (
         ("hip", "hip", "hip"), ("knee", "knee", "knee"), ("ankle", "ankle", "ankle"), ("toe", "foot", "ankle"),
         ("shoulder", "shoulder", "shoulder"), ("elbow", "elbow", "elbow"), ("wrist", "wrist", "wrist"))},

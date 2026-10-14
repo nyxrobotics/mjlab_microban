@@ -38,6 +38,7 @@ FORMATS = {
         "pelvis": "Hips",
         "spine": "LowerBack",
         "neck": "Neck",
+        "head": "Head",
         "L": {"hip": "LeftUpLeg", "knee": "LeftLeg", "ankle": "LeftFoot", "toe": "LeftToeBase",
               "shoulder": "LeftArm", "elbow": "LeftForeArm", "wrist": "LeftHand"},
         "R": {"hip": "RightUpLeg", "knee": "RightLeg", "ankle": "RightFoot", "toe": "RightToeBase",
@@ -51,6 +52,7 @@ FORMATS = {
         "pelvis": "Hips",
         "spine": "Spine",
         "neck": "Neck",
+        "head": "Head",
         "L": {"hip": "LeftUpLeg", "knee": "LeftLeg", "ankle": "LeftFoot", "toe": "LeftToe",
               "shoulder": "LeftArm", "elbow": "LeftForeArm", "wrist": "LeftHand"},
         "R": {"hip": "RightUpLeg", "knee": "RightLeg", "ankle": "RightFoot", "toe": "RightToe",
@@ -58,11 +60,17 @@ FORMATS = {
         "ref_frames": {"subject1": ("fallAndGetUp3_subject1.bvh", 1024), "subject2": ("sprint1_subject2.bvh", 3213),
                        "subject3": ("aiming2_subject3.bvh", 9079), "subject4": ("sprint1_subject4.bvh", 2220),
                        "subject5": ("pushAndStumble1_subject5.bvh", 309)},
+        # The head looking ahead (the neck's 0): each subject's mean head orientation in the trunk frame
+        # (core.trunk_frame) over the frames of all 77 files whose trunk is within 20 degrees of vertical (wxyz).
+        # The reference frames' heads are turned 9-23 degrees from it.
+        "head_neutral": {"subject1": (0.50171, -0.53477, -0.43777, -0.52026), "subject2": (0.4692, -0.47993, -0.52421, -0.52414),
+                         "subject3": (0.52057, -0.50902, -0.4661, -0.50265), "subject4": (0.53944, -0.50317, -0.50007, -0.45361),
+                         "subject5": (0.55156, -0.53211, -0.50947, -0.39126)},
     },
     # G1 robot recordings (the PICO sets) as pseudo-bones from G1's forward
     # kinematics (pico.py); the neck base is the midpoint of the shoulders.
     "g1": {
-        "skip_first": 0, "pelvis": "pelvis", "spine": "torso", "neck": "neck",
+        "skip_first": 0, "pelvis": "pelvis", "spine": "torso", "neck": "neck", "head": "head",
         **{s: {p: f"{s}_{p}" for p in _LIMBS} for s in "LR"},
     },
     # SMPL-X (AMASS), joints 0-21 (smplx.py).  The rest pose stands straight.
@@ -71,6 +79,7 @@ FORMATS = {
         "pelvis": "pelvis",
         "spine": "spine1",
         "neck": "neck",
+        "head": "head",
         "L": {"hip": "left_hip", "knee": "left_knee", "ankle": "left_ankle", "toe": "left_foot",
               "shoulder": "left_shoulder", "elbow": "left_elbow", "wrist": "left_wrist"},
         "R": {"hip": "right_hip", "knee": "right_knee", "ankle": "right_ankle", "toe": "right_foot",

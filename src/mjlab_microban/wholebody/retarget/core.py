@@ -76,8 +76,13 @@ error 0).
   standing reference) and of the other parts that can touch the floor
   (pelvis, spine root, neck base, shoulders, elbows, wrists, knees, against
   their height when on the floor): lying, crawling and hands on the floor.
-* The neck is not retargeted (the HMD drives it): no neck target, so the neck
-  stays at 0 (HOME).
+* Neck: the human head's turn from the standing reference, relative to the
+  trunk frame (above), carried onto Microban's trunk as it stands at HOME and
+  split into head (yaw), neck_roll and neck_pitch (the joints turn the head
+  by Rz Rx Ry).  The angles are a posture target of the three joints in the
+  IK, so the servo limits and the joint ranges hold for them as for the
+  others.  The G1 recordings have no head: their head is the trunk frame, so
+  the neck stays at HOME.
 
 Outputs of ``retarget_frames`` (in ``out_dir``): ``<name>.npz`` (qpos, joint
 names, the joints in HOME's order, the targets, the human skeleton for
@@ -99,6 +104,7 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from mjlab_microban.policy_contract import HEAD_JOINTS
 from mjlab_microban.robot.home_pose import HOME_JOINT_NAMES
 from mjlab_microban.wholebody.retarget import smplx
 from mjlab_microban.wholebody.retarget.gmr import GeneralMotionRetargeting
@@ -168,6 +174,8 @@ KNEE_MIN_DEG = 0.0  # the knee does not bend past straight (HOME's 0)
 # (0.15 % of the leg frames, 49 clips) the knee and ankle are then 26.5 mm from their targets on average (28.9 mm
 # before); LAFAN1 does not change.
 HIP_YAW_OUT_MAX_DEG = float(retarget_limits()["robot"]["hip_yaw_outward_max_deg"]["value"])
+# The neck's posture target in the IK (its three joints only; they move nothing the other targets see).
+NECK_WEIGHT = 10.0
 G1_LEG_M = 0.654  # GMR's g1_mocap_29dof.xml, hip_pitch_link to ankle_roll_link height
 SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("left", "right")}
 # Joint heights of the parts other than the feet when they lie on the floor,
@@ -281,6 +289,10 @@ def calibrate(ref: dict, fmt_name: str, model: mujoco.MjModel) -> dict:
         "trunk": {"pelvis_ref_quat": ref[pelvis][1].tolist(), "neck": fmt["neck"],
                   "lateral": [fmt["L"]["shoulder"], fmt["R"]["shoulder"]],
                   "frame_ref": trunk_frame(ref, pelvis, fmt["neck"], fmt["L"]["shoulder"], fmt["R"]["shoulder"]).tolist()},
+        # The neck: the human head at the reference and Microban's trunk at HOME in the human trunk frame's axes.
+        "neck": {"head": fmt["head"], "head_ref_quat": ref[fmt["head"]][1].tolist(),
+                 "trunk_in_frame": (trunk_frame(ref, pelvis, fmt["neck"], fmt["L"]["shoulder"], fmt["R"]["shoulder"]).T
+                                    @ R.from_quat(home["pelvis"][1], scalar_first=True).as_matrix()).tolist()},
         "info": {"leg_robot_m": leg_robot, "leg_human": leg_human, "pos_weight_mult": pos_mult},
     }
 
@@ -334,6 +346,23 @@ def self_collision_pairs(model: mujoco.MjModel):
     pairs.append((groups[("left", "lower")], groups[("right", "lower")]))
     pairs.append((groups[("left", "femur")], groups[("right", "femur")]))
     return pairs
+
+
+class JointTask(mink.Task):
+    """Some hinge joints towards target angles (error q - target over those joints only, so the IK's convergence
+    test sees no other joint)."""
+
+    def __init__(self, model: mujoco.MjModel, joints, cost: float):
+        super().__init__(cost=np.full(len(joints), cost))
+        self.qpos = np.array([model.joint(n).qposadr[0] for n in joints])
+        self.jacobian = np.eye(model.nv)[[model.joint(n).dofadr[0] for n in joints]]
+        self.target = np.zeros(len(joints))
+
+    def compute_error(self, configuration):
+        return configuration.q[self.qpos] - self.target
+
+    def compute_jacobian(self, configuration):
+        return self.jacobian
 
 
 class ServoLimit(mink.Limit):
@@ -431,6 +460,13 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
             # Outward is + for the left hip yaw and - for the right.
             self.model.jnt_range[self.model.joint(f"{side}_hip_yaw").id, int(side == "left")] = (
                 np.radians(HIP_YAW_OUT_MAX_DEG) * (1.0 if side == "left" else -1.0))
+        neck = cfg["neck"]
+        self.head = neck["head"]
+        self.head_ref = R.from_matrix(self.frame_ref).inv() * R.from_quat(neck["head_ref_quat"], scalar_first=True)
+        self.trunk_in_frame = R.from_matrix(np.asarray(neck["trunk_in_frame"]))
+        self.neck_task = JointTask(self.model, HEAD_JOINTS, NECK_WEIGHT)
+        self.tasks1.append(self.neck_task)
+        self.tasks2.append(self.neck_task)
         self.servo = ServoLimit(self.model, fps)
         self.limits_plain = [self.servo]
         self.limits_coll = self.limits_plain + [mink.CollisionAvoidanceLimit(self.model, self_collision_pairs(self.model),
@@ -497,6 +533,9 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         T = R.from_matrix(F @ self.frame_ref.T)  # the trunk's rotation from the reference
         root_t = self.root_ref_r + self.root_scale * (root_pos - self.root_ref_h)
         out = {human_root_name: (root_t, (T * self.pelvis_ref).as_quat(scalar_first=True))}
+        # The neck: the head's turn from the reference in the trunk frame's axes, on Microban's trunk.
+        turn = R.from_matrix(F).inv() * R.from_quat(human_data[self.head][1], scalar_first=True) * self.head_ref.inv()
+        self.neck_task.target = (self.trunk_in_frame.inv() * turn * self.trunk_in_frame).as_euler("ZXY")
         for hb, off_ref, ref_inv in self.uniform:
             # The difference left at the reference turns with the human foot, moving per frame no more than the human ankle (at robot size).
             w = (R.from_quat(human_data[hb][1], scalar_first=True) * ref_inv).apply(off_ref)
@@ -598,6 +637,11 @@ def load_motion(path: str | Path, fmt_name: str, fps_out: float, smplx_model_dir
         name, frame = fmt["ref_frames"][re.search(r"subject\d+", Path(path).stem).group(0)]
         base = (read_bvh(str(Path(path).parent / name)), frame)
     ref = standing_reference(b, fmt_name, base)
+    if "head_neutral" in fmt:  # the reference's head turned to the subject's looking ahead (the neck's 0)
+        subject = re.search(r"subject\d+", Path(path).stem).group(0)
+        frame = trunk_frame(ref, fmt["pelvis"], fmt["neck"], fmt["L"]["shoulder"], fmt["R"]["shoulder"])
+        head = R.from_matrix(frame) * R.from_quat(fmt["head_neutral"][subject], scalar_first=True)
+        ref[fmt["head"]] = (ref[fmt["head"]][0], head.as_quat(scalar_first=True))
     frames, fps, tilt_deg = motion_frames(b, fmt_name, fps_out)
     return frames, fps, ref, tilt_deg, (list(b.names), b.parents)
 

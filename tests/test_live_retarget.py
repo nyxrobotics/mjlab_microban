@@ -33,7 +33,7 @@ RATE = 25.0
 # A standing operator facing +x (left = +y), metres: spine, legs (hip -> ankle) and arms (shoulder -> wrist) straight,
 # as the standing reference makes them, so the operator's pose is the reference's and retargets to HOME.
 STAND = {
-    "pelvis": (0.0, 0.0, 0.95), "torso": (0.0, 0.0, 1.05), "neck": (0.0, 0.0, 1.45),
+    "pelvis": (0.0, 0.0, 0.95), "torso": (0.0, 0.0, 1.05), "neck": (0.0, 0.0, 1.45), "head": (0.0, 0.0, 1.6),
     **{f"{s}_{p}": (x, y * sign, z) for s, sign in (("L", 1.0), ("R", -1.0)) for p, (x, y, z) in {
         "hip": (0.0, 0.09, 0.92), "knee": (0.0, 0.09, 0.50), "ankle": (0.0, 0.09, 0.08), "toe": (0.12, 0.09, 0.02),
         "shoulder": (0.0, 0.18, 1.42), "elbow": (-0.02, 0.18, 1.15), "wrist": (0.0, 0.18, 0.88)}.items()},

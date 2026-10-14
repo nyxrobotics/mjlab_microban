@@ -14,7 +14,8 @@ motion.  The recordings (``<raw>/``, placed by hand; docs/wholebody_data.md):
   joints in the manifest's order) at 30 fps.
 
 G1 bodies per role (position body / orientation body): pelvis / pelvis, neck
-base = midpoint of the shoulder_roll_links / torso_link, hip hip_pitch_link /
+base = midpoint of the shoulder_roll_links / torso_link, head = the neck base /
+the trunk frame (G1 has no head joint; the neck stays at HOME), hip hip_pitch_link /
 hip_yaw_link, knee knee_link, ankle ankle_roll_link, toe toe_link /
 ankle_roll_link, shoulder shoulder_roll_link / shoulder_yaw_link, elbow
 elbow_link, wrist wrist_roll_link / wrist_yaw_link.  A root teleport (the
@@ -56,12 +57,12 @@ BONES = {
         ("toe", "toe_link", "ankle_roll_link"), ("shoulder", "shoulder_roll_link", "shoulder_yaw_link"),
         ("elbow", "elbow_link", "elbow_link"), ("wrist", "wrist_roll_link", "wrist_yaw_link"))},
 }
-NAMES = list(BONES) + ["neck"]
-PARENT = {"pelvis": None, "torso": "pelvis", "neck": "torso",
+NAMES = list(BONES) + ["neck", "head"]
+PARENT = {"pelvis": None, "torso": "pelvis", "neck": "torso", "head": "neck",
           **{f"{s}_{p}": f"{s}_{q}" if q else "pelvis" for s in "LR" for p, q in (("hip", None), ("knee", "hip"), ("ankle", "knee"), ("toe", "ankle"))},
           **{f"{s}_{p}": (f"{s}_{q}" if q else "neck") for s in "LR" for p, q in (("shoulder", None), ("elbow", "shoulder"), ("wrist", "elbow"))}}
 PARENTS = np.array([NAMES.index(PARENT[n]) if PARENT[n] else -1 for n in NAMES])
-UPPER = ["torso", "neck"] + [f"{s}_{p}" for s in "LR" for p in ("shoulder", "elbow", "wrist")]
+UPPER = ["torso", "neck", "head"] + [f"{s}_{p}" for s in "LR" for p in ("shoulder", "elbow", "wrist")]
 
 
 @functools.cache
@@ -163,8 +164,20 @@ def g1_frames(model: mujoco.MjModel, root_pos, root_quat, jp):
         mujoco.mj_kinematics(model, d)
         f = {k: (d.xpos[pid[k]].copy(), d.xquat[oid[k]].copy()) for k in BONES}
         f["neck"] = (0.5 * (f["L_shoulder"][0] + f["R_shoulder"][0]), f["torso"][1].copy())
+        f["head"] = (f["neck"][0].copy(), trunk_quat(f))
         frames.append(f)
     return frames
+
+
+def trunk_quat(frame) -> np.ndarray:
+    """G1 has no head: its head is the retargeting's trunk frame (pelvis -> neck base up, the shoulder line across),
+    so it turns with the trunk and the neck stays at HOME (wxyz)."""
+    z = frame["neck"][0] - frame["pelvis"][0]
+    z = z / np.linalg.norm(z)
+    y = frame["L_shoulder"][0] - frame["R_shoulder"][0]
+    y = y - y.dot(z) * z
+    y = y / np.linalg.norm(y)
+    return R.from_matrix(np.stack([np.cross(y, z), y, z], axis=1)).as_quat(scalar_first=True)
 
 
 def standing_reference(frame):

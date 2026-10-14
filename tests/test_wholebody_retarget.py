@@ -198,6 +198,38 @@ def test_the_servo_limits_follow_their_sources():
     assert keys(limits["robot"]) | keys(limits["human"]) <= set(limits["sources"])
 
 
+def test_the_head_turns_the_neck(tmp_path):
+    # The human turns the head 40 degrees to the left, then nods 20 degrees down, then turns it 120 degrees (past the
+    # neck's 90): Microban's camera turns the same way in the world, and the neck stays in its range.
+    frames = 61
+    ramp = np.clip(np.linspace(0.0, 3.0, frames), 0.0, 1.0)
+    zeros = np.zeros(frames)
+    m = mujoco.MjModel.from_xml_path(str(model.gmr_model_xml()))
+    d = mujoco.MjData(m)
+    cam = m.body("camera_cover").id
+
+    def camera(q):
+        d.qpos[:] = q
+        mujoco.mj_kinematics(m, d)
+        x = d.xmat[cam].reshape(3, 3)[:, 0]
+        return np.degrees(np.arctan2(x[1], x[0])), np.degrees(np.arcsin(x[2]))
+
+    results = {}
+    for name, motion in (("yaw", np.stack([zeros, 40.0 * ramp, zeros], 1)), ("nod", np.stack([zeros, zeros, 20.0 * ramp], 1)),
+                         ("far", np.stack([zeros, 120.0 * ramp, zeros], 1))):
+        b = _bvh({"Head": motion}, frames)
+        ref = skeleton.standing_reference(b, "bvh_cmu")
+        frames_, _, _ = skeleton.motion_frames(b, "bvh_cmu", FPS)
+        _, q = _retarget(tmp_path, name, frames_, ref)
+        results[name] = (camera(q[0]), camera(q[-1]), q[-1])
+    (yaw0, pitch0), (yaw1, pitch1), _ = results["yaw"]
+    assert yaw1 - yaw0 == pytest.approx(40.0, abs=2.0) and abs(pitch1 - pitch0) < 2.0
+    (yaw0, pitch0), (yaw1, pitch1), _ = results["nod"]
+    assert pitch0 - pitch1 == pytest.approx(20.0, abs=2.0) and abs(yaw1 - yaw0) < 2.0
+    q = results["far"][2]
+    assert np.degrees(q[m.joint("head").qposadr[0]]) == pytest.approx(90.0, abs=0.5)
+
+
 def test_heading_and_position_do_not_change_the_joints(tmp_path):
     b = _motion()
     ref = skeleton.standing_reference(b, "bvh_cmu")
