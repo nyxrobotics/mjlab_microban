@@ -12,5 +12,11 @@ source.
 # mjlab_microban.tasks registers this task and this package uses two of its
 # modules (the HMD limits, the HOME stamp).  Loading the task package first
 # lets any wholebody module be imported first without breaking the
-# registration of every Microban task.
-import mjlab_microban.tasks  # noqa: F401
+# registration of every Microban task.  The live retargeting
+# (mjlab_microban/live) reads only retarget/ and data/ (MuJoCo, mink, SciPy):
+# its command line sets MICROBAN_WITHOUT_TRAINING=1 so mjlab and torch are not
+# loaded.
+import os
+
+if os.environ.get("MICROBAN_WITHOUT_TRAINING") != "1":
+    import mjlab_microban.tasks  # noqa: F401

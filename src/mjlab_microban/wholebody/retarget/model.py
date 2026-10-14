@@ -5,20 +5,25 @@ point where two joint axes come closest), oriented with the world axes at
 HOME (x forward, y left, z up).  It is built from robot.xml at run time and
 written once per process to a temporary file, because GMR loads its model
 from a path.  The collision shapes are the whole-body task's
-(``training_collision_model``), so the floor and the self-collision pairs of
-the retargeting are the ones the training data are cut with.  The limits the
-IK puts on the joints besides their ranges are in config/retarget_limits.yaml.
+(``env_cfg.training_collision_model``), so the floor and the self-collision
+pairs of the retargeting are the ones the training data are cut with.  The
+whole-body task's robot (``wholebody_spec``) is built here, and
+``collision_model`` gives its geoms the task's collision settings without the
+training stack (mjlab), for the live retargeting (tests pin it to the task's
+model).  The limits the IK puts on the joints besides their ranges are in
+config/retarget_limits.yaml.
 """
 
 from __future__ import annotations
 
 import atexit
 import functools
+import json
+import re
 import shutil
 import tempfile
+from collections import defaultdict
 from pathlib import Path
-
-import json
 
 import mujoco
 import numpy as np
@@ -106,12 +111,89 @@ def gmr_model_xml() -> Path:
     return path
 
 
+# The bodies that get a floor-only box: the bounding box of the body's visual meshes, touching only the floor.
+FLOOR_ONLY_BOX_BODIES = (
+    "head",
+    "roll_pitch_link",
+    "camera_cover",
+    "shoulder",
+    "shoulder_2",
+    "humerus__configuration_right",
+    "humerus__configuration_left",
+    "hip",
+    "hip_2",
+)
+# env_cfg.WHOLEBODY_COLLISION's geoms and their contype / conaffinity (robot 3 / 2, floor-only boxes 1 / 0).
+COLLISION_GEOM = re.compile(r".*_collision_\d+$")
+FLOOR_ONLY_GEOM = re.compile(r".*_floor_collision_\d+$")
+
+
+@functools.cache
+def floor_only_boxes() -> dict[str, tuple[tuple[float, ...], tuple[float, ...]]]:
+    """Centre and half size, in each body's frame, of its visual meshes' bounding box."""
+    model = mujoco.MjModel.from_xml_path(str(MICROBAN_XML))
+    boxes = {}
+    for body in FLOOR_ONLY_BOX_BODIES:
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
+        points = []
+        for geom in range(model.ngeom):
+            if model.geom_bodyid[geom] != body_id or int(model.geom_type[geom]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+                continue
+            mesh = model.geom_dataid[geom]
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            rotation = np.zeros(9)
+            mujoco.mju_quat2Mat(rotation, model.geom_quat[geom])
+            vertices = model.mesh_vert[start : start + count].astype(np.float64)
+            points.append(vertices @ rotation.reshape(3, 3).T + model.geom_pos[geom])
+        if not points:
+            raise ValueError(f"{body} has no visual mesh")
+        points = np.concatenate(points)
+        low, high = points.min(axis=0), points.max(axis=0)
+        boxes[body] = (tuple((0.5 * (low + high)).tolist()), tuple((0.5 * (high - low)).tolist()))
+    return boxes
+
+
+def wholebody_spec() -> mujoco.MjSpec:
+    """robot.xml with named collision geoms and the floor-only boxes (the whole-body task's robot)."""
+    spec = mujoco.MjSpec.from_file(str(MICROBAN_XML))
+    counts: dict[str, int] = defaultdict(int)
+    for geom in spec.geoms:
+        if geom.classname.name == "collision" and not geom.name:
+            counts[geom.parent.name] += 1
+            geom.name = f"{geom.parent.name}_collision_{counts[geom.parent.name]}"
+    for body, (centre, half) in floor_only_boxes().items():
+        spec.body(body).add_geom(
+            name=f"{body}_floor_collision_1",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=half,
+            pos=centre,
+            group=3,
+        )
+    return spec
+
+
+@functools.cache
+def collision_model() -> mujoco.MjModel:
+    """env_cfg.training_collision_model without mjlab: the whole-body robot, its collision geoms with the task's
+    contype / conaffinity and every other geom without contact, over a floor plane at z = 0."""
+    spec = wholebody_spec()
+    for geom in spec.geoms:
+        floor_only = bool(FLOOR_ONLY_GEOM.match(geom.name))
+        collides = bool(COLLISION_GEOM.match(geom.name))
+        geom.contype = (1 if floor_only else 3) if collides else 0
+        geom.conaffinity = (0 if floor_only else 2) if collides else 0
+        if collides:
+            geom.condim = 3
+            geom.priority = 1
+    spec.worldbody.add_geom(name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE, size=(0.0, 0.0, 0.05), contype=1,
+                            conaffinity=1)
+    return spec.compile()
+
+
 @functools.cache
 def training_collision_geoms() -> tuple[dict, ...]:
     """The whole-body task's collision geoms: name, body, type (box or cylinder), size, pos, quat (body frame)."""
-    from mjlab_microban.wholebody.env_cfg import training_collision_model
-
-    model = training_collision_model()
+    model = collision_model()
     kinds = {int(mujoco.mjtGeom.mjGEOM_BOX): "box", int(mujoco.mjtGeom.mjGEOM_CYLINDER): "cylinder"}
     out = []
     for g in range(model.ngeom):

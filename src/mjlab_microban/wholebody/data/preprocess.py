@@ -65,7 +65,9 @@ import mujoco
 import numpy as np
 
 from mjlab_microban.wholebody.data.fk import normalize_quaternion, set_qpos
-from mjlab_microban.wholebody.env_cfg import HEIGHT_TERMINATION_M
+
+# env_cfg.HEIGHT_TERMINATION_M (tests pin it), written here so the live retargeting reads these rules without mjlab.
+HEIGHT_TERMINATION_M = 0.05
 
 REASONS = ("floor_penetration", "self_penetration", "joint_range", "joint_jump", "lifted", "off_ground", "unsupported")
 

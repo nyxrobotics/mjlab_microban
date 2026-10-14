@@ -43,13 +43,10 @@ touches only the floor: robot geoms are contype 3 / conaffinity 2, the boxes
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
-from functools import lru_cache
 
 import mujoco
-import numpy as np
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp
 from mjlab.envs.mdp import dr
@@ -71,9 +68,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, HEAD_JOINTS
 from mjlab_microban.robot.microban_constants import (
     MICROBAN_ROBOT_CFG,
-    MICROBAN_XML,
     SERVO_TARGET_RANGE_RAD,
-    get_spec,
 )
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
@@ -83,6 +78,7 @@ from mjlab_microban.wholebody import observations as obs
 from mjlab_microban.wholebody import rewards as rew
 from mjlab_microban.wholebody import terminations as term
 from mjlab_microban.wholebody.motion import MotionCommandCfg, ReferenceNeckTarget
+from mjlab_microban.wholebody.retarget.model import wholebody_spec
 
 TASK_ID = "Mjlab-Wholebody-Microban"
 EXPERIMENT_NAME = "microban_wholebody"
@@ -132,17 +128,6 @@ VELOCITY_RANGE = {
 HISTORY_LENGTH = 10
 ACTOR_GROUP = "actor_history"
 CRITIC_GROUP = "critic_history"
-FLOOR_ONLY_BOX_BODIES = (
-    "head",
-    "roll_pitch_link",
-    "camera_cover",
-    "shoulder",
-    "shoulder_2",
-    "humerus__configuration_right",
-    "humerus__configuration_left",
-    "hip",
-    "hip_2",
-)
 TRAIN_ONLY_EVENTS = (
     "push_robot",
     "base_com",
@@ -151,50 +136,6 @@ TRAIN_ONLY_EVENTS = (
     "dof_armature",
     "dof_friction",
 )
-
-
-@lru_cache(maxsize=1)
-def floor_only_boxes() -> dict[str, tuple[tuple[float, ...], tuple[float, ...]]]:
-    """Centre and half size, in each body's frame, of its visual meshes' bounding box."""
-    model = mujoco.MjModel.from_xml_path(str(MICROBAN_XML))
-    boxes = {}
-    for body in FLOOR_ONLY_BOX_BODIES:
-        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
-        points = []
-        for geom in range(model.ngeom):
-            if model.geom_bodyid[geom] != body_id or int(model.geom_type[geom]) != int(mujoco.mjtGeom.mjGEOM_MESH):
-                continue
-            mesh = model.geom_dataid[geom]
-            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-            rotation = np.zeros(9)
-            mujoco.mju_quat2Mat(rotation, model.geom_quat[geom])
-            vertices = model.mesh_vert[start : start + count].astype(np.float64)
-            points.append(vertices @ rotation.reshape(3, 3).T + model.geom_pos[geom])
-        if not points:
-            raise ValueError(f"{body} has no visual mesh")
-        points = np.concatenate(points)
-        low, high = points.min(axis=0), points.max(axis=0)
-        boxes[body] = (tuple((0.5 * (low + high)).tolist()), tuple((0.5 * (high - low)).tolist()))
-    return boxes
-
-
-def wholebody_spec() -> mujoco.MjSpec:
-    """robot.xml with named collision geoms and the floor-only boxes."""
-    spec = get_spec()
-    counts: dict[str, int] = defaultdict(int)
-    for geom in spec.geoms:
-        if geom.classname.name == "collision" and not geom.name:
-            counts[geom.parent.name] += 1
-            geom.name = f"{geom.parent.name}_collision_{counts[geom.parent.name]}"
-    for body, (centre, half) in floor_only_boxes().items():
-        spec.body(body).add_geom(
-            name=f"{body}_floor_collision_1",
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=half,
-            pos=centre,
-            group=3,
-        )
-    return spec
 
 
 WHOLEBODY_COLLISION = CollisionCfg(
