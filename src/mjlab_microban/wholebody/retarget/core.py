@@ -165,7 +165,7 @@ KNEE_MIN_DEG = 0.0  # the knee does not bend past straight (HOME's 0)
 # degrees), not round to the robot's 240 degree end (see the module docstring).  On CMU's frames that went past it
 # (0.15 % of the leg frames, 49 clips) the knee and ankle are then 26.5 mm from their targets on average (28.9 mm
 # before); LAFAN1 does not change.
-HIP_YAW_OUT_MAX_DEG = float(retarget_limits()["robot"]["hip_yaw_outward_max_deg"])
+HIP_YAW_OUT_MAX_DEG = float(retarget_limits()["robot"]["hip_yaw_outward_max_deg"]["value"])
 G1_LEG_M = 0.654  # GMR's g1_mocap_29dof.xml, hip_pitch_link to ankle_roll_link height
 SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("left", "right")}
 # Joint heights of the parts other than the feet when they lie on the floor,
@@ -354,8 +354,9 @@ class ServoLimit(mink.Limit):
         rows = np.eye(model.nv)[model.jnt_dofadr[hinges]]
         self.G = np.vstack([rows, -rows])
         self.lo, self.hi = model.jnt_range[hinges, 0].copy(), model.jnt_range[hinges, 1].copy()
-        self.step = np.full(len(hinges), float(servo["speed_rad_s"]) / fps)
-        self.turn = np.array([float(servo["acceleration_rad_s2"][model.joint(j).name]) for j in hinges]) / fps**2
+        self.step = np.full(len(hinges), float(servo["speed_rad_s"]["value"]) / fps)
+        accel = servo["acceleration_rad_s2"]["value"]
+        self.turn = np.array([float(accel[model.joint(j).name]) for j in hinges]) / fps**2
         self.reset()
 
     def reset(self) -> None:

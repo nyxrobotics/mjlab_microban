@@ -130,7 +130,7 @@ def training_collision_geoms() -> tuple[dict, ...]:
 
 @functools.cache
 def retarget_limits() -> dict:
-    """config/retarget_limits.yaml."""
+    """config/retarget_limits.yaml (each limit a value, its source keys and a note)."""
     with open(RETARGET_LIMITS_YAML, encoding="utf-8") as stream:
         return yaml.safe_load(stream)
 

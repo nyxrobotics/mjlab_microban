@@ -171,20 +171,24 @@ def test_a_thigh_swung_round_stays_in_the_human_reach_and_the_servos_speed(tmp_p
     report, q = _retarget(tmp_path, "fast", frames_[::3], ref)
     assert report["servo_speed_bound_frames"] > 0 and report["servo_accel_bound_frames"] > 0
     servo = model.retarget_limits()["robot"]["servo"]
-    accel = np.array([servo["acceleration_rad_s2"][m.joint(j).name] for j in range(1, m.njnt)])
-    assert np.abs(np.diff(q[:, 7:], axis=0)).max() <= servo["speed_rad_s"] / FPS + 1e-6
+    accel = np.array([servo["acceleration_rad_s2"]["value"][m.joint(j).name] for j in range(1, m.njnt)])
+    assert np.abs(np.diff(q[:, 7:], axis=0)).max() <= servo["speed_rad_s"]["value"] / FPS + 1e-6
     assert np.all(np.abs(np.diff(q[1:, 7:], 2, axis=0)) <= accel / FPS**2 + 1e-6)
 
 
 def test_the_servo_limits_follow_their_sources():
     from mjlab_microban.wholebody import benchmark
 
-    limits = model.retarget_limits()["robot"]
-    assert limits["servo"]["speed_rad_s"] == pytest.approx(benchmark.servo_no_load_speed_rad_s(), abs=0.005)
+    limits = model.retarget_limits()
+    servo = limits["robot"]["servo"]
+    assert servo["speed_rad_s"]["value"] == pytest.approx(benchmark.servo_no_load_speed_rad_s(), abs=0.005)
     measured = model.servo_accelerations()
-    assert set(limits["servo"]["acceleration_rad_s2"]) == set(measured)
-    for joint, value in limits["servo"]["acceleration_rad_s2"].items():
+    assert set(servo["acceleration_rad_s2"]["value"]) == set(measured)
+    for joint, value in servo["acceleration_rad_s2"]["value"].items():
         assert value == pytest.approx(measured[joint], abs=0.05), joint
+    # Every value names its sources, and every source is listed.
+    entries = [limits["robot"]["hip_yaw_outward_max_deg"], servo["speed_rad_s"], servo["acceleration_rad_s2"]]
+    assert all(entry["src"] and set(entry["src"]) <= set(limits["sources"]) for entry in entries)
 
 
 def test_heading_and_position_do_not_change_the_joints(tmp_path):
