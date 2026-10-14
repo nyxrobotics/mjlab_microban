@@ -423,6 +423,10 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # The window ran out (Teleopit moved the robot to a new window instead).
         "clip_end": TerminationTermCfg(func=term.clip_end, params={"command_name": "motion"}, time_out=True),
     }
+    if not play:
+        # Not Teleopit's: in training a hand or foot off its reference height does not end the episode, so the policy
+        # learns to stay up where it cannot follow a limb.  The benchmark still judges it.
+        del terminations["ee_body_pos"]
 
     # Get-up's self-contact sensor (every trunk-subtree pair), with Teleopit's
     # per-substep force history.
