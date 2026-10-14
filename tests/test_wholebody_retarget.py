@@ -143,6 +143,31 @@ def test_the_human_left_drives_the_robot_left(tmp_path):
     assert sites["left_hand"][-1, 1] - sites["left_hand"][0, 1] > 0.03
 
 
+def test_a_thigh_swung_round_does_not_turn_the_hip_past_the_human_reach(tmp_path, monkeypatch):
+    # The right thigh raised forward with the knee bent, then swept 200 degrees about the vertical: out to the
+    # right side and on behind the body (as CMU 132_56's wild legs).
+    frames = 46
+    up, around = np.clip(np.linspace(0, 2, frames), 0, 1), np.clip(np.linspace(-1, 1, frames), 0, 1)
+    thigh = [(R.from_euler("y", -200.0 * b, degrees=True) * R.from_euler("x", -90.0 * a, degrees=True))
+             .as_euler("ZYX", degrees=True) for a, b in zip(up, around)]
+    zeros = np.zeros(frames)
+    b = _bvh({"RightUpLeg": np.array(thigh), "RightLeg": np.stack([zeros, zeros, 90.0 * up], 1)}, frames)
+    ref = skeleton.standing_reference(b, "bvh_cmu")
+    frames_, _, _ = skeleton.motion_frames(b, "bvh_cmu", FPS)
+    m = mujoco.MjModel.from_xml_path(str(model.gmr_model_xml()))
+    yaw = m.joint("right_hip_yaw").qposadr[0]
+    lo, hi = m.jnt_range[1:, 0], m.jnt_range[1:, 1]
+    # The IK follows the thigh round with the hip yaw (the hip roll stops at 25 degrees) ...
+    monkeypatch.setattr(core, "HIP_YAW_OUT_MAX_DEG", 240.0)
+    _, q = _retarget(tmp_path, "free", frames_, ref)
+    assert np.degrees(-q[:, yaw]).max() > 180.0
+    # ... and stops at the human reach: the leg turned outward by at most 105 degrees, every joint in its range.
+    monkeypatch.undo()
+    _, q = _retarget(tmp_path, "swing", frames_, ref)
+    assert core.HIP_YAW_OUT_MAX_DEG == 105.0 and np.degrees(-q[:, yaw]).max() <= 105.0 + 1e-6
+    assert np.all((q[:, 7:] >= lo) & (q[:, 7:] <= hi))
+
+
 def test_heading_and_position_do_not_change_the_joints(tmp_path):
     b = _motion()
     ref = skeleton.standing_reference(b, "bvh_cmu")

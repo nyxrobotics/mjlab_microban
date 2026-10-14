@@ -33,7 +33,16 @@ error 0).
 * Joints a human cannot bend that way: inside the IK only, the elbow bends
   the human way (<= 0) and the knee stops at straight (>= 0) (with the trunk
   on the human spine line, a deep forward bend puts the hip pitch at its -90
-  degree limit and the knee would bend backwards to make up).
+  degree limit and the knee would bend backwards to make up), and the hip yaw
+  turns the leg outward by at most 105 degrees.  The robot's hip yaw runs
+  from 60 degrees inward to 240 degrees outward, the latter 120 degrees
+  inward the other way round.  With the hip roll at its 25 degrees, the yaw
+  is the only joint that points a raised thigh sideways, so a thigh swung out
+  to the side and on behind (CMU's wild-leg walk 132_56, kicks, animal
+  imitations) was followed outward through 90 degrees, past where the
+  inward end would have stopped it, up to the 240 degree end (past 120
+  degrees in 0.3 % of CMU's evaluation frames).  105 degrees is the farthest LAFAN1's motions turn a
+  leg outward (104), so they are unchanged.
 * Self-collision: mink's CollisionAvoidanceLimit in the IK (no closer than
   2 mm, active from 30 mm; it cannot push apart a pair already in contact, so
   the small overlaps the box approximation lets in remain and are cut on the
@@ -141,9 +150,13 @@ WEIGHTS = {
     "wrist":    ((0, 0), (10, 0)),
 }
 # Joint ranges inside the IK only (the ways a human joint does not bend); the
-# robot's ranges (elbow +-125, knee -45..135 degrees) are unchanged.
+# robot's ranges (elbow +-125, knee -45..135, hip yaw -60..240 outward degrees) are unchanged.
 ELBOW_MAX_DEG = 0.0  # the elbow bends the human way only (HOME is -20)
 KNEE_MIN_DEG = 0.0  # the knee does not bend past straight (HOME's 0)
+# The hip yaw turns the leg outward (left +, right -) by at most LAFAN1's largest (104 degrees), not round to the
+# robot's 240 degree end (see the module docstring).  On CMU's frames that went past it (0.15 % of the leg frames, 49
+# clips) the knee and ankle are then 26.5 mm from their targets on average (28.9 mm before); LAFAN1 does not change.
+HIP_YAW_OUT_MAX_DEG = 105.0
 G1_LEG_M = 0.654  # GMR's g1_mocap_29dof.xml, hip_pitch_link to ankle_roll_link height
 SOLE_GEOMS = {s: [f"{s}_foot_collision_{i}" for i in range(1, 7)] for s in ("left", "right")}
 # Joint heights of the parts other than the feet when they lie on the floor,
@@ -343,6 +356,9 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         for side in ("left", "right"):
             self.model.jnt_range[self.model.joint(f"{side}_elbow").id, 1] = np.radians(ELBOW_MAX_DEG)
             self.model.jnt_range[self.model.joint(f"{side}_knee").id, 0] = np.radians(KNEE_MIN_DEG)
+            # Outward is + for the left hip yaw and - for the right.
+            self.model.jnt_range[self.model.joint(f"{side}_hip_yaw").id, int(side == "left")] = (
+                np.radians(HIP_YAW_OUT_MAX_DEG) * (1.0 if side == "left" else -1.0))
         self.limits_plain = [mink.ConfigurationLimit(self.model)]
         self.limits_coll = self.limits_plain + [mink.CollisionAvoidanceLimit(self.model, self_collision_pairs(self.model),
                                                                             minimum_distance_from_collisions=0.002,
@@ -589,6 +605,11 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
         target_quats.append({k: np.asarray(v[1]).copy() for k, v in gmr.scaled_human_data.items()})
     ik_fps = len(qs) / (time.perf_counter() - t0)
     qs = np.asarray(qs)
+    # mink's limits hold the joints in range only to its tolerance (up to 5e-6 rad past an end in LAFAN1, CMU and
+    # PICO): the angles are clipped to the robot's ranges (the MJCF's, not the IK's narrower ones).
+    jn = [model.joint(j).name for j in range(1, model.njnt)]
+    lo, hi = model.jnt_range[1:, 0], model.jnt_range[1:, 1]
+    qs[:, 7:] = np.clip(qs[:, 7:], lo, hi)
 
     # Floor: each frame's lowest point (training collision shapes) at the human clearance x root scale
     # (the joints are unchanged; only the root height moves).
@@ -607,8 +628,6 @@ def retarget_frames(stem: str, fmt_name: str, frames: list, fps: float, ref: dic
             tg[k] = tg[k] - [0.0, 0.0, z]
 
     # The numbers.
-    jn = [model.joint(j).name for j in range(1, model.njnt)]
-    lo, hi = model.jnt_range[1:, 0], model.jnt_range[1:, 1]
     perr = {f: [] for f, *_ in TARGETS}
     rerr = {f: [] for f, *_ in TARGETS}
     sole = {"left": [], "right": []}
