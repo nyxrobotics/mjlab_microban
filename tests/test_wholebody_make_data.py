@@ -96,6 +96,15 @@ def test_pico_recordings_split_at_root_teleports_and_resample_to_30_fps():
     root[40:, 0] += 0.5  # a teleport between frames 39 and 40
     root[95:, 0] += 0.5  # and a last part shorter than a second
     assert pico.pieces(root, 30.0) == [(0, 40), (40, 95)]
+    # The torso turned from the pelvis past the human trunk's rotation (64.6 degrees) cuts it too: G1's waist yaw
+    # at its 90 degree end for frames 50-59.
+    names = ["left_hip_pitch_joint", "waist_yaw_joint"]
+    jp = np.zeros((100, 2))
+    jp[50:60, 1] = np.radians(-90.0)
+    jp[70, 1] = np.radians(60.0)
+    kept = pico.trunk_turn_kept(jp, names)
+    assert kept.sum() == 90 and not kept[50:60].any()
+    assert pico.pieces(np.zeros((100, 3)), 30.0, kept) == [(0, 50), (60, 100)]
     frames = 60
     clip = {"root_pos": np.zeros((frames, 3)), "root_rot": np.tile([0, 0, 0, 1.0], (frames, 1)), "dof_pos": np.zeros((frames, 29))}
     clip["root_pos"][:, 0] = np.arange(frames) / 29.8  # 1 m/s at 29.8 fps

@@ -160,7 +160,8 @@ PICO の全身推定を G1 に写した公開録画。評価だけに使い、�
 | `raw/pico/twist2/*.pkl` | TWIST2（https://github.com/YanjieZe/TWIST2、コードは MIT）のデータセット（作者の Google Drive）のうち作者の PICO 録画（`0807_yanjie_walk` 50 本、`0811_static` 23 本）。使うときは引用を求めている | GMR の pkl、29.7〜29.9 fps（30 fps に補間する） |
 | `raw/pico/any4hdmi/manifest.json`、`*.npz` | EGalahad/sim2real の real_pico の録画。配布元の場所は未確認 | 13 本、30 fps |
 
-根が 1 フレームで 0.15 m を超えて動く所（瞬間移動）で切り、1 秒以上の部分を別のクリップにする（名前に `_p<番号>`）。
+根が 1 フレームで 0.15 m を超えて動く所（瞬間移動）と、G1 の腰のヨーが人の体幹の回旋の範囲（64.6°、`config/retarget_limits.yaml`）を超える所で切り、
+1 秒以上の部分を別のクリップにする（名前に `_p<番号>`）。
 基準の立ち姿は、録画の元ごとに静かに立つフレームから作る。
 
 ## 写し方（`src/mjlab_microban/wholebody/retarget/`）

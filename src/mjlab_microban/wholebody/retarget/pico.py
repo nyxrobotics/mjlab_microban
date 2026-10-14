@@ -18,8 +18,12 @@ base = midpoint of the shoulder_roll_links / torso_link, hip hip_pitch_link /
 hip_yaw_link, knee knee_link, ankle ankle_roll_link, toe toe_link /
 ankle_roll_link, shoulder shoulder_roll_link / shoulder_yaw_link, elbow
 elbow_link, wrist wrist_roll_link / wrist_yaw_link.  A root teleport (the
-pelvis moving more than 0.15 m in one frame, 4.5 m/s) cuts a recording; the
-parts of at least one second become separate clips (``_p<n>``).  The standing
+pelvis moving more than 0.15 m in one frame, 4.5 m/s) cuts a recording, and
+so do the frames whose waist yaw turns the torso from the pelvis past the
+human trunk's rotation (config/retarget_limits.yaml, human trunk rotation:
+64.6 degrees; TWIST2's G1 holds its waist at the 90 degree end through some
+walks, which turned Microban's legs 105+ degrees out); the parts of at least
+one second become separate clips (``_p<n>``).  The standing
 reference of each source is a quiet standing frame (chosen as for LAFAN1),
 made like the human one (spine up, legs and arms down); G1's zero pose has
 the elbows at 90 degrees and is not used.
@@ -37,6 +41,8 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Slerp
+
+from mjlab_microban.wholebody.retarget.model import retarget_limits
 
 FPS = 30.0
 TELEPORT_M = 0.15
@@ -74,11 +80,30 @@ def g1_joint_names(model: mujoco.MjModel) -> list[str]:
     return [model.joint(j).name for j in range(1, model.njnt)]
 
 
-def pieces(root_pos, fps):
-    """[start, end) parts between root teleports (more than TELEPORT_M in one frame), at least one second long."""
+def trunk_turn_kept(jp, g1_joints) -> np.ndarray:
+    """(T,) the waist yaw (the torso's turn from the pelvis) within the human trunk's rotation range."""
+    rom = retarget_limits()["human"]["joints"]["trunk"]["rotation"]["rom"]["adopted"]
+    right = -np.degrees(np.asarray(jp)[:, g1_joints.index("waist_yaw_joint")])  # G1's yaw turns left; the range's + is right
+    return (right >= rom["lower"]) & (right <= rom["upper"])
+
+
+def pieces(root_pos, fps, kept=None):
+    """[start, end) parts between root teleports (more than TELEPORT_M in one frame) and the frames not ``kept``,
+    at least one second long."""
+    n = len(root_pos)
     step = np.linalg.norm(np.diff(np.asarray(root_pos), axis=0), axis=1)
-    cuts = [0] + [i + 1 for i in np.where(step > TELEPORT_M)[0]] + [len(root_pos)]
-    return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b - a >= fps]
+    kept = np.ones(n, dtype=bool) if kept is None else np.asarray(kept, dtype=bool)
+    cuts = np.zeros(n + 1, dtype=bool)
+    cuts[1:-1] = step > TELEPORT_M
+    parts, start = [], None
+    for t in range(n + 1):
+        if t == n or not kept[t] or cuts[t]:
+            if start is not None and t - start >= fps:
+                parts.append((start, t))
+            start = t if t < n and kept[t] else None
+        elif start is None:
+            start = t
+    return parts
 
 
 def resample(p, fps, name):
@@ -90,9 +115,9 @@ def resample(p, fps, name):
     return ("twist2", name, FPS, lin(p["root_pos"]), rot.as_quat(scalar_first=True), lin(p["dof_pos"]))
 
 
-def _split(src, name, fps, rp, rq, jp):
+def _split(src, name, fps, rp, rq, jp, g1_joints):
     return [(src, name + (f"_p{k}" if (a, b) != (0, len(rp)) else ""), fps, rp[a:b], rq[a:b], jp[a:b])
-            for k, (a, b) in enumerate(pieces(rp, fps))]
+            for k, (a, b) in enumerate(pieces(rp, fps, trunk_turn_kept(jp, g1_joints)))]
 
 
 def load_sources(raw: Path, g1_joints: list[str]):
@@ -105,12 +130,12 @@ def load_sources(raw: Path, g1_joints: list[str]):
                 if int(f["source_clip_fps"][i]) != 30:
                     raise ValueError(f"{shard}: source clip {i} is not 30 fps")
                 out += _split("teleopit", f"picoteleopit_rec{i:02d}", 30.0, f["root_pos"][s:s + n].astype(float),
-                              f["root_quat_w"][s:s + n].astype(float), f["joint_pos"][s:s + n].astype(float))
+                              f["root_quat_w"][s:s + n].astype(float), f["joint_pos"][s:s + n].astype(float), g1_joints)
     for fn in sorted((raw / "twist2").glob("*.pkl")):
         with open(fn, "rb") as stream:
             p0 = pickle.load(stream)
         fps = float(p0["fps"])
-        for k, (a, b) in enumerate(pieces(p0["root_pos"], fps)):
+        for k, (a, b) in enumerate(pieces(p0["root_pos"], fps, trunk_turn_kept(p0["dof_pos"], g1_joints))):
             p = {key: p0[key][a:b] for key in ("root_pos", "root_rot", "dof_pos")}
             out.append(resample(p, fps, f"picotwist_{fn.stem}" + (f"_p{k}" if (a, b) != (0, len(p0["root_pos"])) else "")))
     manifest = raw / "any4hdmi" / "manifest.json"
@@ -121,7 +146,7 @@ def load_sources(raw: Path, g1_joints: list[str]):
         fps = round(1.0 / man["timestep"], 6)
         for c in man["source"]["clips"]:
             q = np.load(raw / "any4hdmi" / f"{c['name']}.npz")["qpos"].astype(float)
-            out += _split("any4hdmi", f"picoany_{c['name'].replace('-', '_')}", fps, q[:, :3], q[:, 3:7], q[:, 7:])
+            out += _split("any4hdmi", f"picoany_{c['name'].replace('-', '_')}", fps, q[:, :3], q[:, 3:7], q[:, 7:], g1_joints)
     return out
 
 

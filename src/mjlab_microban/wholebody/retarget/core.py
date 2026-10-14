@@ -64,8 +64,10 @@ error 0).
   near sideways (along the shoulder pitch axis) the position does not fix the
   shoulder pitch and the IK drifts to the other branch, so the upper arm's
   orientation (the human upper-arm twist) is matched with a weight that grows
-  as the arm comes sideways.  The first frame is also solved from the other
-  branch and the better one is kept.
+  as the arm comes sideways.  The first frame after a reset is also solved
+  from the other branch and the better one is kept; later frames keep the
+  branch they are on (a switch would be a jump the servos cannot make; the
+  servo limits let an arm come round only at their speed).
 * Root: the human pelvis motion scaled by the root scale (GMR's
   human_scale_table).
 * Floor: each frame's lowest point of Microban (the training collision
@@ -338,14 +340,13 @@ class ServoLimit(mink.Limit):
     """The hinge joints within their ranges and within what the servos can do between two frames (h = 1 / fps):
     from the previous frame at most the speed x h, and from the previous frame's motion at most the acceleration x
     h^2 more or less (config/retarget_limits.yaml), and no faster towards an end of the range than lets the joint
-    stop there at that acceleration.  Where all cannot be met (an arm moved onto its other branch) the range, the
-    speed and the stop hold.  After a reset only the range holds (the first frame places the robot), on
-    the frame after it the speed and the stop too.  It takes the place of mink's ConfigurationLimit: a hinge
+    stop there at that acceleration (so the three can always be met; should rounding part them, the range, the
+    speed and the stop hold).  After a reset only the range holds (the first frame places the robot), on the
+    frame after it the speed and the stop too.  It takes the place of mink's ConfigurationLimit: a hinge
     integrates exactly, so the box needs no gain.
 
-    Per frame: ``begin`` sets the box, ``move`` shifts it with a switch of branch tried on the frame (the arm's
-    other branch keeps the same budget from its own start), ``end`` records the frame's angles and returns
-    whether the speed and whether the acceleration bound (at the bound, 1e-6 rad)."""
+    Per frame: ``begin`` sets the box, ``end`` records the frame's angles and returns whether the speed and whether
+    the acceleration bound (at the bound, 1e-6 rad)."""
 
     def __init__(self, model: mujoco.MjModel, fps: float):
         servo = retarget_limits()["robot"]["servo"]
@@ -364,17 +365,9 @@ class ServoLimit(mink.Limit):
         self.begin()
 
     def begin(self) -> None:
-        self.offset = np.zeros(len(self.qpos))
-        self._box()
-
-    def move(self, delta: np.ndarray) -> None:
-        self.offset = self.offset + delta[self.qpos]
-        self._box()
-
-    def _box(self) -> None:
         lower, upper = self.lo, self.hi
         if self.previous:
-            centre = self.previous[-1] + self.offset
+            centre = self.previous[-1]
             # Moving s per frame (a per frame squared), a joint stops within s^2 / (2 a) after this frame's s; keeping
             # s + s^2 / (2 a) within the room to the end leaves the next frame's s - a its room too.
             stop = lambda room: self.turn * (np.sqrt(1.0 + 2.0 * np.maximum(room, 0.0) / self.turn) - 1.0)
@@ -391,12 +384,11 @@ class ServoLimit(mink.Limit):
         angles = q[self.qpos]
         speed = accel = False
         if self.previous:
-            move = angles - (self.previous[-1] + self.offset)
+            move = angles - self.previous[-1]
             speed = bool(np.any(np.abs(move) >= self.step - 1e-6))
             if len(self.previous) == 2:
                 accel = bool(np.any(np.abs(move - (self.previous[-1] - self.previous[-2])) >= self.turn - 1e-6))
-            self.previous = [self.previous[-1] + self.offset]
-        self.previous = [*self.previous, angles.copy()]
+        self.previous = [*self.previous[-1:], angles.copy()]
         return speed, accel
 
     def compute_qp_inequalities(self, configuration, dt):
@@ -447,14 +439,12 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         self.ik_limits = self.limits_coll
         t1, t2 = cfg["ik_match_table1"], cfg["ik_match_table2"]
         # (human shoulder, human elbow, table 2's upper-arm orientation task, its weight,
-        #  qpos addresses (pitch, roll, elbow), roll sign, human wrist)
+        #  qpos addresses (pitch, roll, elbow), roll sign)
         self.arms = []
         for side, sign in (("left", 1.0), ("right", -1.0)):
             task = next(t for t in self.tasks2 if t.frame_name == f"{side}_shoulder_c")
             adr = [self.model.joint(f"{side}_{j}").qposadr[0] for j in ("shoulder_pitch", "shoulder_roll", "elbow")]
-            self.arms.append((t1[f"{side}_shoulder_c"][0], t1[f"{side}_elbow_c"][0], task, t2[f"{side}_shoulder_c"][2], adr, sign,
-                              t1[f"{side}_hand"][0]))
-        self.trunk_id = self.model.body("trunk").id
+            self.arms.append((t1[f"{side}_shoulder_c"][0], t1[f"{side}_elbow_c"][0], task, t2[f"{side}_shoulder_c"][2], adr, sign))
 
     def reset_configuration(self):
         super().reset_configuration()
@@ -467,27 +457,10 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
         first = self._warmup_needed
         self.servo.begin()
         q = super().retarget(human_data, offset_to_ground)
-        arms = list(range(len(self.arms))) if first else [i for i in range(len(self.arms)) if self._arm_suspect(i)]
-        if arms:
-            q = self._pick_arm_branch(arms)
+        if first:
+            q = self._pick_arm_branch(range(len(self.arms)))
         self.servo_bound = self.servo.end(q)
         return q
-
-    def _arm_suspect(self, i) -> bool:
-        """The arm may be on the other branch (arm_flips' condition on the target and the robot's joints): the
-        target elbow bends 30+ degrees while the robot's is straight (within 2 degrees of the IK's 0 limit; the
-        other branch cannot bend it the human way), or the shoulder roll is past 90 degrees (the other branch's
-        side) while the target upper arm points down in the trunk frame."""
-        sh, el, _, _, (_, a_r, a_e), _, wr = self.arms[i]
-        tg = self.scaled_human_data
-        u, f = tg[el][0] - tg[sh][0], tg[wr][0] - tg[el][0]
-        q = self.configuration.q
-        if np.degrees(np.arccos(np.clip(u @ f / np.linalg.norm(u) / np.linalg.norm(f), -1, 1))) > 30 and q[a_e] > np.radians(-2.0):
-            return True
-        if abs(q[a_r]) > np.pi / 2:
-            trunk = R.from_matrix(self.configuration.data.xmat[self.trunk_id].reshape(3, 3))
-            return trunk.inv().apply(u / np.linalg.norm(u))[2] < -0.3
-        return False
 
     def _cost2(self):
         """Table 2's weighted squared error (what the IK minimises)."""
@@ -495,18 +468,16 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
 
     def _pick_arm_branch(self, arms):
         """Per arm, solve table 2 again from the other branch (shoulder pitch + 180 degrees, roll to the other
-        side, elbow reversed) and keep the lower IK cost.  Used on the first frame after a reset and on frames
-        whose arm may be on the other branch (_arm_suspect); the next frames start from the kept solution.
-        Solved as GMR's warm-up after a reset."""
+        side, elbow reversed) and keep the lower IK cost.  Used on the first frame after a reset (the servo limits
+        hold from the next frame on); the next frames start from the kept solution.  Solved as GMR's warm-up."""
         dt = self._warmup_dt
-        for _, _, _, _, (a_p, a_r, a_e), sign, _ in (self.arms[i] for i in arms):
+        for _, _, _, _, (a_p, a_r, a_e), sign in (self.arms[i] for i in arms):
             cur = self.configuration.q.copy()
             c_cur = self._cost2()
             tw = cur.copy()
             tw[a_p] = (cur[a_p] + 2 * np.pi) % (2 * np.pi) - np.pi
             tw[a_r] = sign * np.pi - cur[a_r]
             tw[a_e] = min(-cur[a_e], np.radians(ELBOW_MAX_DEG))
-            self.servo.move(tw - cur)
             self.configuration.update(q=tw)
             err = self.error2()
             for _ in range(self._warmup_max_iter):
@@ -518,7 +489,6 @@ class MicrobanRetargeting(GeneralMotionRetargeting):
                 err = nxt
             if self._cost2() >= c_cur:
                 self.configuration.update(q=cur)
-                self.servo.move(cur - tw)
         return self.configuration.data.qpos.copy()
 
     def scale_human_data(self, human_data, human_root_name, human_scale_table):
