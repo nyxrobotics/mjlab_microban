@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import torch
-from mjlab.utils.lab_api.math import quat_apply, quat_error_magnitude
+from mjlab.utils.lab_api.math import quat_apply, quat_error_magnitude, yaw_quat
 
 from mjlab_microban.wholebody.motion import MotionCommand
 
@@ -35,6 +35,14 @@ def motion_global_anchor_orientation_error_exp(env: ManagerBasedRlEnv, command_n
     command = _command(env, command_name)
     error = quat_error_magnitude(command.anchor_quat_w, command.robot_anchor_quat_w) ** 2
     return torch.exp(-error / std**2)
+
+
+def motion_global_anchor_heading_cos(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    """(1 + cos e) / 2 of the heading error e: not Teleopit's.  The exp terms give nothing past about 1 rad, so a
+    robot left behind in heading had no reason to turn back."""
+    command = _command(env, command_name)
+    error = quat_error_magnitude(yaw_quat(command.anchor_quat_w), yaw_quat(command.robot_anchor_quat_w))
+    return 0.5 * (1.0 + torch.cos(error))
 
 
 def motion_global_anchor_linear_velocity_error_exp(

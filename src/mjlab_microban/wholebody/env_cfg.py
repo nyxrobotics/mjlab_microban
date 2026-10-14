@@ -382,6 +382,9 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     rewards = {
         "motion_global_root_pos": _tracking(rew.motion_global_anchor_position_error_exp, 0.5, BODY_POS_STD_M),
         "motion_global_root_ori": _tracking(rew.motion_global_anchor_orientation_error_exp, 0.5, ORI_STD_RAD),
+        "motion_heading": RewardTermCfg(
+            func=rew.motion_global_anchor_heading_cos, weight=0.5, params={"command_name": "motion"}
+        ),
         "motion_global_root_lin_vel": _tracking(
             rew.motion_global_anchor_linear_velocity_error_exp, 1.0, LIN_VEL_STD_M_S
         ),
