@@ -61,37 +61,40 @@ STAND_S = 1.0
 RETURN_S = 1.0
 CATCH_UP_S = 0.5  # after a gap the return waits (at most this) for the IK to stop catching up the operator
 # The training reference per control tick (0.02 s), as the training env feeds it (motion.py: 30 fps clips, positions
-# and velocities linear, orientations slerp), on the deployed run's motion_file (scripts/wholebody_reference_steps.py):
+# and velocities linear, orientations slerp, at any phase), on the deployed run's motion_file
+# (scripts/wholebody_reference_steps.py):
 # per joint (speed p99 rad/s, speed change per tick p99 rad/s, step p99.9 rad, speed change per tick p99.9 rad/s).
 # The planned motions of an interruption stay within the 99th percentiles; every frame sent through one stays within
 # the 99.9th (``Guard``).
 JOINT_STEP_LIMITS = {
-    "head": (4.09, 0.98, 0.183, 2.26),
-    "neck_roll": (2.00, 0.62, 0.091, 1.40),
-    "neck_pitch": (2.57, 0.77, 0.113, 1.76),
-    "right_shoulder_pitch": (6.35, 1.83, 0.213, 2.22),
-    "right_shoulder_roll": (5.54, 1.65, 0.213, 2.22),
-    "right_elbow": (6.45, 1.94, 0.213, 2.28),
-    "right_hip_yaw": (4.60, 1.75, 0.179, 2.25),
-    "right_hip_roll": (3.30, 1.24, 0.124, 1.92),
-    "right_hip_pitch": (6.51, 1.88, 0.213, 1.91),
-    "right_knee": (8.13, 2.18, 0.213, 2.18),
-    "right_ankle_pitch": (6.11, 2.28, 0.195, 2.28),
-    "right_ankle_roll": (3.60, 1.66, 0.146, 2.29),
+    "head": (4.09, 0.98, 0.182, 2.26),
+    "neck_roll": (2.00, 0.62, 0.090, 1.39),
+    "neck_pitch": (2.57, 0.77, 0.112, 1.75),
+    "right_shoulder_pitch": (6.34, 1.83, 0.213, 2.22),
+    "right_shoulder_roll": (5.53, 1.65, 0.213, 2.22),
+    "right_elbow": (6.44, 1.94, 0.213, 2.28),
+    "right_hip_yaw": (4.60, 1.75, 0.178, 2.25),
+    "right_hip_roll": (3.29, 1.23, 0.124, 1.92),
+    "right_hip_pitch": (6.50, 1.85, 0.213, 1.91),
+    "right_knee": (8.12, 2.18, 0.213, 2.18),
+    "right_ankle_pitch": (6.10, 2.28, 0.195, 2.28),
+    "right_ankle_roll": (3.59, 1.66, 0.146, 2.29),
     "left_shoulder_pitch": (6.06, 1.73, 0.213, 2.22),
-    "left_shoulder_roll": (5.09, 1.52, 0.207, 2.22),
-    "left_elbow": (6.14, 1.84, 0.211, 2.28),
-    "left_hip_yaw": (4.55, 1.70, 0.175, 2.25),
-    "left_hip_roll": (3.40, 1.22, 0.126, 1.92),
-    "left_hip_pitch": (6.36, 1.85, 0.213, 1.91),
-    "left_knee": (7.99, 2.18, 0.213, 2.18),
-    "left_ankle_pitch": (5.78, 2.28, 0.189, 2.28),
-    "left_ankle_roll": (3.68, 1.64, 0.144, 2.29),
+    "left_shoulder_roll": (5.09, 1.52, 0.205, 2.22),
+    "left_elbow": (6.12, 1.83, 0.209, 2.28),
+    "left_hip_yaw": (4.54, 1.69, 0.175, 2.25),
+    "left_hip_roll": (3.39, 1.22, 0.125, 1.92),
+    "left_hip_pitch": (6.36, 1.83, 0.213, 1.91),
+    "left_knee": (7.98, 2.18, 0.213, 2.18),
+    "left_ankle_pitch": (5.77, 2.28, 0.189, 2.28),
+    "left_ankle_roll": (3.67, 1.64, 0.144, 2.29),
 }
-# The trunk: position (m/s, m/s per tick, m, m/s per tick) and turn (rad/s, rad/s per tick, rad, rad/s per tick), the
-# same four percentiles of the speed, its change per tick, the step and the change per tick.
-TRUNK_STEP_LIMITS = (0.447, 0.0836, 0.0146, 0.163)
-TURN_STEP_LIMITS = (4.86, 1.30, 0.198, 2.31)
+# The trunk: position (m/s, m/s per tick, m, m/s per tick, and its height's step p99.9 in m) and turn (rad/s, rad/s per
+# tick, rad, rad/s per tick), the same percentiles of the speed, its change per tick, the step and the change per tick.
+TRUNK_STEP_LIMITS = (0.447, 0.0832, 0.0146, 0.162, 0.00791)
+TURN_STEP_LIMITS = (4.85, 1.30, 0.197, 2.30)
+# The Guard keeps a frame this far inside the 99.9th percentiles (their last digit, float rounding).
+GUARD_SHARE = 0.99
 # PICO's body joints (XRoboToolkit, SMPL order).
 PICO_JOINTS = (
     "pelvis", "left_hip", "right_hip", "spine_1", "left_knee", "right_knee", "spine_2", "left_ankle", "right_ankle",
@@ -500,13 +503,16 @@ class Return:
 
 
 class Guard:
-    """No frame sent through an interruption or a return changes a joint, the trunk's position or its orientation by
-    more than the training reference's 99.9th percentile step in one tick, nor that tick's change by more than its
-    99.9th percentile change of speed (the motion planned there stays within the 99th percentiles: this only acts
-    if the operator moves faster still while the reference goes back to them)."""
+    """No frame sent changes a joint, the trunk's position, its height or its orientation by more than the training
+    reference's 99.9th percentile step in one tick (``GUARD_SHARE`` of it), and none sent through an interruption or a
+    return changes that tick's change (the speed) by more than its 99.9th percentile change of speed either, its joints
+    also within the servos' box (core.ServoLimit: the range, the speed, the acceleration, braking before a range end).
+    The motion planned there stays within the 99th percentiles; this acts when the operator moves faster still, and
+    on the live frames only past the 99.9th percentile steps."""
 
-    def __init__(self, lo: np.ndarray, hi: np.ndarray, fps: float = OUTPUT_HZ):
+    def __init__(self, model: mujoco.MjModel, lo: np.ndarray, hi: np.ndarray, fps: float = OUTPUT_HZ):
         self.lo, self.hi, self.dt = lo, hi, 1.0 / fps
+        self.servo = core.ServoLimit(model, fps)
 
     @staticmethod
     def deltas(q: np.ndarray, prev: np.ndarray) -> np.ndarray:
@@ -514,26 +520,44 @@ class Guard:
         turn = R.from_quat(q[3:7], scalar_first=True) * R.from_quat(prev[3:7], scalar_first=True).inv()
         return np.concatenate([q[7:] - prev[7:], q[:3] - prev[:3], turn.as_rotvec()])
 
-    def __call__(self, q: np.ndarray, prev: np.ndarray, d_prev: np.ndarray) -> tuple[np.ndarray, bool]:
+    def __call__(self, q: np.ndarray, prev: np.ndarray | None, d_prev: np.ndarray | None,
+                 planned: bool) -> tuple[np.ndarray, bool]:
+        """``q`` limited from the last frame sent (``prev``, its changes ``d_prev``); ``planned``: a frame of an
+        interruption or a return (all the limits), else a live one (the steps only).  Records the frame for the
+        servo box; whether it changed it."""
+        if prev is None:
+            self.servo.end(q)
+            return q, False
         d = self.deltas(q, prev)
         out = d.copy()
-        change = _JOINT[3] * self.dt
-        out[:21] = np.clip(np.clip(out[:21], d_prev[:21] - change, d_prev[:21] + change), -_JOINT[2], _JOINT[2])
-        out[:21] = np.clip(out[:21], self.lo - prev[7:], self.hi - prev[7:])  # a joint's range comes first
-        for sl, (_, _, step, speed_change) in ((slice(21, 24), TRUNK_STEP_LIMITS), (slice(24, 27), TURN_STEP_LIMITS)):
-            dd = out[sl] - d_prev[sl]
-            n = float(np.linalg.norm(dd))
-            if n > speed_change * self.dt:
-                out[sl] = d_prev[sl] + dd * (speed_change * self.dt / n)
+        step = GUARD_SHARE * _JOINT[2]
+        lower, upper = -step, step
+        if planned:
+            change = GUARD_SHARE * _JOINT[3] * self.dt
+            lower, upper = np.maximum(lower, d_prev[:21] - change), np.minimum(upper, d_prev[:21] + change)
+        self.servo.begin()
+        box_lo, box_hi = self.servo.lower - prev[7:], self.servo.upper - prev[7:]
+        lower, upper = np.maximum(lower, box_lo), np.minimum(upper, box_hi)
+        empty = lower > upper  # the servos' box comes first (the range, braking before its ends)
+        lower, upper = np.where(empty, box_lo, lower), np.where(empty, box_hi, upper)
+        out[:21] = np.clip(out[:21], lower, upper)
+        for sl, (_, _, step, speed_change, *_) in ((slice(21, 24), TRUNK_STEP_LIMITS), (slice(24, 27), TURN_STEP_LIMITS)):
+            if planned:
+                dd = out[sl] - d_prev[sl]
+                n = float(np.linalg.norm(dd))
+                if n > GUARD_SHARE * speed_change * self.dt:
+                    out[sl] = d_prev[sl] + dd * (GUARD_SHARE * speed_change * self.dt / n)
             n = float(np.linalg.norm(out[sl]))
-            if n > step:
-                out[sl] *= step / n
+            if n > GUARD_SHARE * step:
+                out[sl] *= GUARD_SHARE * step / n
+        out[23] = np.clip(out[23], -GUARD_SHARE * TRUNK_STEP_LIMITS[4], GUARD_SHARE * TRUNK_STEP_LIMITS[4])
         clamped = not np.allclose(out, d, rtol=0.0, atol=1e-9)
-        q = q.copy()
         if clamped:
+            q = q.copy()
             q[7:] = prev[7:] + out[:21]
             q[:3] = prev[:3] + out[21:24]
             q[3:7] = (R.from_rotvec(out[24:27]) * R.from_quat(prev[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        self.servo.end(q)
         return q, clamped
 
 
@@ -573,6 +597,7 @@ class Pipeline:
         self.calm = 0  # ticks in a row the return was over and unguarded
         self.live_prev: tuple | None = None  # the last live qpos and whether it followed new input
         self.carry_end: float | None = None  # when (s into the carry) the input was back
+        self.free_ticks = 0  # ticks in a row the IK followed new input unbounded by its servos
         self.transition: str | None = None  # "carry" or "return" (diagnostics)
         self.guarded = 0  # frames the Guard changed
 
@@ -598,7 +623,7 @@ class Pipeline:
 
     def _install(self, retargeter: Retargeter, world: tuple[R, np.ndarray]) -> None:
         self.retargeter, self.world = retargeter, world
-        self.guard = Guard(retargeter.lo, retargeter.hi, self.fps)
+        self.guard = Guard(retargeter.model, retargeter.lo, retargeter.hi, self.fps)
         self._reset_output()
         self.hold_until = -1
         self.restart = self.active
@@ -682,13 +707,16 @@ class Pipeline:
 
     def _send(self, live: tuple | None, interrupted: bool, fresh: bool) -> dict:
         """This tick's frame: the live one (``(qpos, kinematics)`` of the IK this tick, None when the body is stale),
-        or, while ``interrupted`` (the body missing, late or held), the Carry, and back from it the Return, with
-        velocities from the frames sent.  ``fresh``: the IK followed new input this tick (not stale, not late)."""
+        or, while ``interrupted`` (the body missing, late or held), the Carry, and back from it the Return, through
+        the Guard, with velocities from the frames sent.  ``fresh``: the IK followed new input this tick (not stale,
+        not late)."""
         dt = 1.0 / self.fps
         q_live = None
         if live is not None:
             q_live = live[0].copy()
             q_live[:2] += self.shift
+        free = fresh and not any(self.retargeter.gmr.servo_bound)
+        self.free_ticks = self.free_ticks + 1 if free else 0
         if self.carry is not None and not interrupted and self.carry_end is None:
             self.carry_end = self.carried * dt
         if interrupted or (self.carry is not None and not self._caught_up(fresh)):
@@ -704,13 +732,17 @@ class Pipeline:
             planned, self.transition = self.carry.at(self.carried * dt), "carry"
         else:
             if self.carry is not None:
-                # Back: the live frames start where the reference is (x, y) and the difference fades out.
+                # Back: the live frames start where the reference is (x, y) and the difference fades out.  Their
+                # speed is the operator's when the IK has caught up (free_ticks >= 2); if it has not after
+                # CATCH_UP_S, the joints' speed is not known and taken as zero.
                 prev, a = self.live_prev[0].copy(), self.sent[2]
                 shift = self.sent[0][:2] - prev[:2]
                 self.shift += shift
                 q_live[:2] += shift
                 prev[:2] += shift
                 live_v = Guard.deltas(q_live, prev) / dt
+                if self.free_ticks < 2:
+                    live_v[:21] = 0.0
                 out_v = np.concatenate([a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0]])
                 x0 = -Guard.deltas(prev, self.sent[0])
                 self.back = Return(x0, out_v - live_v, min(self.carried * dt, RETURN_S), self.fps)
@@ -722,22 +754,20 @@ class Pipeline:
                 self.transition = "return"
         if live is not None:
             self.live_prev = (q_live.copy(), fresh)
-        if planned is None:
-            q = q_live
+        prev = (None, None) if self.sent is None else self.sent[:2]
+        q, clamped = self.guard(q_live if planned is None else planned, *prev, planned is not None)
+        self.guarded += clamped
+        if self.back is not None:
+            # Over once the difference is gone and two frames in a row were the live ones unchanged (their speed too).
+            self.calm = self.calm + 1 if done and not clamped else 0
+            if self.calm >= 2:
+                self.back = None
+        if planned is None and not clamped:
             kin = live[1]
             pos = kin.body_pos_w[0].astype(np.float64)
             pos[:, :2] += self.shift
             arrays = {"joint_pos": q[7:], "body_pos_w": pos, "body_quat_w": kin.body_quat_w[0].astype(np.float64)}
         else:
-            q = planned
-            if self.sent is not None:
-                q, clamped = self.guard(planned, self.sent[0], self.sent[1])
-                self.guarded += clamped
-                if self.back is not None:
-                    # Over once the difference is gone and two frames in a row were the live ones (their speed too).
-                    self.calm = self.calm + 1 if done and not clamped else 0
-                    if self.calm >= 2:
-                        self.back = None
             c = self.retargeter.checker
             set_qpos(c.model, c.data, q[:3], q[3:7], q[7:])
             arrays = {"joint_pos": q[7:], "body_pos_w": c.data.xpos[c.body_ids].copy(),
@@ -748,9 +778,10 @@ class Pipeline:
         return arrays
 
     def _caught_up(self, fresh: bool) -> bool:
-        """Whether the live frames follow the operator again after an interruption, so that their last step is the
-        operator's speed: this one and the one before are fresh and the IK's servos bounded neither the speed nor the
-        acceleration of this one (it is not catching up a gap), or CATCH_UP_S have passed since the input was back."""
+        """Whether the live frames follow the operator again after an interruption: the IK followed new input with
+        neither its servos' speed nor their acceleration bounding it (it is not catching up a gap) on this tick and
+        the one before, so that the last step is the operator's speed; or CATCH_UP_S have passed since the input was
+        back (two fresh frames)."""
         waited = self.carried / self.fps - self.carry_end
         before = self.live_prev is not None and self.live_prev[1]
-        return fresh and before and (not any(self.retargeter.gmr.servo_bound) or waited > CATCH_UP_S)
+        return self.free_ticks >= 2 or (fresh and before and waited > CATCH_UP_S)
