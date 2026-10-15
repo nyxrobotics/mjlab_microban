@@ -8,6 +8,13 @@
 
 """Evaluate a checkpoint on the evaluation set, per motion kind.
 
+Pass (decided 2026-10-15).  Whole-body tracking is complete when the robot
+does not fall however the operator moves; the hands' and feet's height off
+the reference (the tracking error) is accepted.  So the full run
+(``verdicts["final"]["pass"]``) passes on the fall line on the
+evaluation-only set (the PICO recordings) and the action-rate line on both
+sets; success, the errors and progress are reported, not judged.
+
 Start (as in teleoperation).  On the robot, teleoperation starts with the
 robot at rest at HOME and the operator standing, and from then on the robot
 sees the operator's motion without a break: the reference never jumps from
@@ -59,27 +66,30 @@ of a line can fall on either side of it in another run.  A piece that ended
 (a termination) keeps running to its end for the fall and action-rate
 measures.
 
-Success and error lines.  A piece succeeds when no termination fires in its
-judged steps (the end of the reference is a time-out, not a failure).  A
-kind's success rate is the share of its judged seconds in successful pieces.
-For every successful piece the RMS over its judged steps of each tracking
-error (the quantity inside the reward's exp, square-rooted) is taken against
-the reference of the step (the observed target); per kind the RMS over all
+Success and errors (reported).  A piece succeeds when no termination fires
+in its judged steps (the end of the reference is a time-out, not a failure).
+A kind's success rate is the share of its judged seconds in successful
+pieces; the kinds below ``FINAL_SUCCESS_RATE`` are listed.  For every
+successful piece the RMS over its judged steps of each tracking error (the
+quantity inside the reward's exp, square-rooted) is taken against the
+reference of the step (the observed target); per kind the RMS over all
 judged steps of its successful pieces is compared with that reward's std
-(RMS <= std: the reward stays above exp(-1) on average).
+(RMS <= std: the reward stays above exp(-1) on average), the kinds above it
+listed.
 
-Progress line.  The trunk velocity line cannot tell a robot standing still
-from a walking one at Microban's speeds, so the trunk's horizontal
-displacement over the judged steps of each successful piece is projected on
-the reference's: progress = sum(d_robot . d_ref) / sum(|d_ref|^2) over a
-kind's travelling pieces, 0 standing still, 1 covering the reference's
-ground, and it must reach ``MIN_PROGRESS``.  A piece travels when its
-reference trunk moves at least ``PROGRESS_TRAVEL_M`` = BODY_POS_STD_M /
-(1 - MIN_PROGRESS) across the floor over the judged steps (from the motion
-file, whatever the policy does): a robot that ends such a piece within the
-trunk position std of the reference reaches MIN_PROGRESS, one standing still
-does not.  The line holds on every kind with a travelling piece, whatever its
-name (LAFAN1's walk, CMU's cmuwalk, the PICO recordings' walking).
+Progress (reported; a small-run check).  The trunk velocity cannot tell a
+robot standing still from a walking one at Microban's speeds, so the trunk's
+horizontal displacement over the judged steps of each successful piece is
+projected on the reference's: progress = sum(d_robot . d_ref) /
+sum(|d_ref|^2) over a kind's travelling pieces, 0 standing still, 1 covering
+the reference's ground, and it is held to ``MIN_PROGRESS``.  A piece
+travels when its reference trunk moves at least ``PROGRESS_TRAVEL_M`` =
+BODY_POS_STD_M / (1 - MIN_PROGRESS) across the floor over the judged steps
+(from the motion file, whatever the policy does): a robot that ends such a
+piece within the trunk position std of the reference reaches MIN_PROGRESS,
+one standing still does not.  It is taken on every kind with a travelling
+piece, whatever its name (LAFAN1's walk, CMU's cmuwalk, the PICO recordings'
+walking).
 
 Action-rate line (violence).  Per kind, the mean over steps of the sum over
 the 12 leg joints of the squared change of the servo target in one step (the
@@ -114,13 +124,12 @@ walking in eight directions, pushed by 0.4 m/s every second) fell 6 times by
 the same tilt rule over 846.58 s standing, 6 of 144 rollouts (its reference
 is upright, so the rule under a leaning reference adds none there).  On the
 training kinds' set the rate is reported, not judged: it holds motions the
-operator does not ask the robot for (sprints, jumps, falls), and its success
-line already bounds the terminations.
+operator does not ask the robot for (sprints, jumps, falls).
 
 Kinds.  Every kind of the training set and walk, run and sprint must be in
 the evaluation set; an evaluation-only set (the PICO recordings, whose kinds
-are not training kinds) is judged on its own kinds, by the same lines and the
-fall line.
+are not training kinds) is judged on its own kinds, by the action-rate line
+and the fall line.
 
 The share of steps whose reference joint speed exceeds the XC330's no-load
 speed is reported per kind; it is not a line.
@@ -435,12 +444,18 @@ def verdicts(
     require_locomotion: bool = True,
     hold_fall_line: bool = False,
 ) -> dict[str, Any]:
-    """The full run's pass (every kind at least 90 % and under the error and
-    action-rate lines, progress on every kind with a travelling piece, and with
-    ``hold_fall_line`` at most MAX_FALLS_PER_MINUTE over all pieces) and the
-    small run's checks (no kind at 0 %, the same progress, finite errors).  A
-    kind expected but not evaluated fails both; walk, run and sprint are
-    expected unless ``require_locomotion`` is off (an evaluation-only set)."""
+    """The full run's pass and the small run's checks.
+
+    The full run passes (decided 2026-10-15: not falling however the operator
+    moves; the tracking errors are accepted) when every kind's leg action rate
+    is at most MAX_LEG_ACTION_RATE and, with ``hold_fall_line`` (an
+    evaluation-only set), the falls over all pieces are at most
+    MAX_FALLS_PER_MINUTE.  The kinds below 90 % success or above the error
+    lines and the progress are reported, not judged.  The small run's checks:
+    no kind at 0 %, progress on every kind with a travelling piece.  A kind
+    expected but not evaluated or a non-finite piece fails both; walk, run and
+    sprint are expected unless ``require_locomotion`` is off (an
+    evaluation-only set)."""
     required = set(expected_kinds) | (set(LOCOMOTION_KINDS) if require_locomotion else set())
     missing = sorted(required - set(kinds))
     errors_ok = {k: all(v[n] is not None and v[n] <= std for n, std in ERROR_LINES.items()) for k, v in kinds.items()}
@@ -452,21 +467,20 @@ def verdicts(
     fall_ok = not hold_fall_line or (falls_per_minute is not None and falls_per_minute <= MAX_FALLS_PER_MINUTE)
     final = {
         "kinds_without_pieces": missing,
-        "kinds_below_success_rate": sorted(k for k, v in kinds.items() if v["success_rate"] < FINAL_SUCCESS_RATE),
-        "kinds_above_error_lines": sorted(k for k, ok in errors_ok.items() if not ok),
         "kinds_above_action_rate_line": sorted(
             k for k, v in kinds.items() if v["leg_action_rate"] is None or v["leg_action_rate"] > MAX_LEG_ACTION_RATE
         ),
-        "progress": progress,
-        "progress_ok": progress_ok,
         "falls_per_minute": falls_per_minute,
         "fall_line_held": hold_fall_line,
         "fall_ok": fall_ok,
+        "finite": finite,
+        # Reported, not judged.
+        "kinds_below_success_rate": sorted(k for k, v in kinds.items() if v["success_rate"] < FINAL_SUCCESS_RATE),
+        "kinds_above_error_lines": sorted(k for k, ok in errors_ok.items() if not ok),
+        "progress": progress,
+        "progress_ok": progress_ok,
     }
-    final["pass"] = bool(
-        kinds and not missing and not final["kinds_below_success_rate"] and not final["kinds_above_error_lines"]
-        and not final["kinds_above_action_rate_line"] and progress_ok and fall_ok and finite
-    )
+    final["pass"] = bool(kinds and not missing and not final["kinds_above_action_rate_line"] and fall_ok and finite)
     small = {
         "kinds_without_pieces": missing,
         "kinds_never_succeeding": sorted(k for k, v in kinds.items() if v["success_rate"] == 0.0),
@@ -545,10 +559,12 @@ def format_summary(report: dict[str, Any]) -> str:
     final, small = report["verdicts"]["final"], report["verdicts"]["small_run"]
     progress = {k: None if v is None else round(v, 2) for k, v in small["progress"].items()}
     held = "" if final["fall_line_held"] else " (not a line here)"
-    lines.append(f"final pass: {final['pass']}  missing kinds: {final['kinds_without_pieces']}  "
-                 f"below 90%: {final['kinds_below_success_rate']}  above error lines: {final['kinds_above_error_lines']}  "
+    lines.append(f"final pass: {final['pass']}  falls {number(final['falls_per_minute'], '.2f')}/min "
+                 f"(<= {MAX_FALLS_PER_MINUTE:.3f}){held}  "
                  f"above action-rate line ({MAX_LEG_ACTION_RATE}): {final['kinds_above_action_rate_line']}  "
-                 f"falls {number(final['falls_per_minute'], '.2f')}/min (<= {MAX_FALLS_PER_MINUTE:.3f}){held}")
+                 f"missing kinds: {final['kinds_without_pieces']}")
+    lines.append(f"reported, not judged: below 90%: {final['kinds_below_success_rate']}  "
+                 f"above error lines: {final['kinds_above_error_lines']}  progress ok: {final['progress_ok']}")
     lines.append(f"small-run checks: {small['pass']}  never succeeding: {small['kinds_never_succeeding']}  "
                  f"progress (>= {MIN_PROGRESS} where the reference travels >= {PROGRESS_TRAVEL_M:.2f} m): {progress}")
     return "\n".join(lines)

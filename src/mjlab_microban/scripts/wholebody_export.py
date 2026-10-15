@@ -7,9 +7,11 @@
 
 Both benchmark reports must be this checkpoint's, start the pieces as in
 teleoperation (at HOME, the reference from a standing frame) and pass the
-full-run lines: ``--benchmark-report`` on the training kinds'
-evaluation set, ``--eval-only-report`` on an evaluation-only set (the PICO
-recordings, ``--eval-only-set``), the one that holds the fall line.
+full run (``verdicts["final"]["pass"]``; decided 2026-10-15: the robot does
+not fall, the tracking errors are accepted): ``--benchmark-report`` on the
+training kinds' evaluation set (the action-rate line), ``--eval-only-report``
+on an evaluation-only set (the PICO recordings, ``--eval-only-set``; the
+action-rate and fall lines).
 ``--dry-run`` accepts any report of the checkpoint and marks the file not
 deployable.  The
 self-test rows (8-64 observation histories) come from an evaluation rollout
@@ -45,7 +47,7 @@ SELF_TEST_PIECES = 4
 
 def benchmark_sha256(path: Path, checkpoint_sha256: str, eval_only_set: bool, dry_run: bool) -> str:
     """The SHA-256 of this checkpoint's benchmark report; unless ``dry_run`` it
-    must start as in teleoperation, be on the set asked for and pass the full-run lines."""
+    must start as in teleoperation, be on the set asked for and pass the full run (``verdicts["final"]["pass"]``)."""
     report = json.loads(path.read_text(encoding="utf-8"))
     metadata = report["metadata"]
     if metadata["checkpoint_sha256"] != checkpoint_sha256:

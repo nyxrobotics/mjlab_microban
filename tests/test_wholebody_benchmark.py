@@ -1,4 +1,5 @@
-"""The whole-body evaluation: pieces start where the reference stands, and the verdicts judge every kind."""
+"""The whole-body evaluation: pieces start where the reference stands, and the verdicts judge every kind
+by the fall and action-rate lines (success, errors and progress reported)."""
 
 from __future__ import annotations
 
@@ -115,17 +116,22 @@ def _kind(
             **{name: 0.5 * std for name, std in benchmark.ERROR_LINES.items()}}
 
 
-def test_verdicts_fail_missing_kinds_and_a_robot_standing_still():
+def test_verdicts_fail_missing_kinds_and_a_small_run_standing_still():
     kinds = {"walk": _kind(1.0), "run": _kind(1.0), "sprint": _kind(0.95), "jumps": _kind(0.92, None)}
     assert benchmark.verdicts(kinds, {"walk", "jumps"})["final"]["pass"]
-    # A training kind with no evaluation piece fails both lines.
+    # A training kind with no evaluation piece fails both.
     missing = benchmark.verdicts(kinds, {"walk", "jumps", "fallAndGetUp"})
     assert missing["final"]["kinds_without_pieces"] == ["fallAndGetUp"]
     assert not missing["final"]["pass"] and not missing["small_run"]["pass"]
-    # So does a missing locomotion kind, and a walk that stands still.
-    assert not benchmark.verdicts({k: v for k, v in kinds.items() if k != "sprint"})["small_run"]["pass"]
+    # So does a missing locomotion kind.
+    missing = benchmark.verdicts({k: v for k, v in kinds.items() if k != "sprint"})
+    assert not missing["final"]["pass"] and not missing["small_run"]["pass"]
+    # A walk that stands still fails the small run; the full run reports it.
     still = benchmark.verdicts({**kinds, "walk": _kind(1.0, progress=0.05)})
-    assert not still["final"]["pass"] and not still["small_run"]["pass"]
+    assert not still["final"]["progress_ok"] and still["final"]["pass"] and not still["small_run"]["pass"]
+    # A non-finite piece fails both.
+    broken = benchmark.verdicts({**kinds, "jumps": {**_kind(0.92, None), "non_finite_pieces": 1}}, {"walk", "jumps"})
+    assert not broken["final"]["pass"] and not broken["small_run"]["pass"]
 
 
 def test_progress_holds_on_every_kind_whose_reference_travels():
@@ -134,12 +140,12 @@ def test_progress_holds_on_every_kind_whose_reference_travels():
     for name in ("cmuwalk", "fight"):
         still = benchmark.verdicts({**kinds, name: _kind(1.0, progress=0.1)})
         assert still["final"]["progress"][name] == 0.1
-        assert not still["final"]["pass"] and not still["small_run"]["pass"]
+        assert not still["final"]["progress_ok"] and not still["small_run"]["pass"]
     # ... and so is one whose travelling pieces all failed (no progress measured).
     assert not benchmark.verdicts({**kinds, "fight": _kind(0.5, progress=None, travel_seconds=20.0)})["small_run"]["pass"]
     # A kind that never travels has no progress line.
     judged = benchmark.verdicts({**kinds, "cmujump": _kind(1.0, progress=None)})
-    assert judged["final"]["pass"] and "cmujump" not in judged["final"]["progress"]
+    assert judged["small_run"]["pass"] and "cmujump" not in judged["final"]["progress"]
 
 
 def _result(
@@ -194,10 +200,10 @@ def test_an_evaluation_only_set_is_judged_on_its_own_kinds():
     failing = benchmark.verdicts({**pico, "picoany": _kind(0.0, None)}, require_locomotion=False)
     assert failing["final"]["kinds_below_success_rate"] == ["picoany"]
     assert failing["small_run"]["kinds_never_succeeding"] == ["picoany"]
-    assert not failing["final"]["pass"] and not failing["small_run"]["pass"]
-    # Its recordings walk without walk in their kind names: a robot standing still fails.
+    assert failing["final"]["pass"] and not failing["small_run"]["pass"]
+    # Its recordings walk without walk in their kind names: a robot standing still is caught.
     still = benchmark.verdicts({**pico, "picoteleopit": _kind(1.0, progress=0.05)}, require_locomotion=False)
-    assert not still["final"]["pass"] and not still["small_run"]["pass"]
+    assert not still["final"]["progress_ok"] and not still["small_run"]["pass"]
 
 
 def test_a_kind_is_judged_on_its_judged_seconds():
@@ -248,6 +254,26 @@ def test_the_fall_line_holds_on_the_operators_motions():
     # The training kinds' set reports the rate without the line.
     reported = benchmark.verdicts(falling, require_locomotion=False)["final"]
     assert reported["falls_per_minute"] == pytest.approx(0.48) and reported["fall_ok"] and reported["pass"]
+
+
+def test_the_full_run_passes_on_the_fall_and_action_rate_lines_alone():
+    # Decided 2026-10-15: not falling however the operator moves; the tracking
+    # errors are accepted.  Half the seconds failing on the end points' height,
+    # every error above its line and no progress still pass ...
+    off = {name: 2.0 * std for name, std in benchmark.ERROR_LINES.items()}
+    loose = {kind: {**_kind(0.49, progress=0.1, falls=1, standing_seconds=600.0), **off}
+             for kind in ("picoteleopit", "picotwist")}
+    judged = benchmark.verdicts(loose, require_locomotion=False, hold_fall_line=True)["final"]
+    assert judged["kinds_below_success_rate"] == judged["kinds_above_error_lines"] == ["picoteleopit", "picotwist"]
+    assert not judged["progress_ok"] and judged["falls_per_minute"] == pytest.approx(0.1)
+    assert judged["pass"]
+    # ... and so does the training kinds' set, falling or not; a fall rate or an action rate past its line fails.
+    assert benchmark.verdicts({**loose, "picotwist": {**loose["picotwist"], "falls": 9}}, require_locomotion=False)[
+        "final"]["pass"]
+    falling = {**loose, "picotwist": {**loose["picotwist"], "falls": 8}}  # 9 in 20 min: 0.45
+    assert not benchmark.verdicts(falling, require_locomotion=False, hold_fall_line=True)["final"]["pass"]
+    rough = {**loose, "picotwist": {**loose["picotwist"], "leg_action_rate": 3.37}}
+    assert not benchmark.verdicts(rough, require_locomotion=False)["final"]["pass"]
 
 
 def test_a_fall_is_a_tipped_trunk_under_an_upright_reference():

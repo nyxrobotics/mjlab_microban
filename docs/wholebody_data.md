@@ -67,16 +67,20 @@ uv run --locked python $S quality data/wholebody/gmr/cmu data/wholebody/cmu/qual
 # 評価（学習の種類がすべて評価にあることを求める）
 uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --checkpoint <model.pt> \
     --motion-file data/wholebody/mix/eval --train-motion-file data/wholebody/mix/train
-# PICO の評価用だけで評価する（評価用の種類だけを、同じ線で判定する）
+# PICO の評価用だけで評価する（評価用の種類だけで、暴れと倒れの線で判定する）
 uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --checkpoint <model.pt> \
     --motion-file data/wholebody/pico_eval/eval --eval-only-set --output-root artifacts/wholebody_pico
 ```
 
-進み具合の線（胴の進んだ量を参照の進んだ量に射影した比が 0.5 以上）は、種類の名前によらず、参照の胴が片の判定する歩
-（片の始めから 1 秒たったあと、下記）の間に 0.12 m 以上進む片を持つ種類すべてに掛かる。0.12 m は、片の終わりに胴の位置の
-報酬の std（0.06 m）以内にいれば 0.5 に届き、立ち止まれば届かない長さ（0.06 / (1 - 0.5)）。PICO の歩き（`picoteleopit`、`picotwist`）や CMU の歩き（`cmuwalk`）にも掛かる。
+進み具合（胴の進んだ量を参照の進んだ量に射影した比。小さな学習の確認では 0.5 以上を求め、本番の合否では報告だけ）は、種類の名前によらず、参照の胴が片の判定する歩
+（片の始めから 1 秒たったあと、下記）の間に 0.12 m 以上進む片を持つ種類すべてで取る。0.12 m は、片の終わりに胴の位置の
+報酬の std（0.06 m）以内にいれば 0.5 に届き、立ち止まれば届かない長さ（0.06 / (1 - 0.5)）。PICO の歩き（`picoteleopit`、`picotwist`）や CMU の歩き（`cmuwalk`）でも取る。
 
 ### 評価の始め方と、暴れと倒れの線
+
+**合否（2026-10-15 の決定）**：全身トラッキングは、操縦者がいろいろ動いても倒れないことを最優先にし、手足の高さのずれ（お手本からの追従の誤差）は許容して完成とする。
+本番の合否（`verdicts.final.pass`）は、PICO の評価用データの倒れの線と、両方の評価用データでの暴れの線（下記）で決める。
+成功の割合、誤差、進み具合は計算して報告に残すが、合否には使わない。
 
 評価（`src/mjlab_microban/wholebody/benchmark.py`）は、遠隔操作の始まりと同じ条件で、片ごとに回す。
 遠隔操作では、ロボットは止まった HOME から、操縦者は立った状態から始め、ロボットが見る参照はそこから途切れずに続く。
@@ -103,7 +107,7 @@ uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --check
   どのフレームからでも始め、参照を最初の歩から流す）は 3030 秒と 5807 秒を判定したが、参照が HOME から動きの途中の姿勢へ跳ぶため、
   最初の歩で片の 49〜59% が終わりの判定（胴・足・手の高さが参照から 5 cm）に掛かっていた。
 
-成功、誤差、進み具合の線は、判定する歩（最初の 1 秒のあと）で取る。これに 2 つの線を足した。
+成功、誤差、進み具合は、判定する歩（最初の 1 秒のあと）で取る（報告だけ）。合否は次の 2 つの線で決める。
 
 - **暴れの線**（種類ごと、`leg_action_rate`）：脚 12 関節の、1 歩ごとのサーボの目標の変化の二乗和
   （報酬の `action_rate_l2` と同じ形、rad²）の、歩の平均が 3.36 以下。
@@ -133,12 +137,12 @@ uv run --locked python src/mjlab_microban/scripts/wholebody_benchmark.py --check
     参照が立っているので、参照が傾いているときの決まりを足しても、この数は変わらない（線は作り直さない）。
     実機で動かしている方策と同じ頻度までを認める。
   - 線は評価だけのデータ（`--eval-only-set`、操作者の動きである PICO の録画）にだけ掛ける。
-    学習の評価用データの倒れの頻度は報告するが、線にしない。操作では使わない動き（全力の走り、跳び、倒れ込み）を含み、
-    終わりの判定は成功率の線ですでに見ているため。
+    学習の評価用データの倒れの頻度は報告するが、線にしない。操作では使わない動き（全力の走り、跳び、倒れ込み）を含むため。
 
 報告の表（`<model>-kinds.csv`）には、種類ごとに `judged_seconds`（判定した秒数）、`falls_per_minute`（立っていた 1 分あたりの倒れ）、
 `leg_action_rate`（暴れの線の数字）を足した。判定（`verdicts.final`）には `kinds_above_action_rate_line`、`falls_per_minute`、
-`fall_ok` が入る。
+`fall_ok` が入り、`pass` はこれと、評価の欠け（評価にない種類、数値の壊れた片）がないことで決まる。
+`kinds_below_success_rate`、`kinds_above_error_lines`、`progress_ok` は報告だけ。
 
 書き出し（`src/mjlab_microban/scripts/wholebody_export.py`）は、同じチェックポイントの報告を 2 つ求める。
 学習の評価用データの報告（`--benchmark-report`）と、評価だけのデータの報告（`--eval-only-report`、倒れの線が掛かるもの）で、
