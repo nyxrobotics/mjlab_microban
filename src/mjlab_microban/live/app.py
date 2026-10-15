@@ -30,18 +30,36 @@ from mjlab_microban.live.retarget import (
 
 
 class Presses:
-    """Calibrate and start requests from the bridge's cumulative press counts (the first packet sets the base)."""
+    """Calibrate and start requests from the bridge's cumulative press counts.  The counts are one bridge process's own
+    (from 0 when it starts): the first packet, and one from another sender (a restarted bridge's new socket) or whose
+    sequence number or counts go back (a bridge restarted on the same socket), set the base and press nothing; a
+    packet at most REORDER behind the newest one is a late copy and changes nothing."""
 
-    def __init__(self):
-        self.last = None
+    REORDER = 50  # packets (1 s of the bridge's 50 Hz)
 
-    def __call__(self, pipe: Pipeline, calibrate: int, start: int) -> None:
-        if self.last is not None:
-            if (calibrate - self.last[0]) % (1 << 32):
-                pipe.request_calibration()
-            if (start - self.last[1]) % 2:
-                pipe.set_active(not pipe.active)
-        self.last = (calibrate, start)
+    def __init__(self, log=print):
+        self.last = None  # (sender, seq, calibrate, start)
+        self.log = log
+
+    def __call__(self, pipe: Pipeline, calibrate: int, start: int, seq: int | None = None, sender=None) -> None:
+        last = self.last
+        restarted = last is not None and sender != last[0]
+        if last is not None and not restarted and seq is not None and last[1] is not None:
+            behind = (last[1] - seq) % (1 << 32)
+            if behind <= self.REORDER:
+                return
+            restarted = behind < (1 << 31)
+        self.last = (sender, seq, calibrate, start)
+        if last is None:
+            return
+        if restarted or calibrate < last[2] or start < last[3]:
+            self.log(f"the bridge started again ({sender}, packet {seq}): its press counts ({calibrate}, {start}) "
+                     "are the new base, nothing pressed")
+            return
+        if calibrate != last[2]:
+            pipe.request_calibration()
+        if (start - last[3]) % 2:
+            pipe.set_active(not pipe.active)
 
 
 class Recording:
@@ -74,6 +92,8 @@ def _stdin_commands(q: queue.Queue) -> None:
 def _status(pipe: Pipeline, frame: stream.Frame, now: float, compute_ms: list[float]) -> str:
     names = [n for n, b in (("CAL", stream.CALIBRATED), ("ACTIVE", stream.ACTIVE), ("STALE", stream.STALE),
                             ("HELD", stream.HELD), ("LATE", stream.LATE)) if frame.flags & b]
+    transition = getattr(pipe, "transition", None)  # the reference through an interruption: carry / return
+    names += [transition.upper()] if transition else []
     delay = f"{1000 * pipe.clock.delay:.0f}" if pipe.clock.rows else "-"
     ms = np.array(compute_ms) if compute_ms else np.zeros(1)
     bone = f", bone dir err {pipe.retargeter.bone_err_deg:.0f} deg" if pipe.retargeter is not None else ""
@@ -82,10 +102,11 @@ def _status(pipe: Pipeline, frame: stream.Frame, now: float, compute_ms: list[fl
 
 
 def _receive(rx: socket.socket, q: queue.Queue) -> None:
-    """Datagrams with their arrival time (stamped here, so a busy output tick does not make them look late)."""
+    """Datagrams with their arrival time (stamped here, so a busy output tick does not make them look late) and
+    sender."""
     while True:
-        data = rx.recv(4096)
-        q.put((time.monotonic(), data))
+        data, sender = rx.recvfrom(4096)
+        q.put((time.monotonic(), data, sender))
 
 
 def run(args) -> None:
@@ -114,13 +135,13 @@ def run(args) -> None:
                 elif c == "q":
                     return
             while not inbox.empty():
-                arrival, data = inbox.get()
+                arrival, data, sender = inbox.get()
                 try:
                     pkt = link.decode(data)
                 except ValueError as exc:
                     print(f"dropped a body packet: {exc}", flush=True)
                     continue
-                presses(pipe, pkt.calibrate_presses, pkt.start_presses)
+                presses(pipe, pkt.calibrate_presses, pkt.start_presses, pkt.seq, sender)
                 if pkt.body_valid:
                     p, q = pkt.wxyz()
                     pipe.push(pkt.body_timestamp_ns * 1e-9, arrival, *pico_to_bones(p, q))
