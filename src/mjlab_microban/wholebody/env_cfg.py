@@ -3,10 +3,11 @@
 # merged into one builder.  Changes: the Microban robot, its HOME + action
 # servo targets and its reference-driven neck; lengths x0.21 and forces
 # x0.034 (Teleopit's start and push velocities included); the noise, delays,
-# physics randomization and action-rate weight of Microban's walking task;
-# one observation history per network whose last row is the current frame;
-# the hand points as the arms' end points; the joint-limit penalty at the
-# MJCF range; the end of a window as a time-out.
+# physics randomization and action-rate weight of Microban's walking task,
+# with the floor's softness and friction and the servo-goal delay widened in
+# training; one observation history per network whose last row is the
+# current frame; the hand points as the arms' end points; the joint-limit
+# penalty at the MJCF range; the end of a window as a time-out.
 
 """The whole-body tracking task ``Mjlab-Wholebody-Microban``.
 
@@ -38,6 +39,28 @@ randomization covers all of them) and adds one box per head, shoulder,
 upper-arm and hip-yaw link, the bounding box of its visual meshes, that
 touches only the floor: robot geoms are contype 3 / conaffinity 2, the boxes
 1 / 0 and the floor 1 / 1, so a box never overlaps the robot's own geoms.
+
+Floor and delay (training only; evaluation and play keep the rigid floor, the
+robot's foot friction and its 15-30 ms goal delay).  The robot's collision
+geoms have priority over the floor, so a floor contact takes their friction
+and solref: one value of each per environment, shared by all of them, is one
+floor (and the robot's self-contacts too).  The contact time constant
+(solref[0]) runs from MuJoCo's 0.02 s, today's rigid floor, to 0.1 s: the most
+loaded sole corner of the robot standing at HOME sinks 0.06 mm at 0.02 s,
+0.34 mm at 0.05 s and 0.77 mm at 0.1 s, from a hard floor to about what a
+carpet or an exercise mat gives under its 1.14 kg on two 23 cm^2 soles
+(2.4 kPa, 4.8 kPa on one foot).  It is drawn log-uniformly (the sink grows
+about as its square): a quarter of the floors stay near today's.  A longer
+time constant would sink further but settle slower than any floor (a contact
+settles in about its time constant, a carpet in tens of ms) and let loaded
+soles creep along the floor (the standing robot's feet drift twice as far at
+0.2 s as at 0.02 s).  The friction runs from 0.15 (hard plastic on a polished
+or dusty floor) to 1.5 (a rubber mat).  The servo goal follows the
+policy's output by one delay per episode, drawn at each reset from 0-6 physics
+steps (0-30 ms), instead of the robot's 3-6 steps redrawn every step: the
+robot's goal reaches its servos about 15 ms (at most about 20 ms) after the
+observation is read, and 30 ms is the old range's end.  The ``actions``
+observation stays the policy's latest output, as on the robot.
 """
 
 from __future__ import annotations
@@ -77,6 +100,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 from mjlab_microban.wholebody import observations as obs
 from mjlab_microban.wholebody import rewards as rew
 from mjlab_microban.wholebody import terminations as term
+from mjlab_microban.wholebody.events import contact_time_constant
 from mjlab_microban.wholebody.motion import MotionCommandCfg, ReferenceNeckTarget
 from mjlab_microban.wholebody.retarget.model import wholebody_spec
 
@@ -133,9 +157,14 @@ TRAIN_ONLY_EVENTS = (
     "base_com",
     "encoder_bias",
     "geom_friction",
+    "floor_softness",
     "dof_armature",
     "dof_friction",
 )
+# Training's floors and goal delay (see the module docstring).
+FLOOR_TIME_CONSTANT_S = (0.02, 0.1)
+FLOOR_FRICTION = (0.15, 1.5)
+COMMAND_DELAY_STEPS = (0, 6)  # physics steps of 5 ms
 
 
 WHOLEBODY_COLLISION = CollisionCfg(
@@ -152,6 +181,19 @@ WHOLEBODY_ROBOT_CFG = replace(
     spec_fn=wholebody_spec,
     collisions=(WHOLEBODY_COLLISION,),
     articulation=replace(MICROBAN_ROBOT_CFG.articulation, soft_joint_pos_limit_factor=1.0),
+)
+# Training's robot: the goal delay is drawn when an episode starts (a reset
+# clears the delay buffer) and kept to its end (no redraw period is reached).
+WHOLEBODY_TRAIN_ROBOT_CFG = replace(
+    WHOLEBODY_ROBOT_CFG,
+    articulation=replace(
+        WHOLEBODY_ROBOT_CFG.articulation,
+        actuators=tuple(
+            replace(actuator, delay_min_lag=COMMAND_DELAY_STEPS[0], delay_max_lag=COMMAND_DELAY_STEPS[1],
+                    delay_hold_prob=0.0, delay_update_period=1 << 40, delay_per_env_phase=False)
+            for actuator in WHOLEBODY_ROBOT_CFG.articulation.actuators
+        ),
+    ),
 )
 
 
@@ -304,7 +346,11 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Every collision geom, not only the soles: the motions lie on the floor.
         "geom_friction": EventTermCfg(
             func=dr.geom_friction, mode="startup",
-            params={"asset_cfg": collision_geoms, "operation": "abs", "ranges": (0.3, 1.2), "shared_random": True},
+            params={"asset_cfg": collision_geoms, "operation": "abs", "ranges": FLOOR_FRICTION, "shared_random": True},
+        ),
+        "floor_softness": EventTermCfg(
+            func=contact_time_constant, mode="startup",
+            params={"asset_cfg": collision_geoms, "time_constant_range": FLOOR_TIME_CONSTANT_S},
         ),
         "dof_armature": EventTermCfg(
             func=dr.joint_armature, mode="startup",
@@ -389,7 +435,7 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             terrain=TerrainEntityCfg(terrain_type="plane", terrain_generator=None, max_init_terrain_level=0),
             num_envs=1,
             extent=2.0,
-            entities={"robot": deepcopy(WHOLEBODY_ROBOT_CFG)},
+            entities={"robot": deepcopy(WHOLEBODY_ROBOT_CFG if play else WHOLEBODY_TRAIN_ROBOT_CFG)},
             sensors=(self_collision,),
         ),
         observations=observations,
