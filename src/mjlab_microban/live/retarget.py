@@ -13,9 +13,12 @@ each output frame uses only what came before it; the parts that differ:
 * Floor: the lowest collision point at the human clearance x the root scale, the clearance's floor being the
   minimum of the last second (the data: +-1 s).
 * Poses: forward kinematics on the training collision model (body_pos_w, body_quat_w as build.py).
-* Velocities: backward differences (the data: central differences).
+* Velocities: backward differences of the frames sent (the data: central differences).
 * Exclusion: preprocess.py's rules and finalize's arm-flip cut, judged on the frames so far.  A marked frame and the
-  pad_s after the last mark are held at the last unmarked frame (velocities 0) instead of being cut.
+  pad_s after the last mark are not sent (the data cuts them): like a missing or late body, they interrupt the
+  reference (``Carry``): the last motion fades out, the pose stands still, after HOLD_S it goes to the calibrated
+  standing pose; when the body is back the reference goes back to it smoothly (``Return``).  No frame changes more
+  than the training reference does in one tick (``JOINT_STEP_LIMITS``, ``Guard``).
 
 PICO's 24 joints become the pseudo-bones of pico.py (skeleton.FORMATS["g1"]), the joint whose global rotation is
 the bone's rotation: thigh = hip, shin = knee, foot = ankle, upper arm = shoulder, forearm = elbow, hand = wrist; the
@@ -36,7 +39,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from mjlab_microban.live import stream
-from mjlab_microban.wholebody.data.fk import quat_conjugate, quat_multiply
+from mjlab_microban.wholebody.data.fk import quat_conjugate, quat_multiply, set_qpos
 from mjlab_microban.wholebody.data.preprocess import ClipChecker, ExclusionSpec
 from mjlab_microban.wholebody.retarget import core, pico
 from mjlab_microban.wholebody.retarget.model import collision_model, home_qpos
@@ -47,6 +50,48 @@ FMT = "g1"
 OUTPUT_HZ = 50.0
 STALE_S = 0.25
 CALIBRATION_S = 1.0
+# An interruption (the body missing or late, or HELD; docs/wholebody_live.md "途切れたとき"): the last motion carries
+# on and fades out in COAST_S (it goes on for COAST_S / 2 x its speed), the pose stands still until HOLD_S after the
+# interruption began, then goes to the calibrated standing pose in STAND_S (longer if a joint or the trunk would move
+# faster than the step limits' 99th percentiles below).  When the body is back, the difference to it fades out in as
+# long as the interruption lasted, at most RETURN_S (longer by the same rule).
+COAST_S = 0.2
+HOLD_S = 1.0
+STAND_S = 1.0
+RETURN_S = 1.0
+CATCH_UP_S = 0.5  # after a gap the return waits (at most this) for the IK to stop catching up the operator
+# The training reference per control tick (0.02 s), as the training env feeds it (motion.py: 30 fps clips, positions
+# and velocities linear, orientations slerp), on the deployed run's motion_file (scripts/wholebody_reference_steps.py):
+# per joint (speed p99 rad/s, speed change per tick p99 rad/s, step p99.9 rad, speed change per tick p99.9 rad/s).
+# The planned motions of an interruption stay within the 99th percentiles; every frame sent through one stays within
+# the 99.9th (``Guard``).
+JOINT_STEP_LIMITS = {
+    "head": (4.09, 0.98, 0.183, 2.26),
+    "neck_roll": (2.00, 0.62, 0.091, 1.40),
+    "neck_pitch": (2.57, 0.77, 0.113, 1.76),
+    "right_shoulder_pitch": (6.35, 1.83, 0.213, 2.22),
+    "right_shoulder_roll": (5.54, 1.65, 0.213, 2.22),
+    "right_elbow": (6.45, 1.94, 0.213, 2.28),
+    "right_hip_yaw": (4.60, 1.75, 0.179, 2.25),
+    "right_hip_roll": (3.30, 1.24, 0.124, 1.92),
+    "right_hip_pitch": (6.51, 1.88, 0.213, 1.91),
+    "right_knee": (8.13, 2.18, 0.213, 2.18),
+    "right_ankle_pitch": (6.11, 2.28, 0.195, 2.28),
+    "right_ankle_roll": (3.60, 1.66, 0.146, 2.29),
+    "left_shoulder_pitch": (6.06, 1.73, 0.213, 2.22),
+    "left_shoulder_roll": (5.09, 1.52, 0.207, 2.22),
+    "left_elbow": (6.14, 1.84, 0.211, 2.28),
+    "left_hip_yaw": (4.55, 1.70, 0.175, 2.25),
+    "left_hip_roll": (3.40, 1.22, 0.126, 1.92),
+    "left_hip_pitch": (6.36, 1.85, 0.213, 1.91),
+    "left_knee": (7.99, 2.18, 0.213, 2.18),
+    "left_ankle_pitch": (5.78, 2.28, 0.189, 2.28),
+    "left_ankle_roll": (3.68, 1.64, 0.144, 2.29),
+}
+# The trunk: position (m/s, m/s per tick, m, m/s per tick) and turn (rad/s, rad/s per tick, rad, rad/s per tick), the
+# same four percentiles of the speed, its change per tick, the step and the change per tick.
+TRUNK_STEP_LIMITS = (0.447, 0.0836, 0.0146, 0.163)
+TURN_STEP_LIMITS = (4.86, 1.30, 0.198, 2.31)
 # PICO's body joints (XRoboToolkit, SMPL order).
 PICO_JOINTS = (
     "pelvis", "left_hip", "right_hip", "spine_1", "left_knee", "right_knee", "spine_2", "left_ankle", "right_ankle",
@@ -320,6 +365,179 @@ def backward_velocities(cur: dict, prev: dict | None, fps: float) -> dict:
             "body_lin_vel_w": (cur["body_pos_w"] - prev["body_pos_w"]) * fps, "body_ang_vel_w": w}
 
 
+# JOINT_STEP_LIMITS in the stream's joint order: speed p99, speed change per tick p99, step p99.9, speed change p99.9.
+_JOINT = np.array([JOINT_STEP_LIMITS[n] for n in stream.JOINT_NAMES]).T
+_SLOPE = 1.875  # smootherstep's largest slope
+_BEND = 10.0 / np.sqrt(3.0)  # and its largest second derivative
+
+
+def smootherstep(u: float) -> float:
+    u = min(max(u, 0.0), 1.0)
+    return u * u * u * (u * (6.0 * u - 15.0) + 10.0)
+
+
+def _faded(u: np.ndarray) -> np.ndarray:
+    """The distance a motion of speed 1 covers by ``u`` while its speed fades as 1 - smoothstep over a duration of 1
+    (all of it: 1 / 2)."""
+    u = np.clip(u, 0.0, 1.0)
+    return u - u**3 + 0.5 * u**4
+
+
+def sweep_s(gaps: list[tuple[np.ndarray, np.ndarray, np.ndarray]], floor_s: float, fps: float = OUTPUT_HZ) -> float:
+    """The shortest smootherstep (s, at least ``floor_s``) that moves every gap with its speed and its speed change per
+    tick within their limits (``(gap, speed, speed change per tick)`` arrays)."""
+    t = floor_s
+    for gap, speed, change in gaps:
+        gap = np.abs(np.asarray(gap, float))
+        t = max(t, float(np.max(_SLOPE * gap / speed)), float(np.max(np.sqrt(_BEND * gap / (change * fps)))))
+    return t
+
+
+def heading(quat: np.ndarray) -> float:
+    w, x, y, z = quat
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
+def blend(a: np.ndarray, b: np.ndarray, w: float) -> np.ndarray:
+    """qpos ``a`` to ``b`` by ``w``: positions and joints linear, the trunk's orientation slerp."""
+    q = a + w * (b - a)
+    q[3:7] = slerp(a[3:7], b[3:7], w)
+    return q
+
+
+def _turn(a: np.ndarray, b: np.ndarray) -> float:
+    return float(2.0 * np.arccos(min(1.0, abs(float(np.dot(a, b))))))
+
+
+class Carry:
+    """The reference through an interruption, from the last frame sent (qpos ``q0``; per-second velocities ``v0``:
+    joints, trunk linear, trunk angular in the world).  Its motion carries on, the speed fading as 1 - smoothstep over
+    COAST_S (longer for a speed whose fading would brake harder than the training reference's 99th percentile change
+    of speed; a joint sooner if it would pass its range ``lo``-``hi``), the pose stands still, and from HOLD_S it goes
+    to the calibrated standing pose (``home``'s joints, trunk height and attitude) at the trunk's x, y and heading."""
+
+    def __init__(self, q0: np.ndarray, v0: tuple, home: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                 fps: float = OUTPUT_HZ):
+        jv, self.lv, self.av = (np.asarray(v, float) for v in v0)
+        self.q0, self.jv = np.asarray(q0, float).copy(), jv
+        fade = lambda speed, change: np.maximum(COAST_S, 1.5 * np.abs(speed) / (change * fps))  # 1 - smoothstep's 1.5
+        room = np.maximum(np.where(jv > 0.0, hi - self.q0[7:], self.q0[7:] - lo), 0.0)
+        self.joint_s = fade(jv, _JOINT[1])
+        self.joint_s = np.where(np.abs(jv) * self.joint_s / 2.0 > room, 2.0 * room / np.maximum(np.abs(jv), 1e-9),
+                                self.joint_s)
+        self.trunk_s = float(fade(np.linalg.norm(self.lv), TRUNK_STEP_LIMITS[1]))
+        self.turn_s = float(fade(np.linalg.norm(self.av), TURN_STEP_LIMITS[1]))
+        self.r0 = R.from_quat(self.q0[3:7], scalar_first=True)
+        self.end = self._coast(np.inf)
+        self.stand = self.end.copy()
+        self.stand[2] = home[2]
+        self.stand[3:7] = (R.from_euler("z", heading(self.end[3:7])) * R.from_quat(home[3:7], scalar_first=True)
+                           ).as_quat(scalar_first=True)
+        self.stand[7:] = home[7:]
+        self.stand_s = sweep_s([(self.stand[7:] - self.end[7:], _JOINT[0], _JOINT[1]),
+                                (self.stand[2] - self.end[2], TRUNK_STEP_LIMITS[0], TRUNK_STEP_LIMITS[1]),
+                                (_turn(self.end[3:7], self.stand[3:7]), TURN_STEP_LIMITS[0], TURN_STEP_LIMITS[1])],
+                               STAND_S)
+
+    def _coast(self, t: float) -> np.ndarray:
+        q = self.q0.copy()
+        q[7:] += self.jv * self.joint_s * _faded(t / np.maximum(self.joint_s, 1e-9))
+        q[:3] += self.lv * self.trunk_s * float(_faded(t / self.trunk_s))
+        q[3:7] = (R.from_rotvec(self.av * self.turn_s * float(_faded(t / self.turn_s))) * self.r0
+                  ).as_quat(scalar_first=True)
+        return q
+
+    def at(self, t: float) -> np.ndarray:
+        """The reference ``t`` s after the last frame sent."""
+        if t < HOLD_S:
+            return self._coast(t)
+        return blend(self.end, self.stand, smootherstep((t - HOLD_S) / self.stand_s))
+
+
+def _quintic(x0: np.ndarray, v0: np.ndarray, T: float, t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A difference ``x0`` changing at ``v0`` brought to rest at zero in ``T`` by the quintic that overshoots least
+    (Bollo's inertialization: x0 (1 - u)^4 (1 + 4u) + v0 T u (1 - u)^4, u = t / T): its value, rate and acceleration
+    at the times ``t`` (rows) for each column."""
+    u = np.clip(np.asarray(t, float) / T, 0.0, 1.0)[:, None]
+    w = 1.0 - u
+    x = x0 * w**4 * (1.0 + 4.0 * u) + v0 * T * u * w**4
+    v = -20.0 * x0 * u * w**3 / T + v0 * w**3 * (1.0 - 5.0 * u)
+    acc = w**2 * (-20.0 * x0 * (1.0 - 4.0 * u) + v0 * T * (20.0 * u - 8.0)) / T**2
+    return x, v, acc
+
+
+# Per channel (21 joints, the trunk's x, y, z, its turn about x, y, z): the speed and the speed change per tick (the
+# training reference's 99th percentiles) a return plans within.
+_SPEED = np.concatenate([_JOINT[0], np.full(3, TRUNK_STEP_LIMITS[0]), np.full(3, TURN_STEP_LIMITS[0])])
+_CHANGE = np.concatenate([_JOINT[1], np.full(3, TRUNK_STEP_LIMITS[1]), np.full(3, TURN_STEP_LIMITS[1])])
+
+
+class Return:
+    """Back to the live frames: each live frame plus the difference the reference had to it (where the interruption
+    took it, and how fast it moved against the operator), fading out in ``seconds`` as a quintic (no step in the
+    position or the speed; at rest at the end).  ``seconds`` is the shortest from ``floor_s`` that
+    keeps every channel, with the operator moving on as now, within the 99th percentiles of the speed and its change
+    per tick (``_SPEED``, ``_CHANGE``); at most 3 s."""
+
+    def __init__(self, x0: np.ndarray, v0: np.ndarray, live_v: np.ndarray, floor_s: float, fps: float = OUTPUT_HZ):
+        self.x0, self.v0 = x0, v0
+        speed = np.maximum(_SPEED, np.maximum(np.abs(live_v), np.abs(live_v + v0)))
+        u = np.linspace(0.0, 1.0, 41)
+        self.seconds = 3.0
+        for T in np.arange(max(floor_s, 2.0 / fps), 3.0, 1.0 / fps):
+            _, v, acc = _quintic(x0, v0, T, u * T)
+            if np.all(np.abs(live_v + v) <= speed + 1e-9) and np.all(np.abs(acc) / fps <= _CHANGE + 1e-9):
+                self.seconds = float(T)
+                break
+
+    def at(self, t: float, live: np.ndarray) -> tuple[np.ndarray, bool]:
+        """The reference ``t`` s into the return (``live``: this tick's live qpos) and whether the difference is
+        gone."""
+        x = _quintic(self.x0, self.v0, self.seconds, np.array([t]))[0][0]
+        q = live.copy()
+        q[7:] += x[:21]
+        q[:3] += x[21:24]
+        q[3:7] = (R.from_rotvec(x[24:27]) * R.from_quat(live[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        return q, t >= self.seconds
+
+
+class Guard:
+    """No frame sent through an interruption or a return changes a joint, the trunk's position or its orientation by
+    more than the training reference's 99.9th percentile step in one tick, nor that tick's change by more than its
+    99.9th percentile change of speed (the motion planned there stays within the 99th percentiles: this only acts
+    if the operator moves faster still while the reference goes back to them)."""
+
+    def __init__(self, lo: np.ndarray, hi: np.ndarray, fps: float = OUTPUT_HZ):
+        self.lo, self.hi, self.dt = lo, hi, 1.0 / fps
+
+    @staticmethod
+    def deltas(q: np.ndarray, prev: np.ndarray) -> np.ndarray:
+        """Per tick changes: 21 joints, the trunk's position (3), its turn (a world rotation vector, 3)."""
+        turn = R.from_quat(q[3:7], scalar_first=True) * R.from_quat(prev[3:7], scalar_first=True).inv()
+        return np.concatenate([q[7:] - prev[7:], q[:3] - prev[:3], turn.as_rotvec()])
+
+    def __call__(self, q: np.ndarray, prev: np.ndarray, d_prev: np.ndarray) -> tuple[np.ndarray, bool]:
+        d = self.deltas(q, prev)
+        out = d.copy()
+        change = _JOINT[3] * self.dt
+        out[:21] = np.clip(np.clip(out[:21], d_prev[:21] - change, d_prev[:21] + change), -_JOINT[2], _JOINT[2])
+        for sl, (_, _, step, speed_change) in ((slice(21, 24), TRUNK_STEP_LIMITS), (slice(24, 27), TURN_STEP_LIMITS)):
+            dd = out[sl] - d_prev[sl]
+            n = float(np.linalg.norm(dd))
+            if n > speed_change * self.dt:
+                out[sl] = d_prev[sl] + dd * (speed_change * self.dt / n)
+            n = float(np.linalg.norm(out[sl]))
+            if n > step:
+                out[sl] *= step / n
+        clamped = not np.allclose(out, d, rtol=0.0, atol=1e-9)
+        q = q.copy()
+        if clamped:
+            q[7:] = np.clip(prev[7:] + out[:21], self.lo, self.hi)
+            q[:3] = prev[:3] + out[21:24]
+            q[3:7] = (R.from_rotvec(out[24:27]) * R.from_quat(prev[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        return q, clamped
+
+
 class Pipeline:
     """Samples in (source clock), calibrate and start requests, one stream frame out per ``tick`` (local clock)."""
 
@@ -333,17 +551,31 @@ class Pipeline:
         self.clock = SourceClock(delay_s)
         self.retargeter: Retargeter | None = None
         self.world: tuple[R, np.ndarray] | None = None
-        self.home = home_arrays()
+        checker = ClipChecker(collision_model())
+        self.home = home_arrays(checker)
+        self.home_q = home_qpos(checker.model)
         self.active = False
         self.restart = False
         self.seq = 0
         self.last_arrival = None
         self.capture: list | None = None  # calibration window: [end source time, samples]
-        self.prev_live = None  # the last frame's arrays before holding (velocities)
-        self.last_sent = None  # the last unheld frame (what a hold repeats)
         self.hold_until = -1
         self.ticks = 0
         self.rendered = None  # source time of the last rendered frame
+        self._reset_output()
+
+    def _reset_output(self) -> None:
+        self.sent = None  # the last frame sent: (qpos, its per-tick deltas, its arrays)
+        self.shift = np.zeros(2)  # added to the live frames' x, y (each return starts where the interruption was)
+        self.carry: Carry | None = None
+        self.carried = 0  # ticks into the interruption
+        self.back: Return | None = None
+        self.returned = 0  # ticks into the return
+        self.calm = 0  # ticks in a row the return was over and unguarded
+        self.live_prev: tuple | None = None  # the last live qpos and whether it followed new input
+        self.carry_end: float | None = None  # when (s into the carry) the input was back
+        self.transition: str | None = None  # "carry" or "return" (diagnostics)
+        self.guarded = 0  # frames the Guard changed
 
     # Input.
     def push(self, source_s: float, arrival_s: float, p: np.ndarray, q: np.ndarray) -> None:
@@ -367,7 +599,8 @@ class Pipeline:
 
     def _install(self, retargeter: Retargeter, world: tuple[R, np.ndarray]) -> None:
         self.retargeter, self.world = retargeter, world
-        self.prev_live = self.last_sent = None
+        self.guard = Guard(retargeter.lo, retargeter.hi, self.fps)
+        self._reset_output()
         self.hold_until = -1
         self.restart = self.active
 
@@ -384,7 +617,8 @@ class Pipeline:
             r = Retargeter(ref, self.fps, self.workdir)
             r.step(self._in_world(frame, world))  # the IK's first solve (the arm branch), off the output ticks
             self.ready = (r, world)
-            self.log(f"calibrated ({why}, root scale {r.scale:.4f})")
+            then = "" if self.active else "; left Y starts tracking"
+            self.log(f"calibrated ({why}, root scale {r.scale:.4f}){then}")
 
         if self.background:
             threading.Thread(target=build, daemon=True).start()
@@ -400,6 +634,9 @@ class Pipeline:
                 for n, v in frame.items()}
 
     def set_active(self, active: bool) -> None:
+        if active and self.retargeter is None:
+            self.log("start refused: not calibrated yet (left X, then stand still for 1 s)")
+            return
         if active and not self.active:
             self.restart = True
         self.active = active
@@ -412,31 +649,25 @@ class Pipeline:
             self.ready = None
         flags = 0
         arrays = None
-        stale = self.last_arrival is None or now_s - self.last_arrival > STALE_S
         if self.retargeter is not None:
             flags |= stream.CALIBRATED
-            if stale:
+            live = None
+            if self.last_arrival is None or now_s - self.last_arrival > STALE_S:
                 flags |= stream.STALE
-                arrays = self._still(self.last_sent)
             else:
                 t = self.clock.render_time(now_s)
                 p, q, late = self.interp.sample(t)
                 self.rendered = t
-                if late:
-                    flags |= stream.LATE
                 qpos, kin, marks = self.retargeter.step(self._in_world(as_frame(p, q), self.world))
-                live = {"joint_pos": qpos[7:], "body_pos_w": kin.body_pos_w[0].astype(np.float64),
-                        "body_quat_w": kin.body_quat_w[0].astype(np.float64)}
-                vel = backward_velocities(live, self.prev_live, self.fps)
-                self.prev_live = live
+                live = (qpos, kin)
                 if marks:
                     self.hold_until = self.ticks + round(ExclusionSpec.pad_s * self.fps)
+                if late:
+                    flags |= stream.LATE
                 if marks or self.ticks <= self.hold_until:
                     flags |= stream.HELD
-                    arrays = self._still(self.last_sent or {**live, **vel})
-                else:
-                    arrays = {**live, **vel}
-                    self.last_sent = arrays
+            arrays = self._send(live, bool(flags & (stream.STALE | stream.LATE | stream.HELD)),
+                                not flags & (stream.STALE | stream.LATE))
         if arrays is None:
             arrays = self.home
         if self.active:
@@ -450,8 +681,77 @@ class Pipeline:
         self.ticks += 1
         return out
 
-    def _still(self, arrays: dict | None) -> dict:
-        if arrays is None:
-            return self.home
-        return {**arrays, "joint_vel": np.zeros(stream.NJ), "body_lin_vel_w": np.zeros((stream.NB, 3)),
-                "body_ang_vel_w": np.zeros((stream.NB, 3))}
+    def _send(self, live: tuple | None, interrupted: bool, fresh: bool) -> dict:
+        """This tick's frame: the live one (``(qpos, kinematics)`` of the IK this tick, None when the body is stale),
+        or, while ``interrupted`` (the body missing, late or held), the Carry, and back from it the Return, with
+        velocities from the frames sent.  ``fresh``: the IK followed new input this tick (not stale, not late)."""
+        dt = 1.0 / self.fps
+        q_live = None
+        if live is not None:
+            q_live = live[0].copy()
+            q_live[:2] += self.shift
+        if self.carry is not None and not interrupted and self.carry_end is None:
+            self.carry_end = self.carried * dt
+        if interrupted or (self.carry is not None and not self._caught_up(fresh)):
+            if self.carry is None:
+                if self.sent is None:
+                    q0, v0 = self.home_q, (np.zeros(stream.NJ), np.zeros(3), np.zeros(3))
+                else:
+                    a = self.sent[2]
+                    q0, v0 = self.sent[0], (a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0])
+                self.carry = Carry(q0, v0, self.home_q, self.retargeter.lo, self.retargeter.hi, self.fps)
+                self.carried, self.back, self.carry_end = 0, None, None
+            self.carried += 1
+            planned, self.transition = self.carry.at(self.carried * dt), "carry"
+        else:
+            if self.carry is not None:
+                # Back: the live frames start where the reference is (x, y) and the difference fades out.
+                prev, a = self.live_prev[0].copy(), self.sent[2]
+                shift = self.sent[0][:2] - prev[:2]
+                self.shift += shift
+                q_live[:2] += shift
+                prev[:2] += shift
+                live_v = Guard.deltas(q_live, prev) / dt
+                out_v = np.concatenate([a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0]])
+                x0 = -Guard.deltas(prev, self.sent[0])
+                self.back = Return(x0, out_v - live_v, live_v, min(self.carried * dt, RETURN_S), self.fps)
+                self.returned, self.calm, self.carry = 0, 0, None
+            planned, self.transition = None, None
+            if self.back is not None:
+                self.returned += 1
+                planned, done = self.back.at(self.returned * dt, q_live)
+                self.transition = "return"
+        if live is not None:
+            self.live_prev = (q_live.copy(), fresh)
+        if planned is None:
+            q = q_live
+            kin = live[1]
+            pos = kin.body_pos_w[0].astype(np.float64)
+            pos[:, :2] += self.shift
+            arrays = {"joint_pos": q[7:], "body_pos_w": pos, "body_quat_w": kin.body_quat_w[0].astype(np.float64)}
+        else:
+            q = planned
+            if self.sent is not None:
+                q, clamped = self.guard(planned, self.sent[0], self.sent[1])
+                self.guarded += clamped
+                if self.back is not None:
+                    # Over once the difference is gone and two frames in a row were the live ones (their speed too).
+                    self.calm = self.calm + 1 if done and not clamped else 0
+                    if self.calm >= 2:
+                        self.back = None
+            c = self.retargeter.checker
+            set_qpos(c.model, c.data, q[:3], q[3:7], q[7:])
+            arrays = {"joint_pos": q[7:], "body_pos_w": c.data.xpos[c.body_ids].copy(),
+                      "body_quat_w": c.data.xquat[c.body_ids].copy()}
+        arrays.update(backward_velocities(arrays, None if self.sent is None else self.sent[2], self.fps))
+        deltas = np.zeros(27) if self.sent is None else Guard.deltas(q, self.sent[0])
+        self.sent = (q, deltas, arrays)
+        return arrays
+
+    def _caught_up(self, fresh: bool) -> bool:
+        """Whether the live frames follow the operator again after an interruption, so that their last step is the
+        operator's speed: this one and the one before are fresh and the IK's servos bounded neither the speed nor the
+        acceleration of this one (it is not catching up a gap), or CATCH_UP_S have passed since the input was back."""
+        waited = self.carried / self.fps - self.carry_end
+        before = self.live_prev is not None and self.live_prev[1]
+        return fresh and before and (not any(self.retargeter.gmr.servo_bound) or waited > CATCH_UP_S)

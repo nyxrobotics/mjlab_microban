@@ -2,7 +2,9 @@
 
 It runs without the training stack, its collision model and frame rules are the training ones, a still standing
 operator calibrates onto HOME and is sent as HOME, one who is not standing is refused, and the flags follow the
-input (start, stale input, a lifted pose held).
+input (start, stale input, a lifted pose held).  Through an interruption (the body missing, or HELD) the reference
+carries the motion on, stands still, after HOLD_S goes to the standing pose and comes back to the operator, with no
+frame changing more than the training reference does in one tick.
 """
 
 from __future__ import annotations
@@ -13,12 +15,18 @@ import sys
 
 import mujoco
 import numpy as np
+import pytest
+from scipy.spatial.transform import Rotation as R
 
 from mjlab_microban.live import stream
 from mjlab_microban.live.app import Presses
 from mjlab_microban.live.retarget import (
     BONES,
+    HOLD_S,
+    JOINT_STEP_LIMITS,
     PICO_JOINTS,
+    TRUNK_STEP_LIMITS,
+    TURN_STEP_LIMITS,
     Interpolator,
     Pipeline,
     pico_to_bones,
@@ -171,3 +179,121 @@ def test_presses_toggle_start_and_request_calibration():
     presses(fake, 5, 10)  # two presses between packets: no change
     presses(fake, 5, 11)
     assert calls == ["c", True, False]
+
+
+# Interruptions.  An operator who swings the arms (0.8 Hz, +-0.8 rad) and walks forward (0.3 m/s), both starting
+# within about 0.5 s, or who raises the left thigh and stands on the right leg.
+QUIET = np.tile([1.0, 0.0, 0.0, 0.0], (len(BONES), 1))
+
+
+def _swinging(t):
+    ramp = 1.0 - np.exp(-t / 0.2)
+    walked = 0.3 * (t - 0.2 * ramp)
+    p, q = np.array([STAND[b] for b in BONES]) + [walked, 0.0, 0.0], QUIET.copy()
+    for s, sign in (("L", 1.0), ("R", -1.0)):
+        turn = R.from_euler("y", sign * 0.8 * ramp * np.sin(2 * np.pi * 0.8 * t))
+        sh = p[BONES.index(f"{s}_shoulder")]
+        for b, length in (("elbow", 0.27), ("wrist", 0.54)):
+            p[BONES.index(f"{s}_{b}")] = sh + turn.apply([0.0, 0.0, -length])
+        for b in ("shoulder", "elbow", "wrist"):
+            q[BONES.index(f"{s}_{b}")] = turn.as_quat(scalar_first=True)
+    return p, q
+
+
+def _one_leg(t):
+    """The left thigh raised to horizontal in the first 0.8 s (smoothstep), the shin hanging."""
+    u = min(t / 0.8, 1.0)
+    thigh = R.from_euler("y", -np.pi / 2 * u * u * (3.0 - 2.0 * u))
+    p, q = np.array([STAND[b] for b in BONES]), QUIET.copy()
+    hip = p[BONES.index("L_hip")]
+    knee = hip + thigh.apply([0.0, 0.0, -0.42])
+    p[BONES.index("L_knee")] = knee
+    p[BONES.index("L_ankle")] = knee + [0.0, 0.0, -0.42]
+    p[BONES.index("L_toe")] = knee + [0.12, 0.0, -0.48]
+    q[BONES.index("L_hip")] = thigh.as_quat(scalar_first=True)
+    return p, q
+
+
+def _run(motion, drop=(), held=()):
+    """Calibrate on the standing operator, then ``motion`` for 7 s; the samples in ``drop`` (start, end) s are not
+    sent, the IK's frames in ``held`` (start, end) s break a rule.  The frames from the motion's start on."""
+    pipe = Pipeline(log=lambda _: None)
+    _, t = _feed(pipe, 0.0, 0.2)
+    pipe.request_calibration()
+    _, t = _feed(pipe, t, 1.2)
+    pipe.set_active(True)
+    step, start = pipe.retargeter.step, t
+    clock = {"t": t}
+
+    def marked(frame):
+        qpos, kin, marks = step(frame)
+        return qpos, kin, marks + ["test"] * any(a <= clock["t"] - start < b for a, b in held)
+
+    pipe.retargeter.step = marked
+    frames, k = [], 0
+    while clock["t"] < start + 7.0:
+        while start + k / RATE <= clock["t"] + 1e-9:
+            if not any(a <= k / RATE < b for a, b in drop):
+                pipe.push(start + k / RATE, start + k / RATE, *motion(k / RATE))
+            k += 1
+        frames.append(pipe.tick(clock["t"]))
+        clock["t"] += 1.0 / pipe.fps
+    return frames
+
+
+def _worst_step(frames):
+    """The largest per-tick change of the frames against the training reference's 99.9th percentiles (1 = there):
+    joints, their speed, the trunk's position, turn, speed and angular speed."""
+    jp = np.array([f.joint_pos for f in frames], float)
+    jv = np.array([f.joint_vel for f in frames], float)
+    limits = np.array([JOINT_STEP_LIMITS[n] for n in stream.JOINT_NAMES])
+    trunk = np.array([f.body_pos_w[0] for f in frames], float)
+    quat = np.array([f.body_quat_w[0] for f in frames], float)
+    turn = 2 * np.arccos(np.clip(np.abs(np.sum(quat[1:] * quat[:-1], axis=1)), 0, 1))
+    lin = np.array([f.body_lin_vel_w[0] for f in frames], float)
+    ang = np.array([f.body_ang_vel_w[0] for f in frames], float)
+    return {"joint": float(np.max(np.abs(np.diff(jp, axis=0)) / limits[:, 2])),
+            "joint speed": float(np.max(np.abs(np.diff(jv, axis=0)) / limits[:, 3])),
+            "trunk": float(np.max(np.linalg.norm(np.diff(trunk, axis=0), axis=1)) / TRUNK_STEP_LIMITS[2]),
+            "turn": float(np.max(turn) / TURN_STEP_LIMITS[2]),
+            "trunk speed": float(np.max(np.linalg.norm(np.diff(lin, axis=0), axis=1)) / TRUNK_STEP_LIMITS[3]),
+            "trunk angular speed": float(np.max(np.linalg.norm(np.diff(ang, axis=0), axis=1)) / TURN_STEP_LIMITS[3])}
+
+
+HOME_JOINTS = np.array([HOME.joint_pos_rad[n] for n in stream.JOINT_NAMES])
+
+
+@pytest.mark.parametrize("drop,held", [
+    pytest.param([(1.0, 1.05)], [], id="dropout 0.05 s"),
+    pytest.param([(1.0, 1.3)], [], id="dropout 0.3 s"),
+    pytest.param([(1.0, 2.0)], [], id="dropout 1 s"),
+    pytest.param([(1.0, 6.0)], [], id="dropout 5 s"),
+    pytest.param([], [(1.0, 1.02)], id="held 1 frame"),
+    pytest.param([], [(1.0, 1.22)], id="held 11 frames"),
+    pytest.param([], [(1.0, 2.0)], id="held 1 s"),
+])
+def test_an_interruption_and_the_return_change_no_frame_beyond_the_training_reference(drop, held):
+    frames = _run(_swinging, drop, held)
+    worst = _worst_step(frames)
+    assert max(worst.values()) <= 1.0 + 1e-6, worst
+    # Back with the operator: the joints are the live ones again (the arms' phase), the trunk where it went on from.
+    clean = _run(_swinging)
+    assert np.abs(frames[-1].joint_pos - clean[-1].joint_pos).max() < 0.02
+    if drop and drop[0][1] - drop[0][0] >= 5.0:
+        # The end of a 5 s dropout, before the body is back: the calibrated standing pose, still.
+        stood = frames[int(5.9 * 50)]
+        assert np.abs(stood.joint_pos - HOME_JOINTS).max() < 1e-4 and not np.abs(stood.joint_vel).max() > 1e-3
+        assert abs(stood.body_pos_w[0, 2] - HOME.root_pos[2]) < 1e-4
+
+
+def test_a_one_leg_pose_carries_on_for_a_second_then_both_feet_go_down():
+    frames = _run(_one_leg, drop=[(1.0, 6.0)])
+    left_foot, right_foot = stream.BODY_NAMES.index("foot_2"), stream.BODY_NAMES.index("foot")
+    foot = lambda f: (f.body_pos_w[left_foot, 2], f.body_pos_w[right_foot, 2])
+    left, right = foot(frames[49])
+    assert left - right > 0.03  # on the right leg before the dropout
+    left, right = foot(frames[int((1.0 + HOLD_S - 0.1) * 50)])
+    assert left - right > 0.03  # carried on (still) for HOLD_S
+    left, right = foot(frames[int(5.9 * 50)])
+    assert abs(left - right) < 0.002  # then both feet down: the calibrated standing pose
+    assert max(_worst_step(frames).values()) <= 1.0 + 1e-6
