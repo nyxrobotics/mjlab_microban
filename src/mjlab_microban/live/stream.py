@@ -15,7 +15,10 @@ from dataclasses import dataclass
 import numpy as np
 
 MAGIC = b"MBWB"
-VERSION = 1
+# 2: the reference is carried through an interruption (STALE, HELD, LATE) and back to the operator without a jump
+# (retarget.py Carry / Return / Guard).  Version 1 sent the held pose, then the live one in one frame; the Pi follows
+# HELD for up to 1 s only from version 2 and refuses version 1's frames.
+VERSION = 2
 HEADER = struct.Struct("<4sHHHIdH")
 DEFAULT_PORT = 5556
 

@@ -28,7 +28,7 @@ def test_a_frame_round_trips_in_the_documented_layout():
     version, nj, nb, seq = struct.unpack_from("<HHHI", data, 4)
     (sent,) = struct.unpack_from("<d", data, 14)
     (flags,) = struct.unpack_from("<H", data, 22)
-    assert (version, nj, nb, seq, sent, flags) == (1, 21, 22, 7, 1760000000.25, 0b11)
+    assert (version, nj, nb, seq, sent, flags) == (2, 21, 22, 7, 1760000000.25, 0b11)
     body = np.frombuffer(data, "<f4", offset=24)
     assert np.array_equal(body[:21], frame.joint_pos)
     assert np.array_equal(body[42:42 + 66].reshape(22, 3), frame.body_pos_w)
@@ -42,7 +42,7 @@ def test_a_frame_round_trips_in_the_documented_layout():
 @pytest.mark.parametrize("mutate", [
     lambda d: d[:-4],
     lambda d: b"XXXX" + d[4:],
-    lambda d: d[:4] + struct.pack("<H", 2) + d[6:],
+    lambda d: d[:4] + struct.pack("<H", 1) + d[6:],  # the PC before the interruption reference (it jumps)
     lambda d: d[:6] + struct.pack("<H", 20) + d[8:],
 ])
 def test_other_datagrams_are_refused(mutate):
