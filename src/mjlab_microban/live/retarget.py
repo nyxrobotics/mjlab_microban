@@ -466,36 +466,34 @@ def _quintic(x0: np.ndarray, v0: np.ndarray, T: float, t: np.ndarray) -> tuple[n
     return x, v, acc
 
 
-# Per channel (21 joints, the trunk's x, y, z, its turn about x, y, z): the speed and the speed change per tick (the
-# training reference's 99th percentiles) a return plans within.
-_SPEED = np.concatenate([_JOINT[0], np.full(3, TRUNK_STEP_LIMITS[0]), np.full(3, TURN_STEP_LIMITS[0])])
+# Per channel (21 joints, the trunk's x, y, z, its turn about x, y, z): the speed change per tick (the training
+# reference's 99th percentile) a return plans within.
 _CHANGE = np.concatenate([_JOINT[1], np.full(3, TRUNK_STEP_LIMITS[1]), np.full(3, TURN_STEP_LIMITS[1])])
 
 
 class Return:
     """Back to the live frames: each live frame plus the difference the reference had to it (where the interruption
-    took it, and how fast it moved against the operator), fading out in ``seconds`` as a quintic (no step in the
-    position or the speed; at rest at the end).  ``seconds`` is the shortest from ``floor_s`` that
-    keeps every channel, with the operator moving on as now, within the 99th percentiles of the speed and its change
-    per tick (``_SPEED``, ``_CHANGE``); at most 3 s."""
+    took it, ``x0``, and how fast it moved against the operator, ``v0``), fading out in ``seconds`` as Bollo's quintic
+    (no step in the position or the speed; at rest at the end).  ``seconds`` is the shortest from ``floor_s`` whose
+    braking (largest at the start: (8 |v0| T + 20 |x0|) / T^2) stays within the training reference's 99th percentile
+    change of speed per tick in every channel (``_CHANGE``)."""
 
-    def __init__(self, x0: np.ndarray, v0: np.ndarray, live_v: np.ndarray, floor_s: float, fps: float = OUTPUT_HZ):
+    def __init__(self, x0: np.ndarray, v0: np.ndarray, floor_s: float, fps: float = OUTPUT_HZ):
         self.x0, self.v0 = x0, v0
-        speed = np.maximum(_SPEED, np.maximum(np.abs(live_v), np.abs(live_v + v0)))
+        a = _CHANGE * fps
+        need = (8.0 * np.abs(v0) + np.sqrt(64.0 * v0**2 + 80.0 * a * np.abs(x0))) / (2.0 * a)
+        T = max(floor_s, 2.0 / fps, float(np.max(need)))
         u = np.linspace(0.0, 1.0, 41)
-        self.seconds = 3.0
-        for T in np.arange(max(floor_s, 2.0 / fps), 3.0, 1.0 / fps):
-            _, v, acc = _quintic(x0, v0, T, u * T)
-            if np.all(np.abs(live_v + v) <= speed + 1e-9) and np.all(np.abs(acc) / fps <= _CHANGE + 1e-9):
-                self.seconds = float(T)
-                break
+        while np.any(np.abs(_quintic(x0, v0, T, u * T)[2]) / fps > _CHANGE * (1.0 + 1e-6)):
+            T += 1.0 / fps
+        self.seconds = T
 
-    def at(self, t: float, live: np.ndarray) -> tuple[np.ndarray, bool]:
-        """The reference ``t`` s into the return (``live``: this tick's live qpos) and whether the difference is
-        gone."""
+    def at(self, t: float, live: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, bool]:
+        """The reference ``t`` s into the return (``live``: this tick's live qpos; the joints kept in ``lo``-``hi``)
+        and whether the difference is gone."""
         x = _quintic(self.x0, self.v0, self.seconds, np.array([t]))[0][0]
         q = live.copy()
-        q[7:] += x[:21]
+        q[7:] = np.clip(q[7:] + x[:21], lo, hi)
         q[:3] += x[21:24]
         q[3:7] = (R.from_rotvec(x[24:27]) * R.from_quat(live[3:7], scalar_first=True)).as_quat(scalar_first=True)
         return q, t >= self.seconds
@@ -521,6 +519,7 @@ class Guard:
         out = d.copy()
         change = _JOINT[3] * self.dt
         out[:21] = np.clip(np.clip(out[:21], d_prev[:21] - change, d_prev[:21] + change), -_JOINT[2], _JOINT[2])
+        out[:21] = np.clip(out[:21], self.lo - prev[7:], self.hi - prev[7:])  # a joint's range comes first
         for sl, (_, _, step, speed_change) in ((slice(21, 24), TRUNK_STEP_LIMITS), (slice(24, 27), TURN_STEP_LIMITS)):
             dd = out[sl] - d_prev[sl]
             n = float(np.linalg.norm(dd))
@@ -532,7 +531,7 @@ class Guard:
         clamped = not np.allclose(out, d, rtol=0.0, atol=1e-9)
         q = q.copy()
         if clamped:
-            q[7:] = np.clip(prev[7:] + out[:21], self.lo, self.hi)
+            q[7:] = prev[7:] + out[:21]
             q[:3] = prev[:3] + out[21:24]
             q[3:7] = (R.from_rotvec(out[24:27]) * R.from_quat(prev[3:7], scalar_first=True)).as_quat(scalar_first=True)
         return q, clamped
@@ -714,12 +713,12 @@ class Pipeline:
                 live_v = Guard.deltas(q_live, prev) / dt
                 out_v = np.concatenate([a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0]])
                 x0 = -Guard.deltas(prev, self.sent[0])
-                self.back = Return(x0, out_v - live_v, live_v, min(self.carried * dt, RETURN_S), self.fps)
+                self.back = Return(x0, out_v - live_v, min(self.carried * dt, RETURN_S), self.fps)
                 self.returned, self.calm, self.carry = 0, 0, None
             planned, self.transition = None, None
             if self.back is not None:
                 self.returned += 1
-                planned, done = self.back.at(self.returned * dt, q_live)
+                planned, done = self.back.at(self.returned * dt, q_live, self.retargeter.lo, self.retargeter.hi)
                 self.transition = "return"
         if live is not None:
             self.live_prev = (q_live.copy(), fresh)
