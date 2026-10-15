@@ -54,8 +54,10 @@ from HOME to a pose in motion.
 
 Conditions.  Observation noise, pushes and the physics randomization of
 training are off.  The robot's own conditions (battery voltage and its drop,
-actuator and sensor delays) are drawn from their training ranges with the
-seed.  No env is reset during a run, so the draws do not depend on the
+actuator and sensor delays) are drawn from their ranges with the seed: those
+of training, but for the goal delay (the robot's 3-6 physics steps redrawn at
+every step; training draws 0-6 once per episode, env_cfg.py).  No env is
+reset during a run, so the draws do not depend on the
 policy: two checkpoints meet the same conditions piece by piece.  The
 physics on the GPU is not bit-reproducible (its sums run in a varying
 order; torch's deterministic settings do not change it), so two runs of one

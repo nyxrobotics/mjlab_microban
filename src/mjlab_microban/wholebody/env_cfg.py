@@ -45,22 +45,31 @@ robot's foot friction and its 15-30 ms goal delay).  The robot's collision
 geoms have priority over the floor, so a floor contact takes their friction
 and solref: one value of each per environment, shared by all of them, is one
 floor (and the robot's self-contacts too).  The contact time constant
-(solref[0]) runs from MuJoCo's 0.02 s, today's rigid floor, to 0.1 s: the most
-loaded sole corner of the robot standing at HOME sinks 0.06 mm at 0.02 s,
-0.34 mm at 0.05 s and 0.77 mm at 0.1 s, from a hard floor to about what a
-carpet or an exercise mat gives under its 1.14 kg on two 23 cm^2 soles
-(2.4 kPa, 4.8 kPa on one foot).  It is drawn log-uniformly (the sink grows
-about as its square): a quarter of the floors stay near today's.  A longer
-time constant would sink further but settle slower than any floor (a contact
-settles in about its time constant, a carpet in tens of ms) and let loaded
-soles creep along the floor (the standing robot's feet drift twice as far at
-0.2 s as at 0.02 s).  The friction runs from 0.15 (hard plastic on a polished
-or dusty floor) to 1.5 (a rubber mat).  The servo goal follows the
-policy's output by one delay per episode, drawn at each reset from 0-6 physics
-steps (0-30 ms), instead of the robot's 3-6 steps redrawn every step: the
-robot's goal reaches its servos about 15 ms (at most about 20 ms) after the
-observation is read, and 30 ms is the old range's end.  The ``actions``
-observation stays the policy's latest output, as on the robot.
+(solref[0]) runs from MuJoCo's 0.02 s, today's rigid floor, to 0.1 s: at the
+feet's friction 1.0 the most loaded sole corner of the robot standing at HOME
+sinks 0.06 mm at 0.02 s, 0.34 mm at 0.05 s and 0.77 mm at 0.1 s, from a hard
+floor to about what a carpet or an exercise mat gives under its 1.14 kg on two
+23 cm^2 soles (2.4 kPa, 4.8 kPa on one foot); dropped 2 cm, it sinks about
+5 mm at 0.02 s and 19 mm at 0.1 s.  It is drawn log-uniformly (the sink grows
+about as its square): a quarter of the time constants stay below 0.03 s.  A
+longer time constant would sink further but settle slower than any floor (a
+contact settles in about its time constant, a carpet in tens of ms) and let
+loaded soles creep along the floor (the standing robot's feet drift twice as
+far at 0.2 s as at 0.02 s).  The friction runs from 0.15 (hard plastic on a
+polished or dusty floor) to 1.5 (a rubber mat).  MuJoCo's pyramidal friction
+cone softens a contact with its friction too (its regularization grows as
+mu^2 (1 + mu^2)), so the slippery floors are also the hard ones: the standing
+sink runs from about 0.001 mm (friction 0.15) to about 2 mm (friction 1.5 at
+0.1 s).  The servo goal follows the policy's output by one delay per episode,
+drawn at each reset from 0-6 physics steps (6, the old range's end), instead
+of the robot's 3-6 steps redrawn every step: the robot's goal reaches its
+servos about 15 ms (at most about 20 ms) after the observation is read.  When
+any environment has reset in the previous step (in training nearly every
+step: about 8 of 2048 environments reset at each), mjlab's post-reset write
+adds one goal to every environment's delay buffer, so a drawn 5 or 6 delays
+the goal by 4 or 5 steps: 0-25 ms in effect, 20 ms twice as often as the
+others.  The ``actions`` observation stays the policy's latest output, as on
+the robot.
 """
 
 from __future__ import annotations
@@ -164,7 +173,7 @@ TRAIN_ONLY_EVENTS = (
 # Training's floors and goal delay (see the module docstring).
 FLOOR_TIME_CONSTANT_S = (0.02, 0.1)
 FLOOR_FRICTION = (0.15, 1.5)
-COMMAND_DELAY_STEPS = (0, 6)  # physics steps of 5 ms
+COMMAND_DELAY_STEPS = (0, 6)  # physics steps of 5 ms, as drawn (0-5 in effect in training)
 
 
 WHOLEBODY_COLLISION = CollisionCfg(
