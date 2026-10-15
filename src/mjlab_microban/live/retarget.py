@@ -11,8 +11,11 @@ each output frame uses only what came before it; the parts that differ:
 * IK: core.MicrobanRetargeting, unchanged (GMR's IK, the servo, hip-yaw, elbow and knee limits, self-collision, the
   arm branch picked on the first frame), at the output rate; the joints are clipped to the MJCF ranges.
 * Floor: the lowest collision point at the human clearance x the root scale, the clearance's floor being the
-  minimum of the last second (the data: +-1 s).
+  minimum of the last second (the data: +-1 s); it follows a lower minimum at once and a higher one (an old low
+  leaving the window) at FLOOR_RISE_M_S at most, so the trunk does not drop by the step in one frame.
 * Poses: forward kinematics on the training collision model (body_pos_w, body_quat_w as build.py).
+* Frames sent: the average of the last SMOOTH_TICKS frames (``Smoother``, SMOOTH_TICKS // 2 ticks late; the data: its
+  30 fps frames, interpolated linearly at 50 Hz in training).
 * Velocities: backward differences of the frames sent (the data: central differences).
 * Exclusion: preprocess.py's rules and finalize's arm-flip cut, judged on the frames so far.  A marked frame and the
   pad_s after the last mark are not sent (the data cuts them): like a missing or late body, they interrupt the
@@ -60,6 +63,14 @@ HOLD_S = 1.0
 STAND_S = 1.0
 RETURN_S = 1.0
 CATCH_UP_S = 0.5  # after a gap the return waits (at most this) for the IK to stop catching up the operator
+# The floor's rise (robot m/s): a step of the trunk height by the floor's 1 s window becomes a descent at this speed
+# (its start and end change the trunk's speed by a third of the training reference's 99.9th percentile per tick).
+FLOOR_RISE_M_S = 0.05
+# The frames sent are the reference SMOOTH_TICKS // 2 ticks late, each the average of the SMOOTH_TICKS frames around it
+# (``Smoother``): the trunk's speed and turn rate from 30 Hz input at 50 Hz otherwise change per tick by up to 3.4 and
+# 2.2 x the training reference's 99.9th percentile (PICO recordings); averaged over 5 ticks (40 ms late), by at most
+# 0.99 and 0.69 x.
+SMOOTH_TICKS = 5
 # The training reference per control tick (0.02 s), as the training env feeds it (motion.py: 30 fps clips, positions
 # and velocities linear, orientations slerp, at any phase), on the deployed run's motion_file
 # (scripts/wholebody_reference_steps.py):
@@ -304,6 +315,7 @@ class Retargeter:
         self.parts += [(core.role_name(self.fmt, r if r in ("pelvis", "spine", "neck") else f"{s}.{r}"), floor_ref + c * leg)
                        for r, c in core.CONTACT_RADIUS.items() for s in (("L",) if r in ("pelvis", "spine", "neck") else ("L", "R"))]
         self.clearance = deque(maxlen=round(1.0 * fps) + 1)
+        self.floor: float | None = None  # the clearance's floor in use (robot metres)
         self.checker = ClipChecker(collision_model())
         names = [self.model.joint(j).name for j in range(1, self.model.njnt)]
         if tuple(names) != self.checker.joint_names or self.checker.joint_names != stream.JOINT_NAMES:
@@ -338,7 +350,11 @@ class Retargeter:
             flip |= bool(core.arm_flips(rob, tgt, d.xquat[self.trunk][None], np.degrees([q[roll]]))[0])
         h = min(frame[n][0][2] - z for n, z in self.parts)
         self.clearance.append(h)
-        q[2] -= self.lowest(d) - self.scale * (h - min(self.clearance))
+        floor = self.scale * min(self.clearance)
+        if self.floor is not None:
+            floor = min(floor, self.floor + FLOOR_RISE_M_S / self.fps)
+        self.floor = floor
+        q[2] -= self.lowest(d) - (self.scale * h - floor)
         kin = self.checker.run(q[None, :3], q[None, 3:7], q[None, 7:])
         return q, kin, self.rules(kin, q[7:], flip)
 
@@ -561,6 +577,30 @@ class Guard:
         return q, clamped
 
 
+class Smoother:
+    """The frames sent: each the average of the last ``ticks`` frames of the reference (qpos: positions and joints
+    linear, the trunk's orientation by its rotation vectors from the middle one), so a frame is (ticks - 1) / 2 ticks
+    late.  An average of consecutive frames keeps the joints in their ranges and changes no channel per tick, nor its
+    speed, more than the frames averaged did (the Guard's limits hold); it takes out the corners the 30 Hz input's
+    linear interpolation and the tracking's jitter put into the trunk's speed at 50 Hz.  Right after a reset it
+    averages the frames it has."""
+
+    def __init__(self, ticks: int = SMOOTH_TICKS):
+        self.frames: deque[np.ndarray] = deque(maxlen=ticks)
+
+    def reset(self) -> None:
+        self.frames.clear()
+
+    def __call__(self, q: np.ndarray) -> np.ndarray:
+        self.frames.append(np.asarray(q, float).copy())
+        qs = np.array(self.frames)
+        out = qs.mean(axis=0)
+        mid = R.from_quat(qs[len(qs) // 2, 3:7], scalar_first=True)
+        turn = (R.from_quat(qs[:, 3:7], scalar_first=True) * mid.inv()).as_rotvec().mean(axis=0)
+        out[3:7] = (R.from_rotvec(turn) * mid).as_quat(scalar_first=True)
+        return out
+
+
 class Pipeline:
     """Samples in (source clock), calibrate and start requests, one stream frame out per ``tick`` (local clock)."""
 
@@ -599,6 +639,8 @@ class Pipeline:
         self.carry_end: float | None = None  # when (s into the carry) the input was back
         self.free_ticks = 0  # ticks in a row the IK followed new input unbounded by its servos
         self.transition: str | None = None  # "carry" or "return" (diagnostics)
+        self.smoother = Smoother()
+        self.out_prev: dict | None = None  # the last frame sent (its arrays, for the velocities)
         self.guarded = 0  # frames the Guard changed
 
     # Input.
@@ -690,8 +732,9 @@ class Pipeline:
                     flags |= stream.LATE
                 if marks or self.ticks <= self.hold_until:
                     flags |= stream.HELD
-            arrays = self._send(live, bool(flags & (stream.STALE | stream.LATE | stream.HELD)),
-                                not flags & (stream.STALE | stream.LATE))
+            self._send(live, bool(flags & (stream.STALE | stream.LATE | stream.HELD)),
+                       not flags & (stream.STALE | stream.LATE))
+            arrays = self._smoothed(self.sent[0])
         if arrays is None:
             arrays = self.home
         if self.active:
@@ -775,6 +818,17 @@ class Pipeline:
         arrays.update(backward_velocities(arrays, None if self.sent is None else self.sent[2], self.fps))
         deltas = np.zeros(27) if self.sent is None else Guard.deltas(q, self.sent[0])
         self.sent = (q, deltas, arrays)
+        return arrays
+
+    def _smoothed(self, q: np.ndarray) -> dict:
+        """The frame sent for the reference ``q`` of this tick (Smoother), its velocities from the frames sent."""
+        q = self.smoother(q)
+        c = self.retargeter.checker
+        set_qpos(c.model, c.data, q[:3], q[3:7], q[7:])
+        arrays = {"joint_pos": q[7:], "body_pos_w": c.data.xpos[c.body_ids].copy(),
+                  "body_quat_w": c.data.xquat[c.body_ids].copy()}
+        arrays.update(backward_velocities(arrays, self.out_prev, self.fps))
+        self.out_prev = arrays
         return arrays
 
     def _caught_up(self, fresh: bool) -> bool:
