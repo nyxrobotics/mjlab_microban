@@ -9,14 +9,18 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 
 import torch
 from mjlab.entity import Entity
+from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
+from mjlab.envs.mdp import dr
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import (
@@ -24,6 +28,7 @@ from mjlab.utils.lab_api.math import (
     quat_apply_inverse,
     quat_from_euler_xyz,
     quat_mul,
+    sample_log_uniform,
     sample_uniform,
     subtract_frame_transforms,
     yaw_quat,
@@ -35,6 +40,11 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.robot.microban_constants import (
+    FLOOR_FRICTION,
+    FLOOR_TIME_CONSTANT_S,
+    MICROBAN_TRAIN_ROBOT_CFG,
+)
 
 # HOME forward trunk lean (rad); 0 = vertical trunk (config/home_pose.yaml).
 HOME_TRUNK_PITCH_RAD = HOME.trunk_pitch_rad
@@ -1768,3 +1778,47 @@ def reset_near_home_fraction(
     )
 
 
+############################ EVENTS ###############################
+
+
+@requires_model_fields("geom_solref")
+def contact_time_constant(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    time_constant_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """One contact time constant (solref[0], s) per environment, drawn log-uniformly, on all of ``asset_cfg``'s geoms.
+
+    MuJoCo's contact is a spring-damper of time constant solref[0] and damping ratio solref[1] (kept): its
+    stiffness goes as 1 / solref[0]^2, so a geom's sink under a load about as solref[0]^2.  A floor contact
+    takes the solref of the geom with the higher priority, here the robot's.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    geoms = env.scene[asset_cfg.name].indexing.geom_ids[asset_cfg.geom_ids]
+    rows, cols = torch.meshgrid(env_ids.to(env.device, torch.long), geoms.to(torch.long), indexing="ij")
+    time_constant = sample_log_uniform(*time_constant_range, (len(env_ids), 1), device=env.device)
+    env.sim.model.geom_solref[rows, cols, 0] = time_constant.expand_as(rows)
+
+
+def training_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Train on MICROBAN_TRAIN_ROBOT_CFG's floors and servo-goal delay (robot/microban_constants.py).
+
+    The robot is the training one (every collision geom named and with priority over the floor, the goal delay
+    drawn per episode), and the soles' friction (``foot_friction``) gives way to one friction and one contact time
+    constant per environment on every collision geom: a get-up also lies on its hands, knees and back.
+    """
+    cfg.scene.entities["robot"] = deepcopy(MICROBAN_TRAIN_ROBOT_CFG)
+    del cfg.events["foot_friction"]
+    collision_geoms = SceneEntityCfg("robot", geom_names=(r".*_collision_\d+$",))
+    cfg.events["geom_friction"] = EventTermCfg(
+        func=dr.geom_friction,
+        mode="startup",
+        params={"asset_cfg": collision_geoms, "operation": "abs", "ranges": FLOOR_FRICTION, "shared_random": True},
+    )
+    cfg.events["floor_softness"] = EventTermCfg(
+        func=contact_time_constant,
+        mode="startup",
+        params={"asset_cfg": deepcopy(collision_geoms), "time_constant_range": FLOOR_TIME_CONSTANT_S},
+    )

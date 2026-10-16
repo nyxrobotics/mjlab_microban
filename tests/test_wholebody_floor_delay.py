@@ -13,19 +13,17 @@ import torch
 
 from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, joint_ranges
 from mjlab_microban.robot.home_pose import HOME
+from mjlab_microban.robot.microban_constants import COMMAND_DELAY_STEPS, FLOOR_FRICTION, FLOOR_TIME_CONSTANT_S
+from mjlab_microban.tasks.mdp import contact_time_constant
 from mjlab_microban.wholebody import contract
 from mjlab_microban.wholebody.data.hdf5 import FRAME_KEYS, write_motion_shard
 from mjlab_microban.wholebody.env_cfg import (
     ACTOR_GROUP,
-    COMMAND_DELAY_STEPS,
-    FLOOR_FRICTION,
-    FLOOR_TIME_CONSTANT_S,
     TRACKED_BODY_NAMES,
     WHOLEBODY_ROBOT_CFG,
     WHOLEBODY_TRAIN_ROBOT_CFG,
     make_wholebody_env_cfg,
 )
-from mjlab_microban.wholebody.events import contact_time_constant
 
 NUM_ENVS = 8
 COLLISION = re.compile(r".*_collision_\d+")

@@ -8,6 +8,8 @@
 
 import os
 import numpy as np
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 import mujoco
@@ -113,6 +115,64 @@ MICROBAN_ROBOT_CFG = EntityCfg(
         actuators=(actuators,),
         soft_joint_pos_limit_factor=0.9,
     ),
+)
+
+# Training's floors and servo-goal delay, for every learned policy (walking,
+# PICO, get-up, whole-body).  Evaluation and play keep MICROBAN_ROBOT_CFG:
+# MuJoCo's 0.02 s contact time constant (a hard floor), the sole friction of
+# the foot_friction event and the 3-6-step goal delay redrawn every step.
+# Each environment draws one floor: one contact time constant (solref[0])
+# log-uniformly from 0.02 s to 0.1 s (standing at HOME, the most loaded sole
+# corner sinks 0.06 mm at 0.02 s and 0.77 mm at 0.1 s, a hard floor to a
+# carpet or an exercise mat) and one friction from 0.15 (hard plastic on a
+# polished floor) to 1.5 (a rubber mat), both on every collision geom
+# (tasks/mdp.py training_floor_and_delay; the whole-body task's module
+# docstring has the measurements).  The servo goal follows the policy by one
+# delay per episode of 3-8 physics steps of 5 ms: the robot's goal reaches its
+# servos about 15 ms (at most 20 ms) after the observation is read, and the
+# refitted servo model leaves out the servo's own delay of about 7 ms, so the
+# goal acts about 22-28 ms after the observation.  (When any environment has
+# reset in the previous step, nearly every step in training, mjlab's post-reset
+# write adds one goal to every environment's delay buffer, so the longer draws
+# delay the goal by one step less.)
+FLOOR_TIME_CONSTANT_S = (0.02, 0.1)
+FLOOR_FRICTION = (0.15, 1.5)
+COMMAND_DELAY_STEPS = (3, 8)  # physics steps of 5 ms, as drawn
+
+
+def collision_named_spec() -> mujoco.MjSpec:
+    """robot.xml with every collision geom named ``<body>_collision_<n>`` (the soles keep their names)."""
+    spec = get_spec()
+    counts: dict[str, int] = defaultdict(int)
+    for geom in spec.geoms:
+        if geom.classname.name == "collision" and not geom.name:
+            counts[geom.parent.name] += 1
+            geom.name = f"{geom.parent.name}_collision_{counts[geom.parent.name]}"
+    return spec
+
+
+# Training's collision geoms: robot.xml's (condim 3, friction 1, MuJoCo's
+# solref, as in MICROBAN_ROBOT_CFG), each with priority over the floor, so a
+# floor contact takes the geom's friction and solref, which training draws.
+# (In MICROBAN_ROBOT_CFG only the soles have priority; the other geoms mix
+# with the floor's equal values, so its contacts are the same.)
+TRAINING_COLLISION = CollisionCfg(geom_names_expr=(r".*_collision_\d+$",), priority=1)
+
+
+def with_training_goal_delay(robot: EntityCfg) -> EntityCfg:
+    """``robot`` whose servo goal is delayed by COMMAND_DELAY_STEPS, drawn when an episode starts (a reset clears
+    the delay buffer) and kept to its end (no redraw period is reached)."""
+    return replace(robot, articulation=replace(robot.articulation, actuators=tuple(
+        replace(actuator, delay_min_lag=COMMAND_DELAY_STEPS[0], delay_max_lag=COMMAND_DELAY_STEPS[1],
+                delay_hold_prob=0.0, delay_update_period=1 << 40, delay_per_env_phase=False)
+        for actuator in robot.articulation.actuators
+    )))
+
+
+# Training's robot (walking, PICO, get-up): MICROBAN_ROBOT_CFG with
+# TRAINING_COLLISION and the training goal delay.
+MICROBAN_TRAIN_ROBOT_CFG = with_training_goal_delay(
+    replace(MICROBAN_ROBOT_CFG, spec_fn=collision_named_spec, collisions=(TRAINING_COLLISION,))
 )
 
 if __name__ == "__main__":

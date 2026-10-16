@@ -69,6 +69,7 @@ from mjlab_microban.tasks.mdp import (
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
     reset_root_state_uniform_world_yaw,
+    training_floor_and_delay,
     upright as local_upright,
 )
 from mjlab_microban.tasks.microban_velocity_tracking import (
@@ -411,6 +412,12 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ranges": (0.9, 1.1),
         },
     )
+
+    # Training's floors (softness and friction on every collision geom, in
+    # place of foot_friction) and servo-goal delay; play and the judgments
+    # keep the robot's (tasks/mdp.py training_floor_and_delay).
+    if not play:
+        training_floor_and_delay(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

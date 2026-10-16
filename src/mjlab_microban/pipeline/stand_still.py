@@ -4,10 +4,11 @@ The walker and PICO stand at HOME on a zero command (PICO with its foot target
 and arms neutral) for 10 s, judged from 2 s on; the get-up starts fallen and
 is judged over the last 5 s of its 20 s (the robot's get-up timeout), on the
 environments standing through them.  Each environment holds one servo goal
-delay of DELAYS_MS (1-10 physics steps of 5 ms; training draws 3-6) and one
-foot friction of FRICTIONS (the training's range 0.3-1.2), with the training's
-observation noise (without it a policy that trembled on the robot stands
-still here; config/pipeline.yaml ``stand_still`` has the measurements).
+delay of DELAYS_MS (1-10 physics steps of 5 ms; play draws 3-6, training 3-8)
+and one foot friction of FRICTIONS (the play env's range 0.3-1.2) on the play
+env's rigid floor, with the training's observation noise (without it a policy
+that trembled on the robot stands still here; config/pipeline.yaml
+``stand_still`` has the measurements).
 
 Measured, while up (the trunk-fixed head point above 0.9 x the standing head
 height, the get-up's standing line):

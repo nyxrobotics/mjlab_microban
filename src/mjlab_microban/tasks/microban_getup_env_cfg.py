@@ -109,6 +109,7 @@ from mjlab_microban.tasks.mdp import (
     extreme_joint_velocity,
     reset_near_home_fraction,
     hands_released_reward,
+    training_floor_and_delay,
 )
 from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionActionCfg,
@@ -438,6 +439,11 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ranges": (0.9, 1.1),
         },
     )
+    # Training's floors (softness and friction on every collision geom, in
+    # place of foot_friction) and servo-goal delay; play and the judgments
+    # keep the robot's (tasks/mdp.py training_floor_and_delay).
+    if not play:
+        training_floor_and_delay(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

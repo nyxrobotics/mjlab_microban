@@ -100,9 +100,13 @@ from mjlab.viewer import ViewerConfig
 
 from mjlab_microban.policy_contract import ACTION_JOINT_NAMES, HEAD_JOINTS
 from mjlab_microban.robot.microban_constants import (
+    FLOOR_FRICTION,
+    FLOOR_TIME_CONSTANT_S,
     MICROBAN_ROBOT_CFG,
     SERVO_TARGET_RANGE_RAD,
+    with_training_goal_delay,
 )
+from mjlab_microban.tasks.mdp import contact_time_constant
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
@@ -110,7 +114,6 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
 from mjlab_microban.wholebody import observations as obs
 from mjlab_microban.wholebody import rewards as rew
 from mjlab_microban.wholebody import terminations as term
-from mjlab_microban.wholebody.events import contact_time_constant
 from mjlab_microban.wholebody.motion import MotionCommandCfg, ReferenceNeckTarget
 from mjlab_microban.wholebody.retarget.model import wholebody_spec
 
@@ -171,10 +174,6 @@ TRAIN_ONLY_EVENTS = (
     "dof_armature",
     "dof_friction",
 )
-# Training's floors and goal delay (see the module docstring).
-FLOOR_TIME_CONSTANT_S = (0.02, 0.1)
-FLOOR_FRICTION = (0.15, 1.5)
-COMMAND_DELAY_STEPS = (3, 8)  # physics steps of 5 ms, as drawn (one less for the longer draws in training)
 
 
 WHOLEBODY_COLLISION = CollisionCfg(
@@ -194,17 +193,7 @@ WHOLEBODY_ROBOT_CFG = replace(
 )
 # Training's robot: the goal delay is drawn when an episode starts (a reset
 # clears the delay buffer) and kept to its end (no redraw period is reached).
-WHOLEBODY_TRAIN_ROBOT_CFG = replace(
-    WHOLEBODY_ROBOT_CFG,
-    articulation=replace(
-        WHOLEBODY_ROBOT_CFG.articulation,
-        actuators=tuple(
-            replace(actuator, delay_min_lag=COMMAND_DELAY_STEPS[0], delay_max_lag=COMMAND_DELAY_STEPS[1],
-                    delay_hold_prob=0.0, delay_update_period=1 << 40, delay_per_env_phase=False)
-            for actuator in WHOLEBODY_ROBOT_CFG.articulation.actuators
-        ),
-    ),
-)
+WHOLEBODY_TRAIN_ROBOT_CFG = with_training_goal_delay(WHOLEBODY_ROBOT_CFG)
 
 
 def training_collision_model() -> mujoco.MjModel:

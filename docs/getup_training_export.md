@@ -50,7 +50,12 @@ The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
 | 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0 (no pushes) | the arms let go of the shoulder_roll stops and the clip excess and target error level off within the stage |
 | 15000-17999 | push: +-0.3 m/s kicks every 3-6 s | the effort terms cost push tolerance; with pushes from the effort switch on, one arm stays pressed into its stop |
 
-The evaluation / play config keeps the 0-3 tick latency and no schedule.
+Every update trains on one floor per environment (contact time constant
+0.02-0.1 s and friction 0.15-1.5 on every collision geom: the get-up lies on
+its hands, knees and back) and one servo-goal delay per episode (3-8 physics
+steps), as walking and PICO do (`tasks/mdp.py` `training_floor_and_delay`).
+The evaluation / play config keeps the 0-3 tick latency and no schedule, the
+rigid floor, the soles' friction 0.3-1.2 and the robot's 3-6-step goal delay.
 A run that stops before its last update is trained again from scratch
 (`scripts/retrain_all_for_home.py`).
 
