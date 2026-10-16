@@ -15,41 +15,41 @@ robot:
       LAFAN1's motions, retargeted without this limit, turn a leg outward by at most 104 degrees.
   servo:
     speed_rad_s:
-      value: 10.65
+      value: 7.45
       src: [xc330_bam, pack_3s]
       note: >-
-        The XC330-T288-T's no-load speed at the 3S pack's nominal 11.1 V: vin / kt, kt = 1.0425 Nm/A (the
+        The XC330-T288-T's no-load speed at the 3S pack's nominal 11.1 V: vin / kt, kt = 1.4904 Nm/A (the
         evaluation's servo_no_load_speed_rad_s).  Between two frames a joint moves at most speed / fps.
     acceleration_rad_s2:
       src: [xc330_bam, xc330_current_limit, microban_mjcf]
       note: >-
-        Per joint: the torque at the firmware current limit, 0.91 A x kt = 0.949 Nm, over the joint's inertia at
-        HOME: the servo's reflected inertia (the BAM armature, 0.00828 kg m^2, 83 % of it at the hip pitch to over
-        99 % at the ankle roll) plus the links it moves, the joint's diagonal entry of MuJoCo's joint-space inertia
+        Per joint: the torque at the firmware current limit, 0.91 A x kt = 1.356 Nm, over the joint's inertia at
+        HOME: the servo's reflected inertia (the BAM armature, 0.00163 kg m^2, 49 % of it at the hip pitch to 99 %
+        at the ankle roll) plus the links it moves, the joint's diagonal entry of MuJoCo's joint-space inertia
         matrix with the other joints held (retarget/model.py servo_accelerations).  Between two frames a joint
         changes its per-frame motion by at most acceleration / fps^2.
       value:
-        head: 112.9
-        neck_roll: 114.2
-        neck_pitch: 114.3
-        right_shoulder_pitch: 111.2
-        right_shoulder_roll: 111.2
-        right_elbow: 114.1
-        right_hip_yaw: 112.7
-        right_hip_roll: 95.9
-        right_hip_pitch: 95.4
-        right_knee: 109.0
-        right_ankle_pitch: 113.8
-        right_ankle_roll: 114.4
-        left_shoulder_pitch: 111.2
-        left_shoulder_roll: 111.2
-        left_elbow: 114.1
-        left_hip_yaw: 112.7
-        left_hip_roll: 95.9
-        left_hip_pitch: 95.4
-        left_knee: 109.0
-        left_ankle_pitch: 113.8
-        left_ankle_roll: 114.4
+        head: 771.4
+        neck_roll: 816.7
+        neck_pitch: 818.3
+        right_shoulder_pitch: 719.1
+        right_shoulder_roll: 717.9
+        right_elbow: 810.8
+        right_hip_yaw: 765.2
+        right_hip_roll: 417.8
+        right_hip_pitch: 410.8
+        right_knee: 657.4
+        right_ankle_pitch: 802.5
+        right_ankle_roll: 822.8
+        left_shoulder_pitch: 719.1
+        left_shoulder_roll: 717.9
+        left_elbow: 810.8
+        left_hip_yaw: 765.2
+        left_hip_roll: 417.8
+        left_hip_pitch: 410.8
+        left_knee: 657.4
+        left_ankle_pitch: 802.5
+        left_ankle_roll: 822.8
 human:
   # 人の関節の可動範囲・最大角速度・最大角加速度（文献から集めた値）
   # 用途
@@ -631,7 +631,7 @@ sources:
     title: "BAM identification of the XC330-T288-T (30 recordings, m6 model)"
     file: "src/mjlab_microban/robot/xc330_params.json"
     url: "https://github.com/rhoban/bam"
-    note: "kt 1.0425 Nm/A, R 10.0 ohm, armature 0.00828 kg m^2; tools/actuator_id/ in the microban repository."
+    note: "kt 1.4904 Nm/A, R 13.3 ohm, armature 0.00163 kg m^2; tools/actuator_id/ in the microban repository."
   xc330_current_limit:
     title: "The XC330-T288-T firmware current limit, 0.91 A (the training actuator's max_current)"
     file: "src/mjlab_microban/robot/microban_constants.py"

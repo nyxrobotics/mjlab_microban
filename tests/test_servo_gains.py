@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import unittest
 
-from bam.mjlab import BamActuatorCfg
-
 from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_KP_POLICY
+from mjlab_microban.robot.xc330_actuator import XC330ActuatorCfg
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
     make_microban_teleop_v13_arm_overlay_env_cfg,
@@ -33,7 +32,7 @@ class ServoGainTest(unittest.TestCase):
                 robot = cfg.scene.entities["robot"]
                 actuators = robot.articulation.actuators
                 self.assertEqual(len(actuators), 1)
-                self.assertIs(type(actuators[0]), BamActuatorCfg)
+                self.assertIs(type(actuators[0]), XC330ActuatorCfg)
                 self.assertEqual(tuple(actuators[0].target_names_expr), (r".*",))
                 self.assertEqual(actuators[0].kp_fw, SERVO_KP_POLICY)
         self.assertEqual(MICROBAN_ROBOT_CFG.articulation.actuators[0].kp_fw, SERVO_KP_POLICY)

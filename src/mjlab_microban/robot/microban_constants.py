@@ -64,19 +64,20 @@ FULL_COLLISION = CollisionCfg(
 )
 
 import bam.actuators
-from bam.mjlab import BamActuatorCfg
 from bam.testbench import Pendulum
 
-from mjlab_microban.robot.xc330_actuator import XC330Actuator
+from mjlab_microban.robot.xc330_actuator import XC330Actuator, XC330ActuatorCfg
 
 # This bam branch has no built-in XC330-T288-T definition, so register one before
-# BamActuatorCfg's json_path (below) needs to look it up by the "actuator" key the
+# XC330ActuatorCfg's json_path (below) needs to look it up by the "actuator" key the
 # JSON was fit with. See xc330_actuator.py for why the class exists at all.
 bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
 
 # The robot's servos are XC330-T288-T on a 3S pack.  json_path points at a
-# real bam identification (tools/actuator_id/ in the microban repo; 30
-# recordings, m6 model).  vin_range/vin_min follow a 3S LiPo and max_current is
+# real bam identification (tools/actuator_id/ in the microban repo, which
+# carries the same file; 30 recordings, m6 model) and XC330ActuatorCfg is
+# bam.mjlab's actuator with the static friction of bam's simulator (see
+# xc330_actuator.py).  vin_range/vin_min follow a 3S LiPo and max_current is
 # the XC330-T288-T firmware current limit.  vin_drop_gain_range is an empirical
 # pack-level V/Nm coefficient (battery + wiring resistance across all 21
 # servos), not derivable from a single motor's R/kt.
@@ -85,7 +86,7 @@ bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
 # robot holds static poses without a policy at its own, stiffer gain.
 SERVO_KP_POLICY = 125
 
-actuators = BamActuatorCfg(
+actuators = XC330ActuatorCfg(
     json_path=str(Path(os.path.dirname(__file__)) / "xc330_params.json"),
     target_names_expr=(r".*",),
     kp_fw=SERVO_KP_POLICY,

@@ -15,13 +15,12 @@ from mjlab.rl.runner import MjlabOnPolicyRunner
 
 from mjlab_microban.robot import home_contracts
 from mjlab_microban.robot.home_pose import HOME
-from bam.mjlab import BamActuatorCfg
-
 from mjlab_microban.robot.microban_constants import (
     HOME_FRAME,
     SERVO_KP_POLICY,
     SERVO_TARGET_RANGE_RAD,
 )
+from mjlab_microban.robot.xc330_actuator import XC330ActuatorCfg
 from mjlab_microban.tasks.curriculum import (
     STEPS_PER_UPDATE_ATTR,
     CURRICULUM_STATE_INFO_KEY,
@@ -257,7 +256,7 @@ class MicrobanGetupOnPolicyRunner(MjlabOnPolicyRunner):
                 raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires undelayed {group} action feedback")
         robot_cfg = unwrapped.cfg.scene.entities["robot"]
         actuator_cfgs = robot_cfg.articulation.actuators if robot_cfg.articulation else ()
-        if len(actuator_cfgs) != 1 or type(actuator_cfgs[0]) is not BamActuatorCfg:
+        if len(actuator_cfgs) != 1 or type(actuator_cfgs[0]) is not XC330ActuatorCfg:
             raise ValueError(f"Get-up {GETUP_CONTRACT_VERSION} requires the shared XC330 actuator model")
         if actuator_cfgs[0].kp_fw != SERVO_KP_POLICY or actuator_cfgs[0].max_current != 0.91:
             raise ValueError(

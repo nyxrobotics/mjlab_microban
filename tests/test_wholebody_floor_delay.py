@@ -42,7 +42,7 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots():
     # Training's goal delay: 0-6 physics steps, drawn once per episode; only the delay differs.
     (trained,) = train.scene.entities["robot"].articulation.actuators
     (robot,) = WHOLEBODY_ROBOT_CFG.articulation.actuators
-    assert (trained.delay_min_lag, trained.delay_max_lag) == COMMAND_DELAY_STEPS == (0, 6)
+    assert (trained.delay_min_lag, trained.delay_max_lag) == COMMAND_DELAY_STEPS == (3, 8)
     assert trained.delay_hold_prob == 0.0 and not trained.delay_per_env_phase
     assert trained.delay_update_period > train.episode_length_s / train.sim.mujoco.timestep
     assert replace(trained, delay_min_lag=robot.delay_min_lag, delay_max_lag=robot.delay_max_lag,

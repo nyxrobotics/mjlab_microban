@@ -61,14 +61,15 @@ cone softens a contact with its friction too (its regularization grows as
 mu^2 (1 + mu^2)), so the slippery floors are also the hard ones: the standing
 sink runs from about 0.001 mm (friction 0.15) to about 2 mm (friction 1.5 at
 0.1 s).  The servo goal follows the policy's output by one delay per episode,
-drawn at each reset from 0-6 physics steps (6, the old range's end), instead
-of the robot's 3-6 steps redrawn every step: the robot's goal reaches its
-servos about 15 ms (at most about 20 ms) after the observation is read.  When
-any environment has reset in the previous step (in training nearly every
-step: about 8 of 2048 environments reset at each), mjlab's post-reset write
-adds one goal to every environment's delay buffer, so a drawn 5 or 6 delays
-the goal by 4 or 5 steps: 0-25 ms in effect, 20 ms twice as often as the
-others.  The ``actions`` observation stays the policy's latest output, as on
+drawn at each reset from 3-8 physics steps, instead of the robot's 3-6 steps
+redrawn every step: the robot's goal reaches its servos about 15 ms (at most
+about 20 ms) after the observation is read, and the refitted servo model
+leaves out the servo's own delay of about 7 ms (8 ms with the 5 ms physics
+step), so the goal acts about 22-28 ms after the observation.  When any
+environment has reset in the previous step (in training nearly every step:
+about 8 of 2048 environments reset at each), mjlab's post-reset write adds one
+goal to every environment's delay buffer, so the longer draws delay the goal
+by one step less: about 15-35 ms in effect.  The ``actions`` observation stays the policy's latest output, as on
 the robot.
 """
 
@@ -173,7 +174,7 @@ TRAIN_ONLY_EVENTS = (
 # Training's floors and goal delay (see the module docstring).
 FLOOR_TIME_CONSTANT_S = (0.02, 0.1)
 FLOOR_FRICTION = (0.15, 1.5)
-COMMAND_DELAY_STEPS = (0, 6)  # physics steps of 5 ms, as drawn (0-5 in effect in training)
+COMMAND_DELAY_STEPS = (3, 8)  # physics steps of 5 ms, as drawn (one less for the longer draws in training)
 
 
 WHOLEBODY_COLLISION = CollisionCfg(

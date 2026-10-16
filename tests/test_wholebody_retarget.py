@@ -166,14 +166,18 @@ def test_a_thigh_swung_round_stays_in_the_human_reach_and_the_servos_speed(tmp_p
     report, q = _retarget(tmp_path, "swing", frames_, ref)
     assert core.HIP_YAW_OUT_MAX_DEG == 105.0 and np.degrees(-q[:, yaw]).max() <= 105.0 + 1e-6
     assert np.all((q[:, 7:] >= lo) & (q[:, 7:] <= hi))
-    # Three times as fast (0.27 s round), the swing is past the servos: they follow it at their speed and
+    # Three times as fast (0.27 s round), the swing is past the servos' speed; the first and last poses in turn,
+    # every frame, reverse the thigh at once, past their acceleration.  The servos follow both at their speed and
     # acceleration (from the frame after the reset's placing).
-    report, q = _retarget(tmp_path, "fast", frames_[::3], ref)
-    assert report["servo_speed_bound_frames"] > 0 and report["servo_accel_bound_frames"] > 0
     servo = model.retarget_limits()["robot"]["servo"]
     accel = np.array([servo["acceleration_rad_s2"]["value"][m.joint(j).name] for j in range(1, m.njnt)])
-    assert np.abs(np.diff(q[:, 7:], axis=0)).max() <= servo["speed_rad_s"]["value"] / FPS + 1e-6
-    assert np.all(np.abs(np.diff(q[1:, 7:], 2, axis=0)) <= accel / FPS**2 + 1e-6)
+    turns = [0 if i % 2 == 0 else len(frames_) - 1 for i in range(8)]
+    for name, motion, bound in (("fast", frames_[::3], "servo_speed_bound_frames"),
+                                ("turns", [frames_[i] for i in turns], "servo_accel_bound_frames")):
+        report, q = _retarget(tmp_path, name, motion, ref)
+        assert report[bound] > 0, (name, report[bound])
+        assert np.abs(np.diff(q[:, 7:], axis=0)).max() <= servo["speed_rad_s"]["value"] / FPS + 1e-6
+        assert np.all(np.abs(np.diff(q[1:, 7:], 2, axis=0)) <= accel / FPS**2 + 1e-6)
 
 
 def test_the_servo_limits_follow_their_sources():

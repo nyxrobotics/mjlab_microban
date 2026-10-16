@@ -327,8 +327,9 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
     # at 0.5 rad/s about the vertical.  The first moves for
     # its first 0.2 s: its piece starts there, 55 judged steps; the second's,
     # 85, its trunk bent 50 deg over from its 0.1 s on.  The policy alternates every action by +-0.05 rad, lifts
-    # the first robot 10 cm in the settle (steps 10-14) and puts it back,
-    # knocks the second over at step 60 and the first at step 110 (past its piece).
+    # the first robot 10 cm in the settle (steps 10-14) and puts it back, holding it there (HOME does not stand
+    # by itself at P125: it falls in about 2 s), knocks the second over at step 60 and the first at step 110
+    # (past its piece).
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.utils.lab_api.math import quat_mul, yaw_quat
 
@@ -388,7 +389,7 @@ def test_a_rollout_starts_at_rest_at_home_holds_the_first_frame_and_judges_after
                 start.update(trunk=robot.data.root_link_pose_w.clone(), vel=robot.data.root_link_vel_w.clone(),
                              joint_pos=robot.data.joint_pos.clone(), joint_vel=robot.data.joint_vel.clone(),
                              ref_xy=command.anchor_pos_w[:, :2].clone())
-            if step in (10, 15):  # lifted, then back where it was placed
+            if step == 10 or 15 <= step < 110:  # lifted, then back where it was placed
                 state = torch.cat([start["trunk"][:1], torch.zeros(1, 6)], dim=-1)
                 state[0, 2] += 0.1 if step == 10 else 0.0
                 robot.write_root_state_to_sim(state, env_ids=torch.tensor([0]))

@@ -16,7 +16,7 @@ held at their measured angles (see microban_getup_action.py).
 Action contract: target = HOME + raw action on the 18 body joints, bounded
 only by the servo's one-turn goal range (+-pi), with the policy's RAW previous
 output as its previous-action observation.  At the robot's RL gain (P=125) one
-XC330 gives only ~0.42 Nm/rad, while gravity tips the standing robot at
+XC330 gives only ~0.45 Nm/rad, while gravity tips the standing robot at
 ~1.65 Nm/rad about the ankles.  No pose holds statically (HOME falls in
 ~1-2 s): standing is active balance that needs targets far past the joint
 angle to get useful torque (hip_roll at HOME: 0.13-0.20 Nm inside a per-joint
