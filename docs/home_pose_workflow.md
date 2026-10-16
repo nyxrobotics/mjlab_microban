@@ -62,6 +62,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | 歩行 | 保持プローブ（`pipeline/walk_probe.py`、シード 101-105）と 9×300（シード 101）。保持プローブの規則は3つ: `falls` は転倒、`direction` は単軸の指令の向きの速さが固定の最低値以上（前 0.2 m/s で 0.08、後ろ 0.04、横 0.1 m/s で 0.02、旋回 0.5 rad/s で 0.2）と止まれの流れ（0.05 m/s、0.05 m/s、0.2 rad/s 以内）、`standing_still` は止まれの着地が 0.5 回/秒以下。9×300 も固定の最低値（`twist_pass_line.py`）。関節の限界の超過は 0.25 rad まで |
 | PICO | 歩行 9×300・追従（最終プロファイル）・ONNX、どれもシード 42 |
 | 起き上がり | `config/pipeline.yaml` の `getup.evals` の 4 つの評価（シード 11 と 5）と `getup.gate` |
+| 3 つとも | 静止（`pipeline/stand_still.py`、`config/pipeline.yaml` の `stand_still`）。歩行と PICO は HOME で止まれの指令、起き上がりは倒れた状態から立ったあとの最後の 5 秒。環境ごとにサーボの指令の遅れ 5〜50 ms とひとつの足の摩擦 0.3〜1.2、学習の観測のノイズで回し、遅れごとの脚 12 関節の速さの RMS の最大が 0.15 rad/s 以下、倒れ 0 |
 
 学習中は、段の切り替えのログ（`Curriculum stage ... (update U)`）を表と照らす（`pipeline/monitor.py`）。
 表にない段が出たら、または表の時刻から `stage_tolerance`（1 回）より遅れたら中止する。

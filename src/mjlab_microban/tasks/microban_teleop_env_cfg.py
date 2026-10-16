@@ -527,9 +527,11 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "lookahead_s": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
         },
     )
-    # Keep only a light smoothing prior.  At -0.1 this raw-coordinate term
-    # dominated v1 and rewarded copying a saturated previous output forever.
-    cfg.rewards["action_rate_l2"].weight = -0.02
+    # The walker's action-rate weight.  The actor is the frozen walker plus a
+    # residual, and the term sees their sum: at -0.02 (a fifth of the
+    # walker's) the residual was free to change its output from step to step,
+    # and PICO v13g2 shook standing still on the robot until it fell.
+    cfg.rewards["action_rate_l2"].weight = -0.1
 
     # Velocity: the terms of the earlier forward-lean PICO
     # (microban_teleop_velocity_rewards.py), with the final tracking stds from

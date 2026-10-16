@@ -362,7 +362,8 @@ class Pipeline:
         probe = json.loads(probe_out.read_text())
         probe.pop("rows", None)
         nine = probe_verdict(json.loads(receipt.read_text()))
-        failures = walk_failures(probe, nine)
+        still = self.stand_still("walk", checkpoint, out / f"{checkpoint.parent.name}_{checkpoint.stem}_stand_still.json")
+        failures = walk_failures(probe, nine) + ([] if still["status"] == "pass" else ["stand_still"])
         summary = {"rules": probe["checks"],
                    "single_signed": {k: round(v, 3) for k, v in probe["single_signed"].items()},
                    # mean twist (v_x m/s, v_y m/s, w_z rad/s) on the standing command
@@ -375,13 +376,32 @@ class Pipeline:
                    "9x300_signed": {k: round(v, 4) for k, v in nine["responses"].items()},
                    "9x300_twist": {k: [round(x, 4) for x in nine["twists"][k]]
                                    for k in ("neutral", "backward_0p1", "backward_0p2") if k in nine["twists"]},
-                   "9x300_soft_limit_rad": round(nine["soft_limit_overshoot_rad"], 3)}
+                   "9x300_soft_limit_rad": round(nine["soft_limit_overshoot_rad"], 3),
+                   "stand_still": stand_still_summary(still)}
         (out / f"{checkpoint.parent.name}_{checkpoint.stem}_judgment.json").write_text(
-            json.dumps({"failures": failures, "summary": summary, "probe": probe, "nine_by_300": nine},
-                       indent=1, sort_keys=True, default=str))
+            json.dumps({"failures": failures, "summary": summary, "probe": probe, "nine_by_300": nine,
+                        "stand_still": still}, indent=1, sort_keys=True, default=str))
         self.log(f"walking judgment of {checkpoint.parent.name}/{checkpoint.name}: "
                  f"{'PASS' if not failures else f'FAIL {failures}'} {json.dumps(summary, default=str)[:1500]}")
         return failures, summary
+
+    def stand_still(self, kind: str, checkpoint: Path, report: Path) -> dict[str, Any]:
+        """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report)."""
+
+        c = self.cfg["stand_still"]
+        report.unlink(missing_ok=True)
+        self.jobs.run(f"{kind}_stand_still", [*UV, "python", "-m", "mjlab_microban.pipeline.stand_still", kind,
+                                              self.cfg[kind]["task"], str(checkpoint), str(report),
+                                              "--max-leg-speed-rms", str(c["max_leg_speed_rms_rad_s"]),
+                                              "--max-falls", str(c["max_falls"]), "--seed", str(c["seed"]),
+                                              "--reps", str(c["reps"])], "eval", env=self.env, check=False)
+        if not report.is_file():
+            raise JobStopped(f"the standing-still evaluator wrote no report ({report}): not a judgment "
+                             "(rerun to evaluate again)")
+        result = json.loads(report.read_text())
+        self.log(f"{kind} standing still {checkpoint.parent.name}/{checkpoint.name}: {result['status'].upper()} "
+                 f"{json.dumps(stand_still_summary(result))}")
+        return result
 
     def install_walker(self, checkpoint: Path) -> Path:
         """Copy the walker (and its params/) where the PICO provenance re-hashes it."""
@@ -485,7 +505,7 @@ class Pipeline:
     @staticmethod
     def pico_failures(prefix: Path) -> list[str]:
         failures = []
-        for name in ("9x300", "tracking", "onnx"):
+        for name in ("9x300", "tracking", "onnx", "stand_still"):
             path = Path(f"{prefix}_{name}.json")
             if not path.is_file():
                 raise JobStopped(f"PICO evaluator {name} wrote no report ({path}): not a judgment "
@@ -506,6 +526,7 @@ class Pipeline:
             Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
         for name, cmd in self.pico_commands(checkpoint, prefix, int(self.cfg["seed"])):
             self.jobs.run(f"pico_judgment_{name}", cmd, "eval", env=self.env, check=False)
+        self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still.json"))
         failures = self.pico_failures(prefix)
         passed = not failures
         if passed:
@@ -525,7 +546,7 @@ class Pipeline:
         final = self.train("getup", GETUP_EXP, label, c["task"], self.sched["getup_total"], c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])])
         summary = self.getup_judgment(final, "judgment")
-        failures = getup_gate_failures(summary, c["gate"])
+        failures = getup_gate_failures(summary, {**c["gate"], **stand_still_lines(self.cfg["stand_still"])})
         if failures and not self.dry:
             raise PipelineError(f"get-up judgment failed for {final.parent.name}/{final.name}: {failures} "
                                 f"({summary})")
@@ -555,6 +576,7 @@ class Pipeline:
                 raise JobStopped(f"the get-up evaluator {eval_name} wrote no result (rc={rc}, log {log}): not "
                                  "a judgment (rerun to evaluate again)")
             results[eval_name] = last_json_line(text, prefix="RESULT ")
+        results["stand_still"] = self.stand_still("getup", checkpoint, self.state.dir / f"getup_{name}_stand_still.json")
         summary = getup_summary(results)
         (self.state.dir / f"getup_{name}.json").write_text(json.dumps({"summary": summary, "results": results},
                                                                        indent=1, sort_keys=True))
@@ -919,6 +941,7 @@ def getup_summary(results: dict[str, dict[str, Any]]) -> dict[str, float]:
         "standing_targets_on_clip": max(r["standing_targets_on_clip"] for r in stand),
         "posture_standing_fraction": results["posture_s11"]["standing_fraction"],
         "final_tilt_deg": max(r["final_tilt_deg"] for r in stand),
+        **{f"stand_still_{key}": value for key, value in stand_still_summary(results["stand_still"]).items()},
     }
 
 
@@ -938,7 +961,27 @@ def getup_gate_failures(summary: dict[str, float], gate: dict[str, float]) -> li
     if summary["standing_targets_on_clip"] > gate["max_standing_targets_on_clip"]:
         failures.append(f"standing targets on the +-pi clip {summary['standing_targets_on_clip']:.2f} > "
                         f"{gate['max_standing_targets_on_clip']}")
+    rms = summary["stand_still_leg_speed_rms_rad_s"]
+    if rms is None or rms > gate["max_stand_still_leg_speed_rms_rad_s"]:
+        failures.append(f"standing still: leg speed RMS {rms} rad/s > {gate['max_stand_still_leg_speed_rms_rad_s']}")
+    if summary["stand_still_falls"] > gate["max_stand_still_falls"]:
+        failures.append(f"standing still: {summary['stand_still_falls']} falls > {gate['max_stand_still_falls']}")
     return failures
+
+
+def stand_still_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """The judged numbers of a standing-still report (pipeline/stand_still.py)."""
+
+    rms = result["leg_speed_rms_rad_s"]
+    return {"leg_speed_rms_rad_s": None if rms is None else round(rms, 4),
+            "worst_delay_ms": result["worst_delay_ms"], "falls": result["falls"],
+            "judged_envs": result["judged_envs"], "envs": result["envs"]}
+
+
+def stand_still_lines(c: dict[str, Any]) -> dict[str, Any]:
+    """config/pipeline.yaml ``stand_still``'s lines as get-up gate keys."""
+
+    return {"max_stand_still_leg_speed_rms_rad_s": c["max_leg_speed_rms_rad_s"], "max_stand_still_falls": c["max_falls"]}
 
 
 def print_status(state_dir: Path) -> int:

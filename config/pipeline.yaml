@@ -62,6 +62,25 @@ getup:
     # are the torque authority the get-up needs and are allowed).
     max_standing_targets_on_clip: 0.05
 
+# Standing still (pipeline/stand_still.py), a judgment of every policy: the
+# walker and PICO stand at HOME on a zero command, the get-up from a fallen
+# start (judged once it stands), each environment with one servo goal delay of
+# 5-50 ms and one foot friction of 0.3-1.2 and the training's observation
+# noise.  The noise is what shakes a policy that trembles: without it PICO
+# v13g2 (it shook standing on the robot and fell) measures 0.046 rad/s, below
+# the old walker's 0.063.  With it, the worst delay's leg-joint speed RMS
+# (rad/s) of the whole-body policies is 0.030 (servo-refit run, update 12000)
+# and 0.057 (final2), of the old walker (a7c28c8a) 0.088, all without a fall;
+# v13g2 0.25 at 30 ms and 0.40 at 40 ms, 2 falls; the old get-up steps in
+# place (1.3-1.8 while up) and 60 of 80 fall after standing.  The line is the
+# geometric mean of the old walker's worst and v13g2's lowest trembling delay,
+# sqrt(0.088 x 0.253) = 0.15; standing still, nothing falls.
+stand_still:
+  seed: 107
+  reps: 2                         # environments per (delay, friction)
+  max_leg_speed_rms_rad_s: 0.15
+  max_falls: 0
+
 # A job whose log is not written for this long is stopped (exit code 2).
 stall_minutes:
   train: 20
@@ -86,3 +105,4 @@ dry:
     stage_tolerance: 3
     eval_envs: 16
     eval_steps: 150
+  stand_still: {reps: 1}

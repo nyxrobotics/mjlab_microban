@@ -15,7 +15,7 @@ from unittest import mock
 from mjlab_microban.pipeline import core, steps
 from mjlab_microban.pipeline.core import PipelineError, State, hash_inputs, is_training_command, load_config
 
-GATE = load_config(dry=False)["getup"]["gate"]
+GATE = {**load_config(dry=False)["getup"]["gate"], **steps.stand_still_lines(load_config(dry=False)["stand_still"])}
 
 
 def fake_pipeline(state_dir: Path) -> steps.Pipeline:
@@ -334,11 +334,13 @@ class JudgmentTest(unittest.TestCase):
     def test_getup_gate(self) -> None:
         good = {"min_fallen_standing_fraction": 0.9, "push_fall_fraction": 0.05,
                 "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_on_clip": 0.03,
-                "posture_standing_fraction": 0.9, "final_tilt_deg": 4.0}
+                "posture_standing_fraction": 0.9, "final_tilt_deg": 4.0,
+                "stand_still_leg_speed_rms_rad_s": 0.05, "stand_still_falls": 0}
         self.assertEqual(steps.getup_gate_failures(good, GATE), [])
         for key, value in (("min_fallen_standing_fraction", 0.8), ("push_fall_fraction", 0.2),
                            ("standing_joint_abs_vel_rad_s", 0.4), ("standing_targets_on_clip", 0.06),
-                           ("posture_standing_fraction", 0.7)):
+                           ("posture_standing_fraction", 0.7), ("stand_still_leg_speed_rms_rad_s", 0.3),
+                           ("stand_still_leg_speed_rms_rad_s", None), ("stand_still_falls", 1)):
             with self.subTest(key=key):
                 self.assertEqual(len(steps.getup_gate_failures({**good, key: value}, GATE)), 1)
 
@@ -399,9 +401,12 @@ class JudgmentTest(unittest.TestCase):
             "stand_s11": stand, "stand_s5": {**stand, "fallen_standing_fraction": 0.88},
             "push_s11": {**stand, "push_fell_within_3s": 3, "push_standing_before": 60},
             "posture_s11": {"standing_fraction": 0.95},
+            "stand_still": {"leg_speed_rms_rad_s": 0.04, "worst_delay_ms": 50, "falls": 0, "judged_envs": 80,
+                            "envs": 80},
         })
         self.assertEqual(summary["min_fallen_standing_fraction"], 0.88)
         self.assertAlmostEqual(summary["push_fall_fraction"], 0.05)
+        self.assertEqual((summary["stand_still_leg_speed_rms_rad_s"], summary["stand_still_falls"]), (0.04, 0))
 
 
 class GpuTest(unittest.TestCase):
