@@ -23,6 +23,7 @@ from mjlab_microban.live.app import Presses
 from mjlab_microban.live.retarget import (
     BONES,
     HOLD_S,
+    STAND_S,
     JOINT_STEP_LIMITS,
     PICO_JOINTS,
     TRUNK_STEP_LIMITS,
@@ -34,6 +35,7 @@ from mjlab_microban.live.retarget import (
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.wholebody import env_cfg
 from mjlab_microban.wholebody.data import preprocess
+from mjlab_microban.wholebody.data.fk import set_qpos
 from mjlab_microban.wholebody.retarget.model import collision_model
 
 RATE = 25.0
@@ -214,9 +216,44 @@ def _one_leg(t):
     return p, q
 
 
-def _run(motion, drop=(), held=()):
+def _squat(t):
+    """A deep squat from 0.5 s in 0.4 s (smoothstep): the thighs turn 1.2 rad forward and the shins 1.2 rad back, the
+    ankles where they stand, the upper body straight down with the hips."""
+    u = min(max((t - 0.5) / 0.4, 0.0), 1.0)
+    a = 1.2 * u * u * (3.0 - 2.0 * u)
+    drop = 2 * 0.42 * (1.0 - np.cos(a))
+    p, q = np.array([STAND[b] for b in BONES]), QUIET.copy()
+    for b in ("pelvis", "torso", "neck", "head", "L_shoulder", "R_shoulder", "L_elbow", "R_elbow", "L_wrist", "R_wrist"):
+        p[BONES.index(b)] -= [0.0, 0.0, drop]
+    for s in "LR":
+        hip = p[BONES.index(f"{s}_hip")] - [0.0, 0.0, drop]
+        knee = hip + 0.42 * np.array([np.sin(a), 0.0, -np.cos(a)])
+        p[BONES.index(f"{s}_hip")], p[BONES.index(f"{s}_knee")] = hip, knee
+        q[BONES.index(f"{s}_hip")] = R.from_euler("y", -a).as_quat(scalar_first=True)
+        q[BONES.index(f"{s}_knee")] = R.from_euler("y", a).as_quat(scalar_first=True)
+    return p, q
+
+
+def _hop(t):
+    """A hop 0.25 m high from 1.1 s for 0.45 s."""
+    u = (t - 1.1) / 0.45
+    return _pose(lift=0.25 * np.sin(np.pi * u) if 0.0 < u < 1.0 else 0.0)
+
+
+def _lowest(frames):
+    """The lowest collision point of each frame on the training model (the floor rules' measure)."""
+    checker = preprocess.ClipChecker(collision_model())
+    out = []
+    for f in frames:
+        set_qpos(checker.model, checker.data, f.body_pos_w[0].astype(float), f.body_quat_w[0].astype(float),
+                 f.joint_pos.astype(float))
+        out.append(checker._lowest_point())
+    return np.array(out)
+
+
+def _run(motion, drop=(), held=(), rule="test"):
     """Calibrate on the standing operator, then ``motion`` for 7 s; the samples in ``drop`` (start, end) s are not
-    sent, the IK's frames in ``held`` (start, end) s break a rule.  The frames from the motion's start on."""
+    sent, the IK's frames in ``held`` (start, end) s break ``rule``.  The frames from the motion's start on."""
     pipe = Pipeline(log=lambda _: None)
     _, t = _feed(pipe, 0.0, 0.2)
     pipe.request_calibration()
@@ -227,7 +264,7 @@ def _run(motion, drop=(), held=()):
 
     def marked(frame):
         qpos, kin, marks = step(frame)
-        return qpos, kin, marks + ["test"] * any(a <= clock["t"] - start < b for a, b in held)
+        return qpos, kin, marks + [rule] * any(a <= clock["t"] - start < b for a, b in held)
 
     pipe.retargeter.step = marked
     frames, k = [], 0
@@ -297,3 +334,48 @@ def test_a_one_leg_pose_carries_on_for_a_second_then_both_feet_go_down():
     left, right = foot(frames[int(5.9 * 50)])
     assert abs(left - right) < 0.002  # then both feet down: the calibrated standing pose
     assert max(_worst_step(frames).values()) <= 1.0 + 1e-6
+
+
+@pytest.mark.parametrize("motion,drop,held", [
+    pytest.param(_squat, [], [(0.55, 0.57)], id="squat, held 1 frame"),
+    pytest.param(_squat, [(0.55, 0.75)], [], id="squat, dropout 0.2 s"),
+    pytest.param(_squat, [(0.55, 2.0)], [], id="squat, dropout 1.45 s"),
+    pytest.param(_hop, [(1.0, 1.45)], [], id="hop, back in the air"),
+])
+def test_the_feet_keep_to_the_floor_through_an_interruption(motion, drop, held):
+    # Squatting deep and fast, interrupted early on the way down: the legs carry on, stop, come back (or go to the
+    # standing pose) while the trunk's height puts the lowest point on the floor.  With the trunk's height carried on
+    # and brought back on its own, the feet went up to 25 mm into the floor here (the training data cuts frames more
+    # than 10 mm in).  Hopping, the body back in the air: the live frames come down to the floor faster than the
+    # return's difference fades out, which took the feet 9 mm in.
+    frames = _run(motion, drop, held)
+    low = _lowest(frames)
+    assert low.min() > -0.002, low.min()
+    assert max(_worst_step(frames).values()) <= 1.0 + 1e-6
+
+
+def test_a_pose_outside_its_support_goes_to_both_feet_at_once():
+    # The unsupported rule (the weight outside the support for 1 s) does not hold the pose: from its mark the
+    # reference goes to the standing pose, both feet down STAND_S later (+ the averaging), not HOLD_S + STAND_S.
+    frames = _run(_one_leg, held=[(1.0, 5.0)], rule="unsupported")
+    left, right = stream.BODY_NAMES.index("foot_2"), stream.BODY_NAMES.index("foot")
+    foot = lambda f: f.body_pos_w[left, 2] - f.body_pos_w[right, 2]
+    assert foot(frames[49]) > 0.03
+    assert abs(foot(frames[int((1.0 + STAND_S + 0.1) * 50)])) < 0.002
+    assert max(_worst_step(frames).values()) <= 1.0 + 1e-6
+
+
+def test_a_new_calibration_stops_tracking_until_left_y():
+    log = []
+    pipe = Pipeline(log=log.append)
+    _, t = _feed(pipe, 0.0, 0.2)
+    pipe.request_calibration()
+    _, t = _feed(pipe, t, 1.2)
+    pipe.set_active(True)
+    _, t = _feed(pipe, t, 0.5)
+    pipe.request_calibration()
+    frames, t = _feed(pipe, t, 1.5)
+    assert not pipe.active and "tracking stopped for the calibration" in " ".join(log)
+    assert not any(f.flags & (stream.ACTIVE | stream.RESTART) for f in frames[-10:])
+    pipe.set_active(True)
+    assert pipe.tick(t).flags & stream.RESTART

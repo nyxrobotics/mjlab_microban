@@ -19,9 +19,10 @@ each output frame uses only what came before it; the parts that differ:
 * Velocities: backward differences of the frames sent (the data: central differences).
 * Exclusion: preprocess.py's rules and finalize's arm-flip cut, judged on the frames so far.  A marked frame and the
   pad_s after the last mark are not sent (the data cuts them): like a missing or late body, they interrupt the
-  reference (``Carry``): the last motion fades out, the pose stands still, after HOLD_S it goes to the calibrated
-  standing pose; when the body is back the reference goes back to it smoothly (``Return``).  No frame changes more
-  than the training reference does in one tick (``JOINT_STEP_LIMITS``, ``Guard``).
+  reference (``Carry``): the last motion fades out, the pose stands still, after HOLD_S (at once for a pose whose
+  weight is outside its support) it goes to the calibrated standing pose, the lowest point on the floor; when the
+  body is back the reference goes back to it smoothly (``Return``).  No frame changes more than the training
+  reference does in one tick (``JOINT_STEP_LIMITS``, ``Guard``).
 
 PICO's 24 joints become the pseudo-bones of pico.py (skeleton.FORMATS["g1"]), the joint whose global rotation is
 the bone's rotation: thigh = hip, shin = knee, foot = ankle, upper arm = shoulder, forearm = elbow, hand = wrist; the
@@ -432,13 +433,16 @@ class Carry:
     """The reference through an interruption, from the last frame sent (qpos ``q0``; per-second velocities ``v0``:
     joints, trunk linear, trunk angular in the world).  Its motion carries on, the speed fading as 1 - smoothstep over
     COAST_S (longer for a speed whose fading would brake harder than the training reference's 99th percentile change
-    of speed; a joint sooner if it would pass its range ``lo``-``hi``), the pose stands still, and from HOLD_S it goes
-    to the calibrated standing pose (``home``'s joints, trunk height and attitude) at the trunk's x, y and heading."""
+    of speed; a joint sooner if it would pass its range ``lo``-``hi``), the pose stands still, and from HOLD_S (or
+    from ``stand_now``) it goes to the calibrated standing pose (``home``'s joints, trunk height and attitude) at the
+    trunk's x, y and heading.  The trunk's height is not carried on: it puts the lowest point (``lowest(qpos)``, the
+    training collision model) on the floor (z = 0), from where the last frame had it by a smootherstep within the
+    99th percentiles, so the feet neither sink into the floor nor stay off it while the joints move."""
 
-    def __init__(self, q0: np.ndarray, v0: tuple, home: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+    def __init__(self, q0: np.ndarray, v0: tuple, home: np.ndarray, lo: np.ndarray, hi: np.ndarray, lowest,
                  fps: float = OUTPUT_HZ):
         jv, self.lv, self.av = (np.asarray(v, float) for v in v0)
-        self.q0, self.jv = np.asarray(q0, float).copy(), jv
+        self.q0, self.jv, self.lowest = np.asarray(q0, float).copy(), jv, lowest
         fade = lambda speed, change: np.maximum(COAST_S, 1.5 * np.abs(speed) / (change * fps))  # 1 - smoothstep's 1.5
         room = np.maximum(np.where(jv > 0.0, hi - self.q0[7:], self.q0[7:] - lo), 0.0)
         self.joint_s = fade(jv, _JOINT[1])
@@ -446,17 +450,26 @@ class Carry:
                                 self.joint_s)
         self.trunk_s = float(fade(np.linalg.norm(self.lv), TRUNK_STEP_LIMITS[1]))
         self.turn_s = float(fade(np.linalg.norm(self.av), TURN_STEP_LIMITS[1]))
+        self.hold_s = HOLD_S
         self.r0 = R.from_quat(self.q0[3:7], scalar_first=True)
+        self.low0 = lowest(self.q0)
+        self.land_s = sweep_s([(self.low0, TRUNK_STEP_LIMITS[0], TRUNK_STEP_LIMITS[1])], COAST_S, fps)
         self.end = self._coast(np.inf)
         self.stand = self.end.copy()
         self.stand[2] = home[2]
         self.stand[3:7] = (R.from_euler("z", heading(self.end[3:7])) * R.from_quat(home[3:7], scalar_first=True)
                            ).as_quat(scalar_first=True)
         self.stand[7:] = home[7:]
+        self.low_stand = lowest(self.stand)
         self.stand_s = sweep_s([(self.stand[7:] - self.end[7:], _JOINT[0], _JOINT[1]),
-                                (self.stand[2] - self.end[2], TRUNK_STEP_LIMITS[0], TRUNK_STEP_LIMITS[1]),
+                                (self.stand[2] - self.end[2] + lowest(self.end),  # the trunk's height, feet down
+                                 TRUNK_STEP_LIMITS[0], TRUNK_STEP_LIMITS[1]),
                                 (_turn(self.end[3:7], self.stand[3:7]), TURN_STEP_LIMITS[0], TURN_STEP_LIMITS[1])],
-                               STAND_S)
+                               STAND_S, fps)
+
+    def stand_now(self, t: float) -> None:
+        """Go to the standing pose from ``t`` s instead of holding the pose (the motion fades out on the way)."""
+        self.hold_s = min(self.hold_s, t)
 
     def _coast(self, t: float) -> np.ndarray:
         q = self.q0.copy()
@@ -468,9 +481,12 @@ class Carry:
 
     def at(self, t: float) -> np.ndarray:
         """The reference ``t`` s after the last frame sent."""
-        if t < HOLD_S:
-            return self._coast(t)
-        return blend(self.end, self.stand, smootherstep((t - HOLD_S) / self.stand_s))
+        q, low = self._coast(t), self.low0 * (1.0 - smootherstep(t / self.land_s))
+        if t > self.hold_s:
+            w = smootherstep((t - self.hold_s) / self.stand_s)
+            q, low = blend(q, self.stand, w), low + w * self.low_stand
+        q[2] += low - self.lowest(q)
+        return q
 
 
 def _quintic(x0: np.ndarray, v0: np.ndarray, T: float, t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -495,7 +511,9 @@ class Return:
     took it, ``x0``, and how fast it moved against the operator, ``v0``), fading out in ``seconds`` as Bollo's quintic
     (no step in the position or the speed; at rest at the end).  ``seconds`` is the shortest from ``floor_s`` whose
     braking (largest at the start: (8 |v0| T + 20 |x0|) / T^2) stays within the training reference's 99th percentile
-    change of speed per tick in every channel (``_CHANGE``)."""
+    change of speed per tick in every channel (``_CHANGE``).  The height's channel (x0[23], v0[23]) is the lowest
+    point's (the training collision model) against the live frame's, not the trunk's: the trunk's height puts the
+    lowest point there, so the feet keep to the floor while the joints come back."""
 
     def __init__(self, x0: np.ndarray, v0: np.ndarray, floor_s: float, fps: float = OUTPUT_HZ):
         self.x0, self.v0 = x0, v0
@@ -507,14 +525,18 @@ class Return:
             T += 1.0 / fps
         self.seconds = T
 
-    def at(self, t: float, live: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> tuple[np.ndarray, bool]:
-        """The reference ``t`` s into the return (``live``: this tick's live qpos; the joints kept in ``lo``-``hi``)
-        and whether the difference is gone."""
+    def at(self, t: float, live: np.ndarray, live_low: float, lo: np.ndarray, hi: np.ndarray,
+           lowest) -> tuple[np.ndarray, bool]:
+        """The reference ``t`` s into the return (``live``: this tick's live qpos, its lowest point ``live_low``; the
+        joints kept in ``lo``-``hi``) and whether the difference is gone."""
         x = _quintic(self.x0, self.v0, self.seconds, np.array([t]))[0][0]
         q = live.copy()
         q[7:] = np.clip(q[7:] + x[:21], lo, hi)
-        q[:3] += x[21:24]
+        q[:2] += x[21:23]
         q[3:7] = (R.from_rotvec(x[24:27]) * R.from_quat(live[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        # Not below both the floor and the live frame's lowest point: the live frame may come down to the floor
+        # faster than the difference fades (the IK catching up the operator after a gap).
+        q[2] += max(live_low + x[23], min(live_low, 0.0)) - lowest(q)
         return q, t >= self.seconds
 
 
@@ -524,10 +546,11 @@ class Guard:
     return changes that tick's change (the speed) by more than its 99.9th percentile change of speed either, its joints
     also within the servos' box (core.ServoLimit: the range, the speed, the acceleration, braking before a range end).
     The motion planned there stays within the 99th percentiles; this acts when the operator moves faster still, and
-    on the live frames only past the 99.9th percentile steps."""
+    on the live frames only past the 99.9th percentile steps.  A frame it changes keeps its lowest point (``lowest``,
+    the training collision model) where it was, within the trunk's limits, so the feet stay on the floor."""
 
-    def __init__(self, model: mujoco.MjModel, lo: np.ndarray, hi: np.ndarray, fps: float = OUTPUT_HZ):
-        self.lo, self.hi, self.dt = lo, hi, 1.0 / fps
+    def __init__(self, model: mujoco.MjModel, lo: np.ndarray, hi: np.ndarray, lowest, fps: float = OUTPUT_HZ):
+        self.lo, self.hi, self.lowest, self.dt = lo, hi, lowest, 1.0 / fps
         self.servo = core.ServoLimit(model, fps)
 
     @staticmethod
@@ -539,13 +562,96 @@ class Guard:
     def __call__(self, q: np.ndarray, prev: np.ndarray | None, d_prev: np.ndarray | None,
                  planned: bool) -> tuple[np.ndarray, bool]:
         """``q`` limited from the last frame sent (``prev``, its changes ``d_prev``); ``planned``: a frame of an
-        interruption or a return (all the limits), else a live one (the steps only).  Records the frame for the
-        servo box; whether it changed it."""
+        interruption or a return (all the limits), else a live one (the steps only).  The step is first shortened
+        as a whole (the frame between ``prev`` and ``q``), which keeps the pose's own relations, such as the feet on
+        the floor; only if no share of it meets every limit is each channel limited on its own.  Then the trunk's
+        height puts the lowest point where ``q`` has it (``_floored``).  Records the frame for the servo box; whether
+        it changed it."""
         if prev is None:
             self.servo.end(q)
             return q, False
         d = self.deltas(q, prev)
+        lower, upper = self._joint_bounds(prev, d_prev, planned)
+        share = self._share(d, d_prev, lower, upper, planned)
         out = d.copy()
+        if share is not None:
+            out *= share
+        else:
+            out[:21] = np.clip(out[:21], lower, upper)
+            out[24:27] = self._limit(out[24:27], d_prev[24:27], planned, TURN_STEP_LIMITS)
+            out[21:24] = self._limit(out[21:24], d_prev[21:24], planned, TRUNK_STEP_LIMITS)
+        clamped = not np.allclose(out, d, rtol=0.0, atol=1e-9)
+        if clamped:
+            q = self._stepped(prev, self._floored(prev, out, d_prev, planned, lower, upper, self.lowest(q)))
+        self.servo.end(q)
+        return q, clamped
+
+    def _floored(self, prev: np.ndarray, out: np.ndarray, d_prev: np.ndarray, planned: bool, lower: np.ndarray,
+                 upper: np.ndarray, low: float) -> np.ndarray:
+        """The limited step ``out`` with the trunk's height putting the lowest point at ``low``, within the trunk's
+        limits.  When the joints' steps need a height step the trunk's limits do not allow (the legs straightening
+        faster than the trunk may speed up), they are shortened by the largest share that keeps the lowest point
+        there and the joints within their limits ``lower``-``upper`` (the change of speed, the servos' box): the body
+        slows down rather than the feet going into the floor.  The trunk's change of speed is given up for the floor
+        only if no such share keeps both."""
+
+        def placed(k: float) -> np.ndarray:
+            o = out.copy()
+            o[:21] *= k
+            o[23] += low - self.lowest(self._stepped(prev, o))
+            return o
+
+        # The least share of the joints' step within their limits (a joint that must go on moving).
+        x = out[:21]
+        need = np.where(x > 1e-12, lower / np.where(x > 1e-12, x, 1.0), np.where(x < -1e-12, upper / np.where(
+            x < -1e-12, x, 1.0), 0.0))
+        least = float(np.clip(np.max(need, initial=0.0), 0.0, 1.0))
+        for speed in (planned, False):
+            fits = lambda o: np.allclose(self._limit(o[21:24], d_prev[21:24], speed, TRUNK_STEP_LIMITS), o[21:24],
+                                         rtol=0.0, atol=1e-9)
+            o = placed(1.0)
+            if fits(o):
+                return o
+            if not fits(placed(least)):
+                continue
+            k, over = least, 1.0
+            for _ in range(12):
+                mid = 0.5 * (k + over)
+                k, over = (mid, over) if fits(placed(mid)) else (k, mid)
+            return placed(k)
+        o = placed(least)
+        o[21:24] = self._limit(o[21:24], d_prev[21:24], planned, TRUNK_STEP_LIMITS)
+        return o
+
+    @staticmethod
+    def _stepped(prev: np.ndarray, out: np.ndarray) -> np.ndarray:
+        """``prev`` moved by the per tick changes ``out``."""
+        q = prev.copy()
+        q[7:] = prev[7:] + out[:21]
+        q[:3] = prev[:3] + out[21:24]
+        q[3:7] = (R.from_rotvec(out[24:27]) * R.from_quat(prev[3:7], scalar_first=True)).as_quat(scalar_first=True)
+        return q
+
+    def _limit(self, x: np.ndarray, x_prev: np.ndarray, planned: bool, limits: tuple) -> np.ndarray:
+        """The trunk's step ``x`` (position or turn) within its limits: the change of speed through an interruption,
+        the step, the height's step."""
+        _, _, step, speed_change, *height = limits
+        x = x.copy()
+        if planned:
+            dd = x - x_prev
+            n = float(np.linalg.norm(dd))
+            if n > GUARD_SHARE * speed_change * self.dt:
+                x = x_prev + dd * (GUARD_SHARE * speed_change * self.dt / n)
+        n = float(np.linalg.norm(x))
+        if n > GUARD_SHARE * step:
+            x *= GUARD_SHARE * step / n
+        if height:
+            x[2] = np.clip(x[2], -GUARD_SHARE * height[0], GUARD_SHARE * height[0])
+        return x
+
+    def _joint_bounds(self, prev: np.ndarray, d_prev: np.ndarray, planned: bool) -> tuple[np.ndarray, np.ndarray]:
+        """Each joint's allowed step: the 99.9th percentile step, through an interruption the change of speed too,
+        within the servos' box (which comes first: the range, braking before its ends)."""
         step = GUARD_SHARE * _JOINT[2]
         lower, upper = -step, step
         if planned:
@@ -554,27 +660,41 @@ class Guard:
         self.servo.begin()
         box_lo, box_hi = self.servo.lower - prev[7:], self.servo.upper - prev[7:]
         lower, upper = np.maximum(lower, box_lo), np.minimum(upper, box_hi)
-        empty = lower > upper  # the servos' box comes first (the range, braking before its ends)
-        lower, upper = np.where(empty, box_lo, lower), np.where(empty, box_hi, upper)
-        out[:21] = np.clip(out[:21], lower, upper)
+        empty = lower > upper
+        return np.where(empty, box_lo, lower), np.where(empty, box_hi, upper)
+
+    def _share(self, d: np.ndarray, d_prev: np.ndarray, lower: np.ndarray, upper: np.ndarray,
+               planned: bool) -> float | None:
+        """The largest share (0..1) of the step ``d`` that meets every limit, or None."""
+        lo, hi = 0.0, 1.0
+        bounds = [(d[:21], lower, upper)]
+        height = GUARD_SHARE * TRUNK_STEP_LIMITS[4]
+        bounds.append((d[23:24], np.array([-height]), np.array([height])))
+        for x, a, b in bounds:
+            moving = np.abs(x) > 1e-12
+            if np.any(~moving & ((a > 0.0) | (b < 0.0))):
+                return None
+            r1, r2 = a[moving] / x[moving], b[moving] / x[moving]
+            lo = max(lo, float(np.max(np.minimum(r1, r2), initial=0.0)))
+            hi = min(hi, float(np.min(np.maximum(r1, r2), initial=1.0)))
         for sl, (_, _, step, speed_change, *_) in ((slice(21, 24), TRUNK_STEP_LIMITS), (slice(24, 27), TURN_STEP_LIMITS)):
+            n = float(np.linalg.norm(d[sl]))
+            if n > 1e-12:
+                hi = min(hi, GUARD_SHARE * step / n)
             if planned:
-                dd = out[sl] - d_prev[sl]
-                n = float(np.linalg.norm(dd))
-                if n > GUARD_SHARE * speed_change * self.dt:
-                    out[sl] = d_prev[sl] + dd * (GUARD_SHARE * speed_change * self.dt / n)
-            n = float(np.linalg.norm(out[sl]))
-            if n > GUARD_SHARE * step:
-                out[sl] *= GUARD_SHARE * step / n
-        out[23] = np.clip(out[23], -GUARD_SHARE * TRUNK_STEP_LIMITS[4], GUARD_SHARE * TRUNK_STEP_LIMITS[4])
-        clamped = not np.allclose(out, d, rtol=0.0, atol=1e-9)
-        if clamped:
-            q = q.copy()
-            q[7:] = prev[7:] + out[:21]
-            q[:3] = prev[:3] + out[21:24]
-            q[3:7] = (R.from_rotvec(out[24:27]) * R.from_quat(prev[3:7], scalar_first=True)).as_quat(scalar_first=True)
-        self.servo.end(q)
-        return q, clamped
+                # |share d - d_prev| <= c: a quadratic in the share
+                c = GUARD_SHARE * speed_change * self.dt
+                a2, b1, c0 = n * n, -2.0 * float(d[sl] @ d_prev[sl]), float(d_prev[sl] @ d_prev[sl]) - c * c
+                if a2 <= 1e-24:
+                    if c0 > 0.0:
+                        return None
+                    continue
+                disc = b1 * b1 - 4.0 * a2 * c0
+                if disc < 0.0:
+                    return None
+                root = np.sqrt(disc)
+                lo, hi = max(lo, (-b1 - root) / (2.0 * a2)), min(hi, (-b1 + root) / (2.0 * a2))
+        return hi if lo <= hi else None
 
 
 class Smoother:
@@ -635,7 +755,8 @@ class Pipeline:
         self.back: Return | None = None
         self.returned = 0  # ticks into the return
         self.calm = 0  # ticks in a row the return was over and unguarded
-        self.live_prev: tuple | None = None  # the last live qpos and whether it followed new input
+        self.live_prev: tuple | None = None  # the last live qpos, whether it followed new input, its lowest point
+        self.marks: list[str] = []  # the rules this tick's live frame broke
         self.carry_end: float | None = None  # when (s into the carry) the input was back
         self.free_ticks = 0  # ticks in a row the IK followed new input unbounded by its servos
         self.transition: str | None = None  # "carry" or "return" (diagnostics)
@@ -665,10 +786,13 @@ class Pipeline:
 
     def _install(self, retargeter: Retargeter, world: tuple[R, np.ndarray]) -> None:
         self.retargeter, self.world = retargeter, world
-        self.guard = Guard(retargeter.model, retargeter.lo, retargeter.hi, self.fps)
+        self.guard = Guard(retargeter.model, retargeter.lo, retargeter.hi, self._lowest, self.fps)
         self._reset_output()
         self.hold_until = -1
-        self.restart = self.active
+        if self.active:
+            # A new calibration moves the world frame: tracking starts again only from left Y.
+            self.active = False
+            self.log("tracking stopped for the calibration; left Y starts it again")
 
     def _finish_calibration(self) -> None:
         frames, self.capture = self.capture[1], None
@@ -683,8 +807,7 @@ class Pipeline:
             r = Retargeter(ref, self.fps, self.workdir)
             r.step(self._in_world(frame, world))  # the IK's first solve (the arm branch), off the output ticks
             self.ready = (r, world)
-            then = "" if self.active else "; left Y starts tracking"
-            self.log(f"calibrated ({why}, root scale {r.scale:.4f}){then}")
+            self.log(f"calibrated ({why}, root scale {r.scale:.4f}); left Y starts tracking")
 
         if self.background:
             threading.Thread(target=build, daemon=True).start()
@@ -726,6 +849,7 @@ class Pipeline:
                 self.rendered = t
                 qpos, kin, marks = self.retargeter.step(self._in_world(as_frame(p, q), self.world))
                 live = (qpos, kin)
+                self.marks = marks
                 if marks:
                     self.hold_until = self.ticks + round(ExclusionSpec.pad_s * self.fps)
                 if late:
@@ -769,9 +893,13 @@ class Pipeline:
                 else:
                     a = self.sent[2]
                     q0, v0 = self.sent[0], (a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0])
-                self.carry = Carry(q0, v0, self.home_q, self.retargeter.lo, self.retargeter.hi, self.fps)
+                self.carry = Carry(q0, v0, self.home_q, self.retargeter.lo, self.retargeter.hi, self._lowest,
+                                   self.fps)
                 self.carried, self.back, self.carry_end = 0, None, None
             self.carried += 1
+            if "unsupported" in self.marks:
+                # A pose whose weight is outside its support is not held: it goes to the standing pose now.
+                self.carry.stand_now(self.carried * dt)
             planned, self.transition = self.carry.at(self.carried * dt), "carry"
         else:
             if self.carry is not None:
@@ -787,16 +915,18 @@ class Pipeline:
                 if self.free_ticks < 2:
                     live_v[:21] = 0.0
                 out_v = np.concatenate([a["joint_vel"], a["body_lin_vel_w"][0], a["body_ang_vel_w"][0]])
-                x0 = -Guard.deltas(prev, self.sent[0])
-                self.back = Return(x0, out_v - live_v, min(self.carried * dt, RETURN_S), self.fps)
+                x0, v0 = -Guard.deltas(prev, self.sent[0]), out_v - live_v
+                x0[23], v0[23] = self._lowest(self.sent[0]) - self.live_prev[2], 0.0  # the lowest point's
+                self.back = Return(x0, v0, min(self.carried * dt, RETURN_S), self.fps)
                 self.returned, self.calm, self.carry = 0, 0, None
             planned, self.transition = None, None
             if self.back is not None:
                 self.returned += 1
-                planned, done = self.back.at(self.returned * dt, q_live, self.retargeter.lo, self.retargeter.hi)
+                planned, done = self.back.at(self.returned * dt, q_live, float(live[1].lowest_point_z[0]),
+                                             self.retargeter.lo, self.retargeter.hi, self._lowest)
                 self.transition = "return"
         if live is not None:
-            self.live_prev = (q_live.copy(), fresh)
+            self.live_prev = (q_live.copy(), fresh, float(live[1].lowest_point_z[0]))
         prev = (None, None) if self.sent is None else self.sent[:2]
         q, clamped = self.guard(q_live if planned is None else planned, *prev, planned is not None)
         self.guarded += clamped
@@ -819,6 +949,12 @@ class Pipeline:
         deltas = np.zeros(27) if self.sent is None else Guard.deltas(q, self.sent[0])
         self.sent = (q, deltas, arrays)
         return arrays
+
+    def _lowest(self, q: np.ndarray) -> float:
+        """The lowest collision point of qpos ``q`` on the training model (as the floor rules measure it)."""
+        c = self.retargeter.checker
+        set_qpos(c.model, c.data, q[:3], q[3:7], q[7:])
+        return c._lowest_point()
 
     def _smoothed(self, q: np.ndarray) -> dict:
         """The frame sent for the reference ``q`` of this tick (Smoother), its velocities from the frames sent."""
