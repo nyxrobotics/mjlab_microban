@@ -14,8 +14,8 @@ each output frame uses only what came before it; the parts that differ:
   minimum of the last second (the data: +-1 s); it follows a lower minimum at once and a higher one (an old low
   leaving the window) at FLOOR_RISE_M_S at most, so the trunk does not drop by the step in one frame.
 * Poses: forward kinematics on the training collision model (body_pos_w, body_quat_w as build.py).
-* Frames sent: the average of the last SMOOTH_TICKS frames (``Smoother``, SMOOTH_TICKS // 2 ticks late; the data: its
-  30 fps frames, interpolated linearly at 50 Hz in training).
+* Frames sent: the average of the last SMOOTH_TICKS frames (``Smoother``, (SMOOTH_TICKS - 1) / 2 ticks late; the data:
+  its 30 fps frames, interpolated linearly at 50 Hz in training).
 * Velocities: backward differences of the frames sent (the data: central differences).
 * Exclusion: preprocess.py's rules and finalize's arm-flip cut, judged on the frames so far.  A marked frame and the
   pad_s after the last mark are not sent (the data cuts them): like a missing or late body, they interrupt the
@@ -67,11 +67,12 @@ CATCH_UP_S = 0.5  # after a gap the return waits (at most this) for the IK to st
 # The floor's rise (robot m/s): a step of the trunk height by the floor's 1 s window becomes a descent at this speed
 # (its start and end change the trunk's speed by a third of the training reference's 99.9th percentile per tick).
 FLOOR_RISE_M_S = 0.05
-# The frames sent are the reference SMOOTH_TICKS // 2 ticks late, each the average of the SMOOTH_TICKS frames around it
-# (``Smoother``): the trunk's speed and turn rate from 30 Hz input at 50 Hz otherwise change per tick by up to 3.4 and
-# 2.2 x the training reference's 99.9th percentile (PICO recordings); averaged over 5 ticks (40 ms late), by at most
-# 0.99 and 0.69 x.
-SMOOTH_TICKS = 5
+# The frames sent are the reference (SMOOTH_TICKS - 1) / 2 ticks late, each the average of the SMOOTH_TICKS frames
+# around it (``Smoother``): the trunk's speed and turn rate from 30 Hz input at 50 Hz otherwise change per tick by up
+# to 3.4 and 2.2 x the training reference's 99.9th percentile (PICO recordings); averaged over 4 ticks (30 ms late), by
+# at most 1.24 and 0.86 x (6 frames of 55,717 past it; over 5 ticks, 40 ms late, 0.99 and 0.69 x: the shorter delay
+# for the operator was chosen).
+SMOOTH_TICKS = 4
 # The training reference per control tick (0.02 s), as the training env feeds it (motion.py: 30 fps clips, positions
 # and velocities linear, orientations slerp, at any phase), on the deployed run's motion_file
 # (scripts/wholebody_reference_steps.py):
