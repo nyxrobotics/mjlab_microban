@@ -1,6 +1,6 @@
-"""Walking's, PICO's and get-up's training floors and servo-goal delay: one floor (friction, contact time constant)
-on every collision geom and one goal delay per environment, the delay redrawn at each reset; play and the judgments
-keep robot.xml's robot, its foot friction and its goal delay."""
+"""The get-up's training floors and servo-goal delay: one floor (friction, contact time constant) on every collision
+geom and one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's
+robot, its foot friction and its goal delay.  Walking and PICO train on the robot's floor and delay, as they play."""
 
 from __future__ import annotations
 
@@ -25,9 +25,11 @@ from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_t
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
 TASKS = {
+    "getup": make_microban_getup_env_cfg,
+}
+ROBOT_FLOOR_TASKS = {
     "walk": make_microban_velocity_env_cfg,
     "pico": make_microban_teleop_v13_arm_overlay_env_cfg,
-    "getup": make_microban_getup_env_cfg,
 }
 NUM_ENVS = 8
 COLLISION = re.compile(r".*_collision_\d+")
@@ -67,6 +69,17 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots(task):
     assert replace(train.scene.entities["robot"], spec_fn=MICROBAN_ROBOT_CFG.spec_fn,
                    collisions=MICROBAN_ROBOT_CFG.collisions,
                    articulation=MICROBAN_ROBOT_CFG.articulation) == MICROBAN_ROBOT_CFG
+
+
+@pytest.mark.parametrize("task", ROBOT_FLOOR_TASKS)
+def test_walking_and_pico_train_on_the_robots_floor_and_goal_delay(task):
+    train, play = ROBOT_FLOOR_TASKS[task](), ROBOT_FLOOR_TASKS[task](play=True)
+    assert train.scene.entities["robot"] == play.scene.entities["robot"] == MICROBAN_ROBOT_CFG
+    assert "geom_friction" not in train.events and "floor_softness" not in train.events
+    foot = train.events["foot_friction"]
+    assert foot.params["ranges"] == (0.3, 1.2) and foot.params["asset_cfg"].geom_names == SOLE_NAMES
+    (trained,) = train.scene.entities["robot"].articulation.actuators
+    assert (trained.delay_min_lag, trained.delay_max_lag, trained.delay_update_period) == (3, 6, 0)
 
 
 def test_the_training_robot_collides_as_the_robot_with_priority_over_the_floor():

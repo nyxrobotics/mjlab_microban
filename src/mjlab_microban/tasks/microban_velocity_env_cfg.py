@@ -69,7 +69,6 @@ from mjlab_microban.tasks.mdp import (
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
     reset_root_state_uniform_world_yaw,
-    training_floor_and_delay,
     upright as local_upright,
 )
 from mjlab_microban.tasks.microban_velocity_tracking import (
@@ -413,11 +412,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Training's floors (softness and friction on every collision geom, in
-    # place of foot_friction) and servo-goal delay; play and the judgments
-    # keep the robot's (tasks/mdp.py training_floor_and_delay).
-    if not play:
-        training_floor_and_delay(cfg)
+    # Walking (and PICO, which inherits this config) trains on the robot's
+    # floor, sole friction and goal delay, as play and the judgments do.
+    # Training's soft and slippery floors and per-episode delay (tasks/mdp.py
+    # training_floor_and_delay) stay with the get-up.  With them the walker
+    # of the refitted servos lost one side of the 0.1 m/s side step (9x300
+    # seed 101 failed at 6000 and 7000 updates; the same seed trained here
+    # passed), and 400 more updates on this floor cut its pushed falls here
+    # from 192 to 57 of 1080.
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {
