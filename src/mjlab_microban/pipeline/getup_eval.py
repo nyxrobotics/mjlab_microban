@@ -2,9 +2,9 @@
 
 usage:
   uv run --locked python -m mjlab_microban.pipeline.getup_eval stand TASK CKPT \
-      [--envs 64] [--seed 11] [--steps 999] [--imu-delay 3] [--noise] [--push x:0.3]
+      [--envs 64] [--seed 11] [--steps 999] [--imu-delay 3] [--noise] [--push x:0.3] [--floor JSON]
   uv run --locked python -m mjlab_microban.pipeline.getup_eval posture TASK CKPT \
-      [--envs 64] [--seed 11] [--steps 999]
+      [--envs 64] [--seed 11] [--steps 999] [--floor JSON]
 
 Human-readable lines, then one ``RESULT {json}`` line that the pipeline
 parses.  TASK's play config (full IMU latency, no schedule) is
@@ -16,6 +16,11 @@ stand: fallen and near-HOME starts, one 20 s episode; standing = the head
 above 0.9 x HEAD_STANDING_HEIGHT on every step of the final second.
 posture: fallen starts only; joint means of the envs standing through the
 final 5 s, compared with HOME.
+
+--floor (a floor of config/pipeline.yaml ``getup.floors``, e.g.
+'{"time_constant_s": 0.1, "friction": 0.3}'): every environment on this soft
+or slippery floor (every collision geom, pipeline/floors.py) in place of the
+play env's rigid one.
 """
 
 from __future__ import annotations
@@ -39,11 +44,16 @@ from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_ACTION_CLIP_RAD, H
 THR = 0.9 * HEAD_STANDING_HEIGHT
 
 
-def _setup(task: str, ckpt: str, envs: int, seed: int, *, posture: bool, delay: int, noise: bool):
+def _setup(task: str, ckpt: str, envs: int, seed: int, *, posture: bool, delay: int, noise: bool,
+           floor: tuple[float | None, float] | None = None):
     torch.manual_seed(seed)
     env_cfg = load_env_cfg(task, play=True)
     env_cfg.scene.num_envs = envs
     env_cfg.seed = seed
+    if floor is not None:
+        from mjlab_microban.pipeline.floors import add_body_floors
+
+        add_body_floors(env_cfg, [floor] * envs)
     if posture:
         env_cfg.events["reset_near_home"].params["rel_near_home_envs"] = 0.0
     else:
@@ -55,6 +65,10 @@ def _setup(task: str, ckpt: str, envs: int, seed: int, *, posture: bool, delay: 
             term.delay_max_lag = delay
             term.delay_update_period = 64
     env = ManagerBasedRlEnv(cfg=env_cfg, device="cuda:0")
+    if floor is not None:
+        from mjlab_microban.pipeline.floors import check_body_floors
+
+        check_body_floors(env, [floor] * envs)
     wrapped = RslRlVecEnvWrapper(env)
     runner = load_runner_cls(task)(wrapped, asdict(load_rl_cfg(task)), device="cuda:0")
     runner.load(ckpt, load_cfg={"actor": True}, strict=True, map_location="cuda:0")
@@ -68,7 +82,7 @@ def _tilt_deg(g: torch.Tensor, g_home: torch.Tensor) -> torch.Tensor:
 def stand(args) -> dict:
     n, steps = args.envs, args.steps
     env, wrapped, policy = _setup(args.task, args.checkpoint, n, args.seed, posture=False,
-                                  delay=args.imu_delay, noise=args.noise)
+                                  delay=args.imu_delay, noise=args.noise, floor=args.floor)
     g_home = torch.tensor([math.sin(HOME_TRUNK_PITCH_RAD), 0.0, -math.cos(HOME_TRUNK_PITCH_RAD)],
                           device="cuda:0")
     robot = env.scene["robot"]
@@ -158,7 +172,7 @@ def stand(args) -> dict:
 def posture(args) -> dict:
     n, steps = args.envs, args.steps
     env, wrapped, policy = _setup(args.task, args.checkpoint, n, args.seed, posture=True,
-                                  delay=0, noise=False)
+                                  delay=0, noise=False, floor=args.floor)
     g_home = torch.tensor([math.sin(HOME_TRUNK_PITCH_RAD), 0.0, -math.cos(HOME_TRUNK_PITCH_RAD)],
                           device="cuda:0")
     robot = env.scene["robot"]
@@ -215,8 +229,16 @@ def main() -> None:
     parser.add_argument("--imu-delay", type=int, default=3)
     parser.add_argument("--noise", action="store_true")
     parser.add_argument("--push", default=None, help="axis:m/s velocity kick at 8 s, e.g. x:0.3")
+    parser.add_argument("--floor", help="JSON of a floor of config/pipeline.yaml getup.floors: every environment "
+                        "on it in place of the play env's rigid floor")
     args = parser.parse_args()
+    if args.floor:
+        from mjlab_microban.pipeline.floors import parse
+
+        args.floor = parse({"floor": json.loads(args.floor)})["floor"]
     result = stand(args) if args.mode == "stand" else posture(args)
+    if args.floor:
+        result["floor"] = list(args.floor)
     print("RESULT " + json.dumps(result, sort_keys=True))
 
 

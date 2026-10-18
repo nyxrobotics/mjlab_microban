@@ -1,13 +1,18 @@
-"""The walking judgment's soft and slippery floors, one per environment.
+"""The judgments' soft and slippery floors, one per environment.
 
-A floor is one contact time constant (solref[0], s) and one friction of the
-soles.  The play robot's soles have priority over the floor (robot/
-microban_constants.py FULL_COLLISION), so a sole contact takes the soles'
-values, as training's floors do on every collision geom (tasks/mdp.py
-training_floor_and_delay).  A friction of None keeps the play env's drawn sole
-friction (foot_friction, 0.3-1.2).  The rigid floor is MuJoCo's 0.02 s, the
-play env's; config/pipeline.yaml ``walk.judgment.floors`` names the judged
-floors, inside training's range (FLOOR_TIME_CONSTANT_S, FLOOR_FRICTION).
+A floor is one contact time constant (solref[0], s) and one friction.  The
+walker's are the soles': the play robot's soles have priority over the floor
+(robot/microban_constants.py FULL_COLLISION), so a sole contact takes the
+soles' values, as training's floors do on every collision geom (tasks/mdp.py
+training_floor_and_delay).  The get-up's are every collision geom's, as in
+training (it lies on its hands, knees and back): the robot's collision geoms
+are named and given priority over the floor as in training's robot
+(TRAINING_COLLISION; with the floor's values the contacts are the play
+robot's).  A friction of None keeps the play env's drawn sole friction
+(foot_friction, 0.3-1.2) and the other geoms' 1.  The rigid floor is MuJoCo's
+0.02 s, the play env's; config/pipeline.yaml ``walk.judgment.floors`` and
+``getup.floors`` name the judged floors, inside training's range
+(FLOOR_TIME_CONSTANT_S, FLOOR_FRICTION).
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ import math
 from typing import Any
 
 SOLES = (r".*left_foot_collision.*", r".*right_foot_collision.*")
+# Every collision geom of training's robot spec (robot/microban_constants.py collision_named_spec), the soles too.
+BODY = (r".*_collision_\d+$",)
 RIGID_TIME_CONSTANT_S = 0.02
 
 
@@ -58,7 +65,7 @@ def _sole_floor(env, env_ids, frictions, time_constants, asset_cfg) -> None:
         model.geom_friction[r, c, 0] = friction[~keep][:, None].expand(-1, len(geoms)).to(model.geom_friction.dtype)
 
 
-def add_sole_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:
+def add_sole_floors(cfg, per_env: list[tuple[float | None, float]], geoms: tuple[str, ...] = SOLES) -> None:
     """Give environment i of ``cfg`` the floor ``per_env[i]`` (friction or None, time constant s) at startup.
 
     The event runs after the play env's startup events (foot_friction draws first) and draws nothing, so the
@@ -75,11 +82,47 @@ def add_sole_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:
         func=func,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", geom_names=SOLES),
+            "asset_cfg": SceneEntityCfg("robot", geom_names=geoms),
             "frictions": [math.nan if f is None else float(f) for f, _ in per_env],
             "time_constants": [float(t) for _, t in per_env],
         },
     )
+
+
+def add_body_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:
+    """``add_sole_floors`` on every collision geom (BODY), on training's collision geoms: named, with priority over
+    the floor (TRAINING_COLLISION), the play robot's actuators and everything else kept."""
+
+    from dataclasses import replace
+
+    from mjlab_microban.robot.microban_constants import TRAINING_COLLISION, collision_named_spec
+
+    robot = cfg.scene.entities["robot"]
+    cfg.scene.entities["robot"] = replace(robot, spec_fn=collision_named_spec, collisions=(TRAINING_COLLISION,))
+    add_sole_floors(cfg, per_env, BODY)
+
+
+def check_body_floors(env, per_env: list[tuple[float | None, float]]) -> None:
+    """Raise unless every collision geom of environment i has the time constant of ``per_env[i]`` and, when it has
+    one, its friction, with priority over the floor."""
+
+    import torch
+
+    robot = env.scene["robot"]
+    local, _names = robot.find_geoms(BODY)
+    geoms = robot.indexing.geom_ids[torch.tensor(local, device=env.device)].long()
+    mj = env.sim.mj_model
+    colliding = [int(g) for g in robot.indexing.geom_ids.tolist() if mj.geom_contype[g] or mj.geom_conaffinity[g]]
+    model = env.sim.model
+    want_t = torch.tensor([t for _, t in per_env], device=env.device)[:, None]
+    want_f = torch.tensor([math.nan if f is None else f for f, _ in per_env], device=env.device)[:, None]
+    time_constant = model.geom_solref[:, geoms, 0]
+    friction = model.geom_friction[:, geoms, 0]
+    set_f = ~torch.isnan(want_f).expand_as(friction)
+    if sorted(geoms.tolist()) != sorted(colliding) or not bool((mj.geom_priority[colliding] == 1).all()) \
+            or not torch.allclose(time_constant, want_t.expand_as(time_constant).to(time_constant.dtype), rtol=1e-5) \
+            or not torch.allclose(friction[set_f], want_f.expand_as(friction)[set_f].to(friction.dtype), rtol=1e-5):
+        raise RuntimeError(f"the floors on the {len(colliding)} collision geoms drifted from the ones set")
 
 
 def sole_floors(env) -> list[tuple[float, float]]:

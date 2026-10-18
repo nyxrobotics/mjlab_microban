@@ -117,6 +117,102 @@ class StateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             floors.add_sole_floors(cfg, [(None, 0.05)])
 
+    def test_the_getup_floors(self) -> None:
+        # The walking judgment's floors, on every collision geom of training's robot: named, with priority over the
+        # floor, and otherwise the play robot's contacts.
+        import re
+
+        import mujoco
+        from mjlab.entity import Entity
+
+        from mjlab_microban.pipeline import floors
+        from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
+
+        cfg = load_config(dry=False)
+        self.assertEqual(floors.parse(cfg["getup"]["floors"]), floors.parse(cfg["walk"]["judgment"]["floors"]))
+        play = make_microban_getup_env_cfg(play=True)
+        judged = make_microban_getup_env_cfg(play=True)
+        judged.scene.num_envs = 2
+        floors.add_body_floors(judged, [(None, 0.05), (0.3, 0.1)])
+        params = judged.events["judgment_floor"].params
+        self.assertEqual((params["asset_cfg"].geom_names, params["time_constants"]), (floors.BODY, [0.05, 0.1]))
+        self.assertEqual(list(judged.events)[-1], "judgment_floor")  # after foot_friction's draw
+        self.assertEqual(judged.scene.entities["robot"].articulation, play.scene.entities["robot"].articulation)
+        before, after = (Entity(c.scene.entities["robot"]).spec.compile() for c in (play, judged))
+        colliding = [g for g in range(after.ngeom) if after.geom_contype[g] or after.geom_conaffinity[g]]
+        names = [mujoco.mj_id2name(after, mujoco.mjtObj.mjOBJ_GEOM, g) for g in colliding]
+        self.assertEqual(len(colliding), 36)
+        self.assertTrue(all(re.match(floors.BODY[0], name) for name in names))
+        self.assertTrue((after.geom_priority[colliding] == 1).all())
+        soles = [name for name in names if any(re.match(pattern, name) for pattern in floors.SOLES)]
+        self.assertEqual(len(soles), 12)
+        self.assertEqual(tuple(judged.events["foot_friction"].params["asset_cfg"].geom_names), floors.SOLES)
+        for field in ("geom_condim", "geom_friction", "geom_solref", "geom_solimp", "geom_contype"):
+            self.assertTrue((getattr(before, field) == getattr(after, field)).all(), field)
+        # A judgment, not a training input.
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.sched = {"getup": {"effort": 10000}, "getup_total": 18000}
+            label = pipeline.inputs("getup")
+            del pipeline.cfg["getup"]["floors"]
+            self.assertEqual(pipeline.inputs("getup"), label)
+
+    def test_the_getup_judgment_on_soft_and_slippery_floors(self) -> None:
+        # The fallen starts and the push (the "stand" evaluations) run again on each floor of getup.floors, standing
+        # still on those of getup.stand_still_floors, judged by the rigid floor's lines.
+        cfg = load_config(dry=False)
+        floors_cfg, still_floors = cfg["getup"]["floors"], cfg["getup"]["stand_still_floors"]
+        self.assertEqual(still_floors, ["soft_0.05"])
+        stand = {"fallen_standing_fraction": 0.9, "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_on_clip": 0.02,
+                 "final_tilt_deg": 3.0, "push_fell_within_3s": 1, "push_standing_before": 60, "standing_fraction": 0.9}
+        commands = []
+        with tempfile.TemporaryDirectory() as directory:
+
+            def run(name, cmd, kind, env=None, check=True):
+                commands.append(cmd)
+                log = Path(directory) / f"{len(commands)}.log"
+                floor = json.loads(cmd[cmd.index("--floor") + 1]) if "--floor" in cmd else None
+                if "mjlab_microban.pipeline.stand_still" in cmd:
+                    report = Path(cmd[cmd.index("mjlab_microban.pipeline.stand_still") + 4])
+                    report.write_text(json.dumps({"leg_speed_rms_rad_s": 0.2 if floor else 0.05, "worst_delay_ms": 40,
+                                                  "falls": 0, "judged_envs": 48, "envs": 48, "status": "pass"}))
+                    log.write_text("")
+                else:
+                    bad = floor == floors_cfg["soft_slippery"]
+                    log.write_text("RESULT " + json.dumps({**stand, "fallen_standing_fraction": 0.5 if bad else 0.9}))
+                return 0, log
+
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.jobs, pipeline.env, pipeline.log = SimpleNamespace(run=run), {}, lambda message: None
+            summary = pipeline.getup_judgment(Path("model_1.pt"), "judgment")
+            written = json.loads((Path(directory) / "state" / "getup_judgment.json").read_text())
+        rigid = len(cfg["getup"]["evals"]) + 1
+        self.assertFalse(any("--floor" in cmd for cmd in commands[:rigid]))
+        on_floors = [cmd for cmd in commands[rigid:]]
+        for name, floor in floors_cfg.items():
+            mine = [cmd for cmd in on_floors if json.loads(cmd[cmd.index("--floor") + 1]) == floor]
+            modules = [cmd[cmd.index("-m") + 1].rsplit(".", 1)[1] for cmd in mine]
+            self.assertEqual(modules, ["getup_eval"] * 3 + ["stand_still"] * (name in still_floors), name)
+            self.assertFalse(any("posture" in cmd for cmd in mine))
+        self.assertEqual(len(on_floors), 3 * len(floors_cfg) + len(still_floors))
+        self.assertEqual((list(summary["floors"]), written["summary"]), (list(floors_cfg), summary))
+        self.assertEqual(steps.getup_gate_failures(summary, GATE), [])
+        failures = steps.getup_floor_failures(summary["floors"], GATE)
+        self.assertEqual(failures, ["soft_0.05: standing still: leg speed RMS 0.2 rad/s > 0.15",
+                                    "soft_slippery: fallen-start standing 0.50 < 0.85"])
+        # Each of the four items fails on its own with the rigid floor's line.
+        good = {**summary["floors"]["soft_0.05"], "stand_still_leg_speed_rms_rad_s": 0.05}
+        self.assertEqual(steps.getup_floor_failures({"f": good}, GATE), [])
+        for key, value in (("min_fallen_standing_fraction", 0.84), ("push_fall_fraction", 0.11),
+                           ("stand_still_leg_speed_rms_rad_s", None), ("stand_still_falls", 1)):
+            with self.subTest(key=key):
+                self.assertEqual(len(steps.getup_floor_failures({"f": {**good, key: value}}, GATE)), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.cfg["getup"]["stand_still_floors"] = ["soft_0.2"]
+            with self.assertRaises(PipelineError):
+                pipeline.getup_judgment(Path("model_1.pt"), "judgment")
+
     def test_a_step_hashes_only_its_own_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")

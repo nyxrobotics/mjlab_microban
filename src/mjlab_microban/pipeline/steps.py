@@ -445,14 +445,18 @@ class Pipeline:
         return failures, {"summary": summary, "probe": probe, "nine_by_300": nines, "stand_still_soft": still}
 
     def stand_still(self, kind: str, checkpoint: Path, report: Path,
-                    time_constants: list[float] | None = None) -> dict[str, Any]:
+                    time_constants: list[float] | None = None, floor: dict[str, float] | None = None) -> dict[str, Any]:
         """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report);
-        with ``time_constants`` (s) on these soft floors in place of the rigid one."""
+        with ``time_constants`` (s) on these soft floors in place of the rigid one; with ``floor`` (one of
+        ``getup.floors``) on that floor."""
 
         c = self.cfg["stand_still"]
         report.unlink(missing_ok=True)
         soft = ["--time-constants", ",".join(str(t) for t in time_constants)] if time_constants else []
-        self.jobs.run(f"{kind}_stand_still{'_soft' if soft else ''}",
+        name = f"{kind}_stand_still{'_soft' if soft else ''}"
+        if floor is not None:
+            soft, name = ["--floor", json.dumps(floor, sort_keys=True)], report.stem
+        self.jobs.run(name,
                       [*UV, "python", "-m", "mjlab_microban.pipeline.stand_still", kind,
                        self.cfg[kind]["task"], str(checkpoint), str(report),
                        "--max-leg-speed-rms", str(c["max_leg_speed_rms_rad_s"]),
@@ -609,7 +613,8 @@ class Pipeline:
         final = self.train("getup", GETUP_EXP, label, c["task"], self.sched["getup_total"], c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])])
         summary = self.getup_judgment(final, "judgment")
-        failures = getup_gate_failures(summary, {**c["gate"], **stand_still_lines(self.cfg["stand_still"])})
+        gate = {**c["gate"], **stand_still_lines(self.cfg["stand_still"])}
+        failures = getup_gate_failures(summary, gate) + getup_floor_failures(summary.get("floors", {}), gate)
         if failures and not self.dry:
             raise PipelineError(f"get-up judgment failed for {final.parent.name}/{final.name}: {failures} "
                                 f"({summary})")
@@ -619,28 +624,61 @@ class Pipeline:
                               "summary": summary,
                               "passed": not failures, "failures": failures}, [final])
 
-    def getup_commands(self, checkpoint: Path) -> list[tuple[str, list[str]]]:
+    def getup_commands(self, checkpoint: Path, floor: dict[str, float] | None = None) -> list[tuple[str, list[str]]]:
+        """The evaluations of ``getup.evals``; with ``floor`` (one of ``getup.floors``) its ``stand`` ones (fallen
+        starts, push) on that floor."""
+
         c = self.cfg["getup"]
         commands = []
         for eval_name, mode, seed, extra in c["evals"]:
+            if floor is not None and mode != "stand":
+                continue
             cmd = [*UV, "python", "-m", "mjlab_microban.pipeline.getup_eval", mode, c["task"], str(checkpoint),
                    "--seed", str(seed), *extra]
             if "eval_envs" in c:
                 cmd += ["--envs", str(c["eval_envs"]), "--steps", str(c["eval_steps"])]
+            if floor is not None:
+                cmd += ["--floor", json.dumps(floor, sort_keys=True)]
             commands.append((eval_name, cmd))
         return commands
 
-    def getup_judgment(self, checkpoint: Path, name: str) -> dict[str, Any]:
+    def getup_results(self, checkpoint: Path, name: str, floor: dict[str, float] | None = None,
+                      still: bool = True) -> dict[str, Any]:
+        """The reports of the evaluations and (``still``) standing still, on the rigid floor or on ``floor``."""
+
         results = {}
-        for eval_name, cmd in self.getup_commands(checkpoint):
+        for eval_name, cmd in self.getup_commands(checkpoint, floor):
             rc, log = self.jobs.run(f"getup_{name}_{eval_name}", cmd, "eval", env=self.env, check=False)
             text = log.read_text(errors="replace")
             if rc != 0 or "RESULT " not in text:
                 raise JobStopped(f"the get-up evaluator {eval_name} wrote no result (rc={rc}, log {log}): not "
                                  "a judgment (rerun to evaluate again)")
             results[eval_name] = last_json_line(text, prefix="RESULT ")
-        results["stand_still"] = self.stand_still("getup", checkpoint, self.state.dir / f"getup_{name}_stand_still.json")
+        if still:
+            results["stand_still"] = self.stand_still("getup", checkpoint,
+                                                      self.state.dir / f"getup_{name}_stand_still.json", floor=floor)
+        return results
+
+    def getup_judgment(self, checkpoint: Path, name: str) -> dict[str, Any]:
+        """The get-up judgment's numbers on the play env's rigid floor and, under ``floors``, on each soft and
+        slippery floor of ``getup.floors`` (pipeline/floors.py): the fallen starts, the push and, on those of
+        ``getup.stand_still_floors``, standing still."""
+
+        from mjlab_microban.pipeline.floors import parse
+
+        c = self.cfg["getup"]
+        floors = c.get("floors") or {}
+        parse(floors)
+        still = c.get("stand_still_floors") or []
+        if set(still) - set(floors):
+            raise PipelineError(f"getup.stand_still_floors names no floor of getup.floors: {sorted(set(still) - set(floors))}",
+                                EXIT_INPUT)
+        results = self.getup_results(checkpoint, name)
         summary = getup_summary(results)
+        if floors:
+            results["floors"] = {floor: self.getup_results(checkpoint, f"{name}_{floor}", floors[floor], floor in still)
+                                 for floor in floors}
+            summary["floors"] = {floor: getup_floor_summary(r) for floor, r in results["floors"].items()}
         (self.state.dir / f"getup_{name}.json").write_text(json.dumps({"summary": summary, "results": results},
                                                                        indent=1, sort_keys=True))
         self.log(f"get-up {name} {checkpoint.parent.name}/{checkpoint.name}: {summary}")
@@ -1044,6 +1082,42 @@ def getup_gate_failures(summary: dict[str, float], gate: dict[str, float]) -> li
         failures.append(f"standing still: leg speed RMS {rms} rad/s > {gate['max_stand_still_leg_speed_rms_rad_s']}")
     if summary["stand_still_falls"] > gate["max_stand_still_falls"]:
         failures.append(f"standing still: {summary['stand_still_falls']} falls > {gate['max_stand_still_falls']}")
+    return failures
+
+
+def getup_floor_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """The judged numbers on a soft or slippery floor: fallen-start standing, the push's falls, standing still (when
+    it ran there)."""
+
+    stand = [results[name] for name in ("stand_s11", "stand_s5", "push_s11")]
+    push = results["push_s11"]
+    still = results.get("stand_still")
+    return {
+        "min_fallen_standing_fraction": min(r["fallen_standing_fraction"] for r in stand),
+        "push_fall_fraction": push.get("push_fell_within_3s", 0) / max(1, push.get("push_standing_before", 0)),
+        **({} if still is None else {f"stand_still_{key}": value for key, value in stand_still_summary(still).items()}),
+    }
+
+
+def getup_floor_failures(floors: dict[str, dict[str, Any]], gate: dict[str, float]) -> list[str]:
+    """The failures on each soft and slippery floor (``summary["floors"]``) against the rigid floor's lines:
+    ``<floor>: <failure>``."""
+
+    failures = []
+    for name, s in floors.items():
+        if s["min_fallen_standing_fraction"] < gate["min_fallen_standing_fraction"]:
+            failures.append(f"{name}: fallen-start standing {s['min_fallen_standing_fraction']:.2f} < "
+                            f"{gate['min_fallen_standing_fraction']}")
+        if s["push_fall_fraction"] > gate["max_push_fall_fraction"]:
+            failures.append(f"{name}: push falls {s['push_fall_fraction']:.2f} > {gate['max_push_fall_fraction']}")
+        if "stand_still_falls" not in s:
+            continue
+        rms = s["stand_still_leg_speed_rms_rad_s"]
+        if rms is None or rms > gate["max_stand_still_leg_speed_rms_rad_s"]:
+            failures.append(f"{name}: standing still: leg speed RMS {rms} rad/s > "
+                            f"{gate['max_stand_still_leg_speed_rms_rad_s']}")
+        if s["stand_still_falls"] > gate["max_stand_still_falls"]:
+            failures.append(f"{name}: standing still: {s['stand_still_falls']} falls > {gate['max_stand_still_falls']}")
     return failures
 
 

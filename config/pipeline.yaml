@@ -79,6 +79,31 @@ getup:
     # reward's clip barrier charges beyond it; targets between 1.57 and pi
     # are the torque authority the get-up needs and are allowed).
     max_standing_targets_on_clip: 0.05
+  # The walking judgment's soft and slippery floors on every collision geom
+  # (pipeline/floors.py; the get-up lies on its hands, knees and back, as in
+  # training).  The fallen starts and the push (the stand evaluations) run
+  # again on each, standing still on stand_still_floors, with the rigid
+  # floor's lines (min_fallen_standing_fraction, max_push_fall_fraction,
+  # stand_still).  The get-up that ran on the robot with the walker a7c28c8a
+  # (e115a8cd, trained on the rigid floor), on the servo model it was trained
+  # on, stands from 0.947-0.982 of its fallen starts on these floors (rigid
+  # 0.965) and falls after 0, 0.12 (0.1 s), 0 and 0.03 of the pushes (rigid
+  # 0); the get-up training on these floors (a2adb8f2, updates 8000 and
+  # 9000) 0.945-1.0 and 0-0.049.  Standing still is judged on soft_0.05 only,
+  # where that training stands as on the rigid floor (15-35 ms: leg RMS
+  # 0.049-0.072 rad/s, no fall; 40 ms: 1.46-1.64 rad/s, 2 falls; rigid
+  # 1.70-1.76, 1-2; e115a8cd falls 2 times in 8 there at 30 ms).
+  # On 0.1 s, friction 0.3 and both, no get-up stands still without a fall
+  # where it does on the rigid floor: a2adb8f2 (8000) falls 2, 1 and 2 times
+  # in 40 at 15-35 ms; e115a8cd at its 15-30 ms 6 and 6 times in 32 on 0.1 s
+  # and on both, and on 0.3 its legs shake at 30 ms (0.83 rad/s); rigid: no
+  # fall, at most 0.013 rad/s.
+  floors:
+    soft_0.05: {time_constant_s: 0.05}
+    soft_0.1: {time_constant_s: 0.1}
+    slippery_0.3: {friction: 0.3}
+    soft_slippery: {time_constant_s: 0.1, friction: 0.3}
+  stand_still_floors: [soft_0.05]
 
 # Standing still (pipeline/stand_still.py), a judgment of every policy: the
 # walker and PICO stand at HOME on a zero command, the get-up from a fallen
