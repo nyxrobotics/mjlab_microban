@@ -54,7 +54,8 @@ Every update trains on one floor per environment (contact time constant
 0.02-0.1 s and friction 0.15-1.5 on every collision geom: the get-up lies on
 its hands, knees and back) and one servo-goal delay per episode (3-8 physics
 steps; `tasks/mdp.py` `training_floor_and_delay`).  Walking and PICO train on
-the robot's floor and goal delay, as they play.
+these floors with friction 0.3-1.5 and a third of their environments on the
+play floor.
 The evaluation / play config keeps the 0-3 tick latency and no schedule, the
 rigid floor, the soles' friction 0.3-1.2 and the robot's 3-6-step goal delay.
 A run that stops before its last update is trained again from scratch

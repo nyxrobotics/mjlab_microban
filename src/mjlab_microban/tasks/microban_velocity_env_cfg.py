@@ -9,6 +9,7 @@
 """Microban velocity environment"""
 
 import numpy as np
+import torch
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -28,7 +29,7 @@ from mjlab.rl import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
-from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -69,6 +70,7 @@ from mjlab_microban.tasks.mdp import (
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
     reset_root_state_uniform_world_yaw,
+    training_floor_and_delay,
     upright as local_upright,
 )
 from mjlab_microban.tasks.microban_velocity_tracking import (
@@ -130,6 +132,61 @@ WALK_STAGES = (
         ),
     ),
 )
+
+# Walking (and PICO, which inherits its config) trains on training's floors
+# (robot/microban_constants.py) with no friction below the play env's lowest
+# sole friction (0.3), and a third of its environments on the play env's
+# floor (MuJoCo's 0.02 s, soles 0.3-1.2): on 0.15-1.5 on every environment
+# the walker failed the rigid floor's judgment.  Kept here, not with the
+# get-up's floors in tasks/mdp.py, so that a change of the walker's floors
+# retrains the walker and PICO only.
+WALK_FLOOR_FRICTION = (0.3, 1.5)
+WALK_ROBOT_FLOOR_FRACTION = 1 / 3
+
+
+@requires_model_fields("geom_friction", "geom_solref")
+def robot_floor_envs(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    fraction: float,
+    asset_cfg: SceneEntityCfg,
+    sole_cfg: SceneEntityCfg,
+    sole_friction: tuple[float, float],
+) -> None:
+    """Put ``fraction`` of the environments, chosen at random, back on the play env's floor.
+
+    Their collision geoms (``asset_cfg``) get robot.xml's friction and solref again (MuJoCo's 0.02 s), and their
+    soles (``sole_cfg``) one friction from ``sole_friction``, as the play env's foot_friction draws it.  With
+    priority over the floor, the training robot's contacts are then the play robot's.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    chosen = env_ids[torch.randperm(len(env_ids), device=env.device)[: round(fraction * len(env_ids))]]
+    if len(chosen) == 0:
+        return
+    geoms = env.scene[asset_cfg.name].indexing.geom_ids[asset_cfg.geom_ids].to(torch.long)
+    rows, cols = torch.meshgrid(chosen, geoms, indexing="ij")
+    model = env.sim.model
+    model.geom_solref[rows, cols] = env.sim.get_default_field("geom_solref")[geoms].to(model.geom_solref.dtype)
+    model.geom_friction[rows, cols] = env.sim.get_default_field("geom_friction")[geoms].to(model.geom_friction.dtype)
+    dr.geom_friction(env, chosen, ranges=sole_friction, asset_cfg=sole_cfg, operation="abs", shared_random=True)
+
+
+def walk_training_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Training's floors and per-episode goal delay (tasks/mdp.py training_floor_and_delay), with friction from
+    WALK_FLOOR_FRICTION and WALK_ROBOT_FLOOR_FRACTION of the environments on the play env's floor."""
+    foot = cfg.events["foot_friction"]
+    training_floor_and_delay(cfg)
+    cfg.events["geom_friction"].params["ranges"] = WALK_FLOOR_FRICTION
+    # After the two draws (startup events run in this order).
+    cfg.events["robot_floor"] = EventTermCfg(
+        func=robot_floor_envs,
+        mode="startup",
+        params={"fraction": WALK_ROBOT_FLOOR_FRACTION,
+                "asset_cfg": deepcopy(cfg.events["geom_friction"].params["asset_cfg"]),
+                "sole_cfg": deepcopy(foot.params["asset_cfg"]), "sole_friction": foot.params["ranges"]},
+    )
 
 
 def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -412,14 +469,12 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
-    # Walking (and PICO, which inherits this config) trains on the robot's
-    # floor, sole friction and goal delay, as play and the judgments do.
-    # Training's soft and slippery floors and per-episode delay (tasks/mdp.py
-    # training_floor_and_delay) stay with the get-up.  With them the walker
-    # of the refitted servos lost one side of the 0.1 m/s side step (9x300
-    # seed 101 failed at 6000 and 7000 updates; the same seed trained here
-    # passed), and 400 more updates on this floor cut its pushed falls here
-    # from 192 to 57 of 1080.
+    # Training's soft and slippery floors and per-episode goal delay, with
+    # friction from 0.3 and a third of the environments on the play env's
+    # floor (walk_training_floor_and_delay); play and the judgments keep the
+    # robot's.  PICO inherits this config.
+    if not play:
+        walk_training_floor_and_delay(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

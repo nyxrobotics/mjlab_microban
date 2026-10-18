@@ -1,6 +1,7 @@
-"""The get-up's training floors and servo-goal delay: one floor (friction, contact time constant) on every collision
-geom and one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's
-robot, its foot friction and its goal delay.  Walking and PICO train on the robot's floor and delay, as they play."""
+"""Training's floors and servo-goal delay: one floor (friction, contact time constant) on every collision geom and
+one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's robot, its
+foot friction and its goal delay.  Walking and PICO draw no friction below 0.3 and keep a third of their
+environments on the play env's floor."""
 
 from __future__ import annotations
 
@@ -22,15 +23,19 @@ from mjlab_microban.robot.microban_constants import (
 from mjlab_microban.tasks.mdp import contact_time_constant
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
-from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+from mjlab_microban.tasks.microban_velocity_env_cfg import (
+    WALK_FLOOR_FRICTION,
+    WALK_ROBOT_FLOOR_FRACTION,
+    make_microban_velocity_env_cfg,
+    robot_floor_envs,
+)
 
 TASKS = {
     "getup": make_microban_getup_env_cfg,
-}
-ROBOT_FLOOR_TASKS = {
     "walk": make_microban_velocity_env_cfg,
     "pico": make_microban_teleop_v13_arm_overlay_env_cfg,
 }
+WALK_TASKS = ("walk", "pico")
 NUM_ENVS = 8
 COLLISION = re.compile(r".*_collision_\d+")
 SOLE = re.compile(r"(left|right)_foot_collision_[1-6]")
@@ -43,7 +48,20 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots(task):
     friction, softness = train.events["geom_friction"], train.events["floor_softness"]
     assert "foot_friction" not in train.events
     assert friction.mode == softness.mode == "startup"
-    assert friction.params["ranges"] == FLOOR_FRICTION == (0.15, 1.5)
+    if task in WALK_TASKS:
+        assert friction.params["ranges"] == WALK_FLOOR_FRICTION == (0.3, 1.5)
+        robot_floor = train.events["robot_floor"]
+        assert robot_floor.func is robot_floor_envs and robot_floor.mode == "startup"
+        assert robot_floor.params["fraction"] == WALK_ROBOT_FLOOR_FRACTION == 1 / 3
+        assert robot_floor.params["asset_cfg"].geom_names == (COLLISION.pattern + "$",)
+        assert robot_floor.params["sole_cfg"].geom_names == SOLE_NAMES
+        assert robot_floor.params["sole_friction"] == (0.3, 1.2)
+        # It draws after the floors it puts back.
+        startup = [name for name, term in train.events.items() if term.mode == "startup"]
+        assert startup.index("robot_floor") > max(startup.index("geom_friction"), startup.index("floor_softness"))
+    else:
+        assert friction.params["ranges"] == FLOOR_FRICTION == (0.15, 1.5)
+        assert "robot_floor" not in train.events
     assert friction.params["operation"] == "abs" and friction.params["shared_random"]
     assert softness.func is contact_time_constant
     assert softness.params["time_constant_range"] == FLOOR_TIME_CONSTANT_S == (0.02, 0.1)
@@ -71,17 +89,6 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots(task):
                    articulation=MICROBAN_ROBOT_CFG.articulation) == MICROBAN_ROBOT_CFG
 
 
-@pytest.mark.parametrize("task", ROBOT_FLOOR_TASKS)
-def test_walking_and_pico_train_on_the_robots_floor_and_goal_delay(task):
-    train, play = ROBOT_FLOOR_TASKS[task](), ROBOT_FLOOR_TASKS[task](play=True)
-    assert train.scene.entities["robot"] == play.scene.entities["robot"] == MICROBAN_ROBOT_CFG
-    assert "geom_friction" not in train.events and "floor_softness" not in train.events
-    foot = train.events["foot_friction"]
-    assert foot.params["ranges"] == (0.3, 1.2) and foot.params["asset_cfg"].geom_names == SOLE_NAMES
-    (trained,) = train.scene.entities["robot"].articulation.actuators
-    assert (trained.delay_min_lag, trained.delay_max_lag, trained.delay_update_period) == (3, 6, 0)
-
-
 def test_the_training_robot_collides_as_the_robot_with_priority_over_the_floor():
     """Same geoms and contact parameters; every collision geom has priority over the floor (MuJoCo's defaults),
     so a floor contact takes the geom's friction and solref, which training draws per environment."""
@@ -101,11 +108,11 @@ def test_the_training_robot_collides_as_the_robot_with_priority_over_the_floor()
     np.testing.assert_array_equal(play.geom_priority[collides], np.asarray(soles)[collides].astype(int))
 
 
-def _env(task: str):
+def _env(task: str, num_envs: int = NUM_ENVS):
     from mjlab.envs import ManagerBasedRlEnv
 
     cfg = TASKS[task]()
-    cfg.scene.num_envs = NUM_ENVS
+    cfg.scene.num_envs = num_envs
     cfg.seed = 0
     # No episode ends while the floors and the delays are read, and no curriculum (it needs a runner's clock).
     cfg.terminations = {"time_out": cfg.terminations["time_out"]}
@@ -113,7 +120,7 @@ def _env(task: str):
     return ManagerBasedRlEnv(cfg=cfg, device="cpu")
 
 
-@pytest.fixture(scope="module", params=list(TASKS))
+@pytest.fixture(scope="module", params=["getup"])
 def env(request):
     env = _env(request.param)
     yield request.param, env
@@ -209,3 +216,35 @@ def test_the_goal_delay_holds_through_an_episode_and_is_redrawn_at_reset(env):
     redrawn = _goal_lags(env)
     assert np.array_equal(redrawn[0], redrawn[1])
     assert not np.array_equal(redrawn[0], lags[0])
+
+
+def test_a_third_of_the_walkers_environments_keep_the_play_floor_and_the_rest_draw_from_friction_0p3():
+    num_envs = 9
+    env = _env("walk", num_envs)
+    try:
+        robot = env.scene["robot"]
+        geom_ids = robot.indexing.geom_ids.to(torch.long)
+        soles = geom_ids[[i for i, name in enumerate(robot.geom_names) if SOLE.fullmatch(name)]]
+        others = geom_ids[[i for i, name in enumerate(robot.geom_names)
+                           if COLLISION.fullmatch(name) and not SOLE.fullmatch(name)]]
+        solref, friction = env.sim.model.geom_solref, env.sim.model.geom_friction
+        default_solref = env.sim.get_default_field("geom_solref")
+        default_friction = env.sim.get_default_field("geom_friction")
+        play = torch.tensor([bool(torch.equal(solref[e, soles], default_solref[soles])
+                                  and torch.equal(solref[e, others], default_solref[others])
+                                  and torch.equal(friction[e, others], default_friction[others]))
+                             for e in range(num_envs)])
+        assert int(play.sum()) == 3
+        # The play env's floor: robot.xml's contact everywhere, one sole friction from foot_friction's 0.3-1.2.
+        mu = friction[play][:, soles, 0]
+        assert torch.equal(mu, mu[:, :1].expand_as(mu)) and 0.3 <= mu.min() and mu.max() <= 1.2
+        assert torch.equal(friction[play][:, soles, 1:], default_friction[soles, 1:].expand(3, -1, -1))
+        # The others: one drawn floor on every collision geom, friction 0.3-1.5.
+        collision = torch.cat([soles, others])
+        tau, mu = solref[~play][:, collision, 0], friction[~play][:, collision, 0]
+        assert torch.equal(tau, tau[:, :1].expand_as(tau)) and torch.equal(mu, mu[:, :1].expand_as(mu))
+        assert WALK_FLOOR_FRICTION[0] <= mu.min() and mu.max() <= WALK_FLOOR_FRICTION[1]
+        assert FLOOR_TIME_CONSTANT_S[0] <= tau.min() and tau.max() <= FLOOR_TIME_CONSTANT_S[1]
+        assert len(set(tau[:, 0].tolist())) == 6
+    finally:
+        env.close()
