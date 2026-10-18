@@ -4,9 +4,9 @@ The walker and PICO stand at HOME on a zero command (PICO with its foot target
 and arms neutral) for 10 s, judged from 2 s on; the get-up starts fallen and
 is judged over the last 5 s of its 20 s (the robot's get-up timeout), on the
 environments standing through them.  Each environment holds one servo goal
-delay of DELAYS_MS (1-10 physics steps of 5 ms; play draws 3-6, training 3-8)
-and one foot friction of FRICTIONS (the play env's range 0.3-1.2) on the play
-env's rigid floor, with the training's observation noise (without it a policy
+delay of DELAYS_MS (1-10 physics steps of 5 ms; play draws 3-6, training 3-8;
+the get-up: GETUP_DELAYS_MS) and one foot friction of FRICTIONS (the play
+env's range 0.3-1.2) on the play env's rigid floor, with the training's observation noise (without it a policy
 that trembled on the robot stands still here; config/pipeline.yaml
 ``stand_still`` has the measurements).
 
@@ -35,6 +35,11 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 DELAYS_MS = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
+# The get-up at the goal delays its training draws (COMMAND_DELAY_STEPS 3-8; the
+# robot's goal acts 22-28 ms after the observation).  The last release's get-up
+# (trained at 15-30 ms) stands still at 5-25 ms on its own servo model (leg RMS
+# 0.014-0.134) and falls beyond its training (40-50 ms: 39 of 48).
+GETUP_DELAYS_MS = (15, 20, 25, 30, 35, 40)
 FRICTIONS = (0.3, 0.6, 0.9, 1.2)
 PHYSICS_STEP_MS = 5
 # (total s, first judged s) of a run: the walker and PICO from HOME at rest,
@@ -99,7 +104,7 @@ def _policy(kind: str, task: str, checkpoint: str, wrapped, device: str):
 
 
 def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: int, noise: bool = True,
-        delays_ms=DELAYS_MS, frictions=FRICTIONS) -> dict:
+        delays_ms=None, frictions=FRICTIONS) -> dict:
     import torch
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -108,6 +113,7 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
     from mjlab_microban.tasks.mdp import _head_height
     from mjlab_microban.tasks.microban_getup_env_cfg import HEAD_STANDING_HEIGHT
 
+    delays_ms = delays_ms or (GETUP_DELAYS_MS if kind == "getup" else DELAYS_MS)
     delays = [int(d) // PHYSICS_STEP_MS for d in delays_ms]
     cells = [(d, f) for d in delays for f in frictions for _ in range(reps)]
     n = len(cells)

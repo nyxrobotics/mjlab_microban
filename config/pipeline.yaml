@@ -65,7 +65,8 @@ getup:
 # Standing still (pipeline/stand_still.py), a judgment of every policy: the
 # walker and PICO stand at HOME on a zero command, the get-up from a fallen
 # start (judged once it stands), each environment with one servo goal delay of
-# 5-50 ms and one foot friction of 0.3-1.2 and the training's observation
+# 5-50 ms (the get-up: 15-40 ms, the delays its training draws) and one foot
+# friction of 0.3-1.2 and the training's observation
 # noise.  The noise is what shakes a policy that trembles: without it PICO
 # v13g2 (it shook standing on the robot and fell) measures 0.046 rad/s, below
 # the old walker's 0.063.  With it, the worst delay's leg-joint speed RMS
