@@ -336,7 +336,8 @@ class Pipeline:
                              "failures": failures, "summary": summary}, [walker])
 
     def walk_judgment(self, checkpoint: Path) -> tuple[list[str], dict[str, Any]]:
-        """The held-out walk probe (seeds 101-105) and the 9x300 probe with a held-out seed: (failures, summary)."""
+        """The held-out walk probe (seeds 101-105), the 9x300 probe with a held-out seed and standing still, on the
+        rigid floor and on each soft and slippery floor of ``walk.judgment.floors``: (failures, summary)."""
 
         chk = self.cfg["walk"]["judgment"]
         out = self.state.dir / "walk_judgment"
@@ -364,6 +365,8 @@ class Pipeline:
         nine = probe_verdict(json.loads(receipt.read_text()))
         still = self.stand_still("walk", checkpoint, out / f"{checkpoint.parent.name}_{checkpoint.stem}_stand_still.json")
         failures = walk_failures(probe, nine) + ([] if still["status"] == "pass" else ["stand_still"])
+        on_floors, floors = self.walk_floor_judgment(checkpoint, out, rules)
+        failures += on_floors
         summary = {"rules": probe["checks"],
                    "single_signed": {k: round(v, 3) for k, v in probe["single_signed"].items()},
                    # mean twist (v_x m/s, v_y m/s, w_z rad/s) on the standing command
@@ -377,24 +380,84 @@ class Pipeline:
                    "9x300_twist": {k: [round(x, 4) for x in nine["twists"][k]]
                                    for k in ("neutral", "backward_0p1", "backward_0p2") if k in nine["twists"]},
                    "9x300_soft_limit_rad": round(nine["soft_limit_overshoot_rad"], 3),
-                   "stand_still": stand_still_summary(still)}
+                   "stand_still": stand_still_summary(still),
+                   "floors": floors["summary"]}
         (out / f"{checkpoint.parent.name}_{checkpoint.stem}_judgment.json").write_text(
             json.dumps({"failures": failures, "summary": summary, "probe": probe, "nine_by_300": nine,
-                        "stand_still": still}, indent=1, sort_keys=True, default=str))
+                        "stand_still": still, "floors": floors}, indent=1, sort_keys=True, default=str))
         self.log(f"walking judgment of {checkpoint.parent.name}/{checkpoint.name}: "
                  f"{'PASS' if not failures else f'FAIL {failures}'} {json.dumps(summary, default=str)[:1500]}")
         return failures, summary
 
-    def stand_still(self, kind: str, checkpoint: Path, report: Path) -> dict[str, Any]:
-        """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report)."""
+    def walk_floor_judgment(self, checkpoint: Path, out: Path, rules: dict[str, Any]) -> tuple[list[str], dict]:
+        """The walking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
+
+        The walk probe on every floor of ``walk.judgment.floors`` (one env per push), the 9x300 probe on each and
+        standing still on the soft ones (every delay and sole friction of ``stand_still`` on each softness):
+        (failures named ``<floor>:<rule>``, ``<floor>:9x300`` or ``stand_still_soft``; the reports).
+        """
+
+        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse
+
+        chk = self.cfg["walk"]["judgment"]
+        floors = chk.get("floors") or {}
+        if not floors:
+            return [], {"summary": {}}
+        parsed = parse(floors)
+        stem = f"{checkpoint.parent.name}_{checkpoint.stem}"
+        probe_out = out / f"{stem}_walk_probe_floors.json"
+        receipts = {name: out / f"{stem}_9x300_seed{chk['probe_seed']}_{name}.json" for name in floors}
+        for path in (probe_out, *receipts.values()):
+            path.unlink(missing_ok=True)
+        self.jobs.run("walk_judgment_probe_floors", [*UV, "python", "-m", "mjlab_microban.pipeline.walk_probe",
+                                                     str(checkpoint), str(probe_out), "--seeds", chk["seeds"],
+                                                     "--rules", json.dumps(rules), "--floors", json.dumps(floors)],
+                      "eval", env=self.env, check=False)
+        for name, receipt in receipts.items():
+            self.jobs.run(f"walk_judgment_9x300_{name}", [*UV, "python", "-m",
+                                                          "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
+                                                          "--checkpoint", str(checkpoint), "--expected-sha256",
+                                                          sha256(checkpoint), "--seed", str(chk["probe_seed"]),
+                                                          "--output", str(receipt), "--force",
+                                                          "--floor", json.dumps(floors[name])],
+                          "eval", env=self.env, check=False)
+        for path in (probe_out, *receipts.values()):
+            if not path.is_file():
+                raise JobStopped(f"the walking evaluator wrote no report ({path}): not a judgment "
+                                 "(rerun to evaluate again)")
+        probe = json.loads(probe_out.read_text())
+        probe.pop("rows", None)
+        nines = {name: probe_verdict(json.loads(path.read_text())) for name, path in receipts.items()}
+        soft = sorted({t for _, t in parsed.values()} - {RIGID_TIME_CONSTANT_S})
+        still = self.stand_still("walk", checkpoint, out / f"{stem}_stand_still_soft.json",
+                                 time_constants=soft) if soft else None
+        failures = floor_failures(list(floors), probe, nines) + (
+            [] if still is None or still["status"] == "pass" else ["stand_still_soft"])
+        summary: dict[str, Any] = {
+            name: {"rules": verdict["checks"], "falls": verdict["falls"],
+                   "single_signed": {k: round(v, 3) for k, v in verdict["single_signed"].items()},
+                   "still_touchdowns_per_s": round(verdict["still_touchdowns_per_s"], 2),
+                   "9x300": nines[name]["ok"],
+                   "9x300_worst_margin": [nines[name]["worst"], round(nines[name]["worst_margin"], 4)]}
+            for name, verdict in probe.get("floors", {}).items() if name in nines}
+        if still is not None:
+            summary["stand_still_soft"] = {**stand_still_summary(still), "time_constants_s": soft}
+        return failures, {"summary": summary, "probe": probe, "nine_by_300": nines, "stand_still_soft": still}
+
+    def stand_still(self, kind: str, checkpoint: Path, report: Path,
+                    time_constants: list[float] | None = None) -> dict[str, Any]:
+        """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report);
+        with ``time_constants`` (s) on these soft floors in place of the rigid one."""
 
         c = self.cfg["stand_still"]
         report.unlink(missing_ok=True)
-        self.jobs.run(f"{kind}_stand_still", [*UV, "python", "-m", "mjlab_microban.pipeline.stand_still", kind,
-                                              self.cfg[kind]["task"], str(checkpoint), str(report),
-                                              "--max-leg-speed-rms", str(c["max_leg_speed_rms_rad_s"]),
-                                              "--max-falls", str(c["max_falls"]), "--seed", str(c["seed"]),
-                                              "--reps", str(c["reps"])], "eval", env=self.env, check=False)
+        soft = ["--time-constants", ",".join(str(t) for t in time_constants)] if time_constants else []
+        self.jobs.run(f"{kind}_stand_still{'_soft' if soft else ''}",
+                      [*UV, "python", "-m", "mjlab_microban.pipeline.stand_still", kind,
+                       self.cfg[kind]["task"], str(checkpoint), str(report),
+                       "--max-leg-speed-rms", str(c["max_leg_speed_rms_rad_s"]),
+                       "--max-falls", str(c["max_falls"]), "--seed", str(c["seed"]),
+                       "--reps", str(c["reps"]), *soft], "eval", env=self.env, check=False)
         if not report.is_file():
             raise JobStopped(f"the standing-still evaluator wrote no report ({report}): not a judgment "
                              "(rerun to evaluate again)")
@@ -929,6 +992,21 @@ def walk_failures(probe: dict[str, Any], nine: dict[str, Any]) -> list[str]:
 
     failures = [name for name in WALK_PROBE_RULES if not (probe.get("checks") or {}).get(name)]
     return failures + ([] if nine.get("ok") else ["9x300"])
+
+
+def floor_failures(names: list[str], probe: dict[str, Any], nines: dict[str, dict[str, Any]]) -> list[str]:
+    """The failed items of the walking judgment on the soft and slippery floors ``names``: ``<floor>:<rule>``."""
+
+    failures = []
+    for name in names:
+        verdict = (probe.get("floors") or {}).get(name)
+        nine = nines.get(name)
+        if verdict is None or nine is None:
+            failures.append(f"{name}:missing")
+            continue
+        failures += [f"{name}:{rule}" for rule in WALK_PROBE_RULES if not (verdict.get("checks") or {}).get(rule)]
+        failures += [] if nine.get("ok") else [f"{name}:9x300"]
+    return failures
 
 
 def getup_summary(results: dict[str, dict[str, Any]]) -> dict[str, float]:

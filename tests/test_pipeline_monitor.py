@@ -8,7 +8,7 @@ from pathlib import Path
 
 from mjlab_microban.pipeline import monitor as m
 from mjlab_microban.pipeline.core import PipelineError, State, load_config
-from mjlab_microban.pipeline.walk_probe import DIAGONAL, SINGLE, evaluate
+from mjlab_microban.pipeline.walk_probe import DIAGONAL, SINGLE, evaluate, evaluate_floors
 
 CFG = load_config(dry=False)
 
@@ -112,6 +112,18 @@ class WalkRulesTest(unittest.TestCase):
         stepping = evaluate(self.rows(touchdowns=7.9), rules)
         self.assertFalse(stepping["checks"]["standing_still"] or stepping["passed"])
         self.assertAlmostEqual(stepping["still_touchdowns_per_s"], 7.9)
+
+    def test_floor_rules(self) -> None:
+        # Each soft or slippery floor is judged on its own rows with the rigid floor's lines.
+        rules = CFG["walk"]["judgment"]
+        rows = [{**r, "floor": "soft"} for r in self.rows()] + [{**r, "floor": "slippery"} for r in self.rows(falls=2)]
+        verdict = evaluate_floors(rows, rules)
+        self.assertEqual(list(verdict["floors"]), ["soft", "slippery"])
+        self.assertTrue(verdict["floors"]["soft"]["passed"])
+        self.assertEqual(verdict["floors"]["slippery"]["falls"], [12, 0, 0])
+        self.assertFalse(verdict["floors"]["slippery"]["checks"]["falls"] or verdict["passed"])
+        good = [{**r, "floor": "soft"} for r in self.rows()]
+        self.assertTrue(evaluate_floors(good, rules)["passed"])
 
 
 if __name__ == "__main__":

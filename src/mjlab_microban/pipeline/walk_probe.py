@@ -24,7 +24,12 @@ Rules:
 
 The signed single-axis responses are recorded with each verdict.
 
-usage: python -m mjlab_microban.pipeline.walk_probe CKPT OUT.json [--seeds 101,...]
+With ``--floors`` (config/pipeline.yaml ``walk.judgment.floors``) every
+command runs on each soft and slippery floor (pipeline/floors.py), one floor
+per environment, in place of the play env's rigid floor, and the rules are
+judged per floor with the same lines.
+
+usage: python -m mjlab_microban.pipeline.walk_probe CKPT OUT.json --rules JSON [--seeds 101,...] [--floors JSON]
 Prints one ``RESULT {json}`` line (the rule verdicts and their numbers).
 """
 
@@ -117,7 +122,22 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
+def evaluate_floors(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
+    """The three rules on each floor of ``rows`` (``floor``) with the floors' lines (``rules``)."""
+
+    floors = {name: evaluate([r for r in rows if r["floor"] == name], rules)
+              for name in dict.fromkeys(r["floor"] for r in rows)}
+    return {"floors": floors, "passed": all(v["passed"] for v in floors.values())}
+
+
+def run(checkpoint: str, seeds: list[int], reps: int,
+        floors: dict[str, tuple[float | None, float]] | None = None) -> list[dict]:
+    """Rows of every (push, seed, command[, floor]); without ``floors`` the play env's rigid floor.
+
+    With ``floors`` ({name: (sole friction or None, time constant s)}, pipeline/floors.py) every command runs
+    on every floor, each environment on one, in one env per push.
+    """
+
     import torch
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.rl import RslRlVecEnvWrapper
@@ -140,6 +160,9 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
     policy.load_state_dict(state, strict=True)
     policy.eval()
     conds = [c for c in DIAGONAL for _ in range(reps)] + [c for c in SINGLE for _ in range(reps)]
+    floor_names = list(floors) if floors else [None]
+    env_floor = [f for f in floor_names for _ in conds]
+    conds = conds * len(floor_names)
     n = len(conds)
     twist_t = torch.tensor([commands[c] for c in conds], device=device)
     side_t = torch.tensor([-1.0 if commands[c][1] < 0 else 1.0 for c in conds], device=device)
@@ -176,11 +199,24 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
             event.interval_range_s = (1.0, 1.0)
             event.params = {"push_xy": PUSHES[push]}
             cfg.events["push_robot"] = event
+        if floors:
+            from mjlab_microban.pipeline.floors import add_sole_floors
+
+            add_sole_floors(cfg, [floors[f] for f in env_floor])
         env = ManagerBasedRlEnv(cfg=cfg, device=device)
         wrapped = RslRlVecEnvWrapper(env, clip_actions=None)
         robot = env.scene["robot"]
         feet = env.scene.sensors["feet_ground_contact"]
         fall_height = float(env.termination_manager.get_term_cfg("fell_over").params["minimum_height"])
+        if floors:
+            from mjlab_microban.pipeline.floors import sole_floors
+
+            simulated = sole_floors(env)
+            for (friction, time_constant), name in zip(simulated, env_floor, strict=True):
+                want_friction, want_time_constant = floors[name]
+                if not math.isclose(time_constant, want_time_constant, rel_tol=1e-5) or (
+                        want_friction is not None and not math.isclose(friction, want_friction, rel_tol=1e-5)):
+                    raise RuntimeError(f"floor {name} simulated as ({friction}, {time_constant})")
         try:
             for seed in seeds:
                 env.reset(seed=seed)
@@ -210,7 +246,8 @@ def run(checkpoint: str, seeds: list[int], reps: int) -> list[dict]:
                 for i, name in enumerate(conds):
                     rows.append({"push": push, "seed": seed, "cmd": name, "twist": commands[name],
                                  "fell": bool(fell[i]), "up_steps": int(count[i]), "mean": mean[i],
-                                 "touchdowns_per_s": rate[i]})
+                                 "touchdowns_per_s": rate[i],
+                                 **({"floor": env_floor[i], "sole_floor": simulated[i]} if floors else {})})
         finally:
             wrapped.close()
     return rows
@@ -223,11 +260,18 @@ def main() -> None:
     parser.add_argument("--seeds", default="101,102,103,104,105")
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--rules", required=True, help="JSON of config/pipeline.yaml walk.judgment")
+    parser.add_argument("--floors", help="JSON of config/pipeline.yaml walk.judgment.floors: judge on these "
+                        "floors (with --rules the floors' lines) instead of the play env's rigid floor")
     args = parser.parse_args()
     started = time.time()
-    rows = run(args.checkpoint, [int(s) for s in args.seeds.split(",")], args.reps)
-    result = {"checkpoint": args.checkpoint, **evaluate(rows, json.loads(args.rules)),
-              "seconds": time.time() - started}
+    floors = None
+    if args.floors:
+        from mjlab_microban.pipeline.floors import parse
+
+        floors = parse(json.loads(args.floors))
+    rows = run(args.checkpoint, [int(s) for s in args.seeds.split(",")], args.reps, floors)
+    verdict = evaluate_floors(rows, json.loads(args.rules)) if floors else evaluate(rows, json.loads(args.rules))
+    result = {"checkpoint": args.checkpoint, **verdict, "seconds": time.time() - started}
     with open(args.output, "w") as stream:
         json.dump({**result, "rows": rows}, stream, indent=1)
     print("RESULT " + json.dumps(result, sort_keys=True))

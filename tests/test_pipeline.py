@@ -81,6 +81,42 @@ class StateTest(unittest.TestCase):
         self.assertEqual(steps.walk_failures({"checks": {"falls": True, "direction": False, "standing_still": True}}, {"ok": False}),
                          ["direction", "9x300"])
 
+    def test_the_walking_judgment_on_soft_and_slippery_floors(self) -> None:
+        good = {"checks": {"falls": True, "direction": True, "standing_still": True}}
+        probe = {"floors": {"soft": good, "slippery": {"checks": {**good["checks"], "falls": False}}}}
+        self.assertEqual(steps.floor_failures(["soft", "slippery"], probe, {"soft": {"ok": True}, "slippery": {"ok": True}}),
+                         ["slippery:falls"])
+        self.assertEqual(steps.floor_failures(["soft", "slippery", "corner"], probe,
+                                              {"soft": {"ok": False}, "slippery": {"ok": True}}),
+                         ["soft:9x300", "slippery:falls", "corner:missing"])
+
+    def test_the_judged_floors(self) -> None:
+        from mjlab_microban.pipeline import floors
+        from mjlab_microban.robot.microban_constants import FLOOR_FRICTION, FLOOR_TIME_CONSTANT_S
+
+        judged = floors.parse(load_config(dry=False)["walk"]["judgment"]["floors"])
+        # Inside training's range, each softer or more slippery than the play floor (0.02 s, 0.3-1.2).
+        self.assertEqual(judged, {"soft_0.05": (None, 0.05), "soft_0.1": (None, 0.1), "slippery_0.3": (0.3, 0.02),
+                                  "soft_slippery": (0.3, 0.1)})
+        self.assertEqual(floors.RIGID_TIME_CONSTANT_S, FLOOR_TIME_CONSTANT_S[0])
+        for bad in ({"time_constant_s": 0.2}, {"time_constant_s": 0.01}, {"friction": FLOOR_FRICTION[0] - 0.01},
+                    {"friction": 2.0}, {"softness": 0.1}):
+            with self.assertRaises(ValueError):
+                floors.parse({"bad": bad})
+        cfg = SimpleNamespace(scene=SimpleNamespace(num_envs=2), events={})
+        floors.add_sole_floors(cfg, [(None, 0.05), (0.3, 0.1)])
+        params = cfg.events["judgment_floor"].params
+        self.assertEqual(params["time_constants"], [0.05, 0.1])
+        self.assertTrue(params["frictions"][0] != params["frictions"][0] and params["frictions"][1] == 0.3)
+        self.assertEqual(params["asset_cfg"].geom_names, floors.SOLES)
+        # The soles whose friction the play env draws (and which have priority over the floor).
+        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+
+        play = make_microban_velocity_env_cfg(play=True).events["foot_friction"].params["asset_cfg"]
+        self.assertEqual(tuple(play.geom_names), floors.SOLES)
+        with self.assertRaises(ValueError):
+            floors.add_sole_floors(cfg, [(None, 0.05)])
+
     def test_a_step_hashes_only_its_own_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")

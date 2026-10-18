@@ -34,6 +34,24 @@ walk:
     # should stand still there).  Stepping in place is about 3.5 per second;
     # a walker that stands still, 0.0.
     still_touchdowns_per_s: 0.5
+    # Soft and slippery floors (pipeline/floors.py: the soles' contact time
+    # constant, s, and friction; no friction: the play env's 0.3-1.2), inside
+    # training's range (robot/microban_constants.py).  The walk probe, the
+    # 9x300 probe and standing still (on the soft ones) run again on each,
+    # with the rigid floor's lines: the walker that walked on the robot
+    # (a7c28c8a), on the servo model it was trained on, keeps them on every
+    # one (rigid: falls 0/1/0 of 90/90/90, 9x300 worst margin +0.028; here
+    # falls 0/0/0, margins +0.023 to +0.055, standing 0.033 rad/s).
+    # Friction 0.15 is left out: there it falls 10 of 90 unpushed and 50
+    # pushed and turns 0.01-0.05 rad/s on 0.5, and the other walkers fall
+    # too (9 and 42 unpushed).  Trained on the robot's floor only, the walker
+    # (45d46ac9) passes the rigid floor and falls 12-27 of 90 pushed on 0.1 s
+    # and 0.3.
+    floors:
+      soft_0.05: {time_constant_s: 0.05}
+      soft_0.1: {time_constant_s: 0.1}
+      slippery_0.3: {friction: 0.3}
+      soft_slippery: {time_constant_s: 0.1, friction: 0.3}
 
 pico:
   task: Mjlab-Teleop-V13-ArmOverlay-Microban
@@ -76,6 +94,9 @@ getup:
 # place (1.3-1.8 while up) and 60 of 80 fall after standing.  The line is the
 # geometric mean of the old walker's worst and v13g2's lowest trembling delay,
 # sqrt(0.088 x 0.253) = 0.15; standing still, nothing falls.
+# The walker stands again on the soft floors of walk.judgment.floors (every
+# delay and friction on 0.05 s and on 0.1 s) with these lines: 0.033
+# (a7c28c8a on its servo model) to 0.099 rad/s, no falls.
 stand_still:
   seed: 107
   reps: 2                         # environments per (delay, friction)

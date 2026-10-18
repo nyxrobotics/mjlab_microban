@@ -9,7 +9,8 @@ Steps (src/mjlab_microban/pipeline/steps.py; docs/home_pose_workflow.md):
 1. home     balance and training-line checks of the YAML, the training test
             suite at this HOME (CPU);
 2. walk     one walking run from scratch (Mjlab-Velocity-Microban, 30000
-            updates), then its judgment (walk probe, 9x300 probe);
+            updates), then its judgment (walk probe, 9x300 probe, standing
+            still; on the rigid floor and on the soft and slippery ones);
 3. pico     the walker's 9x300 source probe (seed 42) and bootstrap gate,
             one PICO run (critic warm-up, hands, feet; 15000 updates), then
             its judgment (locomotion, tracking, ONNX; seed 42) and gate file;

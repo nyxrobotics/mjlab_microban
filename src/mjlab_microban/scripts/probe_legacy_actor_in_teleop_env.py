@@ -190,7 +190,7 @@ def _source_cfg(*, seed: int, steps: int) -> Any:
     return cfg
 
 
-def _teleop_cfg(*, seed: int, steps: int) -> Any:
+def _teleop_cfg(*, seed: int, steps: int, floor: tuple[float | None, float] | None = None) -> Any:
     cfg = make_microban_teleop_env_cfg(play=True)
     cfg.scene.num_envs = 1
     cfg.seed = seed
@@ -200,6 +200,10 @@ def _teleop_cfg(*, seed: int, steps: int) -> Any:
     # The teleop env already observes the raw previous action; the target is
     # saturated only at the servo goal range, as in the v12 task.
     cfg.actions["joint_pos"].clip = teleop_v12_action_clip_cfg()
+    if floor is not None:  # a soft or slippery floor of the walking judgment (pipeline/floors.py)
+        from mjlab_microban.pipeline.floors import add_sole_floors
+
+        add_sole_floors(cfg, [floor])
     return cfg
 
 
@@ -486,6 +490,7 @@ def run_probe(
     seed: int,
     steps: int,
     settle_steps: int,
+    floor: tuple[float | None, float] | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = checkpoint_sha256(checkpoint)
@@ -521,7 +526,7 @@ def run_probe(
     finally:
         source_wrapped.close()
 
-    teleop_env = ManagerBasedRlEnv(cfg=_teleop_cfg(seed=seed, steps=steps), device=device)
+    teleop_env = ManagerBasedRlEnv(cfg=_teleop_cfg(seed=seed, steps=steps, floor=floor), device=device)
     teleop_wrapped = RslRlVecEnvWrapper(teleop_env, clip_actions=None)
     try:
         teleop_layout = _actor_layout(teleop_env)
@@ -556,6 +561,14 @@ def run_probe(
             raise ValueError("Legacy and teleop raw-action scales differ")
         if not bool(torch.equal(source_offset, teleop_offset)):
             raise ValueError("Legacy and teleop raw-action offsets differ")
+        sole_floor = None
+        if floor is not None:
+            from mjlab_microban.pipeline.floors import sole_floors
+
+            sole_floor = sole_floors(teleop_env)[0]
+            if not math.isclose(sole_floor[1], floor[1], rel_tol=1e-5) or (
+                    floor[0] is not None and not math.isclose(sole_floor[0], floor[0], rel_tol=1e-5)):
+                raise RuntimeError(f"floor {floor} simulated as {sole_floor}")
 
         results = []
         for scenario in default_scenarios():
@@ -624,6 +637,8 @@ def run_probe(
             "previous_action": "raw_actor_output",
             "foot_target": "exact_zero_inactive",
             "arm_target": "home_overlay",
+            **({"floor": {"friction": floor[0], "time_constant_s": floor[1], "sole_floor": sole_floor}}
+               if floor is not None else {}),
         },
         "mapping": {
             "legacy_observation_width": legacy_layout.width,
@@ -695,11 +710,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--floor", help='a soft or slippery floor of the walking judgment, JSON '
+                        '{"time_constant_s": s, "friction": mu or null} (pipeline/floors.py); default the play floor')
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    floor = None
+    if args.floor:
+        from mjlab_microban.pipeline.floors import parse
+
+        floor = parse({"floor": json.loads(args.floor)})["floor"]
     report = run_probe(
         checkpoint=args.checkpoint,
         expected_sha256=args.expected_sha256,
@@ -707,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
+        floor=floor,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:
