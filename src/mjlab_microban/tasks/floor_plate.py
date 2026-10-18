@@ -109,6 +109,10 @@ def add_floor_plate(spec: mujoco.MjSpec) -> None:
     # The plane and the plate never touch (the unused one sits 1 m below the other; MuJoCo's parent filter
     # leaves pairs with a body welded to the world).
     spec.add_exclude(bodyname1=GROUND, bodyname2=FLOOR_PLATE)
+    # Box-box contacts by MuJoCo's box collider, not the general one (native CCD): on the plate the general one
+    # gives the feet's thin boxes fewer contacts than the plane does, drops the foot touch sensors, and makes a
+    # standing whole-body policy shake (0.043 rad/s leg speed on a locked plate vs 0.0016 on the plane).
+    spec.option.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
     for key in spec.keys:
         key.qpos = [0.0] * len(FLOOR_PLATE_JOINTS) + list(key.qpos)
 
