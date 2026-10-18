@@ -6,9 +6,9 @@ is judged over the last 5 s of its 20 s (the robot's get-up timeout), on the
 environments standing through them.  Each environment holds one servo goal
 delay of DELAYS_MS (1-10 physics steps of 5 ms; play draws 3-6, training 3-8;
 the get-up: GETUP_DELAYS_MS) and one foot friction of FRICTIONS (the play
-env's range 0.3-1.2) on the play env's rigid floor, with the training's observation noise (without it a policy
-that trembled on the robot stands still here; config/pipeline.yaml
-``stand_still`` has the measurements).
+env's range 0.3-1.2) on the play env's rigid floor, with the training's
+observation noise (without it a policy that trembled on the robot stands still
+here; config/pipeline.yaml ``stand_still`` has the measurements).
 
 Measured, while up (the trunk-fixed head point above 0.9 x the standing head
 height, the get-up's standing line):

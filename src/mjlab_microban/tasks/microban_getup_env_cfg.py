@@ -499,9 +499,20 @@ def _add_shared_rewards(
 ) -> None:
     """Reward terms common to both reward sets (only their gates differ)."""
 
-    # Plain raw-action rate from the base config, lighter than walking's:
-    # getting up needs large motions.
-    cfg.rewards["action_rate_l2"].weight = -0.02
+    # Plain raw-action rate from the base config, at the walker's weight.  At
+    # -0.02 the action std ran up to 12-15 before the refine switch and the
+    # stance it learned under that noise was bang-bang: targets on the +-pi
+    # clip, raw outputs of 5-10 rad on the legs and ~720 rad on a shoulder
+    # pressed into its stop.  The refitted servo model (armature 0.0016, a
+    # fifth of the old fit's) follows each 20 ms flip, so the legs shook at
+    # 3.7 rad/s (the old fit: 1.2) and the refine phase never calmed them: the
+    # KL of that one shoulder output kept the adaptive learning rate on its
+    # 1e-5 floor.  At -0.1 the std is 3.1 at update 2000 (at -0.02: 8.7) and
+    # the run stands about 800 updates later, calmer: trunk-calm term 0.39
+    # (0.10), joint speed standing 1.4 rad/s (2.8-3.7), raw outputs 3 rad
+    # (27-60).  The walker, trained on the same servo model at -0.1, stands
+    # still (leg RMS 0.064 rad/s).
+    cfg.rewards["action_rate_l2"].weight = -0.1
     # dof_pos_limits stays at the base config's -1.0.
 
     # Dense ascent signal on the virtual head height (orientation-aware: an
