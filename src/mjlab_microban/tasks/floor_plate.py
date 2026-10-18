@@ -1,0 +1,172 @@
+"""A training floor that gives sideways like a carpet (shear compliance).
+
+The floor is one plate under the robot, on two horizontal slide joints (x and y) with a spring and a damper on
+each.  Each environment draws, once at startup:
+
+* a spring k log-uniformly from 500 to 5000 N/m, the same in x and y: 2.7 N, the largest sideways foot force of
+  standing and walking, bends it 5.4 to 0.54 mm;
+* a damping ratio zeta uniformly from 0.3 to 1.0 for the robot's mass m on the spring: c = 2 zeta sqrt(k m), with
+  m = 1.136 kg 14-48 N s/m at 500 N/m and 45-151 N s/m at 5000 N/m;
+* whether its floor is rigid: one third of the environments keep the static ground.
+
+The plate weighs 0.1 kg and travels +-10 mm.  Its free frequency sqrt(k / 0.1 kg) is at most 224 rad/s, under the
+5 ms physics step's bound of 2 / dt = 400 rad/s for the explicit spring; the damper is integrated implicitly
+(implicitfast), so it has none.  A reset puts the plate back at its centre at rest (mjwarp's reset_data restores
+qpos0 and zero velocity in the reset worlds).
+
+Geometry.  MuJoCo allows a plane only on a static body, so the plate is a box, 10 m square and 0.1 m thick, its top
+at the ground's height, centred under each environment's origin (the get-up stays near it, the whole-body
+references within 1.9 m).  It is a child of the ground's body ``terrain``, so the contact sensors that match the
+ground's subtree see both.  In MuJoCo Warp's float32 a box much larger loses its contacts: on a 20 m half-size
+plate the standing robot's soles kept 23 of their 48 floor contacts and sank 0.21 mm instead of 0.07 mm; at 0.5 to
+5 m the soles keep 47-48 contacts and sink 0.07 mm, as on the plane.  Box-box contacts still differ from the
+plane's where the robot lies on the floor (fallen starts with random actions: 4.0 instead of 4.7 floor contacts per
+environment, median deepest penetration 0.6 instead of 0.3 mm), so a rigid environment does not lock the plate but
+keeps the plane: its plate sits 1 m below the ground, out of reach, and a compliant environment's plane sits 1 m
+below its plate.  The plane's height is set per environment in mjwarp's data: a static geom's pose is computed
+once, when the data is made, and never again (mjwarp smooth.kinematics).
+
+Contact softness.  MuJoCo regularizes a contact by its two bodies' inverse weights (body_invweight0), which for
+the plate (10 /kg, sliding sideways only) would double the standing robot's sink on a compliant plate (0.07 to
+0.15-0.17 mm at the 0.02 s contact time constant), a softening in the normal direction the plate does not have.  The
+plate's inverse weight is set to 0 at every reset, so its contacts are as soft as the ground's; the plate's
+sideways mobility stays in the dynamics.
+
+Training only: evaluation and play keep the static ground.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import mujoco
+import torch
+from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
+from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
+from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.utils.lab_api.math import sample_log_uniform
+
+GROUND = "terrain"  # mjlab's ground body and its plane geom
+FLOOR_PLATE = "floor_plate"  # the plate's body and its box geom
+FLOOR_PLATE_JOINTS = ("floor_plate_x", "floor_plate_y")
+FLOOR_PLATE_MASS_KG = 0.1
+FLOOR_PLATE_HALF_SIZE_M = (5.0, 5.0, 0.05)
+FLOOR_PLATE_TRAVEL_M = 0.01
+FLOOR_PLATE_STIFFNESS_N_M = (500.0, 5000.0)
+FLOOR_PLATE_DAMPING_RATIO = (0.3, 1.0)
+RIGID_FLOOR_FRACTION = 1.0 / 3.0
+# How far below the floor the unused one of the ground plane and the plate sits.
+UNUSED_FLOOR_DEPTH_M = 1.0
+
+
+def add_floor_plate(spec: mujoco.MjSpec) -> None:
+    """Add the plate under the ground's body (a SceneCfg.spec_fn).
+
+    The ground is the scene's first body, so the plate's joints come first in qpos: the scene's keyframe, the
+    entities' joint positions, gets the plate's centre in front of it.
+    """
+    ground = spec.body(GROUND)
+    (plane,) = ground.geoms
+    plate = ground.add_body(name=FLOOR_PLATE, mass=FLOOR_PLATE_MASS_KG, inertia=[1.0e-4] * 3)
+    plate.explicitinertial = True  # the plate only slides: its rotational inertia is never used
+    for name, axis in zip(FLOOR_PLATE_JOINTS, ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), strict=True):
+        plate.add_joint(
+            name=name,
+            type=mujoco.mjtJoint.mjJNT_SLIDE,
+            axis=axis,
+            range=(-FLOOR_PLATE_TRAVEL_M, FLOOR_PLATE_TRAVEL_M),
+            limited=mujoco.mjtLimited.mjLIMITED_TRUE,
+        )
+    plate.add_geom(
+        name=FLOOR_PLATE,
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=FLOOR_PLATE_HALF_SIZE_M,
+        pos=(0.0, 0.0, -FLOOR_PLATE_HALF_SIZE_M[2]),
+        # The ground's contact parameters (the robot's geoms have priority over both).
+        contype=plane.contype,
+        conaffinity=plane.conaffinity,
+        condim=plane.condim,
+        priority=plane.priority,
+        friction=plane.friction,
+        solref=plane.solref,
+        solimp=plane.solimp,
+        margin=plane.margin,
+        gap=plane.gap,
+        material=plane.material,
+        rgba=plane.rgba,
+    )
+    # The plane and the plate never touch (the unused one sits 1 m below the other; MuJoCo's parent filter
+    # leaves pairs with a body welded to the world).
+    spec.add_exclude(bodyname1=GROUND, bodyname2=FLOOR_PLATE)
+    for key in spec.keys:
+        key.qpos = [0.0] * len(FLOOR_PLATE_JOINTS) + list(key.qpos)
+
+
+@requires_model_fields("body_pos", "jnt_stiffness", "dof_damping")
+def floor_plate(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    stiffness_range: tuple[float, float],
+    damping_ratio_range: tuple[float, float],
+    rigid_fraction: float,
+) -> None:
+    """One floor per environment: ``rigid_fraction`` of them (rounded) the static ground, the others a plate
+    centred under the origin with a spring k drawn log-uniformly and a damper of a damping ratio drawn uniformly
+    for the robot's mass, the same in x and y.  A rigid floor's plate has no spring or damper."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    n = len(env_ids)
+    mj_model = env.sim.mj_model
+    robot_mass = float(mj_model.body_mass[env.scene["robot"].indexing.body_ids.cpu().numpy()].sum())
+    stiffness = sample_log_uniform(*stiffness_range, (n,), device=env.device)
+    ratio = torch.empty(n, device=env.device).uniform_(*damping_ratio_range)
+    damping = 2.0 * ratio * torch.sqrt(stiffness * robot_mass)
+    rigid = torch.zeros(n, dtype=torch.bool, device=env.device)
+    rigid[torch.randperm(n, device=env.device)[: round(rigid_fraction * n)]] = True
+    stiffness[rigid] = 0.0
+    damping[rigid] = 0.0
+    model = env.sim.model
+    for name in FLOOR_PLATE_JOINTS:
+        joint = mj_model.joint(name)
+        model.jnt_stiffness[env_ids, joint.id] = stiffness
+        model.dof_damping[env_ids, int(joint.dofadr[0])] = damping
+    origins = env.scene.env_origins[env_ids]
+    unused = torch.tensor([0.0, 0.0, UNUSED_FLOOR_DEPTH_M], device=env.device)
+    model.body_pos[env_ids, mj_model.body(FLOOR_PLATE).id] = origins - rigid[:, None] * unused
+    # The ground plane is a static geom: mjwarp computes its pose once, so it is moved in the data.
+    plane = mj_model.geom(GROUND).id
+    env.sim.data.geom_xpos[env_ids, plane, 2] = torch.where(rigid, 0.0, -UNUSED_FLOOR_DEPTH_M)
+
+
+@requires_model_fields("body_invweight0")
+def floor_plate_contact_weight(env: ManagerBasedRlEnv, env_ids: torch.Tensor | slice | None) -> None:
+    """Regularize the plate's contacts as the static ground's: no inverse weight of its own (module docstring)."""
+    if env_ids is None:
+        env_ids = slice(None)
+    env.sim.model.body_invweight0[env_ids, env.sim.mj_model.body(FLOOR_PLATE).id] = 0.0
+
+
+def train_on_floor_plate(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Train ``cfg`` on the plate: the plate under the ground, one floor drawn per environment, and the ground's
+    contact sensors matching the ground's subtree (the plane and the plate)."""
+    if cfg.scene.spec_fn is not None:
+        raise ValueError("the scene already has a spec_fn")
+    cfg.scene.spec_fn = add_floor_plate
+    ground = ContactMatch(mode="body", pattern=GROUND)
+    cfg.scene.sensors = tuple(
+        replace(sensor, secondary=replace(ground, mode="subtree"))
+        if isinstance(sensor, ContactSensorCfg) and sensor.secondary == ground
+        else sensor
+        for sensor in cfg.scene.sensors
+    )
+    cfg.events["floor_plate"] = EventTermCfg(
+        func=floor_plate,
+        mode="startup",
+        params={
+            "stiffness_range": FLOOR_PLATE_STIFFNESS_N_M,
+            "damping_ratio_range": FLOOR_PLATE_DAMPING_RATIO,
+            "rigid_fraction": RIGID_FLOOR_FRACTION,
+        },
+    )
+    cfg.events["floor_plate_contact_weight"] = EventTermCfg(func=floor_plate_contact_weight, mode="reset")

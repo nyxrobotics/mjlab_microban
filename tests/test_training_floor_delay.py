@@ -162,7 +162,9 @@ def test_each_environment_has_its_own_floor_on_every_collision_geom_and_its_cont
     soles = geom_ids[[i for i, name in enumerate(robot.geom_names) if SOLE.fullmatch(name)]]
     others = geom_ids[[i for i, name in enumerate(robot.geom_names) if not COLLISION.fullmatch(name)]]
     assert len(collision) == 36 and len(soles) == 12
-    floor = mujoco.mj_name2id(env.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "terrain")
+    # The ground plane, and the plate that two thirds of the environments stand on instead (tasks/floor_plate.py).
+    floors = [mujoco.mj_name2id(env.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+              for name in ("terrain", "floor_plate")]
     solref, friction = env.sim.model.geom_solref, env.sim.model.geom_friction
     # Per-world arrays: one time constant and one friction per environment on every collision geom.
     assert solref.shape[0] == friction.shape[0] == NUM_ENVS
@@ -173,7 +175,7 @@ def test_each_environment_has_its_own_floor_on_every_collision_geom_and_its_cont
     assert len(set(tau[:, 0].tolist())) == len(set(mu[:, 0].tolist())) == NUM_ENVS
     assert torch.all(solref[:, collision, 1] == 1.0)  # the damping ratio is MuJoCo's
     default_solref, default_friction = env.sim.get_default_field("geom_solref"), env.sim.get_default_field("geom_friction")
-    for geom in (*others.tolist(), floor):
+    for geom in (*others.tolist(), *floors):
         assert torch.equal(solref[:, geom], default_solref[geom].expand(NUM_ENVS, 2))
         assert torch.equal(friction[:, geom], default_friction[geom].expand(NUM_ENVS, 3))
     # The solver's floor contacts carry their world's values (the robot's geoms have priority), the get-up's on
@@ -185,8 +187,9 @@ def test_each_environment_has_its_own_floor_on_every_collision_geom_and_its_cont
     count = int(data.nacon.numpy()[0])
     pairs = data.contact.geom.numpy()[:count]
     world = data.contact.worldid.numpy()[:count]
-    robot_geom = np.where(pairs[:, 0] == floor, pairs[:, 1], pairs[:, 0])
-    on_floor = (pairs == floor).any(axis=1) & np.isin(robot_geom, collision.numpy())
+    is_floor = np.isin(pairs, floors)
+    robot_geom = np.where(is_floor[:, 0], pairs[:, 1], pairs[:, 0])
+    on_floor = is_floor.any(axis=1) & np.isin(robot_geom, collision.numpy())
     assert set(world[on_floor].tolist()) == set(range(NUM_ENVS))
     np.testing.assert_allclose(data.contact.solref.numpy()[:count][on_floor, 0], tau[world[on_floor], 0].numpy())
     np.testing.assert_allclose(data.contact.friction.numpy()[:count][on_floor, 0], mu[world[on_floor], 0].numpy())

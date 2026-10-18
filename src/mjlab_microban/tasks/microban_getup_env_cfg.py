@@ -92,6 +92,7 @@ from mjlab_microban.robot.microban_constants import (
     SERVO_TARGET_RANGE_RAD,
 )
 from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
+from mjlab_microban.tasks.floor_plate import train_on_floor_plate
 from mjlab_microban.schedules import GETUP_SCHEDULE, GETUP_TOTAL_UPDATES
 from mjlab_microban.tasks.mdp import (
     reward_based_staged_curriculum,
@@ -440,10 +441,12 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     # Training's floors (softness and friction on every collision geom, in
-    # place of foot_friction) and servo-goal delay; play and the judgments
-    # keep the robot's (tasks/mdp.py training_floor_and_delay).
+    # place of foot_friction, and a floor that gives sideways) and servo-goal
+    # delay; play and the judgments keep the robot's (tasks/mdp.py
+    # training_floor_and_delay, tasks/floor_plate.py).
     if not play:
         training_floor_and_delay(cfg)
+        train_on_floor_plate(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {
