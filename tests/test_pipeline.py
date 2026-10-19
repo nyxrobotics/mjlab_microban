@@ -121,10 +121,9 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.scripts import evaluate_teleop_v12_tracking as tracking
 
         cfg = load_config(dry=False)
-        # PICO trains on walking's floors and is judged on walking's judged floors but 0.1 s with friction 0.3.
+        # PICO trains on walking's floors and is judged on walking's judged floors.
         floors = cfg["pico"]["judgment"]["floors"]
-        self.assertEqual(floors, {name: floor for name, floor in cfg["walk"]["judgment"]["floors"].items()
-                                  if name != "soft_slippery"})
+        self.assertEqual(floors, cfg["walk"]["judgment"]["floors"])
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
             pipeline.env = {}
