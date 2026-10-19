@@ -56,10 +56,13 @@ schedule (docs/getup_training_export.md).
 """
 
 import numpy as np
+import torch
 from copy import deepcopy
+from dataclasses import replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
+from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -72,7 +75,7 @@ from mjlab.rl import (
     RslRlPpoAlgorithmCfg,
 )
 
-from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 
@@ -87,6 +90,8 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import (
+    COMMAND_DELAY_STEPS,
+    FLOOR_TIME_CONSTANT_S,
     MICROBAN_ROBOT_CFG,
     HOME_TRUNK_PITCH_RAD,
     SERVO_TARGET_RANGE_RAD,
@@ -109,6 +114,7 @@ from mjlab_microban.tasks.mdp import (
     extreme_joint_velocity,
     reset_near_home_fraction,
     hands_released_reward,
+    contact_time_constant,
     training_floor_and_delay,
 )
 from mjlab_microban.tasks.microban_getup_action import (
@@ -144,6 +150,18 @@ STANDING_GATE_HEIGHT = 0.9 * HEAD_STANDING_HEIGHT
 # within +-5 deg of HOME.  A wide (0.2, 0.6) "tipping" reset trains a braced,
 # staggered stance.
 NEAR_HOME_RESET = (0.1, 0.09)
+# The get-up's floors and goal delay on top of training's (getup_floor_and_delay).
+# Standing still, the get-up that trained on training's (a2adb8f2, update
+# 17999) falls after standing up at long delays on soft floors: 39 of 240
+# runs on the 0.1 s floor (21 of them at 40 ms), 5 on the rigid floor (all at
+# 40 ms).  With a reset in nearly every step the draws of 5 and more act one
+# step earlier (robot/microban_constants.py), so 3-8 steps trained 15-35 ms
+# and never 40 ms; 3-9 trains 15, 20, 20, 25, 30, 35 and 40 ms.  In training
+# 3.4 % of its stands fell on 0.08-0.1 s floors, 1.6 % on 0.06-0.08 s and
+# 0.3 % on harder ones, so the odd environments draw from 0.06-0.1 s: floors
+# of 0.08 s and more go from 13 % to 29 %, and 22 % stay at 0.02-0.04 s.
+GETUP_COMMAND_DELAY_STEPS = (COMMAND_DELAY_STEPS[0], COMMAND_DELAY_STEPS[1] + 1)
+GETUP_SOFT_FLOOR_TIME_CONSTANT_S = (0.06, FLOOR_TIME_CONSTANT_S[1])
 # Despite the name, _head_height only uses .name to resolve the robot entity.
 HEAD_ASSET_CFG = SceneEntityCfg("robot", body_names=("head",))
 DOFS_FILTER = r".*(?<!head)(?<!neck_roll)(?<!neck_pitch)$"
@@ -228,6 +246,41 @@ GETUP_STAGES = (
         (Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),),
     ),
 )
+
+
+@requires_model_fields("geom_solref")
+def getup_floor_softness(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    time_constant_range: tuple[float, float],
+    soft_time_constant_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """contact_time_constant from ``time_constant_range`` on the even environments and from
+    ``soft_time_constant_range`` on the odd ones."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    for ids, time_constants in ((env_ids[env_ids % 2 == 0], time_constant_range),
+                                (env_ids[env_ids % 2 == 1], soft_time_constant_range)):
+        if len(ids):
+            contact_time_constant(env, ids, time_constants, asset_cfg)
+
+
+def getup_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
+    """After training_floor_and_delay: the goal delay drawn from GETUP_COMMAND_DELAY_STEPS and the odd
+    environments' floors from GETUP_SOFT_FLOOR_TIME_CONSTANT_S (see the constants)."""
+    robot = cfg.scene.entities["robot"]
+    actuators = tuple(replace(actuator, delay_min_lag=GETUP_COMMAND_DELAY_STEPS[0],
+                              delay_max_lag=GETUP_COMMAND_DELAY_STEPS[1])
+                      for actuator in robot.articulation.actuators)
+    cfg.scene.entities["robot"] = replace(robot, articulation=replace(robot.articulation, actuators=actuators))
+    softness = cfg.events["floor_softness"]
+    cfg.events["floor_softness"] = EventTermCfg(
+        func=getup_floor_softness,
+        mode="startup",
+        params={**softness.params, "soft_time_constant_range": GETUP_SOFT_FLOOR_TIME_CONSTANT_S},
+    )
 
 
 def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -440,10 +493,12 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     # Training's floors (softness and friction on every collision geom, in
-    # place of foot_friction) and servo-goal delay; play and the judgments
-    # keep the robot's (tasks/mdp.py training_floor_and_delay).
+    # place of foot_friction) and servo-goal delay, with the get-up's softer
+    # floors and longer delays; play and the judgments keep the robot's
+    # (tasks/mdp.py training_floor_and_delay, getup_floor_and_delay).
     if not play:
         training_floor_and_delay(cfg)
+        getup_floor_and_delay(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

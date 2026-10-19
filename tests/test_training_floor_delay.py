@@ -1,7 +1,8 @@
 """Training's floors and servo-goal delay: one floor (friction, contact time constant) on every collision geom and
 one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's robot, its
 foot friction and its goal delay.  Walking and PICO draw no friction below 0.3 and keep a third of their
-environments on the play env's floor."""
+environments on the play env's floor.  The get-up draws its goal delays up to 9 steps and its odd environments'
+floors from 0.06-0.1 s."""
 
 from __future__ import annotations
 
@@ -21,7 +22,12 @@ from mjlab_microban.robot.microban_constants import (
     MICROBAN_TRAIN_ROBOT_CFG,
 )
 from mjlab_microban.tasks.mdp import contact_time_constant
-from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
+from mjlab_microban.tasks.microban_getup_env_cfg import (
+    GETUP_COMMAND_DELAY_STEPS,
+    GETUP_SOFT_FLOOR_TIME_CONSTANT_S,
+    getup_floor_softness,
+    make_microban_getup_env_cfg,
+)
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     WALK_FLOOR_FRICTION,
@@ -63,14 +69,25 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots(task):
         assert friction.params["ranges"] == FLOOR_FRICTION == (0.15, 1.5)
         assert "robot_floor" not in train.events
     assert friction.params["operation"] == "abs" and friction.params["shared_random"]
-    assert softness.func is contact_time_constant
     assert softness.params["time_constant_range"] == FLOOR_TIME_CONSTANT_S == (0.02, 0.1)
+    if task == "getup":
+        assert softness.func is getup_floor_softness
+        assert softness.params["soft_time_constant_range"] == GETUP_SOFT_FLOOR_TIME_CONSTANT_S == (0.06, 0.1)
+        assert getup_floor_softness.model_fields == contact_time_constant.model_fields == ("geom_solref",)
+    else:
+        assert softness.func is contact_time_constant
     assert friction.params["asset_cfg"].geom_names == softness.params["asset_cfg"].geom_names == (COLLISION.pattern + "$",)
-    # Training's robot: robot.xml's with every collision geom named and the goal delay drawn once per episode.
-    assert train.scene.entities["robot"] == MICROBAN_TRAIN_ROBOT_CFG
+    # Training's robot: robot.xml's with every collision geom named and the goal delay drawn once per episode
+    # (the get-up's from 3-9 steps).
+    delays = GETUP_COMMAND_DELAY_STEPS if task == "getup" else COMMAND_DELAY_STEPS
+    assert COMMAND_DELAY_STEPS == (3, 8) and GETUP_COMMAND_DELAY_STEPS == (3, 9)
     (trained,) = train.scene.entities["robot"].articulation.actuators
     (robot,) = MICROBAN_ROBOT_CFG.articulation.actuators
-    assert (trained.delay_min_lag, trained.delay_max_lag) == COMMAND_DELAY_STEPS == (3, 8)
+    (train_robot,) = MICROBAN_TRAIN_ROBOT_CFG.articulation.actuators
+    assert (trained.delay_min_lag, trained.delay_max_lag) == delays
+    assert replace(trained, delay_max_lag=COMMAND_DELAY_STEPS[1]) == train_robot
+    assert replace(train.scene.entities["robot"], articulation=replace(
+        train.scene.entities["robot"].articulation, actuators=(train_robot,))) == MICROBAN_TRAIN_ROBOT_CFG
     assert trained.delay_hold_prob == 0.0 and not trained.delay_per_env_phase
     assert trained.delay_update_period > train.episode_length_s / train.sim.mujoco.timestep
     assert replace(trained, delay_min_lag=robot.delay_min_lag, delay_max_lag=robot.delay_max_lag,
@@ -178,6 +195,8 @@ def test_each_environment_has_its_own_floor_on_every_collision_geom_and_its_cont
     assert FLOOR_TIME_CONSTANT_S[0] <= tau.min() and tau.max() <= FLOOR_TIME_CONSTANT_S[1]
     assert FLOOR_FRICTION[0] <= mu.min() and mu.max() <= FLOOR_FRICTION[1]
     assert len(set(tau[:, 0].tolist())) == len(set(mu[:, 0].tolist())) == NUM_ENVS
+    if task == "getup":  # the odd environments on the softer floors
+        assert GETUP_SOFT_FLOOR_TIME_CONSTANT_S[0] <= tau[1::2].min()
     assert torch.all(solref[:, collision, 1] == 1.0)  # the damping ratio is MuJoCo's
     default_solref, default_friction = env.sim.get_default_field("geom_solref"), env.sim.get_default_field("geom_friction")
     for geom in (*others.tolist(), floor):
@@ -202,12 +221,13 @@ def test_each_environment_has_its_own_floor_on_every_collision_geom_and_its_cont
 
 
 def test_the_goal_delay_holds_through_an_episode_and_is_redrawn_at_reset(env):
-    _task, env = env
+    task, env = env
+    low, high = GETUP_COMMAND_DELAY_STEPS if task == "getup" else COMMAND_DELAY_STEPS
     env.reset()
     for _ in range(3):  # past the reset's backfilled goals
         env.step(_zero(env))
     lags = _goal_lags(env)
-    assert lags.min() >= COMMAND_DELAY_STEPS[0] and lags.max() <= COMMAND_DELAY_STEPS[1]
+    assert lags.min() >= low and lags.max() <= high
     assert np.array_equal(lags[0], lags[1])  # one delay per episode
     assert len(set(lags[0].tolist())) > 1  # one per environment
     env.reset()
