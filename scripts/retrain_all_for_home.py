@@ -17,7 +17,8 @@ Steps (src/mjlab_microban/pipeline/steps.py; docs/home_pose_workflow.md):
             on the rigid floor and on the soft and slippery ones) and gate file;
 4. getup    one get-up run (scheduled IMU latency, calm, effort/push; 18000
             updates), then its judgment (fallen-start stands, push, tremble,
-            posture, clip);
+            posture, clip, standing still; the fallen-start stands, push,
+            tremble and standing still again on the soft and slippery floors);
 5. export   walk.onnx, getup.onnx, pico_teleop.onnx and manifest.json
             (policy contract, docs/policies.md);
 6. install  copy them and the robot HOME YAML into --robot-repo, run its

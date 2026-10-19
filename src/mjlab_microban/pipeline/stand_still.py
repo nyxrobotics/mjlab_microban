@@ -22,10 +22,14 @@ height, the get-up's standing line):
 
 With ``--time-constants`` every (delay, friction) runs on each of these soft
 floors (the soles' contact time constant, pipeline/floors.py) instead: the
-walking judgment's soft floors, with the same lines.
+walking judgment's soft floors, with the same lines.  With ``--floor`` (a
+floor of config/pipeline.yaml ``getup.floors``) every environment is on this
+floor, on every collision geom (pipeline/floors.py): the get-up judgment's
+soft and slippery floors, with the same lines.  A floor with a friction puts
+every sole at it too, with as many environments per delay as the frictions.
 
 usage: python -m mjlab_microban.pipeline.stand_still {walk,pico,getup} TASK CKPT OUT.json
-           --max-leg-speed-rms 0.05 --max-falls 0 [--device cuda:0] [--time-constants 0.05,0.1]
+           --max-leg-speed-rms 0.05 --max-falls 0 [--device cuda:0] [--time-constants 0.05,0.1 | --floor JSON]
 Prints one ``RESULT {json}`` line; OUT.json has ``checks`` and ``status``.
 """
 
@@ -54,7 +58,7 @@ LEG_JOINT_KEYS = ("hip", "knee", "ankle")
 
 
 def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seconds: float, noise: bool,
-             time_constants: list[float] | None = None):
+             time_constants: list[float] | None = None, floor: tuple[float | None, float] | None = None):
     from mjlab.tasks.registry import load_env_cfg
 
     from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import _configure_fixed_twist
@@ -77,6 +81,10 @@ def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seco
         from mjlab_microban.pipeline.floors import add_sole_floors
 
         add_sole_floors(cfg, [(None, t) for t in time_constants])
+    if floor is not None:  # every collision geom (pipeline/floors.py); the soles' frictions are set after the build
+        from mjlab_microban.pipeline.floors import add_body_floors
+
+        add_body_floors(cfg, [floor] * envs)
     return cfg
 
 
@@ -113,9 +121,10 @@ def _policy(kind: str, task: str, checkpoint: str, wrapped, device: str):
 
 
 def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: int, noise: bool = True,
-        delays_ms=None, frictions=FRICTIONS, time_constants=None) -> dict:
+        delays_ms=None, frictions=FRICTIONS, time_constants=None, floor=None) -> dict:
     """The measurements; with ``time_constants`` (s) every (delay, friction) also on each of these soft floors
-    (the soles' contact time constant, pipeline/floors.py) in place of the play env's rigid one."""
+    (the soles' contact time constant, pipeline/floors.py) in place of the play env's rigid one; with ``floor``
+    ((friction or None, time constant s)) every environment on this floor, on every collision geom."""
 
     import torch
     from mjlab.envs import ManagerBasedRlEnv
@@ -127,12 +136,16 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
 
     delays_ms = delays_ms or (GETUP_DELAYS_MS if kind == "getup" else DELAYS_MS)
     delays = [int(d) // PHYSICS_STEP_MS for d in delays_ms]
+    if floor is not None and time_constants:
+        raise ValueError("a floor or soft floors, not both")
+    if floor is not None and floor[0] is not None:  # the floor's friction on every environment
+        reps, frictions = reps * len(frictions), (floor[0],)
     floors = list(time_constants) if time_constants else [None]
     cells = [(d, f, t) for d in delays for f in frictions for t in floors for _ in range(reps)]
     n = len(cells)
     seconds, judged_from = TIMING_S[kind]
     cfg = _env_cfg(kind, task, n, seed, delays, seconds, noise,
-                   [t for _, _, t in cells] if time_constants else None)
+                   [t for _, _, t in cells] if time_constants else None, floor)
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
     wrapped = RslRlVecEnvWrapper(env, clip_actions=None)
     try:
@@ -150,6 +163,12 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
             simulated = sole_floors(env)
             if any(abs(s[0] - f) > 1e-5 or abs(s[1] - t) > 1e-5 * t for s, (_, f, t) in zip(simulated, cells)):
                 raise RuntimeError("the soft floors drifted from the ones set")
+        if floor is not None:
+            from mjlab_microban.pipeline.floors import check_body_floors, sole_floors
+
+            check_body_floors(env, [floor] * n)
+            if any(abs(s[0] - f) > 1e-5 for s, (_, f, _) in zip(sole_floors(env), cells)):
+                raise RuntimeError("the soles' frictions drifted from the ones set")
         legs = [i for i, name in enumerate(robot.joint_names) if any(k in name for k in LEG_JOINT_KEYS)]
         head_cfg = SceneEntityCfg("robot", body_names=("head",))
         feet = env.scene.sensors["feet_ground_contact"]
@@ -239,6 +258,7 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
         "kind": kind, "task": task, "checkpoint": checkpoint, "seed": seed, "envs": n, "reps": reps,
         "seconds": seconds, "judged_from_s": judged_from, "delays_ms": list(delays_ms), "frictions": list(frictions),
         "noise": noise, **({"time_constants_s": floors, "by_time_constant": by_time_constant} if time_constants else {}),
+        **({"floor": list(floor)} if floor is not None else {}),
         "leg_speed_rms_rad_s": per_delay[worst]["leg_speed_rms_rad_s"], "worst_delay_ms": worst,
         "falls": int(fell.sum()), "judged_envs": int(judged.sum()),
         "per_delay": per_delay, "max_env_leg_speed_rms_rad_s_by_friction": by_friction,
@@ -269,15 +289,21 @@ def main() -> None:
     parser.add_argument("--reps", type=int, default=2)
     parser.add_argument("--time-constants", help="comma-separated soft floors (sole contact time constants, s) "
                         "in place of the rigid one, e.g. 0.05,0.1")
+    parser.add_argument("--floor", help="JSON of a floor of config/pipeline.yaml getup.floors (every collision "
+                        "geom) in place of the rigid one")
     args = parser.parse_args()
     started = time.time()
-    time_constants = None
+    time_constants = floor = None
     if args.time_constants:
         from mjlab_microban.pipeline.floors import parse
 
         time_constants = [parse({"t": {"time_constant_s": float(t)}})["t"][1] for t in args.time_constants.split(",")]
+    if args.floor:
+        from mjlab_microban.pipeline.floors import parse
+
+        floor = parse({"floor": json.loads(args.floor)})["floor"]
     result = judge(run(args.kind, args.task, args.checkpoint, device=args.device, seed=args.seed, reps=args.reps,
-                       time_constants=time_constants), args.max_leg_speed_rms, args.max_falls)
+                       time_constants=time_constants, floor=floor), args.max_leg_speed_rms, args.max_falls)
     result["wall_s"] = round(time.time() - started, 1)
     with open(args.output, "w") as stream:
         json.dump(result, stream, indent=1)

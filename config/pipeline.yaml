@@ -103,6 +103,35 @@ getup:
     # reward's clip barrier charges beyond it; targets between 1.57 and pi
     # are the torque authority the get-up needs and are allowed).
     max_standing_targets_on_clip: 0.05
+  # The walking judgment's soft and slippery floors on every collision geom
+  # (pipeline/floors.py; the get-up lies on its hands, knees and back, as in
+  # training).  The stand evaluations (fallen starts, push, tremble) and
+  # standing still run again on each with the rigid floor's lines
+  # (min_fallen_standing_fraction, max_push_fall_fraction,
+  # max_standing_joint_abs_vel_rad_s, stand_still).  The get-up that ran on
+  # the robot with the walker a7c28c8a (e115a8cd, trained on the rigid floor),
+  # on the servo model it was trained on, stands from 0.947-0.982 of its
+  # fallen starts on these floors (rigid 0.965), falls after 0, 0.12 (0.1 s),
+  # 0 and 0.03 of the pushes (rigid 0) and trembles at 0.077-0.296 rad/s
+  # (rigid 0.086); the get-up training on these floors (a2adb8f2, updates
+  # 8000 and 9000) 0.945-1.0, 0-0.049 and 0.110-0.159 rad/s (rigid
+  # 0.115-0.120).  Standing still, a2adb8f2 at update 9500 (seeds 107 and
+  # 108, 240 environments at 15-35 ms on each floor) moves its legs at
+  # 0.039-0.062 rad/s on every floor (rigid 0.039-0.056) and falls 1, 0, 4
+  # and 5 times (0.05 s, 0.3, 0.1 s, both; rigid 1); at 40 ms 18, 23, 36 and
+  # 40 times in 48 (rigid 18).  e115a8cd (trained at 15-30 ms) does not
+  # stand still at 35-40 ms on the rigid floor either.
+  # Judged on the rigid floor only: the targets on the clip (on 0.1 s and
+  # both no get-up reaches the line: e115a8cd 0.111 and 0.072, a2adb8f2
+  # 0.177-0.179; on 0.05 s and 0.3 both stay at their rigid value: 0.033 and
+  # 0.022 against 0.026, 0.174 against 0.174) and the posture evaluation
+  # (fallen starts without IMU delay and noise standing at 0.80; the stand
+  # evaluations' fallen starts, with them, are judged here at 0.85).
+  floors:
+    soft_0.05: {time_constant_s: 0.05}
+    soft_0.1: {time_constant_s: 0.1}
+    slippery_0.3: {friction: 0.3}
+    soft_slippery: {time_constant_s: 0.1, friction: 0.3}
 
 # Standing still (pipeline/stand_still.py), a judgment of every policy: the
 # walker and PICO stand at HOME on a zero command, the get-up from a fallen
