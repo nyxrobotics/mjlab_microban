@@ -566,9 +566,11 @@ class Pipeline:
         ]
 
     @staticmethod
-    def pico_failures(prefix: Path) -> list[str]:
+    def pico_failures(prefix: Path, names: tuple[str, ...] = ("9x300", "tracking", "onnx", "stand_still")) -> list[str]:
+        """The failed checks of the PICO reports ``<prefix>_<name>.json``, named ``<name>:<check>``."""
+
         failures = []
-        for name in ("9x300", "tracking", "onnx", "stand_still"):
+        for name in names:
             path = Path(f"{prefix}_{name}.json")
             if not path.is_file():
                 raise JobStopped(f"PICO evaluator {name} wrote no report ({path}): not a judgment "
@@ -580,7 +582,9 @@ class Pipeline:
         return failures
 
     def pico_judgment(self, checkpoint: Path) -> tuple[str, bool, list[str]]:
-        """The three PICO evaluators (seed 42; the PICO judgment also 43) and, when all pass, the gate file."""
+        """The three PICO evaluators (seed 42; the PICO judgment also 43) and standing still, on the rigid floor and
+        on each soft and slippery floor of ``pico.judgment.floors``, and, when all pass, the gate file (of the rigid
+        floor's reports)."""
 
         out_dir = self.state.dir / "pico_judgment"
         out_dir.mkdir(exist_ok=True)
@@ -590,7 +594,7 @@ class Pipeline:
         for name, cmd in self.pico_commands(checkpoint, prefix, int(self.cfg["seed"])):
             self.jobs.run(f"pico_judgment_{name}", cmd, "eval", env=self.env, check=False)
         self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still.json"))
-        failures = self.pico_failures(prefix)
+        failures = self.pico_failures(prefix) + self.pico_floor_judgment(checkpoint, prefix)
         passed = not failures
         if passed:
             capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_stage", "create", str(checkpoint),
@@ -599,6 +603,39 @@ class Pipeline:
         self.log(f"PICO judgment of {checkpoint.parent.name}/{checkpoint.name}: "
                  + ("PASS" if passed else f"FAIL {failures}"))
         return str(prefix), passed, failures
+
+    def pico_floor_judgment(self, checkpoint: Path, prefix: Path) -> list[str]:
+        """The PICO judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
+
+        The 9x300 and tracking evaluators on every floor of ``pico.judgment.floors`` (reports
+        ``<prefix>_<floor>_9x300.json``, ``<prefix>_<floor>_tracking.json``) and standing still on the soft ones
+        (``<prefix>_stand_still_soft.json``): the failures, named ``<floor>_9x300:<check>``,
+        ``<floor>_tracking:<check>`` or ``stand_still_soft:<check>``.
+        """
+
+        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse
+
+        floors = (self.cfg["pico"].get("judgment") or {}).get("floors") or {}
+        if not floors:
+            return []
+        soft = sorted({t for _, t in parse(floors).values()} - {RIGID_TIME_CONSTANT_S})
+        names = tuple(f"{floor}_{part}" for floor in floors for part in ("9x300", "tracking"))
+        for name in names:
+            Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
+        digest, seed = sha256(checkpoint), str(self.cfg["seed"])
+        for floor, values in floors.items():
+            for part, module in (("9x300", "evaluate_teleop_v12_checkpoint"), ("tracking", "evaluate_teleop_v12_tracking")):
+                self.jobs.run(f"pico_judgment_{part}_{floor}",
+                              [*UV, "python", "-m", f"mjlab_microban.scripts.{module}", str(checkpoint),
+                               "--expected-sha256", digest, "--seed", seed, "--output", f"{prefix}_{floor}_{part}.json",
+                               "--force", "--floor", json.dumps(values)], "eval", env=self.env, check=False)
+        if soft:
+            self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still_soft.json"), time_constants=soft)
+            names += ("stand_still_soft",)
+        failures = self.pico_failures(prefix, names)
+        self.log(f"PICO judgment on the floors {list(floors)}{f' (standing still on {soft} s)' if soft else ''} of "
+                 f"{checkpoint.parent.name}/{checkpoint.name}: " + ("PASS" if not failures else f"FAIL {failures}"))
+        return failures
 
     def step_getup(self) -> None:
         inputs = self.inputs("getup")

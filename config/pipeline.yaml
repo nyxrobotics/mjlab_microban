@@ -58,6 +58,25 @@ pico:
   envs: 2048
   save_interval: 500
   stage_tolerance: 1
+  # Judgment: the three evaluators and standing still on the rigid floor, then
+  # the 9x300 and tracking evaluators on each of these floors of walking's
+  # judgment (PICO trains on walking's floors) and standing still on the soft
+  # ones, with the rigid floor's lines (steps.Pipeline.pico_floor_judgment).
+  # The PICO that walked on the robot (v12, 343b5ed4, on its own code and
+  # servo model) keeps the 9x300 lines on these floors: worst margin over the
+  # fixed minimums +0.012 rigid, +0.020 on 0.05 s, +0.001 on 0.1 s, +0.008 on
+  # friction 0.3 (its left side step: 0.032, 0.040, 0.021, 0.028 m/s on
+  # 0.02).  Walking's 0.1 s with friction 0.3 is left out: there it steps left
+  # 0.0175 m/s, and v13c (the arm-overlay recipe at this HOME, on the servo
+  # model it was trained on) falls in 1 of the 9 scenarios and goes forward
+  # 0.009 m/s short of 0.04.  No PICO keeps the tracking lines on the rigid
+  # floor yet (v13c fails five of them); on these floors they are the same.
+  # v13c stands still on 0.05 s and 0.1 s at 0.023 and 0.022 rad/s, no falls.
+  judgment:
+    floors:
+      soft_0.05: {time_constant_s: 0.05}
+      soft_0.1: {time_constant_s: 0.1}
+      slippery_0.3: {friction: 0.3}
 
 getup:
   task: Mjlab-Getup-Microban
