@@ -10,6 +10,7 @@ source probe and the stage gates build on is pinned.
 from __future__ import annotations
 
 import json
+import math
 import unittest
 from pathlib import Path
 
@@ -96,12 +97,12 @@ class VelocityRewardTest(unittest.TestCase):
         self.assertEqual(peaks, ROBOT_MOVING_COMMAND_LIMITS)
 
     def test_the_velocity_terms(self) -> None:
-        # Walking: mjlab's exp tracking at HOME, std sqrt(0.1) / sqrt(0.5),
+        # Walking: mjlab's exp tracking at HOME, std sqrt(0.045) / sqrt(0.5),
         # weight 2 each.
         linear, angular = self.walk.rewards["track_linear_velocity"], self.walk.rewards["track_angular_velocity"]
         self.assertIs(linear.func, track_linear_velocity_home_frame)
         self.assertIs(angular.func, track_angular_velocity_home_frame)
-        self.assertAlmostEqual(linear.params["std"] ** 2, 0.1)
+        self.assertAlmostEqual(linear.params["std"] ** 2, 0.045)
         self.assertAlmostEqual(angular.params["std"] ** 2, 0.5)
         for term in (linear, angular):
             self.assertEqual(term.params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
@@ -117,6 +118,16 @@ class VelocityRewardTest(unittest.TestCase):
         for name in ("track_linear_velocity", "commanded_planar_velocity_progress", "linear_velocity_error_l1",
                      "yaw_velocity_error_l1"):
             self.assertEqual(terms[name].params["trunk_pitch"], HOME_TRUNK_PITCH_RAD, name)
+
+    def test_small_lateral_commands_count(self) -> None:
+        # Ignoring a 0.1 m/s command costs what half of the 0.3 m/s lateral
+        # maximum cost at std sqrt(0.1) (0.80 of the reward); ignoring the
+        # maximum keeps under a sixth.
+        std = self.walk.rewards["track_linear_velocity"].params["std"]
+        kept = lambda error: math.exp(-error**2 / std**2)  # noqa: E731
+        self.assertAlmostEqual(kept(0.1), math.exp(-0.15**2 / 0.1), places=2)
+        self.assertLess(kept(0.3), 1 / 6)
+        self.assertEqual(max(abs(v) for v in self.walk.commands["twist"].ranges.lin_vel_y), 0.3)
 
     def test_reward_tables(self) -> None:
         self.assertEqual({k: v.weight for k, v in self.walk.rewards.items()}, WALK_REWARD_WEIGHTS)

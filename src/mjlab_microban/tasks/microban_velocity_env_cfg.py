@@ -330,7 +330,7 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
-    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.1)
+    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.045)
     # and sqrt(0.5), in the HOME-levelled trunk frame
     # (microban_velocity_tracking.py).  A vertical-trunk HOME keeps mjlab's own
     # terms.
@@ -341,7 +341,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ):
             cfg.rewards[name].func = func
             cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
-    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
+    # The lateral range (0.3 m/s) is small: at std sqrt(0.1) ignoring a 0.1
+    # m/s command kept 0.905 of the reward and ignoring the full 0.3 kept
+    # 0.41, and the walkers of the refitted servos walked 0.03-0.045 m/s of a
+    # 0.1 m/s sideways command (0.06 for a7c28c8a, which walked on the robot).
+    # std^2 = 0.045 makes ignoring 0.1 m/s cost what half of 0.3 m/s cost at
+    # sqrt(0.1) (reward 0.80); half of 0.3 m/s keeps exp(-0.5), none exp(-2).
+    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.045)
     cfg.rewards["track_linear_velocity"].weight = 2.0
 
     cfg.rewards["track_angular_velocity"].params["std"] = np.sqrt(0.5)

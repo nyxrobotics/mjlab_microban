@@ -1,6 +1,6 @@
 """The walking task's velocity reward: mjlab's two exp tracking terms at HOME.
 
-mjlab's track_linear_velocity (std sqrt(0.1)) and track_angular_velocity
+mjlab's track_linear_velocity (std sqrt(0.045)) and track_angular_velocity
 (std sqrt(0.5)), weight 2 each, read in the HOME-levelled trunk frame.
 """
 
