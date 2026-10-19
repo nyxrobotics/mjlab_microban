@@ -15,7 +15,8 @@ from mjlab_microban import policy_contract
 from mjlab_microban.robot import crouch_feedforward as cf
 from mjlab_microban.robot.home_pose import HOME, MICROBAN_XML
 from mjlab_microban.tasks import microban_teleop_mdp as mdp
-from mjlab_microban.tasks.microban_teleop_mirror import _TERM_MIRRORS, _joints
+from mjlab_microban.tasks.microban_teleop_mirror import _TERM_MIRRORS
+from mjlab_microban.tasks.microban_velocity_mirror import joint_mirror
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
     MICROBAN_TELEOP_LEG_JOINT_NAMES,
     make_microban_teleop_v13_arm_overlay_env_cfg,
@@ -182,7 +183,7 @@ class RowsTest(unittest.TestCase):
         feet = np.hstack((rng.uniform(-0.01, 0.01, (64, 2)), rng.uniform(0.003, 0.02, (64, 1))))
         feet = np.hstack((feet, feet + rng.uniform(-0.002, 0.002, (64, 3))))
         foot_index, foot_sign = _TERM_MIRRORS["foot_target"]
-        leg_index, leg_sign = _joints(cf.LEG_JOINT_NAMES)
+        leg_index, leg_sign = joint_mirror(cf.LEG_JOINT_NAMES)
         mirrored = cf.leg_offsets(TABLE, feet[:, foot_index] * foot_sign)
         np.testing.assert_allclose(mirrored, cf.leg_offsets(TABLE, feet)[:, leg_index] * leg_sign, atol=1e-9)
 

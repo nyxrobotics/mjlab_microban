@@ -11,7 +11,7 @@
 import numpy as np
 import torch
 from copy import deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -683,6 +683,25 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
+# Weight of the left-right mirror loss (microban_velocity_mirror).
+WALK_MIRROR_LOSS_COEFF = 1.0
+
+
+@dataclass
+class WalkMirrorLossCfg:
+    """rsl_rl's ``symmetry_cfg``: the mirror loss over the 18 outputs, no mirrored samples."""
+
+    use_data_augmentation: bool = False
+    use_mirror_loss: bool = True
+    mirror_loss_coeff: float = WALK_MIRROR_LOSS_COEFF
+    data_augmentation_func: str = "mjlab_microban.tasks.microban_velocity_mirror:mirror_augmentation"
+
+
+@dataclass
+class WalkPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    symmetry_cfg: WalkMirrorLossCfg = field(default_factory=WalkMirrorLossCfg)
+
+
 MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
@@ -699,7 +718,7 @@ MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
         activation="elu",
         obs_normalization=True,
     ),
-    algorithm=RslRlPpoAlgorithmCfg(
+    algorithm=WalkPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,

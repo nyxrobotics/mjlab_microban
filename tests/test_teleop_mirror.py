@@ -24,9 +24,7 @@ from mjlab_microban.tasks.microban_teleop_mirror import (
     MIRROR_OBSERVATION,
     mirror_actions,
     mirror_augmentation,
-    mirror_joint_sign,
     mirror_observations,
-    mirror_partner,
 )
 from mjlab_microban.tasks.microban_teleop_v12_actor import (
     LEGACY_TO_TELEOP_OBSERVATION_INDEX,
@@ -36,6 +34,7 @@ from mjlab_microban.tasks.microban_teleop_v12_actor import (
     transplant_legacy_actor_state_to_teleop,
 )
 from mjlab_microban.tasks.microban_teleop_v12_env_cfg import MicrobanTeleopV12RlCfg
+from mjlab_microban.tasks.microban_velocity_mirror import mirror_joint_sign, mirror_partner
 
 JOINTS = (*MICROBAN_HMD_JOINT_NAMES, *MICROBAN_TELEOP_ACTION_JOINT_NAMES)
 REFLECT = np.diag([1.0, -1.0, 1.0])
