@@ -142,6 +142,36 @@ WALK_STAGES = (
 # retrains the walker and PICO only.
 WALK_FLOOR_FRICTION = (0.3, 1.5)
 WALK_ROBOT_FLOOR_FRACTION = 1 / 3
+# Half of the drawn floors (a third of all environments) are hard and
+# slippery: robot.xml's contact (MuJoCo's 0.02 s) with friction 0.3-0.45, a
+# polished floor.  Trained on 7.6% of such floors, the walker fell 6-18 of 90
+# pushed on the judgment's friction 0.3 (2-3 on 0.1 s with 0.3), its loaded
+# soles sliding with the push; these floors alone left 9-14.
+WALK_SLIPPERY_FRICTION = (0.3, 0.45)
+WALK_SLIPPERY_FRACTION = 0.5
+
+
+@requires_model_fields("geom_friction", "geom_solref")
+def slippery_floor_envs(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    fraction: float,
+    friction: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Put ``fraction`` of the environments, chosen at random, on a hard slippery floor: robot.xml's solref
+    (MuJoCo's 0.02 s) and one friction from ``friction`` on every geom of ``asset_cfg``."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    chosen = env_ids[torch.randperm(len(env_ids), device=env.device)[: round(fraction * len(env_ids))]]
+    if len(chosen) == 0:
+        return
+    geoms = env.scene[asset_cfg.name].indexing.geom_ids[asset_cfg.geom_ids].to(torch.long)
+    rows, cols = torch.meshgrid(chosen, geoms, indexing="ij")
+    model = env.sim.model
+    model.geom_solref[rows, cols] = env.sim.get_default_field("geom_solref")[geoms].to(model.geom_solref.dtype)
+    dr.geom_friction(env, chosen, ranges=friction, asset_cfg=asset_cfg, operation="abs", shared_random=True)
 
 
 @requires_model_fields("geom_friction", "geom_solref")
@@ -175,11 +205,18 @@ def robot_floor_envs(
 
 def walk_training_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
     """Training's floors and per-episode goal delay (tasks/mdp.py training_floor_and_delay), with friction from
-    WALK_FLOOR_FRICTION and WALK_ROBOT_FLOOR_FRACTION of the environments on the play env's floor."""
+    WALK_FLOOR_FRICTION, WALK_SLIPPERY_FRACTION of the environments on hard slippery floors and
+    WALK_ROBOT_FLOOR_FRACTION on the play env's floor (each chosen from all environments)."""
     foot = cfg.events["foot_friction"]
     training_floor_and_delay(cfg)
     cfg.events["geom_friction"].params["ranges"] = WALK_FLOOR_FRICTION
     # After the two draws (startup events run in this order).
+    cfg.events["slippery_floor"] = EventTermCfg(
+        func=slippery_floor_envs,
+        mode="startup",
+        params={"fraction": WALK_SLIPPERY_FRACTION, "friction": WALK_SLIPPERY_FRICTION,
+                "asset_cfg": deepcopy(cfg.events["geom_friction"].params["asset_cfg"])},
+    )
     cfg.events["robot_floor"] = EventTermCfg(
         func=robot_floor_envs,
         mode="startup",
@@ -386,8 +423,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     del cfg.rewards["soft_landing"]
 
+    # A sole's horizontal speed while in contact, squared.  At -1.0 it was
+    # 1% of the tracking reward (a 30 cm robot's soles move slowly): the
+    # walker of the refitted servos kept its loaded soles moving (p90 0.11
+    # m/s on high friction; 0.03 for the walker that walked on the robot,
+    # a7c28c8a on its servo model) and, pushed on a hard floor of friction
+    # 0.3, slid with the push and fell (6-18 of 90).
     cfg.rewards["foot_slip"].params["command_threshold"] = walking_threshold
-    cfg.rewards["foot_slip"].weight = -1.0
+    cfg.rewards["foot_slip"].weight = -10.0
 
     cfg.rewards["action_rate_l2"].weight = -0.1
 
@@ -470,9 +513,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     # Training's soft and slippery floors and per-episode goal delay, with
-    # friction from 0.3 and a third of the environments on the play env's
-    # floor (walk_training_floor_and_delay); play and the judgments keep the
-    # robot's.  PICO inherits this config.
+    # friction from 0.3, a third of the environments on hard slippery floors
+    # and a third on the play env's floor (walk_training_floor_and_delay);
+    # play and the judgments keep the robot's.  PICO inherits this config.
     if not play:
         walk_training_floor_and_delay(cfg)
 

@@ -532,6 +532,8 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # walker's) the residual was free to change its output from step to step,
     # and PICO v13g2 shook standing still on the robot until it fell.
     cfg.rewards["action_rate_l2"].weight = -0.1
+    # PICO keeps the foot-slip weight it was judged with (the walker's is -10).
+    cfg.rewards["foot_slip"].weight = -1.0
 
     # Velocity: the terms of the earlier forward-lean PICO
     # (microban_teleop_velocity_rewards.py), with the final tracking stds from

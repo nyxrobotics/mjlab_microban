@@ -1,7 +1,7 @@
 """Training's floors and servo-goal delay: one floor (friction, contact time constant) on every collision geom and
 one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's robot, its
-foot friction and its goal delay.  Walking and PICO draw no friction below 0.3 and keep a third of their
-environments on the play env's floor."""
+foot friction and its goal delay.  Walking and PICO draw no friction below 0.3 and put a third of their
+environments on hard slippery floors and a third on the play env's floor."""
 
 from __future__ import annotations
 
@@ -26,8 +26,11 @@ from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_t
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     WALK_FLOOR_FRICTION,
     WALK_ROBOT_FLOOR_FRACTION,
+    WALK_SLIPPERY_FRACTION,
+    WALK_SLIPPERY_FRICTION,
     make_microban_velocity_env_cfg,
     robot_floor_envs,
+    slippery_floor_envs,
 )
 
 TASKS = {
@@ -56,9 +59,15 @@ def test_training_draws_floors_and_goal_delays_and_play_keeps_the_robots(task):
         assert robot_floor.params["asset_cfg"].geom_names == (COLLISION.pattern + "$",)
         assert robot_floor.params["sole_cfg"].geom_names == SOLE_NAMES
         assert robot_floor.params["sole_friction"] == (0.3, 1.2)
-        # It draws after the floors it puts back.
+        slippery = train.events["slippery_floor"]
+        assert slippery.func is slippery_floor_envs and slippery.mode == "startup"
+        assert slippery.params["fraction"] == WALK_SLIPPERY_FRACTION == 0.5
+        assert slippery.params["friction"] == WALK_SLIPPERY_FRICTION == (0.3, 0.45)
+        assert slippery.params["asset_cfg"].geom_names == (COLLISION.pattern + "$",)
+        # Each draws after the floors it replaces.
         startup = [name for name, term in train.events.items() if term.mode == "startup"]
-        assert startup.index("robot_floor") > max(startup.index("geom_friction"), startup.index("floor_softness"))
+        assert startup.index("slippery_floor") > max(startup.index("geom_friction"), startup.index("floor_softness"))
+        assert startup.index("robot_floor") > startup.index("slippery_floor")
     else:
         assert friction.params["ranges"] == FLOOR_FRICTION == (0.15, 1.5)
         assert "robot_floor" not in train.events
@@ -239,12 +248,16 @@ def test_a_third_of_the_walkers_environments_keep_the_play_floor_and_the_rest_dr
         mu = friction[play][:, soles, 0]
         assert torch.equal(mu, mu[:, :1].expand_as(mu)) and 0.3 <= mu.min() and mu.max() <= 1.2
         assert torch.equal(friction[play][:, soles, 1:], default_friction[soles, 1:].expand(3, -1, -1))
-        # The others: one drawn floor on every collision geom, friction 0.3-1.5.
+        # The others: one drawn floor on every collision geom, friction 0.3-1.5; the hard slippery ones MuJoCo's
+        # 0.02 s and friction 0.3-0.45.
         collision = torch.cat([soles, others])
         tau, mu = solref[~play][:, collision, 0], friction[~play][:, collision, 0]
         assert torch.equal(tau, tau[:, :1].expand_as(tau)) and torch.equal(mu, mu[:, :1].expand_as(mu))
         assert WALK_FLOOR_FRICTION[0] <= mu.min() and mu.max() <= WALK_FLOOR_FRICTION[1]
         assert FLOOR_TIME_CONSTANT_S[0] <= tau.min() and tau.max() <= FLOOR_TIME_CONSTANT_S[1]
-        assert len(set(tau[:, 0].tolist())) == 6
+        hard = tau[:, 0] == default_solref[soles[0], 0]
+        assert hard.any() and (~hard).any()
+        assert WALK_SLIPPERY_FRICTION[0] <= mu[hard].min() and mu[hard].max() <= WALK_SLIPPERY_FRICTION[1]
+        assert len(set(tau[~hard, 0].tolist())) == int((~hard).sum())
     finally:
         env.close()
