@@ -27,6 +27,10 @@ recurrence and soft-limit violations of the twelve leg joints the policy
 drives are rejected too.  The per-joint
 action envelopes (policy, source walker, difference) set the robot's runtime
 action guard, and the recorded actor observations its startup self-test.
+
+With ``--floor`` every part runs on a soft or slippery floor of the walking
+judgment (pipeline/floors.py; the walker of J2 on the same floor) in place of
+the play env's rigid one, with the same lines.
 """
 
 from __future__ import annotations
@@ -465,7 +469,7 @@ def feet_on_floor(env: ManagerBasedRlEnv) -> torch.Tensor:
     return feet_down(env.scene.sensors[params["sensor_name"]], params["sensor_foot_ids"])
 
 
-def _cfg(seed: int, steps: int) -> tuple[Any, float]:
+def _cfg(seed: int, steps: int, floor: tuple[float | None, float] | None = None) -> tuple[Any, float]:
     cfg = make_microban_teleop_v12_env_cfg(play=True)
     training = make_microban_teleop_v12_env_cfg(play=False)
     fall_height = float(cfg.terminations["fell_over"].params["minimum_height"])
@@ -479,6 +483,10 @@ def _cfg(seed: int, steps: int) -> tuple[Any, float]:
     )
     cfg.scene.num_envs = ENVS_PER_SCENARIO * SCENARIOS_PER_RUN
     cfg.seed = seed
+    if floor is not None:  # a soft or slippery floor of the walking judgment, on every environment
+        from mjlab_microban.pipeline.floors import add_sole_floors
+
+        add_sole_floors(cfg, [floor] * cfg.scene.num_envs)
     return cfg, fall_height
 
 
@@ -787,6 +795,7 @@ def run_evaluation(
     expected_sha256: str | None,
     device: str,
     seed: int,
+    floor: tuple[float | None, float] | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -805,10 +814,19 @@ def run_evaluation(
     source_policy.eval()
 
     seeds = tuple(seed + offset for offset in range(SEED_COUNT))
-    cfg, fall_height = _cfg(seed, max(FOOT_STEPS, PUSH_STEPS, ARM_STEPS))
+    cfg, fall_height = _cfg(seed, max(FOOT_STEPS, PUSH_STEPS, ARM_STEPS), floor)
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
     wrapped = RslRlVecEnvWrapper(env, clip_actions=None)
     try:
+        sole_floor = None
+        if floor is not None:
+            from mjlab_microban.pipeline.floors import sole_floors
+
+            simulated = sole_floors(env)
+            sole_floor = simulated[0]
+            if any(not math.isclose(t, floor[1], rel_tol=1e-5)
+                   or (floor[0] is not None and not math.isclose(f, floor[0], rel_tol=1e-5)) for f, t in simulated):
+                raise RuntimeError(f"floor {floor} simulated as {sorted(set(simulated))[:4]}")
         validate_teleop_v12_environment_contract(wrapped)
         arm_term = arm_overlay_term(env)
         ctx = _Context(
@@ -871,7 +889,12 @@ def run_evaluation(
             "iteration": iteration,
             "completed_updates": iteration + 1,
         },
-        "settings": {**canonical_settings(device=device, seed=seed), **recipe_report_settings(infos)},
+        "settings": {
+            **canonical_settings(device=device, seed=seed),
+            **recipe_report_settings(infos),
+            **({"floor": {"friction": floor[0], "time_constant_s": floor[1], "sole_floor": sole_floor}}
+               if floor is not None else {}),
+        },
         "thresholds": thresholds(),
         "checks": checks,
         "push_fall_rates": push_fall_rates_by_group(results["push"]),
@@ -909,16 +932,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42, help="the first of the two seeds")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--floor", help='a soft or slippery floor of the walking judgment, JSON '
+                        '{"time_constant_s": s, "friction": mu or null} (pipeline/floors.py); default the play floor')
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    floor = None
+    if args.floor:
+        from mjlab_microban.pipeline.floors import parse
+
+        floor = parse({"floor": json.loads(args.floor)})["floor"]
     report = run_evaluation(
         checkpoint=args.checkpoint,
         expected_sha256=args.expected_sha256,
         device=args.device,
         seed=args.seed,
+        floor=floor,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

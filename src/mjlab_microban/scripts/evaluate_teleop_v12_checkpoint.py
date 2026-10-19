@@ -1,9 +1,15 @@
-"""Evaluate a contract-v12 checkpoint on the nine legacy locomotion scenarios."""
+"""Evaluate a contract-v12 checkpoint on the nine legacy locomotion scenarios.
+
+With ``--floor`` the scenarios run on a soft or slippery floor of the walking
+judgment (pipeline/floors.py) in place of the play env's rigid one, with the
+same lines.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -210,6 +216,7 @@ def run_evaluation(
     seed: int,
     steps: int,
     settle_steps: int,
+    floor: tuple[float | None, float] | None = None,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -238,10 +245,19 @@ def run_evaluation(
         source_wrapped.close()
 
     teleop_env = ManagerBasedRlEnv(
-        cfg=_teleop_cfg(seed=seed, steps=steps), device=device
+        cfg=_teleop_cfg(seed=seed, steps=steps, floor=floor), device=device
     )
     wrapped = RslRlVecEnvWrapper(teleop_env, clip_actions=None)
     try:
+        sole_floor = None
+        if floor is not None:
+            from mjlab_microban.pipeline.floors import sole_floors
+
+            sole_floor = sole_floors(teleop_env)[0]
+            if not math.isclose(sole_floor[1], floor[1], rel_tol=1e-5) or (
+                floor[0] is not None and not math.isclose(sole_floor[0], floor[0], rel_tol=1e-5)
+            ):
+                raise RuntimeError(f"floor {floor} simulated as {sole_floor}")
         teleop_layout = _actor_layout(teleop_env)
         joint_pos_indices = _indices_by_name(
             legacy_layout.joint_pos_names,
@@ -317,6 +333,8 @@ def run_evaluation(
             "previous_action": "raw_actor_output",
             "policy_observation_width": MICROBAN_TELEOP_OBSERVATION_WIDTH,
             **recipe_report_settings(_infos),
+            **({"floor": {"friction": floor[0], "time_constant_s": floor[1], "sole_floor": sole_floor}}
+               if floor is not None else {}),
         },
         "thresholds": {
             "actual_soft_limit_violation_rad_max": (
@@ -363,11 +381,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--floor", help='a soft or slippery floor of the walking judgment, JSON '
+                        '{"time_constant_s": s, "friction": mu or null} (pipeline/floors.py); default the play floor')
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    floor = None
+    if args.floor:
+        from mjlab_microban.pipeline.floors import parse
+
+        floor = parse({"floor": json.loads(args.floor)})["floor"]
     report = run_evaluation(
         checkpoint=args.checkpoint,
         expected_sha256=args.expected_sha256,
@@ -375,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         steps=args.steps,
         settle_steps=args.settle_steps,
+        floor=floor,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

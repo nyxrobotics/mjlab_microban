@@ -58,6 +58,30 @@ pico:
   envs: 2048
   save_interval: 500
   stage_tolerance: 1
+  # Judgment: the three evaluators and standing still on the rigid floor, then
+  # the 9x300 and tracking evaluators on each floor of walking's judgment
+  # (PICO trains on walking's floors) and standing still on the soft ones,
+  # with the rigid floor's lines (steps.Pipeline.pico_floor_judgment).
+  # The PICO that walked on the robot (v12, 343b5ed4, on its own code and
+  # servo model; never trained on soft floors) keeps the 9x300 lines with
+  # seed 42 on 0.05 s and friction 0.3 (worst margin, its left side step
+  # over 0.02 m/s: +0.020, +0.008).  On both 0.1 s floors it is at the
+  # line, as it is on the rigid floor at some seeds: rigid +0.012, +0.010,
+  # +0.017 (three runs of seed 42), +0.027, -0.002, +0.011 (seeds 43-45);
+  # 0.1 s +0.001, -0.001, then +0.010, -0.014, -0.001; 0.1 s with friction
+  # 0.3 -0.0025 (three runs), then +0.015, -0.019, -0.003.  It reaches both
+  # at some seeds, so neither is left out.  v13c (not run on the robot)
+  # falls in 1 of the 9 scenarios on 0.1 s with friction 0.3, but its own
+  # rigid 9x300 of seed 42 passes or fails from run to run (+0.008, -0.003,
+  # -0.010).  No PICO keeps the tracking lines on the rigid floor yet (v13c
+  # fails five of them); on these floors they are the same.  v13c stands
+  # still on 0.05 s and 0.1 s at 0.023 and 0.022 rad/s, no falls.
+  judgment:
+    floors:
+      soft_0.05: {time_constant_s: 0.05}
+      soft_0.1: {time_constant_s: 0.1}
+      slippery_0.3: {friction: 0.3}
+      soft_slippery: {time_constant_s: 0.1, friction: 0.3}
 
 getup:
   task: Mjlab-Getup-Microban

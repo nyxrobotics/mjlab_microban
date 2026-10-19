@@ -117,6 +117,49 @@ class StateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             floors.add_sole_floors(cfg, [(None, 0.05)])
 
+    def test_the_pico_judgment_on_soft_and_slippery_floors(self) -> None:
+        from mjlab_microban.scripts import evaluate_teleop_v12_tracking as tracking
+
+        cfg = load_config(dry=False)
+        # PICO trains on walking's floors and is judged on walking's judged floors.
+        floors = cfg["pico"]["judgment"]["floors"]
+        self.assertEqual(floors, cfg["walk"]["judgment"]["floors"])
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.env = {}
+            ran: list[list] = []
+
+            def run(name, cmd, kind, **_):  # the evaluators write their own checks (the rigid floor's lines)
+                ran.append(cmd)
+                output = Path(cmd[cmd.index("--output") + 1])
+                bad = output.name.endswith("soft_0.1_tracking.json")
+                output.write_text(json.dumps({"status": "fail" if bad else "pass", "checks": {"push_falls": not bad}}))
+
+            def stand_still(kind, checkpoint, report, time_constants=None):
+                ran.append(["stand_still", kind, time_constants])
+                report.write_text(json.dumps({"status": "pass", "checks": {"falls": True}}))
+
+            pipeline.jobs = SimpleNamespace(run=run)
+            pipeline.stand_still = stand_still
+            checkpoint = Path(directory) / "model_9.pt"
+            checkpoint.write_bytes(b"pico")
+            prefix = Path(directory) / "run_model_9"
+            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), ["soft_0.1_tracking:push_falls"])
+            self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in ran[:-1]],
+                             [floor for floor in floors.values() for _ in range(2)])
+            self.assertEqual(ran[-1], ["stand_still", "pico", [0.05, 0.1]])
+            Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
+            with self.assertRaises(core.JobStopped):  # a report not written is no judgment
+                pipeline.pico_failures(prefix, ("slippery_0.3_9x300",))
+            pipeline.cfg = {**cfg, "pico": {**cfg["pico"], "judgment": {}}}
+            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), [])
+        # The tracking evaluator puts the floor on every environment; the rigid floor has none.
+        rigid, _ = tracking._cfg(42, 10)
+        soft, _ = tracking._cfg(42, 10, (0.3, 0.1))
+        self.assertNotIn("judgment_floor", rigid.events)
+        self.assertEqual(soft.events["judgment_floor"].params["time_constants"], [0.1] * soft.scene.num_envs)
+        self.assertEqual(soft.events["judgment_floor"].params["frictions"], [0.3] * soft.scene.num_envs)
+
     def test_a_step_hashes_only_its_own_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
