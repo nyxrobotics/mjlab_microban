@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 from mjlab.utils.buffers.delay_buffer import DelayBuffer
 
+import mjlab_microban.tasks.microban_getup_env_cfg as getup_cfg
 from mjlab_microban.tasks.curriculum import StagedCurriculum, bind_update_clock
 from mjlab_microban.tasks.microban_getup_env_cfg import (
     GETUP_MAX_ITERATIONS,
@@ -26,8 +28,8 @@ from mjlab_microban.tasks.microban_getup_runner import (
 )
 
 STEPS = 24
-CALM = ("standing_joint_vel", "raw_target_clip_excess", "roll_pose", "roll_pose_shoulder",
-        "standing_target_error")
+CALM = ("standing_joint_vel", "raw_target_clip_excess", "raw_target_clip_excess_both_feet", "roll_pose",
+        "roll_pose_shoulder", "standing_target_error")
 
 
 def expected(update: int) -> dict:
@@ -41,7 +43,7 @@ def expected(update: int) -> dict:
         feet_lateral = 30.0
     if update >= GETUP_SCHEDULE["effort"]:
         weights.update(roll_pose=0.0, roll_pose_shoulder=60.0, standing_target_error=-2.0,
-                       raw_target_clip_excess=-2.0)
+                       raw_target_clip_excess_both_feet=-1.8)
     if update >= GETUP_SCHEDULE["push"]:
         push = (-0.3, 0.3)
     return {"delay": delay, "weights": weights, "feet_lateral": feet_lateral, "push": push}
@@ -85,6 +87,28 @@ class GetupScheduleTest(unittest.TestCase):
             env.common_step_counter = update * STEPS
             term(env, None, GETUP_STAGES)
             self.assertEqual(env.state(), expected(update), update)
+
+    def test_effort_charges_count_only_on_both_feet(self) -> None:
+        env = FakeEnv(make_microban_getup_env_cfg())
+        term = StagedCurriculum(SimpleNamespace(params={"stages": GETUP_STAGES}), env)
+        bind_update_clock(env, STEPS)
+        env.common_step_counter = GETUP_SCHEDULE["effort"] * STEPS
+        term(env, None, GETUP_STAGES)
+        # Feet on the floor: both, left only, right only, none.
+        found = torch.tensor([[1, 1], [1, 0], [0, 2], [0, 0]])
+        env.scene = {"feet_ground_contact": SimpleNamespace(data=SimpleNamespace(found=found))}
+        excess, error = torch.full((4,), 0.5), torch.full((4,), 3.0)
+        rewards = env.cfg.rewards
+        plain, both, target = (rewards[name] for name in ("raw_target_clip_excess", "raw_target_clip_excess_both_feet",
+                                                         "standing_target_error"))
+        self.assertIs(plain.func, getup_cfg.normalized_target_clip_excess_l1_sum)
+        with mock.patch.object(getup_cfg, "normalized_target_clip_excess_l1_sum", return_value=excess), \
+                mock.patch.object(getup_cfg, "standing_target_error_l1", return_value=error):
+            barrier = plain.weight * excess + both.weight * both.func(env, **both.params)
+            effort = target.weight * target.func(env, **target.params)
+        # The 10x barrier (-2.0) on both feet, refine's -0.2 otherwise; the target error on both feet only.
+        torch.testing.assert_close(barrier, torch.tensor([-1.0, -0.1, -0.1, -0.1]))
+        torch.testing.assert_close(effort, torch.tensor([-6.0, 0.0, 0.0, 0.0]))
 
     def test_play_config_has_the_final_latency_and_no_schedule(self) -> None:
         cfg = make_microban_getup_env_cfg(play=True)

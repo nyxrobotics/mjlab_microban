@@ -41,7 +41,8 @@ process:
   raw-target clip barrier); the runner resets the action std to 0.5, the
   Adam moments, the learning rate and sets entropy 0.001 at the same update;
 * update 10000 ("effort"): shoulder roll joins the roll pose term, the
-  target-vs-measured effort penalty and a 10x clip barrier;
+  target-vs-measured effort penalty and a 10x clip barrier, both only while
+  both feet touch the floor (_add_calm_rewards);
 * update 15000 ("push"): +-0.3 m/s pushes every 3-6 s, to the end (18000).
 
 The pushes come after the effort stage: with pushes from the effort switch
@@ -237,7 +238,8 @@ GETUP_STAGES = (
             Setting("reward", "roll_pose", "weight", 0.0),
             Setting("reward", "roll_pose_shoulder", "weight", 60.0),
             Setting("reward", "standing_target_error", "weight", -2.0),
-            Setting("reward", "raw_target_clip_excess", "weight", -2.0),
+            # With refine's -0.2 the 10x barrier (-2.0), only while both feet touch the floor.
+            Setting("reward", "raw_target_clip_excess_both_feet", "weight", -1.8),
         ),
     ),
     Stage(
@@ -412,7 +414,7 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
     _add_redesign_rewards(cfg, sensors)
     _add_posture_rewards(cfg)
-    _add_calm_rewards(cfg)
+    _add_calm_rewards(cfg, sensors)
     standing_pose_final, hip_pose_final = 240.0, 120.0
 
     #---------------------------- Terminations ----------------------
@@ -771,7 +773,29 @@ def _add_posture_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         )
 
 
-def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
+def _both_feet_down(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    return (env.scene[sensor_name].data.found > 0).all(dim=-1).float()
+
+
+def both_feet_standing_target_error_l1(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """standing_target_error_l1 while both feet touch the floor (0 otherwise)."""
+    return _both_feet_down(env, sensor_name) * standing_target_error_l1(
+        env, height_threshold, head_asset_cfg, asset_cfg
+    )
+
+
+def both_feet_clip_excess_l1_sum(env: ManagerBasedRlEnv, sensor_name: str, action_name: str) -> torch.Tensor:
+    """normalized_target_clip_excess_l1_sum while both feet touch the floor (0 otherwise)."""
+    return _both_feet_down(env, sensor_name) * normalized_target_clip_excess_l1_sum(env, action_name)
+
+
+def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
     """The calm (refine) and effort terms, registered at weight 0.
 
     GETUP_STAGES sets their weights: refine at update 4000, effort at
@@ -795,8 +819,19 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
     back to where the target responds. The effort penalty costs push
     tolerance; the pushes start later, at the push switch (with pushes from
     this switch on, an arm stays pressed into its stop).
+
+    Both effort charges count only while both feet touch the floor; on one
+    foot or none the barrier keeps refine's weight.  Standing still, the
+    get-up that reaches standing height on one foot with its leg targets far
+    from the measured angles keeps stepping at ~3.9 Hz and falls 1-2.6 s
+    later, and the effort switch doubled these falls (0.1 s floor, 15-35 ms
+    delay: 5-9 of 200 runs at update 9500, 11-18 at 17999).  The stands that
+    recovered at 9500 braced harder in their first 0.2 s up (leg target
+    error 2.25 rad, 45 % of leg targets on the clip; after the switch
+    1.83-2.01 rad, 32-37 %), and no stance that settled on both feet fell.
     """
     gated = {"height_threshold": STANDING_GATE_HEIGHT, "head_asset_cfg": HEAD_ASSET_CFG}
+    feet = {"sensor_name": sensors["feet"]}
     cfg.rewards["standing_joint_vel"] = RewardTermCfg(
         func=standing_joint_vel_l2,
         weight=0.0,
@@ -809,6 +844,11 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
         weight=0.0,
         params={"action_name": "joint_pos"},
     )
+    cfg.rewards["raw_target_clip_excess_both_feet"] = RewardTermCfg(
+        func=both_feet_clip_excess_l1_sum,
+        weight=0.0,
+        params={**feet, "action_name": "joint_pos"},
+    )
     roll_joints = (r".*hip_roll.*", r".*ankle_roll.*")
     for name, joints in (
         ("roll_pose", roll_joints),
@@ -820,9 +860,9 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg) -> None:
             params={**gated, "std": {r".*": 0.15}, "asset_cfg": SceneEntityCfg("robot", joint_names=joints)},
         )
     cfg.rewards["standing_target_error"] = RewardTermCfg(
-        func=standing_target_error_l1,
+        func=both_feet_standing_target_error_l1,
         weight=0.0,
-        params={**gated, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
+        params={**gated, **feet, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
     )
 
 
