@@ -11,6 +11,7 @@
 import numpy as np
 import torch
 from copy import deepcopy
+from dataclasses import dataclass, fields
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -69,6 +70,7 @@ from mjlab_microban.tasks.mdp import (
     no_stepping_penalty,
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
+    UniformVelocityCommandWithRotationCfg,
     reset_root_state_uniform_world_yaw,
     training_floor_and_delay,
     upright as local_upright,
@@ -117,10 +119,7 @@ WALK_COMMAND_RANGES_FINAL = {
 }
 
 # One stage at update 3000: widen the forward and yaw command ranges and
-# penalize standing still on a moving command.  (The command's rotation-env
-# extensions below are instance attributes that the train CLI's config
-# reconstruction drops, so training samples mjlab's UniformVelocityCommand and
-# the stage writes only its fields.)
+# penalize standing still on a moving command.
 WALK_STAGES = (
     Stage(
         "penalize stepping + increase velocity",
@@ -223,6 +222,78 @@ def walk_training_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
         params={"fraction": WALK_ROBOT_FLOOR_FRACTION,
                 "asset_cfg": deepcopy(cfg.events["geom_friction"].params["asset_cfg"]),
                 "sole_cfg": deepcopy(foot.params["asset_cfg"]), "sole_friction": foot.params["ranges"]},
+    )
+
+
+# A fifth of training's moving commands are single-axis and small: forward
+# or backward, left or right, or a turn, the other two axes zero.  Drawn from
+# the box (+-0.7 m/s, +-0.3 m/s, +-1.5 rad/s) a pure lateral command near the
+# judgment's 0.1 m/s (forward below 0.05 m/s, turn below 0.1 rad/s) came about
+# once in 600 commands, and the walker answered 0.1 m/s left or right with
+# 0.01-0.045 m/s (and drifted forward 0.04-0.05 m/s and turned).  Half of the
+# single-axis commands are lateral (the axis that failed; forward, backward
+# and turning answered 2-4 times their lines), so 9% of the commands are pure
+# lateral.  The speeds bracket the judgment's (0.1 m/s lateral, 0.1-0.2 m/s
+# forward and backward, 0.5 rad/s turn) and stay above 0.05 m/s, where
+# standing still already earns 97.5% of the tracking reward.  The other 80%
+# keep the box's diagonal commands that the pushed falls are judged on.
+WALK_SINGLE_AXIS_FRACTION = 0.2
+# Shares of the forward/backward, lateral and turning axes (x, y, yaw).
+WALK_SINGLE_AXIS_SHARES = (0.25, 0.5, 0.25)
+# |speed| ranges of the three axes (m/s, m/s, rad/s); the sign is drawn.
+WALK_SINGLE_AXIS_SPEEDS = ((0.05, 0.3), (0.05, 0.2), (0.2, 0.8))
+
+
+class SingleAxisVelocityCommand(UniformVelocityCommandWithRotation):
+    """The rotation command's sampling, then ``cfg.rel_single_axis_envs`` of the moving (non-standing)
+    resampled environments get one small single-axis command: an axis drawn with ``cfg.single_axis_shares``
+    (x, y, yaw), a speed from that axis's ``cfg.single_axis_speeds`` range, either sign, the other axes zero."""
+
+    cfg: "SingleAxisVelocityCommandCfg"
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        moving = env_ids[~self.is_standing_env[env_ids]]
+        chosen = moving[torch.rand(len(moving), device=self.device) < self.cfg.rel_single_axis_envs]
+        if len(chosen) == 0:
+            return
+        shares = torch.tensor(self.cfg.single_axis_shares, dtype=torch.float32, device=self.device)
+        axis = torch.multinomial(shares, len(chosen), replacement=True)
+        low, high = torch.tensor(self.cfg.single_axis_speeds, dtype=torch.float32, device=self.device)[axis].unbind(-1)
+        speed = low + (high - low) * torch.rand(len(chosen), device=self.device)
+        sign = torch.where(torch.rand(len(chosen), device=self.device) < 0.5, -1.0, 1.0)
+        self.vel_command_b[chosen] = 0.0
+        self.vel_command_b[chosen, axis] = sign * speed
+        self.vel_command_w[chosen] = self.vel_command_b[chosen]
+        for flag in (self.is_forward_env, self.is_heading_env, self.is_world_env, self.is_rotation_env):
+            flag[chosen] = False
+
+
+@dataclass(kw_only=True)
+class SingleAxisVelocityCommandCfg(UniformVelocityCommandWithRotationCfg):
+    """Configuration for SingleAxisVelocityCommand."""
+
+    rel_single_axis_envs: float = 0.0
+    single_axis_shares: tuple[float, float, float] = (1 / 3, 1 / 3, 1 / 3)
+    single_axis_speeds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
+        (0.05, 0.3), (0.05, 0.2), (0.2, 0.8))
+
+    def build(self, env: ManagerBasedRlEnv) -> SingleAxisVelocityCommand:
+        return SingleAxisVelocityCommand(self, env)
+
+
+def walk_single_axis_command(command: object) -> SingleAxisVelocityCommandCfg:
+    """Training's twist: ``command``'s fields with no rotation-only environments (the train CLI dropped the
+    velocity task's instance-only ``rel_rotation_envs``, so the walker never trained with them) and
+    WALK_SINGLE_AXIS_FRACTION of the moving commands single-axis and small."""
+    values = {f.name: deepcopy(getattr(command, f.name)) for f in fields(UniformVelocityCommandWithRotationCfg)
+              if f.init and hasattr(command, f.name)}
+    values["rel_rotation_envs"] = 0.0
+    return SingleAxisVelocityCommandCfg(
+        **values,
+        rel_single_axis_envs=WALK_SINGLE_AXIS_FRACTION,
+        single_axis_shares=WALK_SINGLE_AXIS_SHARES,
+        single_axis_speeds=WALK_SINGLE_AXIS_SPEEDS,
     )
 
 
@@ -472,6 +543,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     command.rotation_env_ang_vel_range = (-1.5, 1.5)
     command.rotation_min_ang_vel = 0.5
+
+    # Training adds small single-axis commands (walk_single_axis_command);
+    # play and the judgments write their commands themselves.
+    if not play:
+        cfg.commands["twist"] = walk_single_axis_command(command)
 
     #---------------------------- Events ----------------------------
     # A leaning HOME turns the random reset yaw about world z: mjlab's term
