@@ -158,11 +158,10 @@ class StateTest(unittest.TestCase):
             self.assertEqual(pipeline.inputs("getup"), label)
 
     def test_the_getup_judgment_on_soft_and_slippery_floors(self) -> None:
-        # The fallen starts and the push (the "stand" evaluations) run again on each floor of getup.floors, standing
-        # still on those of getup.stand_still_floors, judged by the rigid floor's lines.
+        # The fallen starts, the push and the tremble (the "stand" evaluations) and standing still run again on each
+        # floor of getup.floors, judged by the rigid floor's lines.
         cfg = load_config(dry=False)
-        floors_cfg, still_floors = cfg["getup"]["floors"], cfg["getup"]["stand_still_floors"]
-        self.assertEqual(still_floors, ["soft_0.05"])
+        floors_cfg = cfg["getup"]["floors"]
         stand = {"fallen_standing_fraction": 0.9, "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_on_clip": 0.02,
                  "final_tilt_deg": 3.0, "push_fell_within_3s": 1, "push_standing_before": 60, "standing_fraction": 0.9}
         commands = []
@@ -174,12 +173,15 @@ class StateTest(unittest.TestCase):
                 floor = json.loads(cmd[cmd.index("--floor") + 1]) if "--floor" in cmd else None
                 if "mjlab_microban.pipeline.stand_still" in cmd:
                     report = Path(cmd[cmd.index("mjlab_microban.pipeline.stand_still") + 4])
-                    report.write_text(json.dumps({"leg_speed_rms_rad_s": 0.2 if floor else 0.05, "worst_delay_ms": 40,
+                    rms = 0.2 if floor == floors_cfg["soft_0.05"] else 0.05
+                    report.write_text(json.dumps({"leg_speed_rms_rad_s": rms, "worst_delay_ms": 40,
                                                   "falls": 0, "judged_envs": 48, "envs": 48, "status": "pass"}))
                     log.write_text("")
                 else:
                     bad = floor == floors_cfg["soft_slippery"]
-                    log.write_text("RESULT " + json.dumps({**stand, "fallen_standing_fraction": 0.5 if bad else 0.9}))
+                    shaking = floor == floors_cfg["slippery_0.3"]
+                    log.write_text("RESULT " + json.dumps({**stand, "fallen_standing_fraction": 0.5 if bad else 0.9,
+                                                           "standing_joint_abs_vel_rad_s": 0.31 if shaking else 0.1}))
                 return 0, log
 
             pipeline = fake_pipeline(Path(directory) / "state")
@@ -192,26 +194,23 @@ class StateTest(unittest.TestCase):
         for name, floor in floors_cfg.items():
             mine = [cmd for cmd in on_floors if json.loads(cmd[cmd.index("--floor") + 1]) == floor]
             modules = [cmd[cmd.index("-m") + 1].rsplit(".", 1)[1] for cmd in mine]
-            self.assertEqual(modules, ["getup_eval"] * 3 + ["stand_still"] * (name in still_floors), name)
+            self.assertEqual(modules, ["getup_eval"] * 3 + ["stand_still"], name)
             self.assertFalse(any("posture" in cmd for cmd in mine))
-        self.assertEqual(len(on_floors), 3 * len(floors_cfg) + len(still_floors))
+        self.assertEqual(len(on_floors), 4 * len(floors_cfg))
         self.assertEqual((list(summary["floors"]), written["summary"]), (list(floors_cfg), summary))
         self.assertEqual(steps.getup_gate_failures(summary, GATE), [])
         failures = steps.getup_floor_failures(summary["floors"], GATE)
         self.assertEqual(failures, ["soft_0.05: standing still: leg speed RMS 0.2 rad/s > 0.15",
+                                    "slippery_0.3: standing tremble 0.31 rad/s > 0.3",
                                     "soft_slippery: fallen-start standing 0.50 < 0.85"])
-        # Each of the four items fails on its own with the rigid floor's line.
+        # Each of the five items fails on its own with the rigid floor's line.
         good = {**summary["floors"]["soft_0.05"], "stand_still_leg_speed_rms_rad_s": 0.05}
         self.assertEqual(steps.getup_floor_failures({"f": good}, GATE), [])
         for key, value in (("min_fallen_standing_fraction", 0.84), ("push_fall_fraction", 0.11),
-                           ("stand_still_leg_speed_rms_rad_s", None), ("stand_still_falls", 1)):
+                           ("standing_joint_abs_vel_rad_s", 0.31), ("stand_still_leg_speed_rms_rad_s", None),
+                           ("stand_still_falls", 1)):
             with self.subTest(key=key):
                 self.assertEqual(len(steps.getup_floor_failures({"f": {**good, key: value}}, GATE)), 1)
-        with tempfile.TemporaryDirectory() as directory:
-            pipeline = fake_pipeline(Path(directory) / "state")
-            pipeline.cfg["getup"]["stand_still_floors"] = ["soft_0.2"]
-            with self.assertRaises(PipelineError):
-                pipeline.getup_judgment(Path("model_1.pt"), "judgment")
 
     def test_a_step_hashes_only_its_own_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

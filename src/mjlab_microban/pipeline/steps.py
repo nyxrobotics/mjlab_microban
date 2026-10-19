@@ -642,9 +642,8 @@ class Pipeline:
             commands.append((eval_name, cmd))
         return commands
 
-    def getup_results(self, checkpoint: Path, name: str, floor: dict[str, float] | None = None,
-                      still: bool = True) -> dict[str, Any]:
-        """The reports of the evaluations and (``still``) standing still, on the rigid floor or on ``floor``."""
+    def getup_results(self, checkpoint: Path, name: str, floor: dict[str, float] | None = None) -> dict[str, Any]:
+        """The reports of the evaluations and standing still, on the rigid floor or on ``floor``."""
 
         results = {}
         for eval_name, cmd in self.getup_commands(checkpoint, floor):
@@ -654,29 +653,24 @@ class Pipeline:
                 raise JobStopped(f"the get-up evaluator {eval_name} wrote no result (rc={rc}, log {log}): not "
                                  "a judgment (rerun to evaluate again)")
             results[eval_name] = last_json_line(text, prefix="RESULT ")
-        if still:
-            results["stand_still"] = self.stand_still("getup", checkpoint,
-                                                      self.state.dir / f"getup_{name}_stand_still.json", floor=floor)
+        results["stand_still"] = self.stand_still("getup", checkpoint, self.state.dir / f"getup_{name}_stand_still.json",
+                                                  floor=floor)
         return results
 
     def getup_judgment(self, checkpoint: Path, name: str) -> dict[str, Any]:
         """The get-up judgment's numbers on the play env's rigid floor and, under ``floors``, on each soft and
-        slippery floor of ``getup.floors`` (pipeline/floors.py): the fallen starts, the push and, on those of
-        ``getup.stand_still_floors``, standing still."""
+        slippery floor of ``getup.floors`` (pipeline/floors.py): the fallen starts, the push, the standing tremble
+        and standing still."""
 
         from mjlab_microban.pipeline.floors import parse
 
         c = self.cfg["getup"]
         floors = c.get("floors") or {}
         parse(floors)
-        still = c.get("stand_still_floors") or []
-        if set(still) - set(floors):
-            raise PipelineError(f"getup.stand_still_floors names no floor of getup.floors: {sorted(set(still) - set(floors))}",
-                                EXIT_INPUT)
         results = self.getup_results(checkpoint, name)
         summary = getup_summary(results)
         if floors:
-            results["floors"] = {floor: self.getup_results(checkpoint, f"{name}_{floor}", floors[floor], floor in still)
+            results["floors"] = {floor: self.getup_results(checkpoint, f"{name}_{floor}", floors[floor])
                                  for floor in floors}
             summary["floors"] = {floor: getup_floor_summary(r) for floor, r in results["floors"].items()}
         (self.state.dir / f"getup_{name}.json").write_text(json.dumps({"summary": summary, "results": results},
@@ -1086,16 +1080,16 @@ def getup_gate_failures(summary: dict[str, float], gate: dict[str, float]) -> li
 
 
 def getup_floor_summary(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """The judged numbers on a soft or slippery floor: fallen-start standing, the push's falls, standing still (when
-    it ran there)."""
+    """The judged numbers on a soft or slippery floor: fallen-start standing, the push's falls, the standing
+    tremble, standing still."""
 
     stand = [results[name] for name in ("stand_s11", "stand_s5", "push_s11")]
     push = results["push_s11"]
-    still = results.get("stand_still")
     return {
         "min_fallen_standing_fraction": min(r["fallen_standing_fraction"] for r in stand),
         "push_fall_fraction": push.get("push_fell_within_3s", 0) / max(1, push.get("push_standing_before", 0)),
-        **({} if still is None else {f"stand_still_{key}": value for key, value in stand_still_summary(still).items()}),
+        "standing_joint_abs_vel_rad_s": max(r["standing_joint_abs_vel_rad_s"] for r in stand),
+        **{f"stand_still_{key}": value for key, value in stand_still_summary(results["stand_still"]).items()},
     }
 
 
@@ -1110,8 +1104,9 @@ def getup_floor_failures(floors: dict[str, dict[str, Any]], gate: dict[str, floa
                             f"{gate['min_fallen_standing_fraction']}")
         if s["push_fall_fraction"] > gate["max_push_fall_fraction"]:
             failures.append(f"{name}: push falls {s['push_fall_fraction']:.2f} > {gate['max_push_fall_fraction']}")
-        if "stand_still_falls" not in s:
-            continue
+        if s["standing_joint_abs_vel_rad_s"] > gate["max_standing_joint_abs_vel_rad_s"]:
+            failures.append(f"{name}: standing tremble {s['standing_joint_abs_vel_rad_s']:.2f} rad/s > "
+                            f"{gate['max_standing_joint_abs_vel_rad_s']}")
         rms = s["stand_still_leg_speed_rms_rad_s"]
         if rms is None or rms > gate["max_stand_still_leg_speed_rms_rad_s"]:
             failures.append(f"{name}: standing still: leg speed RMS {rms} rad/s > "
