@@ -11,6 +11,7 @@
 import numpy as np
 import torch
 from copy import deepcopy
+from dataclasses import dataclass, field, fields
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -69,6 +70,7 @@ from mjlab_microban.tasks.mdp import (
     no_stepping_penalty,
     feet_distance_penalty,
     UniformVelocityCommandWithRotation,
+    UniformVelocityCommandWithRotationCfg,
     reset_root_state_uniform_world_yaw,
     training_floor_and_delay,
     upright as local_upright,
@@ -117,10 +119,7 @@ WALK_COMMAND_RANGES_FINAL = {
 }
 
 # One stage at update 3000: widen the forward and yaw command ranges and
-# penalize standing still on a moving command.  (The command's rotation-env
-# extensions below are instance attributes that the train CLI's config
-# reconstruction drops, so training samples mjlab's UniformVelocityCommand and
-# the stage writes only its fields.)
+# penalize standing still on a moving command.
 WALK_STAGES = (
     Stage(
         "penalize stepping + increase velocity",
@@ -142,6 +141,36 @@ WALK_STAGES = (
 # retrains the walker and PICO only.
 WALK_FLOOR_FRICTION = (0.3, 1.5)
 WALK_ROBOT_FLOOR_FRACTION = 1 / 3
+# Half of the drawn floors (a third of all environments) are hard and
+# slippery: robot.xml's contact (MuJoCo's 0.02 s) with friction 0.3-0.45, a
+# polished floor.  Trained on 7.6% of such floors, the walker fell 6-18 of 90
+# pushed on the judgment's friction 0.3 (2-3 on 0.1 s with 0.3), its loaded
+# soles sliding with the push; these floors alone left 9-14.
+WALK_SLIPPERY_FRICTION = (0.3, 0.45)
+WALK_SLIPPERY_FRACTION = 0.5
+
+
+@requires_model_fields("geom_friction", "geom_solref")
+def slippery_floor_envs(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    fraction: float,
+    friction: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Put ``fraction`` of the environments, chosen at random, on a hard slippery floor: robot.xml's solref
+    (MuJoCo's 0.02 s) and one friction from ``friction`` on every geom of ``asset_cfg``."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    chosen = env_ids[torch.randperm(len(env_ids), device=env.device)[: round(fraction * len(env_ids))]]
+    if len(chosen) == 0:
+        return
+    geoms = env.scene[asset_cfg.name].indexing.geom_ids[asset_cfg.geom_ids].to(torch.long)
+    rows, cols = torch.meshgrid(chosen, geoms, indexing="ij")
+    model = env.sim.model
+    model.geom_solref[rows, cols] = env.sim.get_default_field("geom_solref")[geoms].to(model.geom_solref.dtype)
+    dr.geom_friction(env, chosen, ranges=friction, asset_cfg=asset_cfg, operation="abs", shared_random=True)
 
 
 @requires_model_fields("geom_friction", "geom_solref")
@@ -175,17 +204,96 @@ def robot_floor_envs(
 
 def walk_training_floor_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
     """Training's floors and per-episode goal delay (tasks/mdp.py training_floor_and_delay), with friction from
-    WALK_FLOOR_FRICTION and WALK_ROBOT_FLOOR_FRACTION of the environments on the play env's floor."""
+    WALK_FLOOR_FRICTION, WALK_SLIPPERY_FRACTION of the environments on hard slippery floors and
+    WALK_ROBOT_FLOOR_FRACTION on the play env's floor (each chosen from all environments)."""
     foot = cfg.events["foot_friction"]
     training_floor_and_delay(cfg)
     cfg.events["geom_friction"].params["ranges"] = WALK_FLOOR_FRICTION
     # After the two draws (startup events run in this order).
+    cfg.events["slippery_floor"] = EventTermCfg(
+        func=slippery_floor_envs,
+        mode="startup",
+        params={"fraction": WALK_SLIPPERY_FRACTION, "friction": WALK_SLIPPERY_FRICTION,
+                "asset_cfg": deepcopy(cfg.events["geom_friction"].params["asset_cfg"])},
+    )
     cfg.events["robot_floor"] = EventTermCfg(
         func=robot_floor_envs,
         mode="startup",
         params={"fraction": WALK_ROBOT_FLOOR_FRACTION,
                 "asset_cfg": deepcopy(cfg.events["geom_friction"].params["asset_cfg"]),
                 "sole_cfg": deepcopy(foot.params["asset_cfg"]), "sole_friction": foot.params["ranges"]},
+    )
+
+
+# A fifth of training's moving commands are single-axis and small: forward
+# or backward, left or right, or a turn, the other two axes zero.  Drawn from
+# the box (+-0.7 m/s, +-0.3 m/s, +-1.5 rad/s) a pure lateral command near the
+# judgment's 0.1 m/s (forward below 0.05 m/s, turn below 0.1 rad/s) came about
+# once in 600 commands, and the walker answered 0.1 m/s left or right with
+# 0.01-0.045 m/s (and drifted forward 0.04-0.05 m/s and turned).  Half of the
+# single-axis commands are lateral (the axis that failed; forward, backward
+# and turning answered 2-4 times their lines), so 9% of the commands are pure
+# lateral.  The speeds bracket the judgment's (0.1 m/s lateral, 0.1-0.2 m/s
+# forward and backward, 0.5 rad/s turn) and stay above 0.05 m/s, where
+# standing still already earns 97.5% of the tracking reward.  The other 80%
+# keep the box's diagonal commands that the pushed falls are judged on.
+WALK_SINGLE_AXIS_FRACTION = 0.2
+# Shares of the forward/backward, lateral and turning axes (x, y, yaw).
+WALK_SINGLE_AXIS_SHARES = (0.25, 0.5, 0.25)
+# |speed| ranges of the three axes (m/s, m/s, rad/s); the sign is drawn.
+WALK_SINGLE_AXIS_SPEEDS = ((0.05, 0.3), (0.05, 0.2), (0.2, 0.8))
+
+
+class SingleAxisVelocityCommand(UniformVelocityCommandWithRotation):
+    """The rotation command's sampling, then ``cfg.rel_single_axis_envs`` of the moving (non-standing)
+    resampled environments get one small single-axis command: an axis drawn with ``cfg.single_axis_shares``
+    (x, y, yaw), a speed from that axis's ``cfg.single_axis_speeds`` range, either sign, the other axes zero."""
+
+    cfg: "SingleAxisVelocityCommandCfg"
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        moving = env_ids[~self.is_standing_env[env_ids]]
+        chosen = moving[torch.rand(len(moving), device=self.device) < self.cfg.rel_single_axis_envs]
+        if len(chosen) == 0:
+            return
+        shares = torch.tensor(self.cfg.single_axis_shares, dtype=torch.float32, device=self.device)
+        axis = torch.multinomial(shares, len(chosen), replacement=True)
+        low, high = torch.tensor(self.cfg.single_axis_speeds, dtype=torch.float32, device=self.device)[axis].unbind(-1)
+        speed = low + (high - low) * torch.rand(len(chosen), device=self.device)
+        sign = torch.where(torch.rand(len(chosen), device=self.device) < 0.5, -1.0, 1.0)
+        self.vel_command_b[chosen] = 0.0
+        self.vel_command_b[chosen, axis] = sign * speed
+        self.vel_command_w[chosen] = self.vel_command_b[chosen]
+        for flag in (self.is_forward_env, self.is_heading_env, self.is_world_env, self.is_rotation_env):
+            flag[chosen] = False
+
+
+@dataclass(kw_only=True)
+class SingleAxisVelocityCommandCfg(UniformVelocityCommandWithRotationCfg):
+    """Configuration for SingleAxisVelocityCommand."""
+
+    rel_single_axis_envs: float = 0.0
+    single_axis_shares: tuple[float, float, float] = (1 / 3, 1 / 3, 1 / 3)
+    single_axis_speeds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
+        (0.05, 0.3), (0.05, 0.2), (0.2, 0.8))
+
+    def build(self, env: ManagerBasedRlEnv) -> SingleAxisVelocityCommand:
+        return SingleAxisVelocityCommand(self, env)
+
+
+def walk_single_axis_command(command: object) -> SingleAxisVelocityCommandCfg:
+    """Training's twist: ``command``'s fields with no rotation-only environments (the train CLI dropped the
+    velocity task's instance-only ``rel_rotation_envs``, so the walker never trained with them) and
+    WALK_SINGLE_AXIS_FRACTION of the moving commands single-axis and small."""
+    values = {f.name: deepcopy(getattr(command, f.name)) for f in fields(UniformVelocityCommandWithRotationCfg)
+              if f.init and hasattr(command, f.name)}
+    values["rel_rotation_envs"] = 0.0
+    return SingleAxisVelocityCommandCfg(
+        **values,
+        rel_single_axis_envs=WALK_SINGLE_AXIS_FRACTION,
+        single_axis_shares=WALK_SINGLE_AXIS_SHARES,
+        single_axis_speeds=WALK_SINGLE_AXIS_SPEEDS,
     )
 
 
@@ -293,7 +401,7 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     #---------------------------- Rewards ---------------------------
-    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.1)
+    # Velocity: mjlab's two exp tracking terms, weight 2 each, std sqrt(0.045)
     # and sqrt(0.5), in the HOME-levelled trunk frame
     # (microban_velocity_tracking.py).  A vertical-trunk HOME keeps mjlab's own
     # terms.
@@ -304,7 +412,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ):
             cfg.rewards[name].func = func
             cfg.rewards[name].params["trunk_pitch"] = HOME_TRUNK_PITCH_RAD
-    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.1)
+    # The lateral range (0.3 m/s) is small: at std sqrt(0.1) ignoring a 0.1
+    # m/s command kept 0.905 of the reward and ignoring the full 0.3 kept
+    # 0.41, and the walkers of the refitted servos walked 0.03-0.045 m/s of a
+    # 0.1 m/s sideways command (0.06 for a7c28c8a, which walked on the robot).
+    # std^2 = 0.045 makes ignoring 0.1 m/s cost what half of 0.3 m/s cost at
+    # sqrt(0.1) (reward 0.80); half of 0.3 m/s keeps exp(-0.5), none exp(-2).
+    cfg.rewards["track_linear_velocity"].params["std"] = np.sqrt(0.045)
     cfg.rewards["track_linear_velocity"].weight = 2.0
 
     cfg.rewards["track_angular_velocity"].params["std"] = np.sqrt(0.5)
@@ -386,8 +500,14 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     del cfg.rewards["soft_landing"]
 
+    # A sole's horizontal speed while in contact, squared.  At -1.0 it was
+    # 1% of the tracking reward (a 30 cm robot's soles move slowly): the
+    # walker of the refitted servos kept its loaded soles moving (p90 0.11
+    # m/s on high friction; 0.03 for the walker that walked on the robot,
+    # a7c28c8a on its servo model) and, pushed on a hard floor of friction
+    # 0.3, slid with the push and fell (6-18 of 90).
     cfg.rewards["foot_slip"].params["command_threshold"] = walking_threshold
-    cfg.rewards["foot_slip"].weight = -1.0
+    cfg.rewards["foot_slip"].weight = -10.0
 
     cfg.rewards["action_rate_l2"].weight = -0.1
 
@@ -423,6 +543,11 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     command.rotation_env_ang_vel_range = (-1.5, 1.5)
     command.rotation_min_ang_vel = 0.5
+
+    # Training adds small single-axis commands (walk_single_axis_command);
+    # play and the judgments write their commands themselves.
+    if not play:
+        cfg.commands["twist"] = walk_single_axis_command(command)
 
     #---------------------------- Events ----------------------------
     # A leaning HOME turns the random reset yaw about world z: mjlab's term
@@ -470,9 +595,9 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     # Training's soft and slippery floors and per-episode goal delay, with
-    # friction from 0.3 and a third of the environments on the play env's
-    # floor (walk_training_floor_and_delay); play and the judgments keep the
-    # robot's.  PICO inherits this config.
+    # friction from 0.3, a third of the environments on hard slippery floors
+    # and a third on the play env's floor (walk_training_floor_and_delay);
+    # play and the judgments keep the robot's.  PICO inherits this config.
     if not play:
         walk_training_floor_and_delay(cfg)
 
@@ -558,6 +683,25 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
+# Weight of the left-right mirror loss (microban_velocity_mirror).
+WALK_MIRROR_LOSS_COEFF = 1.0
+
+
+@dataclass
+class WalkMirrorLossCfg:
+    """rsl_rl's ``symmetry_cfg``: the mirror loss over the 18 outputs, no mirrored samples."""
+
+    use_data_augmentation: bool = False
+    use_mirror_loss: bool = True
+    mirror_loss_coeff: float = WALK_MIRROR_LOSS_COEFF
+    data_augmentation_func: str = "mjlab_microban.tasks.microban_velocity_mirror:mirror_augmentation"
+
+
+@dataclass
+class WalkPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    symmetry_cfg: WalkMirrorLossCfg = field(default_factory=WalkMirrorLossCfg)
+
+
 MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
@@ -574,7 +718,7 @@ MicrobanVelocityRlCfg = RslRlOnPolicyRunnerCfg(
         activation="elu",
         obs_normalization=True,
     ),
-    algorithm=RslRlPpoAlgorithmCfg(
+    algorithm=WalkPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,

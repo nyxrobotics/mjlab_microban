@@ -16,6 +16,7 @@ from mjlab_microban.tasks.curriculum import (
     resume_run,
 )
 from mjlab_microban.tasks.microban_getup_runner import getup_home_pose, home_pose_stamps_match
+from mjlab_microban.tasks.microban_velocity_mirror import check_walk_mirror_layout
 
 # Checkpoint marker: the full training HOME (joints, root position and root
 # quaternion), in the same JSON-safe form as get-up's microban_getup_home_pose.
@@ -48,10 +49,13 @@ def require_walk_checkpoint_home_stamp(path: str | Path) -> None:
 
 
 class MicrobanVelocityOnPolicyRunner(VelocityOnPolicyRunner):
-    """mjlab's velocity runner plus the update clock, the HOME stamp on save and its check on load."""
+    """mjlab's velocity runner plus the update clock, the mirror's layout check, the HOME stamp on save and its
+    check on load."""
 
     def __init__(self, env, train_cfg: dict, *args, **kwargs) -> None:
         bind_update_clock(env.unwrapped, int(train_cfg["num_steps_per_env"]))
+        if train_cfg["algorithm"].get("symmetry_cfg"):
+            check_walk_mirror_layout(env.unwrapped)
         super().__init__(env, train_cfg, *args, **kwargs)
 
     def save(self, path: str, infos=None) -> None:
