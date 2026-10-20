@@ -18,7 +18,8 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import MISSING, fields, replace
 
-from mjlab.envs import ManagerBasedRlEnvCfg
+import torch
+from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -231,6 +232,31 @@ MICROBAN_TELEOP_FINAL_SIGNED_AXIS_RANGES = {
     "yaw_left": (0.40, 3.00),
     "yaw_right": (-3.00, -0.40),
 }
+
+
+# A joint's raw output past the +-pi target clip moves nothing, so only the
+# last-action observation feeds it back; with a gain above one it winds up.
+# At update 1000 (arms and HMD moving) left_hip_yaw's raw output in one of
+# 1024 envs grew 38x per step to 1e17 (step reward -1.6e33) with the joints,
+# trunk and contacts at ordinary values, and two PICO runs broke (value loss
+# inf, a non-finite actor, at updates 1065 and 1159).  Ordinary raw outputs
+# reach 9.8 (1024 envs x 1500 steps).  Training ends an env whose raw output
+# passes PICO_RAW_ACTION_LIMIT (the robot stops PICO when an output leaves its
+# recorded envelope) and charges the action rate on outputs held to it, so
+# the step that runs away costs an ordinary penalty.
+PICO_RAW_ACTION_LIMIT = 15.0
+
+
+def raw_action_runaway(env: ManagerBasedRlEnv, limit: float) -> torch.Tensor:
+    """An env with a raw policy output past ``limit``."""
+    return env.action_manager.action.abs().amax(dim=-1) > limit
+
+
+def held_action_rate_l2(env: ManagerBasedRlEnv, limit: float) -> torch.Tensor:
+    """mjlab's action_rate_l2 on the raw outputs held to +-``limit`` (unchanged below it)."""
+    action = env.action_manager.action.clamp(-limit, limit)
+    previous = env.action_manager.prev_action.clamp(-limit, limit)
+    return torch.square(action - previous).sum(dim=1)
 
 
 def _materialize_rotation_command_cfg(
@@ -642,14 +668,18 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
 
     if not play:
-        # The get-up's guards: on the soft and slippery floors one PICO training
-        # env ran away (value loss 1.5e10 at update 1159, then a non-finite
-        # actor); an unphysical joint speed ends the env before it poisons the
-        # batch, and a NaN one is reset instead of aborting the run.
+        # The get-up's guards (an unphysical joint speed ends the env before it
+        # poisons the batch, a NaN one is reset instead of aborting the run) and
+        # the raw-output runaway guard (PICO_RAW_ACTION_LIMIT).
         cfg.terminations["nan_detection"] = TerminationTermCfg(func=envs_mdp.nan_detection)
         cfg.terminations["extreme_joint_velocity"] = TerminationTermCfg(
             func=extreme_joint_velocity, params={"max_joint_vel": 50.0}
         )
+        cfg.terminations["raw_action_runaway"] = TerminationTermCfg(
+            func=raw_action_runaway, params={"limit": PICO_RAW_ACTION_LIMIT}
+        )
+        cfg.rewards["action_rate_l2"].func = held_action_rate_l2
+        cfg.rewards["action_rate_l2"].params = {"limit": PICO_RAW_ACTION_LIMIT}
 
     if play:
         # Deterministic neutral keypoints by default.  A live/specialized player
