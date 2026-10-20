@@ -127,11 +127,25 @@ getup:
   # 0.022 against 0.026, 0.174 against 0.174) and the posture evaluation
   # (fallen starts without IMU delay and noise standing at 0.80; the stand
   # evaluations' fallen starts, with them, are judged here at 0.85).
+  # Floors up to 0.05 s (a carpet's few mm under the robot's weight): on the
+  # 0.1 s floor (near 1 cm, a thick foam mat) the get-up stands up from every
+  # fallen start but 5-6 % of its stands fall within 1-3 s (240 environments,
+  # 15-40 ms: 12, 12 and 14 after updates 18000-21999 of four fixes), against
+  # 0-2 of 240 on the floors below (2026-10-20, with the user: the floors a
+  # get-up trained on general rewards converges on, not the severe ones).
+  # Training keeps drawing 0.02-0.1 s.
   floors:
     soft_0.05: {time_constant_s: 0.05}
-    soft_0.1: {time_constant_s: 0.1}
     slippery_0.3: {friction: 0.3}
-    soft_slippery: {time_constant_s: 0.1, friction: 0.3}
+    soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+  # Standing still counts the get-up's falls right after it stands, a rare
+  # event: judged as a rate over 360 environments per floor (15 per delay and
+  # friction), at most the walker's unpushed line, 1 in 90 (4).  The get-up
+  # with the fixes (update 21999) falls 2, 0, 1 and 2 times in 240 (rigid,
+  # 0.05 s, 0.3, both); the get-up on the robot (e115a8cd, its servo model)
+  # 6 of 48 on the rigid floor.  At 0 falls in 48 a get-up falling once in
+  # 200 fails one floor in five; at 4 in 360, one in 28.
+  stand_still: {reps: 15, max_falls: 4}
 
 # Standing still (pipeline/stand_still.py), a judgment of every policy: the
 # walker and PICO stand at HOME on a zero command, the get-up from a fallen
@@ -180,4 +194,5 @@ dry:
     stage_tolerance: 3
     eval_envs: 16
     eval_steps: 150
+    stand_still: {reps: 1}
   stand_still: {reps: 1}

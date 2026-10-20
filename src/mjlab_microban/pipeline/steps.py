@@ -450,7 +450,7 @@ class Pipeline:
         with ``time_constants`` (s) on these soft floors in place of the rigid one; with ``floor`` (one of
         ``getup.floors``) on that floor."""
 
-        c = self.cfg["stand_still"]
+        c = stand_still_config(self.cfg, kind)
         report.unlink(missing_ok=True)
         soft = ["--time-constants", ",".join(str(t) for t in time_constants)] if time_constants else []
         name = f"{kind}_stand_still{'_soft' if soft else ''}"
@@ -650,7 +650,7 @@ class Pipeline:
         final = self.train("getup", GETUP_EXP, label, c["task"], self.sched["getup_total"], c["envs"],
                            ["--agent.save-interval", str(c["save_interval"])])
         summary = self.getup_judgment(final, "judgment")
-        gate = {**c["gate"], **stand_still_lines(self.cfg["stand_still"])}
+        gate = {**c["gate"], **stand_still_lines(stand_still_config(self.cfg, "getup"))}
         failures = getup_gate_failures(summary, gate) + getup_floor_failures(summary.get("floors", {}), gate)
         if failures and not self.dry:
             raise PipelineError(f"get-up judgment failed for {final.parent.name}/{final.name}: {failures} "
@@ -1160,6 +1160,12 @@ def stand_still_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {"leg_speed_rms_rad_s": None if rms is None else round(rms, 4),
             "worst_delay_ms": result["worst_delay_ms"], "falls": result["falls"],
             "judged_envs": result["judged_envs"], "envs": result["envs"]}
+
+
+def stand_still_config(cfg: dict[str, Any], kind: str) -> dict[str, Any]:
+    """config/pipeline.yaml ``stand_still`` for ``kind`` (walk, pico, getup), with its own ``stand_still`` keys."""
+
+    return {**cfg["stand_still"], **((cfg.get(kind) or {}).get("stand_still") or {})}
 
 
 def stand_still_lines(c: dict[str, Any]) -> dict[str, Any]:

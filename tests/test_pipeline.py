@@ -15,7 +15,8 @@ from unittest import mock
 from mjlab_microban.pipeline import core, steps
 from mjlab_microban.pipeline.core import PipelineError, State, hash_inputs, is_training_command, load_config
 
-GATE = {**load_config(dry=False)["getup"]["gate"], **steps.stand_still_lines(load_config(dry=False)["stand_still"])}
+GATE = {**load_config(dry=False)["getup"]["gate"],
+        **steps.stand_still_lines(steps.stand_still_config(load_config(dry=False), "getup"))}
 
 
 def fake_pipeline(state_dir: Path) -> steps.Pipeline:
@@ -172,7 +173,11 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 
         cfg = load_config(dry=False)
-        self.assertEqual(floors.parse(cfg["getup"]["floors"]), floors.parse(cfg["walk"]["judgment"]["floors"]))
+        # A soft, a slippery and a soft-and-slippery floor, up to 0.05 s (where the get-up's stands hold).
+        judged_floors = floors.parse(cfg["getup"]["floors"])
+        self.assertEqual(sorted(judged_floors.values(), key=str),
+                         sorted(floors.parse({"a": {"time_constant_s": 0.05}, "b": {"friction": 0.3},
+                                              "c": {"time_constant_s": 0.05, "friction": 0.3}}).values(), key=str))
         play = make_microban_getup_env_cfg(play=True)
         judged = make_microban_getup_env_cfg(play=True)
         judged.scene.num_envs = 2
@@ -240,6 +245,12 @@ class StateTest(unittest.TestCase):
             self.assertEqual(modules, ["getup_eval"] * 3 + ["stand_still"], name)
             self.assertFalse(any("posture" in cmd for cmd in mine))
         self.assertEqual(len(on_floors), 4 * len(floors_cfg))
+        # The get-up's standing still: 360 environments per floor, at most 4 falls (1 in 90).
+        still = [cmd for cmd in commands if "mjlab_microban.pipeline.stand_still" in cmd]
+        self.assertEqual(len(still), 1 + len(floors_cfg))
+        for cmd in still:
+            self.assertEqual((cmd[cmd.index("--reps") + 1], cmd[cmd.index("--max-falls") + 1]), ("15", "4"))
+        self.assertEqual(GATE["max_stand_still_falls"], 4)
         self.assertEqual((list(summary["floors"]), written["summary"]), (list(floors_cfg), summary))
         self.assertEqual(steps.getup_gate_failures(summary, GATE), [])
         failures = steps.getup_floor_failures(summary["floors"], GATE)
@@ -251,7 +262,7 @@ class StateTest(unittest.TestCase):
         self.assertEqual(steps.getup_floor_failures({"f": good}, GATE), [])
         for key, value in (("min_fallen_standing_fraction", 0.84), ("push_fall_fraction", 0.11),
                            ("standing_joint_abs_vel_rad_s", 0.31), ("stand_still_leg_speed_rms_rad_s", None),
-                           ("stand_still_falls", 1)):
+                           ("stand_still_falls", GATE["max_stand_still_falls"] + 1)):
             with self.subTest(key=key):
                 self.assertEqual(len(steps.getup_floor_failures({"f": {**good, key: value}}, GATE)), 1)
 
@@ -514,7 +525,8 @@ class JudgmentTest(unittest.TestCase):
         for key, value in (("min_fallen_standing_fraction", 0.8), ("push_fall_fraction", 0.2),
                            ("standing_joint_abs_vel_rad_s", 0.4), ("standing_targets_on_clip", 0.06),
                            ("posture_standing_fraction", 0.7), ("stand_still_leg_speed_rms_rad_s", 0.3),
-                           ("stand_still_leg_speed_rms_rad_s", None), ("stand_still_falls", 1)):
+                           ("stand_still_leg_speed_rms_rad_s", None),
+                           ("stand_still_falls", GATE["max_stand_still_falls"] + 1)):
             with self.subTest(key=key):
                 self.assertEqual(len(steps.getup_gate_failures({**good, key: value}, GATE)), 1)
 
