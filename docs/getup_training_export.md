@@ -47,15 +47,18 @@ The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
 | 0-2499 | HOME-stance rewards, pose curriculum (reward-driven), no IMU latency, entropy 0.01 | learns to stand first; with the delay from the first update it learns to stand far later |
 | 2500-3999 | + 0-3 tick IMU latency (the actor's delay buffers are allocated for 3 ticks and held at 0 before) | stands under the IMU latency of the evaluation and the robot |
 | 4000-9999 | refine: action std 0.5, fresh Adam moments, learning rate back to 1e-3, entropy 0.001 (runner); calm terms: standing joint velocity -4, roll pose (hip/ankle roll, 8.6 deg std) 60, feet width x3, clip barrier -0.2 | calms the standing tremble; otherwise the stance is held by bang-bang targets under a large action std |
-| 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0 (no pushes) | the arms let go of the shoulder_roll stops and the clip excess and target error level off within the stage |
+| 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2 and clip barrier -2.0 while both feet touch the floor (otherwise the barrier stays -0.2; no pushes) | the arms let go of the shoulder_roll stops and the clip excess and target error level off within the stage |
 | 15000-17999 | push: +-0.3 m/s kicks every 3-6 s | the effort terms cost push tolerance; with pushes from the effort switch on, one arm stays pressed into its stop |
 
 Every update trains on one floor per environment (contact time constant
-0.02-0.1 s and friction 0.15-1.5 on every collision geom: the get-up lies on
-its hands, knees and back) and one servo-goal delay per episode (3-8 physics
-steps; `tasks/mdp.py` `training_floor_and_delay`).  Walking and PICO train on
-these floors with friction 0.3-1.5, a third of their environments on hard
-slippery floors (0.02 s, friction 0.3-0.45) and a third on the play floor.
+0.02-0.1 s, on the odd environments 0.06-0.1 s, and friction 0.15-1.5 on every
+collision geom: the get-up lies on its hands, knees and back) and one
+servo-goal delay per episode (3-9 physics steps, 15-40 ms in effect;
+`tasks/mdp.py` `training_floor_and_delay` and `getup_floor_and_delay` in
+`microban_getup_env_cfg.py`).  Walking and PICO train on training's floors
+(0.02-0.1 s) with friction 0.3-1.5, a third of their environments on hard
+slippery floors (0.02 s, friction 0.3-0.45), a third on the play floor, and
+3-8 steps.
 The evaluation / play config keeps the 0-3 tick latency and no schedule, the
 rigid floor, the soles' friction 0.3-1.2 and the robot's 3-6-step goal delay.
 A run that stops before its last update is trained again from scratch
