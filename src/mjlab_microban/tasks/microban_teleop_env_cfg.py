@@ -19,12 +19,14 @@ from copy import deepcopy
 from dataclasses import MISSING, fields, replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
@@ -36,6 +38,7 @@ from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
 from mjlab_microban.schedules import PICO_SCHEDULE
 from mjlab_microban.tasks.mdp import (
     UniformVelocityCommandWithRotationCfg,
+    extreme_joint_velocity,
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
@@ -637,6 +640,16 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=StagedCurriculum, params={"stages": TELEOP_STAGES}
         )
     }
+
+    if not play:
+        # The get-up's guards: on the soft and slippery floors one PICO training
+        # env ran away (value loss 1.5e10 at update 1159, then a non-finite
+        # actor); an unphysical joint speed ends the env before it poisons the
+        # batch, and a NaN one is reset instead of aborting the run.
+        cfg.terminations["nan_detection"] = TerminationTermCfg(func=envs_mdp.nan_detection)
+        cfg.terminations["extreme_joint_velocity"] = TerminationTermCfg(
+            func=extreme_joint_velocity, params={"max_joint_vel": 50.0}
+        )
 
     if play:
         # Deterministic neutral keypoints by default.  A live/specialized player
