@@ -599,13 +599,19 @@ class Pipeline:
             self.jobs.run(f"pico_judgment_{name}", cmd, "eval", env=self.env, check=False)
         self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still.json"))
         failures = self.pico_failures(prefix) + self.pico_floor_judgment(checkpoint, prefix)
-        passed = not failures
+        waiver = self.cfg["pico"].get("tracking_waiver") or {}
+        waived = waived_failures(failures, waiver)
+        passed = len(waived) == len(failures)
         if passed:
+            rigid = sorted({failure.split(":", 1)[1] for failure in waived if failure.startswith("tracking:")})
             capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_stage", "create", str(checkpoint),
                      f"{prefix}_9x300.json", f"{prefix}_tracking.json", f"{prefix}_onnx.json",
-                     f"{prefix}_gate.json", "--force"], env=self.env, check=True, timeout=1800)
+                     f"{prefix}_gate.json", "--force",
+                     *(["--waive-tracking-checks", ",".join(rigid), "--waiver-note", waiver["note"]] if rigid else [])],
+                    env=self.env, check=True, timeout=1800)
         self.log(f"PICO judgment of {checkpoint.parent.name}/{checkpoint.name}: "
-                 + ("PASS" if passed else f"FAIL {failures}"))
+                 + ((f"PASS with the tracking waiver of {waived}" if waived else "PASS") if passed
+                    else f"FAIL {failures}"))
         return str(prefix), passed, failures
 
     def pico_floor_judgment(self, checkpoint: Path, prefix: Path) -> list[str]:
@@ -1160,6 +1166,33 @@ def stand_still_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {"leg_speed_rms_rad_s": None if rms is None else round(rms, 4),
             "worst_delay_ms": result["worst_delay_ms"], "falls": result["falls"],
             "judged_envs": result["judged_envs"], "envs": result["envs"]}
+
+
+# The PICO tracking checks config/pipeline.yaml ``pico.tracking_waiver`` may waive: accuracy only, never a fall, a
+# step, a standing or walking check or a safety check (teleop_v12_stage records the waiver in the gate and the robot
+# shows it).
+PIPELINE_WAIVABLE_TRACKING_CHECKS = ("foot_error",)
+
+
+def waived_failures(failures: list[str], waiver: dict[str, Any]) -> list[str]:
+    """The PICO judgment failures ``waiver`` covers: a tracking check of the rigid floor or of a judged floor
+    (``tracking:<check>``, ``<floor>_tracking:<check>``) it names."""
+
+    checks = set(waiver.get("checks") or [])
+    if not checks:
+        return []
+    if not str(waiver.get("note") or "").strip():
+        raise PipelineError("pico.tracking_waiver needs a note recording on what it was decided", EXIT_INPUT)
+    unknown = sorted(checks - set(PIPELINE_WAIVABLE_TRACKING_CHECKS))
+    if unknown:
+        raise PipelineError(f"pico.tracking_waiver can waive only {list(PIPELINE_WAIVABLE_TRACKING_CHECKS)}, not "
+                            f"{unknown}", EXIT_INPUT)
+    covered = []
+    for failure in failures:
+        source, _, check = failure.rpartition(":")
+        if check in checks and (source == "tracking" or source.endswith("_tracking")):
+            covered.append(failure)
+    return covered
 
 
 def stand_still_config(cfg: dict[str, Any], kind: str) -> dict[str, Any]:

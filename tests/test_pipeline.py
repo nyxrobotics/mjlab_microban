@@ -520,6 +520,48 @@ class ConfigTest(unittest.TestCase):
 
 
 class JudgmentTest(unittest.TestCase):
+    def test_pico_tracking_waiver_covers_accuracy_only(self) -> None:
+        failures = ["tracking:foot_error", "soft_0.05_tracking:foot_error", "slippery_0.3_tracking:push_falls"]
+        waiver = {"checks": ["foot_error"], "note": "why"}
+        self.assertEqual(steps.waived_failures(failures, waiver), failures[:2])
+        self.assertEqual(steps.waived_failures(failures, {}), [])
+        self.assertEqual(steps.waived_failures(["9x300:foot_error"], waiver), [])  # only the tracking reports
+        for broken in ({"checks": ["foot_error"], "note": " "}, {"checks": ["push_falls"], "note": "why"},
+                       {"checks": ["foot_error", "no_falls_without_push"], "note": "why"}):
+            with self.subTest(broken=broken), self.assertRaises(PipelineError):
+                steps.waived_failures(failures, broken)
+
+    def test_pico_gate_records_the_waiver_of_the_rigid_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.env, pipeline.log = {}, lambda message: None
+            pipeline.cfg = {**pipeline.cfg, "pico": {**pipeline.cfg["pico"],
+                                                     "tracking_waiver": {"checks": ["foot_error"], "note": "why"}}}
+            pipeline.jobs = SimpleNamespace(run=lambda *a, **k: (0, None))
+            pipeline.stand_still = lambda *a, **k: None
+            created = []
+            checkpoint = Path(directory) / "run" / "model_9.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.write_bytes(b"pico")
+            for failures, passed, flags in (
+                (["tracking:foot_error", "soft_0.05_tracking:foot_error"], True,
+                 ["--waive-tracking-checks", "foot_error", "--waiver-note", "why"]),
+                (["soft_0.05_tracking:foot_error"], True, []),
+                (["tracking:foot_error", "tracking:push_falls"], False, None),
+            ):
+                created.clear()
+                with mock.patch.object(steps, "capture", lambda cmd, **k: created.append(cmd)), \
+                        mock.patch.object(pipeline, "pico_failures", lambda prefix: [f for f in failures if
+                                                                                     f.startswith("tracking:")]), \
+                        mock.patch.object(pipeline, "pico_floor_judgment", lambda c, prefix: [
+                            f for f in failures if not f.startswith("tracking:")]):
+                    _, result, reported = pipeline.pico_judgment(checkpoint)
+                self.assertEqual((result, reported), (passed, failures))
+                if flags is None:
+                    self.assertEqual(created, [])
+                else:
+                    self.assertEqual(created[0][created[0].index("--force") + 1:], flags)
+
     def test_getup_gate(self) -> None:
         good = {"min_fallen_standing_fraction": 0.9, "push_fall_fraction": 0.05,
                 "standing_joint_abs_vel_rad_s": 0.1, "standing_targets_on_clip": 0.03,
