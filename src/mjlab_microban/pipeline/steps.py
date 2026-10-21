@@ -482,11 +482,26 @@ class Pipeline:
             shutil.copytree(checkpoint.parent / "params", dest_dir / "params")
         return dest
 
+    @staticmethod
+    def walker_receipt(walker: Path) -> Path:
+        """Where the PICO entry probe of ``walker`` writes its receipt."""
+
+        return PROBE_ROOT / f"velocity_{sha256(walker)[:16]}_teleop81_arm_overlay_9x300.json"
+
+    def walker_probe_record(self, walker: Path) -> dict[str, Any] | None:
+        """The entry probe ``walker``'s PICO runs were bootstrapped on, from its receipt (None: no receipt)."""
+
+        receipt = self.walker_receipt(walker)
+        if not receipt.is_file():
+            return None
+        return {**probe_verdict(json.loads(receipt.read_text())), "receipt": str(receipt),
+                "receipt_sha256": sha256(receipt)}
+
     def walker_probe(self, walker: Path) -> Path:
         """The 9x300 source probe of the walker in the PICO env (seed 42); the PICO entry gate."""
 
         digest = sha256(walker)
-        receipt = PROBE_ROOT / f"velocity_{digest[:16]}_teleop81_arm_overlay_9x300.json"
+        receipt = self.walker_receipt(walker)
         PROBE_ROOT.mkdir(parents=True, exist_ok=True)
         self.jobs.run("probe_walker", [*UV, "python", "-m",
                                         "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
@@ -542,6 +557,12 @@ class Pipeline:
                      "--agent.legacy-teleop-probe-receipt", str(receipt),
                      "--agent.legacy-teleop-probe-receipt-sha256", receipt_sha,
                      "--agent.save-pristine-checkpoint", "True"]
+        elif "walker_probe" not in self.state.step("pico"):
+            # A run trained (or training) already: the entry probe it was bootstrapped on.
+            record = self.walker_probe_record(walker)
+            if record is not None:
+                self.state.step("pico")["walker_probe"] = record
+                self.state.save()
         final = self.train("pico", PICO_EXP, label, c["task"], total, c["envs"],
                            ["--agent.num-steps-per-env", "24", "--agent.save-interval", str(c["save_interval"])],
                            fresh_extra=fresh)
@@ -763,7 +784,8 @@ class Pipeline:
         """The walk and get-up judgments as their exporters check them (policy_contract.gate_report)."""
 
         steps = self.state.data["steps"]
-        walk_probe = steps["pico"].get("walker_probe") or {}
+        walk_probe = (steps["pico"].get("walker_probe")
+                      or self.walker_probe_record(Path(steps["walk"]["outputs"]["checkpoint"])) or {})
         evidence = {
             "walk": {"passed": bool(steps["walk"]["outputs"]["passed"]) and bool(walk_probe.get("ok")),
                      "summary": steps["walk"]["outputs"]["summary"],
