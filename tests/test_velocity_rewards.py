@@ -44,7 +44,7 @@ WALK_REWARD_WEIGHTS = {
 }
 PICO_ONLY_REWARD_WEIGHTS = {
     "action_rate_l2": -0.1, "dof_pos_limits": -10.0, "feet_distance": -100.0, "foot_slip": -1.0,
-    "foot_target_tracking": 1.0, "joint_soft_limit_guard": -5.0, "lifted_support_feet": 0.0,
+    "foot_target_tracking": 1.0, "joint_soft_limit_guard": -5.0, "raw_target_clip_excess": -5.0, "lifted_support_feet": 0.0,
     "upper_foot_lift": 0.0, "support_zmp": 0.0,
     "track_linear_velocity": 5.0, "commanded_planar_velocity_progress": 2.0,
     "linear_velocity_error_l1": -16.0, "yaw_velocity_error_l1": -1.0,

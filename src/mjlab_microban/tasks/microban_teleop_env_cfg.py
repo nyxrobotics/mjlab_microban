@@ -63,6 +63,7 @@ from mjlab_microban.tasks.microban_teleop_mdp import (
     PicoArmTargetMotion,
     arm_target_rel,
     normalized_joint_soft_limit_guard_l1_sum,
+    normalized_target_clip_excess_l1_sum,
 )
 from mjlab_microban.tasks.microban_teleop_foot_command import StationaryFootTargetCommandCfg
 from mjlab_microban.tasks.microban_teleop_velocity_rewards import (
@@ -555,6 +556,16 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "margin_ratio": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_MARGIN_RATIO,
             "lookahead_s": MICROBAN_TELEOP_JOINT_LIMIT_GUARD_LOOKAHEAD_S,
         },
+    )
+    # The servo goal range (+-pi) ends before a hip yaw's soft range
+    # (-60..240 deg), so the soft-limit guard above never sees a hip-yaw target
+    # past the clip, where the joint stops following and its raw output winds
+    # up on the last-action observation (raw_action_runaway).  The get-up's
+    # clip barrier, at the guard's weight, charges the target past +-pi.
+    cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
+        func=normalized_target_clip_excess_l1_sum,
+        weight=-5.0,
+        params={"action_name": "joint_pos"},
     )
     # The walker's action-rate weight.  The actor is the frozen walker plus a
     # residual, and the term sees their sum: at -0.02 (a fifth of the
