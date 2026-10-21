@@ -76,12 +76,17 @@ pico:
   # -0.010).  No PICO keeps the tracking lines on the rigid floor yet (v13c
   # fails five of them); on these floors they are the same.  v13c stands
   # still on 0.05 s and 0.1 s at 0.023 and 0.022 rad/s, no falls.
+  # Floors up to 0.05 s, as the get-up's (2026-10-21, with the user: judge
+  # the floors a policy on general rewards converges on, not the severe
+  # ones; training keeps 0.02-0.1 s).  On 0.1 s the PICO run from scratch
+  # (34859f41, update 14999) falls 13 times without a push in 6016 runs
+  # (27 with friction 0.3) and 30 % of its crouched pushes; on 0.05 s and
+  # friction 0.3 none without a push.
   judgment:
     floors:
       soft_0.05: {time_constant_s: 0.05}
-      soft_0.1: {time_constant_s: 0.1}
       slippery_0.3: {friction: 0.3}
-      soft_slippery: {time_constant_s: 0.1, friction: 0.3}
+      soft_slippery: {time_constant_s: 0.05, friction: 0.3}
 
 getup:
   task: Mjlab-Getup-Microban

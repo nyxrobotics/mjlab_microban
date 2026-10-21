@@ -122,9 +122,10 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.scripts import evaluate_teleop_v12_tracking as tracking
 
         cfg = load_config(dry=False)
-        # PICO trains on walking's floors and is judged on walking's judged floors.
+        # PICO trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s.
         floors = cfg["pico"]["judgment"]["floors"]
-        self.assertEqual(floors, cfg["walk"]["judgment"]["floors"])
+        self.assertEqual(floors, cfg["getup"]["floors"])
+        self.assertTrue(all(f.get("time_constant_s", 0.02) <= 0.05 for f in floors.values()))
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
             pipeline.env = {}
@@ -133,7 +134,7 @@ class StateTest(unittest.TestCase):
             def run(name, cmd, kind, **_):  # the evaluators write their own checks (the rigid floor's lines)
                 ran.append(cmd)
                 output = Path(cmd[cmd.index("--output") + 1])
-                bad = output.name.endswith("soft_0.1_tracking.json")
+                bad = output.name.endswith("soft_slippery_tracking.json")
                 output.write_text(json.dumps({"status": "fail" if bad else "pass", "checks": {"push_falls": not bad}}))
 
             def stand_still(kind, checkpoint, report, time_constants=None):
@@ -145,10 +146,10 @@ class StateTest(unittest.TestCase):
             checkpoint = Path(directory) / "model_9.pt"
             checkpoint.write_bytes(b"pico")
             prefix = Path(directory) / "run_model_9"
-            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), ["soft_0.1_tracking:push_falls"])
+            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), ["soft_slippery_tracking:push_falls"])
             self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in ran[:-1]],
                              [floor for floor in floors.values() for _ in range(2)])
-            self.assertEqual(ran[-1], ["stand_still", "pico", [0.05, 0.1]])
+            self.assertEqual(ran[-1], ["stand_still", "pico", [0.05]])
             Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
             with self.assertRaises(core.JobStopped):  # a report not written is no judgment
                 pipeline.pico_failures(prefix, ("slippery_0.3_9x300",))
