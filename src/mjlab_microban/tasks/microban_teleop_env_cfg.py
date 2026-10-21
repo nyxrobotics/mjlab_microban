@@ -83,12 +83,12 @@ MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
 # The foot stage's single-foot targets: 60 % of the foot targets, 85 % of them
 # with a standing twist.  The command draws the single-foot rows first and
 # rel_both_feet_envs then turns its share of all rows into both-feet targets,
-# so 0.6 x 0.95 x 0.85 = 48 % of the samples train a standing single-foot
+# so 0.7 x 0.9 x 0.85 = 54 % of the samples train a standing single-foot
 # target at full weight (46 % from the tighten stage's 0.1; it was 0.3 x 0.5:
 # 15 %).  Resumed at update 4000 of a 1e-4 run, the unload reward grew 8 % in
 # 200 updates with these shares and 33 % with the learning rate also tripled
 # (MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE).
-PICO_SINGLE_SUPPORT_ENV_SHARE = 0.6
+PICO_SINGLE_SUPPORT_ENV_SHARE = 0.7
 PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY = 0.85
 # The lifted-support-feet penalty (mdp.lifted_support_feet) on a standing
 # command, per foot that should be down and is in the air (mjlab multiplies by
@@ -331,7 +331,7 @@ TELEOP_STAGES = (
             # microban_teleop_foot_command.py).
             Setting("command", "foot_target", "single_support_stationary_probability",
                     PICO_SINGLE_SUPPORT_STATIONARY_PROBABILITY),
-            Setting("command", "foot_target", "rel_both_feet_envs", 0.05),
+            Setting("command", "foot_target", "rel_both_feet_envs", 0.1),
         ),
     ),
     Stage(
@@ -344,7 +344,12 @@ TELEOP_STAGES = (
             Setting(
                 "reward", "foot_target_tracking", "params.std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
             ),
-            Setting("command", "foot_target", "rel_both_feet_envs", 0.1),
+            # Twice the crouches of the first runs (0.05, then 0.1; the single-foot
+            # share 0.6 -> 0.7 keeps half the samples on one foot standing, the
+            # rows without a foot target 36 -> 24 %): PICO with the clip barrier
+            # (7de607ab) falls in 3.7-5.9 % of its crouched pushes, 0.2-0.7 %
+            # standing or walking.
+            Setting("command", "foot_target", "rel_both_feet_envs", 0.2),
             Setting(
                 "command",
                 "foot_target",
