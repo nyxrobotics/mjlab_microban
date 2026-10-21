@@ -612,12 +612,12 @@ class StationaryFootTargetTest(unittest.TestCase):
                     if s.manager == "command" and s.term == "foot_target" and s.path == path}
 
         foot = TELEOP_STAGES[1].name
-        self.assertEqual(values("rel_single_support_envs"), {foot: 0.6})
+        self.assertEqual(values("rel_single_support_envs"), {foot: 0.7})
         self.assertEqual(values("single_support_stationary_probability"), {foot: 0.85})
         # The two-foot targets are drawn first; the rest are single-foot ones.
         both = values("rel_both_feet_envs")
         for share in both.values():
-            self.assertAlmostEqual(0.6 * (1.0 - share) * 0.85, 0.5, delta=0.05)
+            self.assertAlmostEqual(0.7 * (1.0 - share) * 0.85, 0.5, delta=0.05)
 
     def test_pico_feet_distance_is_below_every_single_foot_target(self) -> None:
         import mujoco
