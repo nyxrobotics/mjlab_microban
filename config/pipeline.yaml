@@ -87,6 +87,24 @@ pico:
       soft_0.05: {time_constant_s: 0.05}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+  # The tracking checks of foot accuracy a release takes as they are (the gate
+  # records each failing measurement and the robot shows it; steps.py
+  # PIPELINE_WAIVABLE_TRACKING_CHECKS).  PICO 07fd10db (update 14999) passes
+  # every fall, step, drift, support-foot, walking and safety check on the
+  # rigid and the three judged floors; it misses the foot error lines (worst
+  # 1.37-1.41x the line), one lift (right_back_in with the arms reaching
+  # right: 27.0 mm of 28.0 rigid, 24.5 mm and 0.875 in the air on 0.05 s) and
+  # one crouch's ZMP centring (both_front_left, 15.480 mm of 15.478).
+  tracking_waiver:
+    checks: [foot_error, foot_lift, standing_still]
+    note: >-
+      Not approved for this policy by the user: applied by Claude while the
+      user had asked it to finish without asking for two days (2026-10-21
+      00:30 to 2026-10-23 00:30), from the user's decisions on motion
+      tracking ("モーショントラッキングは倒れさえしなければ多少ついてこれなくても一旦いいけど",
+      2026-10-15; "手足のずれはもう許容して完成でもいいですよ", 2026-10-16).  Waived:
+      foot position accuracy, one scenario's lift height and one crouch's ZMP
+      centring; every fall, step, drift, support-foot and safety check passes.
 
 getup:
   task: Mjlab-Getup-Microban
