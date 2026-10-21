@@ -341,9 +341,13 @@ TELEOP_STAGES = (
         "tighten foot tracking",
         PICO_SCHEDULE["foot_tighten"],
         (
-            Setting("reward", "foot_target_tracking", "weight", 3.0),
+            # 4 (it was 3) with the single-foot rows' product kept at
+            # MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT: the crouches and the
+            # neutral targets pull harder (07fd10db misses their lines by up to
+            # 1.4x), the single-foot rows as before.
+            Setting("reward", "foot_target_tracking", "weight", 4.0),
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
-                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 3.0),
+                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 4.0),
             Setting(
                 "reward", "foot_target_tracking", "params.std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
             ),
