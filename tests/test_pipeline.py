@@ -521,15 +521,31 @@ class ConfigTest(unittest.TestCase):
 
 class JudgmentTest(unittest.TestCase):
     def test_pico_tracking_waiver_covers_accuracy_only(self) -> None:
-        failures = ["tracking:foot_error", "soft_0.05_tracking:foot_error", "slippery_0.3_tracking:push_falls"]
-        waiver = {"checks": ["foot_error"], "note": "why"}
+        failures = ["tracking:foot_error", "soft_0.05_tracking:foot_lift", "slippery_0.3_tracking:push_falls"]
+        waiver = {"checks": ["foot_error", "foot_lift"], "note": "why"}
         self.assertEqual(steps.waived_failures(failures, waiver), failures[:2])
         self.assertEqual(steps.waived_failures(failures, {}), [])
         self.assertEqual(steps.waived_failures(["9x300:foot_error"], waiver), [])  # only the tracking reports
         for broken in ({"checks": ["foot_error"], "note": " "}, {"checks": ["push_falls"], "note": "why"},
-                       {"checks": ["foot_error", "no_falls_without_push"], "note": "why"}):
+                       {"checks": ["foot_error", "no_falls_without_push"], "note": "why"},
+                       {"checks": ["support_foot_still"], "note": "why"}):
             with self.subTest(broken=broken), self.assertRaises(PipelineError):
                 steps.waived_failures(failures, broken)
+        # standing_still: only a report whose standing rows neither step nor drift (the ZMP alone).
+        thresholds = {"still_touchdowns_per_s_max": 0.5}
+        still = {"lifted": [True, True], "mean_twist": [0.0, 0.0, 0.0], "touchdowns_per_s": 0.0}
+        arm = {"twist": [0.0, 0.0, 0.0], "mean_twist": [0.0, 0.01, 0.0], "touchdowns_per_s": 0.1}
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            for rows, waived in (([still], True), ([{**still, "touchdowns_per_s": 0.6}], False),
+                                 ([{**still, "mean_twist": [0.06, 0.0, 0.0]}], False), ([still, arm], True)):
+                feet = [r for r in rows if "lifted" in r]
+                arms = [r for r in rows if "twist" in r]
+                report.write_text(json.dumps({"thresholds": thresholds, "results": {"feet": feet, "arms": arms}}))
+                with self.subTest(rows=rows):
+                    self.assertEqual(steps.waived_failures(["tracking:standing_still"],
+                                                           {"checks": ["standing_still"], "note": "why"},
+                                                           lambda source: report), ["tracking:standing_still"] if waived else [])
 
     def test_pico_gate_records_the_waiver_of_the_rigid_floor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

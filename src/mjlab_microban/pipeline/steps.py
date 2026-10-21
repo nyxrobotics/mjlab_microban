@@ -26,7 +26,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mjlab_microban import schedules
 from mjlab_microban.pipeline.monitor import Monitor
@@ -600,7 +600,7 @@ class Pipeline:
         self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still.json"))
         failures = self.pico_failures(prefix) + self.pico_floor_judgment(checkpoint, prefix)
         waiver = self.cfg["pico"].get("tracking_waiver") or {}
-        waived = waived_failures(failures, waiver)
+        waived = waived_failures(failures, waiver, lambda source: Path(f"{prefix}_{source}.json"))
         passed = len(waived) == len(failures)
         if passed:
             rigid = sorted({failure.split(":", 1)[1] for failure in waived if failure.startswith("tracking:")})
@@ -1168,15 +1168,36 @@ def stand_still_summary(result: dict[str, Any]) -> dict[str, Any]:
             "judged_envs": result["judged_envs"], "envs": result["envs"]}
 
 
-# The PICO tracking checks config/pipeline.yaml ``pico.tracking_waiver`` may waive: accuracy only, never a fall, a
-# step, a standing or walking check or a safety check (teleop_v12_stage records the waiver in the gate and the robot
-# shows it).
-PIPELINE_WAIVABLE_TRACKING_CHECKS = ("foot_error",)
+# The PICO tracking checks config/pipeline.yaml ``pico.tracking_waiver`` may waive: accuracy only (the foot's
+# position, the lifted foot's height, the standing ZMP's centring), never a fall, a step, a drift, a sliding support
+# foot, walking or a safety check (teleop_v12_stage records the waiver in the gate and the robot shows it).
+PIPELINE_WAIVABLE_TRACKING_CHECKS = ("foot_error", "foot_lift", "standing_still")
 
 
-def waived_failures(failures: list[str], waiver: dict[str, Any]) -> list[str]:
+def standing_still_fails_only_on_zmp(report: dict[str, Any]) -> bool:
+    """A tracking report's standing rows (J1's crouches, J3's standing rows) neither step nor drift: standing_still
+    can fail there only on the ZMP's distance from support_zmp's point."""
+
+    from mjlab_microban.twist_pass_line import twist_passes
+
+    results = report["results"]
+    rows = [item for item in results["feet"] if all(item["lifted"])]
+    rows += [item for item in results["arms"] if all(value == 0.0 for value in item["twist"])]
+    for item in rows:
+        twist = item.get("mean_twist")
+        if twist is None or any(value is None for value in twist) or not twist_passes((0.0, 0.0, 0.0), twist):
+            return False
+        touchdowns = item.get("touchdowns_per_s")
+        if touchdowns is not None and touchdowns > report["thresholds"]["still_touchdowns_per_s_max"]:
+            return False
+    return True
+
+
+def waived_failures(failures: list[str], waiver: dict[str, Any],
+                    report_of: Callable[[str], Path] | None = None) -> list[str]:
     """The PICO judgment failures ``waiver`` covers: a tracking check of the rigid floor or of a judged floor
-    (``tracking:<check>``, ``<floor>_tracking:<check>``) it names."""
+    (``tracking:<check>``, ``<floor>_tracking:<check>``) it names; standing_still only where its report
+    (``report_of(source)``) fails it on the ZMP alone."""
 
     checks = set(waiver.get("checks") or [])
     if not checks:
@@ -1190,8 +1211,12 @@ def waived_failures(failures: list[str], waiver: dict[str, Any]) -> list[str]:
     covered = []
     for failure in failures:
         source, _, check = failure.rpartition(":")
-        if check in checks and (source == "tracking" or source.endswith("_tracking")):
-            covered.append(failure)
+        if check not in checks or not (source == "tracking" or source.endswith("_tracking")):
+            continue
+        if check == "standing_still" and (report_of is None or not standing_still_fails_only_on_zmp(
+                json.loads(report_of(source).read_text()))):
+            continue
+        covered.append(failure)
     return covered
 
 
