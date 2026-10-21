@@ -374,11 +374,26 @@ def kill_group(pgid: int) -> None:
             return
 
 
+class _ParamsLoader(yaml.SafeLoader):
+    """yaml.SafeLoader for mjlab's params/*.yaml, whose python tags (e.g. ``!!python/tuple``) read as plain data."""
+
+
+def _plain(loader: yaml.SafeLoader, _suffix: str, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return loader.construct_scalar(node)
+
+
+_ParamsLoader.add_multi_constructor("tag:yaml.org,2002:python/", _plain)
+
+
 def resumed_run(run: Path) -> bool:
     """True unless ``run``'s params/agent.yaml records ``resume: false`` (trained from update 0)."""
 
     agent = run / "params" / "agent.yaml"
-    return not agent.is_file() or (yaml.safe_load(agent.read_text()) or {}).get("resume") is not False
+    return not agent.is_file() or (yaml.load(agent.read_text(), Loader=_ParamsLoader) or {}).get("resume") is not False
 
 
 def resumes(cmdline: str) -> bool:

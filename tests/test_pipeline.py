@@ -461,6 +461,9 @@ class StateTest(unittest.TestCase):
                         pipeline.train("walk", "exp", "lbl", "T", 10, 64, [])
             (run / "params" / "agent.yaml").write_text("resume: false\n")
             self.assertFalse(core.resumed_run(run))
+            # mjlab writes python tags into params (a PICO run's wandb_tags, for one).
+            (run / "params" / "agent.yaml").write_text("wandb_tags: !!python/tuple []\nresume: false\n")
+            self.assertFalse(core.resumed_run(run))
             self.assertTrue(core.resumes("train T --agent.resume=true"))
             self.assertFalse(core.resumes("train T --agent.resume False --agent.run-name lbl"))
 
