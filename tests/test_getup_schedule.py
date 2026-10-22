@@ -29,7 +29,7 @@ from mjlab_microban.tasks.microban_getup_runner import (
 
 STEPS = 24
 CALM = ("standing_joint_vel", "raw_target_clip_excess", "raw_target_clip_excess_both_feet", "roll_pose",
-        "roll_pose_shoulder", "standing_target_error")
+        "roll_pose_shoulder", "standing_target_error", "standing_target_soft_limit_excess")
 
 
 def expected(update: int) -> dict:
@@ -37,15 +37,16 @@ def expected(update: int) -> dict:
 
     delay = 3 if update >= GETUP_SCHEDULE["imu_delay"] else 0
     weights = dict.fromkeys(CALM, 0.0)
+    weights["raw_target_clip_excess"] = -0.2  # from the first update
     feet_lateral, push = 10.0, (0.0, 0.0)
     # The floor that gives sideways: every environment rigid until the plate stage, then two thirds on the plate.
     rigid_fraction = 1.0 / 3.0 if update >= GETUP_SCHEDULE["plate"] else 1.0
     if update >= GETUP_SCHEDULE["refine"]:
-        weights.update(standing_joint_vel=-4.0, raw_target_clip_excess=-0.2, roll_pose=60.0)
+        weights.update(standing_joint_vel=-4.0, roll_pose=60.0)
         feet_lateral = 30.0
     if update >= GETUP_SCHEDULE["effort"]:
         weights.update(roll_pose=0.0, roll_pose_shoulder=60.0, standing_target_error=-2.0,
-                       raw_target_clip_excess_both_feet=-1.8)
+                       raw_target_clip_excess_both_feet=-1.8, standing_target_soft_limit_excess=-10.0)
     if update >= GETUP_SCHEDULE["push"]:
         push = (-0.3, 0.3)
     return {"delay": delay, "weights": weights, "feet_lateral": feet_lateral, "push": push,

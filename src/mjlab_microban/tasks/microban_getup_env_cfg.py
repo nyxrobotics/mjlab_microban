@@ -234,9 +234,7 @@ GETUP_STAGES = (
         "refine",
         GETUP_SCHEDULE["refine"],
         (
-            Setting("reward", "standing_target_soft_limit_excess", "weight", -10.0),
             Setting("reward", "standing_joint_vel", "weight", -4.0),
-            Setting("reward", "raw_target_clip_excess", "weight", -0.2),
             Setting("reward", "feet_lateral", "weight", 30.0),
             Setting("reward", "roll_pose", "weight", 60.0),
         ),
@@ -248,8 +246,9 @@ GETUP_STAGES = (
             Setting("reward", "roll_pose", "weight", 0.0),
             Setting("reward", "roll_pose_shoulder", "weight", 60.0),
             Setting("reward", "standing_target_error", "weight", -2.0),
-            # With refine's -0.2 the 10x barrier (-2.0), only while both feet touch the floor.
+            # With the light barrier's -0.2 the 10x barrier (-2.0), only while both feet touch the floor.
             Setting("reward", "raw_target_clip_excess_both_feet", "weight", -1.8),
+            Setting("reward", "standing_target_soft_limit_excess", "weight", -10.0),
         ),
     ),
     Stage(
@@ -872,10 +871,16 @@ def both_feet_clip_excess_l1_sum(env: ManagerBasedRlEnv, sensor_name: str, actio
 
 
 def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
-    """The calm (refine) and effort terms, registered at weight 0.
+    """The calm (refine) and effort terms, registered at weight 0, and the light clip barrier.
 
     GETUP_STAGES sets their weights: refine at update 4000, effort at
     10000 (mjlab skips a zero-weight term, so they cost nothing before).
+
+    The light barrier (-0.2) charges raw output beyond the flat clip from the
+    first update: past the clip a raw output moves nothing, so it drifts.
+    Switched on at refine, it found a get-up's (fc141b6a) left shoulder_roll
+    412 rad past its soft limit at update 4000 and had brought it back to
+    3.5 rad past the clip by 17999.
 
     refine. Without it the standing policy holds its stance with bang-bang
     targets on the clip under a large action std and trembles, although a
@@ -883,8 +888,7 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
     commanded-target-rate penalty does not calm it, so the MEASURED joint
     velocity is penalized while standing. On its own that calms the stance
     by splaying it, so feet_lateral is tripled and a tight (8.6 deg)
-    roll_pose holds the roll joints near HOME. A light barrier penalizes raw
-    output beyond the flat clip.
+    roll_pose holds the roll joints near HOME.
 
     effort. The calm policy presses an arm into the 0-deg shoulder_roll stop
     while standing. Its target sits on the clip and its measured angle cannot
@@ -894,10 +898,13 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
     penalized, and the clip barrier is raised 10x so the raw output comes
     back to where the target responds. The effort penalty costs push
     tolerance; the pushes start later, at the push switch (with pushes from
-    this switch on, an arm stays pressed into its stop).
+    this switch on, an arm stays pressed into its stop). On the plate an arm
+    stays pressed all the same (standing_target_soft_limit_excess_l1_sum), so
+    each standing target's excess past its soft limits is charged too; not
+    from refine, whose bang-bang stance holds leg targets past theirs.
 
     Both effort charges count only while both feet touch the floor; on one
-    foot or none the barrier keeps refine's weight.  Standing still, the
+    foot or none the barrier keeps its light weight.  Standing still, the
     get-up that reaches standing height on one foot with its leg targets far
     from the measured angles keeps stepping at ~3.9 Hz and falls 1-2.6 s
     later, and the effort switch doubled these falls (0.1 s floor, 15-35 ms
@@ -913,11 +920,11 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
         weight=0.0,
         params={**gated, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
     )
-    # Brings raw output back to the clip edge, where a small change moves
-    # the target (it may still sit at the edge for full torque).
+    # Keeps raw output at the clip edge, where a small change moves the
+    # target (it may still sit at the edge for full torque).
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=0.0,
+        weight=-0.2,
         params={"action_name": "joint_pos"},
     )
     cfg.rewards["raw_target_clip_excess_both_feet"] = RewardTermCfg(
