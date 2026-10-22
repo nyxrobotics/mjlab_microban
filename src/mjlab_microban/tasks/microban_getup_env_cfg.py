@@ -102,6 +102,7 @@ from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
 from mjlab_microban.tasks.floor_plate import RIGID_FLOOR_FRACTION, floor_plate, train_on_floor_plate
 from mjlab_microban.schedules import GETUP_SCHEDULE, GETUP_TOTAL_UPDATES
 from mjlab_microban.tasks.mdp import (
+    _head_height,
     reward_based_staged_curriculum,
     head_height_reward,
     home_pose_reward,
@@ -233,6 +234,7 @@ GETUP_STAGES = (
         "refine",
         GETUP_SCHEDULE["refine"],
         (
+            Setting("reward", "standing_target_soft_limit_excess", "weight", -10.0),
             Setting("reward", "standing_joint_vel", "weight", -4.0),
             Setting("reward", "raw_target_clip_excess", "weight", -0.2),
             Setting("reward", "feet_lateral", "weight", 30.0),
@@ -838,6 +840,32 @@ def both_feet_standing_target_error_l1(
     )
 
 
+def standing_target_soft_limit_excess_l1_sum(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    height_threshold: float,
+    head_asset_cfg: SceneEntityCfg,
+    action_name: str,
+) -> torch.Tensor:
+    """While standing on both feet: each joint's target before the +-pi clip, how far past its soft limits, over
+    half its soft range, summed (normalized_target_clip_excess_l1_sum against the soft limits).
+
+    Trained on the plate, a get-up (fc141b6a) stood with its left shoulder roll's target at -380 deg (soft limits
+    +9..171), clipped to -pi, the arm pressed into its 0-deg stop at 0.79 Nm in every standing step.  The clip
+    barrier charges only the 3.5 rad past -pi, and the target-error and pose terms read the clipped target and the
+    measured angle, which do not move there.  Standing, a target past the soft range only presses a joint into its
+    stop: this sums 0.03 per standing step for the release get-up (185e584d), 5.25 for fc141b6a."""
+    action = env.action_manager.get_term(action_name)
+    target = action.raw_action * torch.as_tensor(action.scale, device=env.device) + torch.as_tensor(
+        action.offset, device=env.device
+    )
+    limits = action._entity.data.soft_joint_pos_limits[:, action.target_ids]
+    lower, upper = limits[..., 0], limits[..., 1]
+    excess = torch.clamp(lower - target, min=0.0) + torch.clamp(target - upper, min=0.0)
+    standing = (_head_height(env, head_asset_cfg) > height_threshold).float()
+    return _both_feet_down(env, sensor_name) * standing * (excess / (0.5 * (upper - lower))).sum(dim=-1)
+
+
 def both_feet_clip_excess_l1_sum(env: ManagerBasedRlEnv, sensor_name: str, action_name: str) -> torch.Tensor:
     """normalized_target_clip_excess_l1_sum while both feet touch the floor (0 otherwise)."""
     return _both_feet_down(env, sensor_name) * normalized_target_clip_excess_l1_sum(env, action_name)
@@ -911,6 +939,11 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
         func=both_feet_standing_target_error_l1,
         weight=0.0,
         params={**gated, **feet, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
+    )
+    cfg.rewards["standing_target_soft_limit_excess"] = RewardTermCfg(
+        func=standing_target_soft_limit_excess_l1_sum,
+        weight=0.0,
+        params={**gated, **feet, "action_name": "joint_pos"},
     )
 
 
