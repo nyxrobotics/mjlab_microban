@@ -131,10 +131,13 @@ def floor_plate(
     stiffness_range: tuple[float, float],
     damping_ratio_range: tuple[float, float],
     rigid_fraction: float,
+    per_episode: bool = False,
 ) -> None:
     """One floor per environment: ``rigid_fraction`` of them (rounded) the static ground, the others a plate
     centred under the origin with a spring k drawn log-uniformly and a damper of a damping ratio drawn uniformly
-    for the robot's and the plate's mass, the same in x and y.  A rigid floor's plate has no spring or damper."""
+    for the robot's and the plate's mass, the same in x and y.  A rigid floor's plate has no spring or damper.
+    ``per_episode`` (drawn at every reset, a few environments at a time): each environment is rigid with
+    probability ``rigid_fraction``."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     env_ids = env_ids.to(env.device, torch.long)
@@ -147,8 +150,11 @@ def floor_plate(
     stiffness = sample_log_uniform(*stiffness_range, (n,), device=env.device)
     ratio = torch.empty(n, device=env.device).uniform_(*damping_ratio_range)
     damping = 2.0 * ratio * torch.sqrt(stiffness * mass)
-    rigid = torch.zeros(n, dtype=torch.bool, device=env.device)
-    rigid[torch.randperm(n, device=env.device)[: round(rigid_fraction * n)]] = True
+    if per_episode:
+        rigid = torch.rand(n, device=env.device) < rigid_fraction
+    else:
+        rigid = torch.zeros(n, dtype=torch.bool, device=env.device)
+        rigid[torch.randperm(n, device=env.device)[: round(rigid_fraction * n)]] = True
     stiffness[rigid] = 0.0
     damping[rigid] = 0.0
     model = env.sim.model
@@ -194,9 +200,11 @@ def floor_plate_contact_weight(env: ManagerBasedRlEnv, env_ids: torch.Tensor | s
     env.sim.model.body_invweight0[env_ids, env.sim.mj_model.body(FLOOR_PLATE).id] = 0.0
 
 
-def train_on_floor_plate(cfg: ManagerBasedRlEnvCfg) -> None:
-    """Train ``cfg`` on the plate: the plate under the ground, one floor drawn per environment, and the ground's
-    contact sensors matching the ground's subtree (the plane and the plate)."""
+def train_on_floor_plate(cfg: ManagerBasedRlEnvCfg, *, per_episode: bool = False,
+                         rigid_fraction: float = RIGID_FLOOR_FRACTION) -> None:
+    """Train ``cfg`` on the plate: the plate under the ground, one floor drawn per environment (at startup, or with
+    ``per_episode`` at every reset, so a curriculum can change ``rigid_fraction``), and the ground's contact sensors
+    matching the ground's subtree (the plane and the plate)."""
     if cfg.scene.spec_fn is not None:
         raise ValueError("the scene already has a spec_fn")
     cfg.scene.spec_fn = add_floor_plate
@@ -209,11 +217,12 @@ def train_on_floor_plate(cfg: ManagerBasedRlEnvCfg) -> None:
     )
     cfg.events["floor_plate"] = EventTermCfg(
         func=floor_plate,
-        mode="startup",
+        mode="reset" if per_episode else "startup",
         params={
             "stiffness_range": FLOOR_PLATE_STIFFNESS_N_M,
             "damping_ratio_range": FLOOR_PLATE_DAMPING_RATIO,
-            "rigid_fraction": RIGID_FLOOR_FRACTION,
+            "rigid_fraction": rigid_fraction,
+            "per_episode": per_episode,
         },
     )
     cfg.events["floor_plate_contact_weight"] = EventTermCfg(func=floor_plate_contact_weight, mode="reset")

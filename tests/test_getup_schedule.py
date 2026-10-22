@@ -38,6 +38,8 @@ def expected(update: int) -> dict:
     delay = 3 if update >= GETUP_SCHEDULE["imu_delay"] else 0
     weights = dict.fromkeys(CALM, 0.0)
     feet_lateral, push = 10.0, (0.0, 0.0)
+    # The floor that gives sideways: every environment rigid until the plate stage, then two thirds on the plate.
+    rigid_fraction = 1.0 / 3.0 if update >= GETUP_SCHEDULE["plate"] else 1.0
     if update >= GETUP_SCHEDULE["refine"]:
         weights.update(standing_joint_vel=-4.0, raw_target_clip_excess=-0.2, roll_pose=60.0)
         feet_lateral = 30.0
@@ -46,7 +48,8 @@ def expected(update: int) -> dict:
                        raw_target_clip_excess_both_feet=-1.8)
     if update >= GETUP_SCHEDULE["push"]:
         push = (-0.3, 0.3)
-    return {"delay": delay, "weights": weights, "feet_lateral": feet_lateral, "push": push}
+    return {"delay": delay, "weights": weights, "feet_lateral": feet_lateral, "push": push,
+            "rigid_fraction": rigid_fraction}
 
 
 class FakeEnv:
@@ -73,6 +76,7 @@ class FakeEnv:
             "weights": {name: rewards[name].weight for name in CALM},
             "feet_lateral": rewards["feet_lateral"].weight,
             "push": tuple(self.cfg.events["push_robot"].params["velocity_range"]["x"]),
+            "rigid_fraction": self.cfg.events["floor_plate"].params["rigid_fraction"],
         }
 
 
@@ -83,7 +87,7 @@ class GetupScheduleTest(unittest.TestCase):
         term(env, None, GETUP_STAGES)
         self.assertEqual(env.state(), expected(0))
         bind_update_clock(env, STEPS)
-        for update in (1, 2499, 2500, 3999, 4000, 9999, 10000, GETUP_MAX_ITERATIONS):
+        for update in (1, 2499, 2500, 2999, 3000, 3999, 4000, 9999, 10000, GETUP_MAX_ITERATIONS):
             env.common_step_counter = update * STEPS
             term(env, None, GETUP_STAGES)
             self.assertEqual(env.state(), expected(update), update)

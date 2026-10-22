@@ -98,7 +98,7 @@ from mjlab_microban.robot.microban_constants import (
     SERVO_TARGET_RANGE_RAD,
 )
 from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
-from mjlab_microban.tasks.floor_plate import train_on_floor_plate
+from mjlab_microban.tasks.floor_plate import RIGID_FLOOR_FRACTION, train_on_floor_plate
 from mjlab_microban.schedules import GETUP_SCHEDULE, GETUP_TOTAL_UPDATES
 from mjlab_microban.tasks.mdp import (
     reward_based_staged_curriculum,
@@ -221,6 +221,11 @@ GETUP_STAGES = (
             Setting("observation", term, "delay_max_lag", GETUP_IMU_DELAY_MAX_LAG)
             for term in _IMU_TERMS
         ),
+    ),
+    Stage(
+        "plate",
+        GETUP_SCHEDULE["plate"],
+        (Setting("event", "floor_plate", "params.rigid_fraction", RIGID_FLOOR_FRACTION),),
     ),
     Stage(
         "refine",
@@ -503,7 +508,8 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if not play:
         training_floor_and_delay(cfg)
         getup_floor_and_delay(cfg)
-        train_on_floor_plate(cfg)
+        # Rigid until the plate stage (GETUP_STAGES), drawn at every reset.
+        train_on_floor_plate(cfg, per_episode=True, rigid_fraction=1.0)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

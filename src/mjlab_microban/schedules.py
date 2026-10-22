@@ -49,6 +49,11 @@ WALK_TOTAL_UPDATES = scaled(30000)
 # and last 3000 updates.
 GETUP_SCHEDULE = {
     "imu_delay": scaled(2500),
+    # The floor that gives sideways (tasks/floor_plate.py) under two thirds of
+    # the environments, once the get-up stands on the rigid floor (600-1000
+    # updates): on the plate from the first update, runs found standing at 600
+    # or not by 6600, the same seed either way.
+    "plate": scaled(3000),
     "refine": scaled(4000),
     "effort": scaled(10000),
     "push": scaled(15000),

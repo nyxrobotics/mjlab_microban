@@ -42,9 +42,12 @@ def test_training_switches_the_plate_on_and_play_keeps_the_ground(task):
     train, play = PLATE_TASKS[task](), PLATE_TASKS[task](play=True)
     assert train.scene.spec_fn is add_floor_plate
     plate, weight = train.events["floor_plate"], train.events["floor_plate_contact_weight"]
-    assert plate.func is floor_plate and plate.mode == "startup"
+    assert plate.func is floor_plate
+    # The get-up draws its floor at every reset, rigid until its plate stage (GETUP_STAGES); the others once.
+    per_episode = task == "getup"
+    assert plate.mode == ("reset" if per_episode else "startup")
     assert plate.params == {"stiffness_range": (500.0, 5000.0), "damping_ratio_range": (0.3, 1.0),
-                            "rigid_fraction": 1.0 / 3.0}
+                            "rigid_fraction": 1.0 if per_episode else 1.0 / 3.0, "per_episode": per_episode}
     assert weight.func is floor_plate_contact_weight and weight.mode == "reset"
     recentre, follow = train.events["floor_plate_recentre"], train.events["floor_plate_follow"]
     assert recentre.func is floor_plate_recentre and recentre.mode == "reset"
@@ -62,6 +65,10 @@ def env():
     from mjlab.envs import ManagerBasedRlEnv
 
     cfg = make_microban_getup_env_cfg()
+    # The floors drawn once, a third rigid (the walker's, PICO's and the whole-body's; the get-up's past its plate
+    # stage draws the same at every reset).
+    cfg.events["floor_plate"].mode = "startup"
+    cfg.events["floor_plate"].params.update(rigid_fraction=1.0 / 3.0, per_episode=False)
     cfg.scene.num_envs = NUM_ENVS
     cfg.seed = 0
     # No episode ends while the floors are read, and no curriculum (it needs a runner's clock).
@@ -257,3 +264,16 @@ def test_the_plate_follows_a_robot_that_walks_away_and_comes_back_at_reset(env):
     assert torch.equal(centre[:, 2], depth_before)  # a rigid floor's plate stays out of reach below the ground
     floor_plate_recentre(env, torch.arange(env.num_envs))
     assert torch.allclose(env.sim.model.body_pos[:, plate, :2], origins[:, :2])
+
+
+def test_a_floor_drawn_every_episode_is_rigid_with_its_probability(env):
+    ids = torch.arange(env.num_envs)
+    rigid_counts = []
+    for fraction in (1.0, 0.0):
+        floor_plate(env, ids, (500.0, 5000.0), (0.3, 1.0), fraction, per_episode=True)
+        rigid, *_ = _floors(env)
+        rigid_counts.append(int(rigid.sum()))
+    assert rigid_counts == [env.num_envs, 0]
+    # Put back the fixture's floors for the tests that read them.
+    torch.manual_seed(0)
+    floor_plate(env, ids, (500.0, 5000.0), (0.3, 1.0), 1.0 / 3.0)
