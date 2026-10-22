@@ -21,7 +21,7 @@ from mjlab_microban.tasks.floor_plate import (
     floor_plate_follow,
     floor_plate_recentre,
 )
-from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
+from mjlab_microban.tasks.microban_getup_env_cfg import getup_floor_plate, make_microban_getup_env_cfg
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 from mjlab_microban.wholebody.env_cfg import make_wholebody_env_cfg
@@ -42,12 +42,12 @@ def test_training_switches_the_plate_on_and_play_keeps_the_ground(task):
     train, play = PLATE_TASKS[task](), PLATE_TASKS[task](play=True)
     assert train.scene.spec_fn is add_floor_plate
     plate, weight = train.events["floor_plate"], train.events["floor_plate_contact_weight"]
-    assert plate.func is floor_plate
     # The get-up draws its floor at every reset, rigid until its plate stage (GETUP_STAGES); the others once.
-    per_episode = task == "getup"
-    assert plate.mode == ("reset" if per_episode else "startup")
+    getup = task == "getup"
+    assert plate.func is (getup_floor_plate if getup else floor_plate)
+    assert plate.mode == ("reset" if getup else "startup")
     assert plate.params == {"stiffness_range": (500.0, 5000.0), "damping_ratio_range": (0.3, 1.0),
-                            "rigid_fraction": 1.0 if per_episode else 1.0 / 3.0, "per_episode": per_episode}
+                            "rigid_fraction": 1.0 if getup else 1.0 / 3.0}
     assert weight.func is floor_plate_contact_weight and weight.mode == "reset"
     recentre, follow = train.events["floor_plate_recentre"], train.events["floor_plate_follow"]
     assert recentre.func is floor_plate_recentre and recentre.mode == "reset"
@@ -65,10 +65,11 @@ def env():
     from mjlab.envs import ManagerBasedRlEnv
 
     cfg = make_microban_getup_env_cfg()
-    # The floors drawn once, a third rigid (the walker's, PICO's and the whole-body's; the get-up's past its plate
+    # The floors drawn once, a third rigid (the walker's, PICO's and the whole-body's; the get-up past its plate
     # stage draws the same at every reset).
+    cfg.events["floor_plate"].func = floor_plate
     cfg.events["floor_plate"].mode = "startup"
-    cfg.events["floor_plate"].params.update(rigid_fraction=1.0 / 3.0, per_episode=False)
+    cfg.events["floor_plate"].params["rigid_fraction"] = 1.0 / 3.0
     cfg.scene.num_envs = NUM_ENVS
     cfg.seed = 0
     # No episode ends while the floors are read, and no curriculum (it needs a runner's clock).
@@ -266,14 +267,14 @@ def test_the_plate_follows_a_robot_that_walks_away_and_comes_back_at_reset(env):
     assert torch.allclose(env.sim.model.body_pos[:, plate, :2], origins[:, :2])
 
 
-def test_a_floor_drawn_every_episode_is_rigid_with_its_probability(env):
+def test_the_get_up_draws_each_reset_rigid_with_its_probability(env):
     ids = torch.arange(env.num_envs)
-    rigid_counts = []
+    counts = []
     for fraction in (1.0, 0.0):
-        floor_plate(env, ids, (500.0, 5000.0), (0.3, 1.0), fraction, per_episode=True)
+        getup_floor_plate(env, ids, (500.0, 5000.0), (0.3, 1.0), fraction)
         rigid, *_ = _floors(env)
-        rigid_counts.append(int(rigid.sum()))
-    assert rigid_counts == [env.num_envs, 0]
-    # Put back the fixture's floors for the tests that read them.
+        counts.append(int(rigid.sum()))
+    assert counts == [env.num_envs, 0]
+    # The fixture's floors back for any test that reads them after this one.
     torch.manual_seed(0)
     floor_plate(env, ids, (500.0, 5000.0), (0.3, 1.0), 1.0 / 3.0)

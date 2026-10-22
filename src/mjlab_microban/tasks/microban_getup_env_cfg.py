@@ -98,7 +98,7 @@ from mjlab_microban.robot.microban_constants import (
     SERVO_TARGET_RANGE_RAD,
 )
 from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
-from mjlab_microban.tasks.floor_plate import RIGID_FLOOR_FRACTION, train_on_floor_plate
+from mjlab_microban.tasks.floor_plate import RIGID_FLOOR_FRACTION, floor_plate, train_on_floor_plate
 from mjlab_microban.schedules import GETUP_SCHEDULE, GETUP_TOTAL_UPDATES
 from mjlab_microban.tasks.mdp import (
     reward_based_staged_curriculum,
@@ -254,6 +254,26 @@ GETUP_STAGES = (
         (Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),),
     ),
 )
+
+
+@requires_model_fields("body_pos", "jnt_stiffness", "dof_damping")
+def getup_floor_plate(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    stiffness_range: tuple[float, float],
+    damping_ratio_range: tuple[float, float],
+    rigid_fraction: float,
+) -> None:
+    """tasks/floor_plate.floor_plate at every reset, a few environments at a time: each rigid with probability
+    ``rigid_fraction`` (the plate stage of GETUP_STAGES lowers it from 1).  On the plate from the first update the
+    get-up found standing at update 600 in one run and not by 6600 in another, the same seed and config (two more
+    runs of 1000 updates, neither); without the plate it stands by 600-1000."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    rigid = torch.rand(len(env_ids), device=env.device) < rigid_fraction
+    for ids, fraction in ((env_ids[rigid], 1.0), (env_ids[~rigid], 0.0)):
+        if len(ids):
+            floor_plate(env, ids, stiffness_range, damping_ratio_range, fraction)
 
 
 @requires_model_fields("geom_solref")
@@ -508,8 +528,13 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if not play:
         training_floor_and_delay(cfg)
         getup_floor_and_delay(cfg)
-        # Rigid until the plate stage (GETUP_STAGES), drawn at every reset.
-        train_on_floor_plate(cfg, per_episode=True, rigid_fraction=1.0)
+        train_on_floor_plate(cfg)
+        # Drawn at every reset, every environment rigid until the plate stage (GETUP_STAGES).
+        cfg.events["floor_plate"] = EventTermCfg(
+            func=getup_floor_plate,
+            mode="reset",
+            params={**cfg.events["floor_plate"].params, "rigid_fraction": 1.0},
+        )
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {
