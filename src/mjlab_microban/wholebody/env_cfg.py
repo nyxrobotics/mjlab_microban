@@ -70,7 +70,8 @@ environment has reset in the previous step (in training nearly every step:
 about 8 of 2048 environments reset at each), mjlab's post-reset write adds one
 goal to every environment's delay buffer, so the longer draws delay the goal
 by one step less: about 15-35 ms in effect.  The ``actions`` observation stays the policy's latest output, as on
-the robot.
+the robot.  Two thirds of the environments stand on a floor that gives sideways like a carpet, a plate on springs
+of 500-5000 N/m (tasks/floor_plate.py).
 """
 
 from __future__ import annotations
@@ -106,6 +107,7 @@ from mjlab_microban.robot.microban_constants import (
     SERVO_TARGET_RANGE_RAD,
     with_training_goal_delay,
 )
+from mjlab_microban.tasks.floor_plate import train_on_floor_plate
 from mjlab_microban.tasks.mdp import contact_time_constant
 from mjlab_microban.tasks.microban_teleop_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
@@ -429,7 +431,7 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         history_length=4,
     )
 
-    return ManagerBasedRlEnvCfg(
+    cfg = ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane", terrain_generator=None, max_init_terrain_level=0),
             num_envs=1,
@@ -458,6 +460,9 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         decimation=4,
         episode_length_s=1.0e9 if play else 10.0,
     )
+    if not play:
+        train_on_floor_plate(cfg)
+    return cfg
 
 
 _CNN_CFG = {"output_channels": (256, 128, 64), "kernel_size": 3, "activation": "elu", "global_pool": "avg"}

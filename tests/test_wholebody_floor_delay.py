@@ -88,7 +88,9 @@ def test_each_environment_has_its_own_floor_and_its_contacts_use_it(env):
     geom_ids = robot.indexing.geom_ids.to(torch.long)
     collision = geom_ids[[i for i, name in enumerate(robot.geom_names) if COLLISION.fullmatch(name)]]
     others = geom_ids[[i for i, name in enumerate(robot.geom_names) if not COLLISION.fullmatch(name)]]
-    floor = mujoco.mj_name2id(env.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "terrain")
+    # The ground plane, and the plate that two thirds of the environments stand on instead (tasks/floor_plate.py).
+    floors = [mujoco.mj_name2id(env.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
+              for name in ("terrain", "floor_plate")]
     solref, friction = env.sim.model.geom_solref, env.sim.model.geom_friction
     # Per-world arrays: one time constant and one friction per environment on every collision geom.
     assert solref.shape[0] == friction.shape[0] == NUM_ENVS
@@ -99,7 +101,7 @@ def test_each_environment_has_its_own_floor_and_its_contacts_use_it(env):
     assert len(set(tau[:, 0].tolist())) == len(set(mu[:, 0].tolist())) == NUM_ENVS
     assert torch.all(solref[:, collision, 1] == 1.0)  # the damping ratio is MuJoCo's
     default = env.sim.get_default_field("geom_solref")
-    for geom in (*others.tolist(), floor):
+    for geom in (*others.tolist(), *floors):
         assert torch.equal(solref[:, geom], default[geom].expand(NUM_ENVS, 2))
     # The solver's floor contacts carry their world's values (the robot's geoms have priority).
     env.reset()
@@ -110,7 +112,7 @@ def test_each_environment_has_its_own_floor_and_its_contacts_use_it(env):
     count = int(data.nacon.numpy()[0])
     pairs = data.contact.geom.numpy()[:count]
     world = data.contact.worldid.numpy()[:count]
-    on_floor = (pairs == floor).any(axis=1) & np.isin(pairs, collision.numpy()).any(axis=1)
+    on_floor = np.isin(pairs, floors).any(axis=1) & np.isin(pairs, collision.numpy()).any(axis=1)
     assert set(world[on_floor].tolist()) == set(range(NUM_ENVS))
     np.testing.assert_allclose(data.contact.solref.numpy()[:count][on_floor, 0], tau[world[on_floor], 0].numpy())
     np.testing.assert_allclose(data.contact.friction.numpy()[:count][on_floor, 0], mu[world[on_floor], 0].numpy())
