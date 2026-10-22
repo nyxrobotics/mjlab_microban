@@ -142,8 +142,8 @@ class StateTest(unittest.TestCase):
                 bad = output.name.endswith("soft_slippery_tracking.json")
                 output.write_text(json.dumps({"status": "fail" if bad else "pass", "checks": {"push_falls": not bad}}))
 
-            def stand_still(kind, checkpoint, report, time_constants=None):
-                ran.append(["stand_still", kind, time_constants])
+            def stand_still(kind, checkpoint, report, time_constants=None, floor=None):
+                ran.append(["stand_still", kind, time_constants, floor])
                 report.write_text(json.dumps({"status": "pass", "checks": {"falls": True}}))
 
             pipeline.jobs = SimpleNamespace(run=run)
@@ -152,9 +152,15 @@ class StateTest(unittest.TestCase):
             checkpoint.write_bytes(b"pico")
             prefix = Path(directory) / "run_model_9"
             self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), ["soft_slippery_tracking:push_falls"])
-            self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in ran[:-1]],
+            evaluated = [cmd for cmd in ran if cmd[0] != "stand_still"]
+            self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in evaluated],
                              [floor for floor in floors.values() for _ in range(2)])
-            self.assertEqual(ran[-1], ["stand_still", "pico", [0.05]])
+            # Standing still on the soft floors, then on each floor that gives sideways.
+            plates = [floor for floor in floors.values() if "plate" in floor]
+            self.assertEqual([cmd for cmd in ran if cmd[0] == "stand_still"],
+                             [["stand_still", "pico", [0.05], None]]
+                             + [["stand_still", "pico", None, floor] for floor in plates])
+            self.assertEqual(len(plates), 2)
             Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
             with self.assertRaises(core.JobStopped):  # a report not written is no judgment
                 pipeline.pico_failures(prefix, ("slippery_0.3_9x300",))

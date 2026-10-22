@@ -81,10 +81,14 @@ def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seco
         from mjlab_microban.pipeline.floors import add_sole_floors
 
         add_sole_floors(cfg, [(None, t) for t in time_constants])
-    if floor is not None:  # every collision geom (pipeline/floors.py); the soles' frictions are set after the build
-        from mjlab_microban.pipeline.floors import add_body_floors
+    if floor is not None and kind == "getup":  # every collision geom (pipeline/floors.py); the soles' frictions are set
+        from mjlab_microban.pipeline.floors import add_body_floors  # after the build
 
         add_body_floors(cfg, [floor] * envs)
+    elif floor is not None:  # the soles' floor and its plate, as the walk probe and PICO's evaluators
+        from mjlab_microban.pipeline.floors import add_sole_floors
+
+        add_sole_floors(cfg, [floor] * envs)
     return cfg
 
 
@@ -166,7 +170,10 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
         if floor is not None:
             from mjlab_microban.pipeline.floors import check_body_floors, sole_floors
 
-            check_body_floors(env, [floor] * n)
+            if kind == "getup":
+                check_body_floors(env, [floor] * n)
+            elif any(abs(s[1] - floor[1]) > 1e-5 * floor[1] for s in sole_floors(env)):
+                raise RuntimeError("the soles' floor drifted from the one set")
             if any(abs(s[0] - f) > 1e-5 for s, (_, f, _) in zip(sole_floors(env), cells)):
                 raise RuntimeError("the soles' frictions drifted from the ones set")
         legs = [i for i, name in enumerate(robot.joint_names) if any(k in name for k in LEG_JOINT_KEYS)]
@@ -289,8 +296,8 @@ def main() -> None:
     parser.add_argument("--reps", type=int, default=2)
     parser.add_argument("--time-constants", help="comma-separated soft floors (sole contact time constants, s) "
                         "in place of the rigid one, e.g. 0.05,0.1")
-    parser.add_argument("--floor", help="JSON of a floor of config/pipeline.yaml getup.floors (every collision "
-                        "geom) in place of the rigid one")
+    parser.add_argument("--floor", help="JSON of a floor of config/pipeline.yaml in place of the rigid one: the "
+                        "get-up's on every collision geom, walking's and PICO's (with a plate) on the soles")
     args = parser.parse_args()
     started = time.time()
     time_constants = floor = None

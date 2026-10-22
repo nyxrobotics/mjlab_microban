@@ -185,7 +185,8 @@ def add_sole_floors(cfg, per_env: list[tuple[float | None, float]], geoms: tuple
 
 def add_body_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:
     """``add_sole_floors`` on every collision geom (BODY), on training's collision geoms: named, with priority over
-    the floor (TRAINING_COLLISION), the play robot's actuators and everything else kept."""
+    the floor (TRAINING_COLLISION), the play robot's actuators and everything else kept; a plate with native CCD,
+    as the get-up trains on it."""
 
     from dataclasses import replace
 
@@ -194,6 +195,15 @@ def add_body_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:
     robot = cfg.scene.entities["robot"]
     cfg.scene.entities["robot"] = replace(robot, spec_fn=collision_named_spec, collisions=(TRAINING_COLLISION,))
     add_sole_floors(cfg, per_env, BODY)
+    plate_spec = cfg.scene.spec_fn
+    if plate_spec is not None:  # the get-up trains on the plate's model with native CCD (microban_getup_env_cfg.py)
+        import mujoco
+
+        def native_ccd_plate(spec) -> None:
+            plate_spec(spec)
+            spec.option.disableflags &= ~int(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
+
+        cfg.scene.spec_fn = native_ccd_plate
 
 
 def check_body_floors(env, per_env: list[tuple[float | None, float]]) -> None:

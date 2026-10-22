@@ -432,8 +432,12 @@ class Pipeline:
         soft = sorted({t for _, t in parsed.values()} - {RIGID_TIME_CONSTANT_S})
         still = self.stand_still("walk", checkpoint, out / f"{stem}_stand_still_soft.json",
                                  time_constants=soft) if soft else None
+        on_plates = {name: self.stand_still("walk", checkpoint, out / f"{stem}_stand_still_{name}.json",
+                                            floor=floors[name])
+                     for name, floor in parsed.items() if floor.plate}
         failures = floor_failures(list(floors), probe, nines) + (
-            [] if still is None or still["status"] == "pass" else ["stand_still_soft"])
+            [] if still is None or still["status"] == "pass" else ["stand_still_soft"]) + [
+            f"stand_still_{name}" for name, result in on_plates.items() if result["status"] != "pass"]
         summary: dict[str, Any] = {
             name: {"rules": verdict["checks"], "falls": verdict["falls"],
                    "single_signed": {k: round(v, 3) for k, v in verdict["single_signed"].items()},
@@ -443,13 +447,16 @@ class Pipeline:
             for name, verdict in probe.get("floors", {}).items() if name in nines}
         if still is not None:
             summary["stand_still_soft"] = {**stand_still_summary(still), "time_constants_s": soft}
-        return failures, {"summary": summary, "probe": probe, "nine_by_300": nines, "stand_still_soft": still}
+        for name, result in on_plates.items():
+            summary[f"stand_still_{name}"] = stand_still_summary(result)
+        return failures, {"summary": summary, "probe": probe, "nine_by_300": nines, "stand_still_soft": still,
+                          "stand_still_plates": on_plates}
 
     def stand_still(self, kind: str, checkpoint: Path, report: Path,
                     time_constants: list[float] | None = None, floor: dict[str, float] | None = None) -> dict[str, Any]:
         """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report);
         with ``time_constants`` (s) on these soft floors in place of the rigid one; with ``floor`` (one of
-        ``getup.floors``) on that floor."""
+        ``getup.floors``, or a floor with a plate of walking's or PICO's) on that floor."""
 
         c = stand_still_config(self.cfg, kind)
         report.unlink(missing_ok=True)
@@ -664,6 +671,10 @@ class Pipeline:
         if soft:
             self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still_soft.json"), time_constants=soft)
             names += ("stand_still_soft",)
+        for floor, values in floors.items():  # the floors that give sideways
+            if parse({floor: values})[floor].plate:
+                self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still_{floor}.json"), floor=values)
+                names += (f"stand_still_{floor}",)
         failures = self.pico_failures(prefix, names)
         self.log(f"PICO judgment on the floors {list(floors)}{f' (standing still on {soft} s)' if soft else ''} of "
                  f"{checkpoint.parent.name}/{checkpoint.name}: " + ("PASS" if not failures else f"FAIL {failures}"))
