@@ -79,15 +79,12 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocit
 MICROBAN_TELEOP_LINEAR_TRACKING_STD_M_S = 0.5
 MICROBAN_TELEOP_ANGULAR_TRACKING_STD_RAD_S = 1.25
 MICROBAN_TELEOP_NEUTRAL_FOOT_TRACKING_WEIGHT = 1.0
-# The tightened foot reward's std: at 0.03 m a 15 mm miss kept 78 % of the
-# reward and PICO 07fd10db missed the foot error lines by up to 1.41x (a
-# 52 mm target missed by 22 mm); at 0.02 m that miss keeps 57 %.
-MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.02
-# The foot stage's single-foot targets: 70 % of the foot targets, 85 % of them
+MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M = 0.03
+# The foot stage's single-foot targets: 60 % of the foot targets, 85 % of them
 # with a standing twist.  The command draws the single-foot rows first and
 # rel_both_feet_envs then turns its share of all rows into both-feet targets,
 # so 0.7 x 0.9 x 0.85 = 54 % of the samples train a standing single-foot
-# target at full weight (48 % from the tighten stage's 0.2; it was 0.3 x 0.5:
+# target at full weight (46 % from the tighten stage's 0.1; it was 0.3 x 0.5:
 # 15 %).  Resumed at update 4000 of a 1e-4 run, the unload reward grew 8 % in
 # 200 updates with these shares and 33 % with the learning rate also tripled
 # (MICROBAN_TELEOP_V12_FIXED_LEARNING_RATE).
@@ -341,13 +338,9 @@ TELEOP_STAGES = (
         "tighten foot tracking",
         PICO_SCHEDULE["foot_tighten"],
         (
-            # 4 (it was 3) with the single-foot rows' product kept at
-            # MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT: the crouches and the
-            # neutral targets pull harder (07fd10db misses their lines by up to
-            # 1.4x), the single-foot rows as before.
-            Setting("reward", "foot_target_tracking", "weight", 4.0),
+            Setting("reward", "foot_target_tracking", "weight", 3.0),
             Setting("reward", "foot_target_tracking", "params.single_foot_weight",
-                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 4.0),
+                    MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT / 3.0),
             Setting(
                 "reward", "foot_target_tracking", "params.std", MICROBAN_TELEOP_FOOT_TRACKING_FINAL_STD_M
             ),
