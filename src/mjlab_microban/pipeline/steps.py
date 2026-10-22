@@ -80,7 +80,8 @@ STEP_SCHEDULE_KEYS = {
 # The schedule constants are not a file input: each step hashes only its own
 # (STEP_SCHEDULE_KEYS), so a get-up schedule change does not retrain walking.
 _COMMON = ["config/home_pose.yaml", "src/mjlab_microban/robot",
-           "src/mjlab_microban/tasks/curriculum.py", "src/mjlab_microban/tasks/mdp.py", "uv.lock"]
+           "src/mjlab_microban/tasks/curriculum.py", "src/mjlab_microban/tasks/mdp.py",
+           "src/mjlab_microban/tasks/floor_plate.py", "uv.lock"]
 STEP_INPUTS = {
     "walk": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_*.py",
              "src/mjlab_microban/tasks/microban_getup_runner.py"],
