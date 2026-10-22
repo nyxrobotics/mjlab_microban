@@ -52,6 +52,11 @@ walk:
       soft_0.1: {time_constant_s: 0.1}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.1, friction: 0.3}
+      # The floor that gives sideways (tasks/floor_plate.py) at training's
+      # softest, least damped and stiffest, most damped ends (2026-10-22, with
+      # the user: every policy trains and is judged on it).
+      plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}}
+      plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
 
 pico:
   task: Mjlab-Teleop-V13-ArmOverlay-Microban
@@ -87,6 +92,8 @@ pico:
       soft_0.05: {time_constant_s: 0.05}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+      plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}}
+      plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
   # The tracking checks of foot accuracy a release takes as they are (the gate
   # records each failing measurement and the robot shows it; steps.py
   # PIPELINE_WAIVABLE_TRACKING_CHECKS).  PICO 07fd10db (update 14999) passes
@@ -161,6 +168,8 @@ getup:
     soft_0.05: {time_constant_s: 0.05}
     slippery_0.3: {friction: 0.3}
     soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+    plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}}
+    plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
   # Standing still counts the get-up's falls right after it stands, a rare
   # event: judged as a rate over 360 environments per floor (15 per delay and
   # friction), at most the walker's unpushed line, 1 in 90 (4).  The get-up

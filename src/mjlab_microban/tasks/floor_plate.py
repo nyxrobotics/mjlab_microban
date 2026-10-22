@@ -24,8 +24,9 @@ explicit spring.  A reset puts the plate back at its centre at rest (mjwarp's re
 velocity in the reset worlds).
 
 Geometry.  MuJoCo allows a plane only on a static body, so the plate is a box, 10 m square and 0.1 m thick, its top
-at the ground's height, centred under each environment's origin (the get-up stays near it, the whole-body
-references within 1.9 m).  It is a child of the ground's body ``terrain``, so the contact sensors that match the
+at the ground's height, centred under each environment's origin at every reset (the get-up stays near it, the
+whole-body references within 1.9 m).  A walking robot goes farther (20 s at up to 0.7 m/s), so the plate's centre
+moves under a robot FLOOR_PLATE_RECENTRE_M from it.  It is a child of the ground's body ``terrain``, so the contact sensors that match the
 ground's subtree see both.  In MuJoCo Warp's float32 a box much larger loses its contacts: on a 20 m half-size
 plate the standing robot's soles kept 23 of their 48 floor contacts and sank 0.21 mm instead of 0.07 mm; at 0.5 to
 5 m the soles keep 47-48 contacts and sink 0.07 mm, as on the plane.  Where the robot lies on the floor, MuJoCo
@@ -68,6 +69,8 @@ FLOOR_PLATE_DAMPING_RATIO = (0.3, 1.0)
 RIGID_FLOOR_FRACTION = 1.0 / 3.0
 # How far below the floor the unused one of the ground plane and the plate sits.
 UNUSED_FLOOR_DEPTH_M = 1.0
+# A walking robot leaves the plate's centre (20 s at up to 0.7 m/s); the plate follows it from this far.
+FLOOR_PLATE_RECENTRE_M = 2.0
 
 
 def add_floor_plate(spec: mujoco.MjSpec) -> None:
@@ -157,6 +160,28 @@ def floor_plate(
     env.sim.data.geom_xpos[env_ids, plane, 2] = torch.where(rigid, 0.0, -UNUSED_FLOOR_DEPTH_M)
 
 
+@requires_model_fields("body_pos")
+def floor_plate_follow(env: ManagerBasedRlEnv, env_ids: torch.Tensor | slice | None) -> None:
+    """Put the plate's centre under a robot more than FLOOR_PLATE_RECENTRE_M from it (every step): its top is flat,
+    so the contacts do not change, and its spring and damper act on the joint displacement, which is kept."""
+    plate_id = env.sim.mj_model.body(FLOOR_PLATE).id
+    model = env.sim.model
+    root = env.scene["robot"].data.root_link_pos_w[:, :2]
+    centre = model.body_pos[:, plate_id, :2]
+    far = torch.linalg.vector_norm(root - centre, dim=-1, keepdim=True) > FLOOR_PLATE_RECENTRE_M
+    model.body_pos[:, plate_id, :2] = torch.where(far, root.to(centre.dtype), centre)
+
+
+@requires_model_fields("body_pos")
+def floor_plate_recentre(env: ManagerBasedRlEnv, env_ids: torch.Tensor | slice | None) -> None:
+    """Put the plate's centre back under the environment's origin, where the robot starts (every reset)."""
+    if env_ids is None:
+        env_ids = slice(None)
+    plate_id = env.sim.mj_model.body(FLOOR_PLATE).id
+    model = env.sim.model
+    model.body_pos[env_ids, plate_id, :2] = env.scene.env_origins[env_ids, :2].to(model.body_pos.dtype)
+
+
 @requires_model_fields("body_invweight0")
 def floor_plate_contact_weight(env: ManagerBasedRlEnv, env_ids: torch.Tensor | slice | None) -> None:
     """Regularize the plate's contacts as the static ground's: no inverse weight of its own (module docstring)."""
@@ -188,3 +213,5 @@ def train_on_floor_plate(cfg: ManagerBasedRlEnvCfg) -> None:
         },
     )
     cfg.events["floor_plate_contact_weight"] = EventTermCfg(func=floor_plate_contact_weight, mode="reset")
+    cfg.events["floor_plate_recentre"] = EventTermCfg(func=floor_plate_recentre, mode="reset")
+    cfg.events["floor_plate_follow"] = EventTermCfg(func=floor_plate_follow, mode="step")

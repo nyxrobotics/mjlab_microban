@@ -66,6 +66,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg, ObjRef, TerrainHeightSe
 
 from mjlab_microban.schedules import WALK_TOTAL_UPDATES, WALK_WIDEN_UPDATE
 from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
+from mjlab_microban.tasks.floor_plate import train_on_floor_plate
 from mjlab_microban.tasks.mdp import (
     no_stepping_penalty,
     feet_distance_penalty,
@@ -596,10 +597,13 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Training's soft and slippery floors and per-episode goal delay, with
     # friction from 0.3, a third of the environments on hard slippery floors
-    # and a third on the play env's floor (walk_training_floor_and_delay);
-    # play and the judgments keep the robot's.  PICO inherits this config.
+    # and a third on the play env's floor (walk_training_floor_and_delay),
+    # and two thirds on a floor that gives sideways like a carpet
+    # (tasks/floor_plate.py); play and the judgments keep the robot's.  PICO
+    # inherits this config.
     if not play:
         walk_training_floor_and_delay(cfg)
+        train_on_floor_plate(cfg)
 
     #---------------------------- Curriculum ------------------------
     cfg.curriculum = {

@@ -13,6 +13,11 @@ robot's).  A friction of None keeps the play env's drawn sole friction
 0.02 s, the play env's; config/pipeline.yaml ``walk.judgment.floors``,
 ``pico.judgment.floors`` and ``getup.floors`` name the judged floors, inside
 training's range (FLOOR_TIME_CONSTANT_S, FLOOR_FRICTION).
+
+A floor may also give sideways like training's carpet (tasks/floor_plate.py):
+``plate: {stiffness_n_m: k, damping_ratio: zeta}`` puts every environment of
+it on the plate with that spring and damping ratio (``add_judgment_plates``),
+inside training's range (FLOOR_PLATE_STIFFNESS_N_M, FLOOR_PLATE_DAMPING_RATIO).
 """
 
 from __future__ import annotations
@@ -26,6 +31,18 @@ BODY = (r".*_collision_\d+$",)
 RIGID_TIME_CONSTANT_S = 0.02
 
 
+class Floor(tuple):
+    """(friction or None, time constant s), carrying the floor's plate (spring N/m, damping ratio) or None as
+    ``plate``: the evaluators pass it on as the pair, and ``add_sole_floors`` puts the plate in."""
+
+    plate: tuple[float, float] | None
+
+    def __new__(cls, friction: float | None, time_constant: float, plate: tuple[float, float] | None = None):
+        floor = super().__new__(cls, (friction, time_constant))
+        floor.plate = plate
+        return floor
+
+
 def parse(floors: dict[str, dict[str, Any]]) -> dict[str, tuple[float | None, float]]:
     """{name: (friction or None, time constant s)} of config/pipeline.yaml's floors, checked against training's range."""
 
@@ -33,16 +50,88 @@ def parse(floors: dict[str, dict[str, Any]]) -> dict[str, tuple[float | None, fl
 
     parsed = {}
     for name, floor in floors.items():
-        if set(floor) - {"friction", "time_constant_s"}:
-            raise ValueError(f"floor {name}: unknown keys {sorted(set(floor) - {'friction', 'time_constant_s'})}")
+        if set(floor) - {"friction", "time_constant_s", "plate"}:
+            raise ValueError(f"floor {name}: unknown keys {sorted(set(floor) - {'friction', 'time_constant_s', 'plate'})}")
         friction = floor.get("friction")
         time_constant = float(floor.get("time_constant_s", RIGID_TIME_CONSTANT_S))
         if not FLOOR_TIME_CONSTANT_S[0] <= time_constant <= FLOOR_TIME_CONSTANT_S[1]:
             raise ValueError(f"floor {name}: time constant {time_constant} s outside training's {FLOOR_TIME_CONSTANT_S}")
         if friction is not None and not FLOOR_FRICTION[0] <= float(friction) <= FLOOR_FRICTION[1]:
             raise ValueError(f"floor {name}: friction {friction} outside training's {FLOOR_FRICTION}")
-        parsed[name] = (None if friction is None else float(friction), time_constant)
+        parsed[name] = Floor(None if friction is None else float(friction), time_constant, parse_plate(name, floor))
     return parsed
+
+
+def parse_plate(name: str, floor: dict[str, Any]) -> tuple[float, float] | None:
+    """(spring N/m, damping ratio) of a floor's ``plate``, checked against training's range; None without one."""
+
+    from mjlab_microban.tasks.floor_plate import FLOOR_PLATE_DAMPING_RATIO, FLOOR_PLATE_STIFFNESS_N_M
+
+    plate = floor.get("plate")
+    if plate is None:
+        return None
+    if set(plate) != {"stiffness_n_m", "damping_ratio"}:
+        raise ValueError(f"floor {name}: a plate takes stiffness_n_m and damping_ratio, got {sorted(plate)}")
+    stiffness, ratio = float(plate["stiffness_n_m"]), float(plate["damping_ratio"])
+    if not FLOOR_PLATE_STIFFNESS_N_M[0] <= stiffness <= FLOOR_PLATE_STIFFNESS_N_M[1]:
+        raise ValueError(f"floor {name}: plate spring {stiffness} N/m outside training's {FLOOR_PLATE_STIFFNESS_N_M}")
+    if not FLOOR_PLATE_DAMPING_RATIO[0] <= ratio <= FLOOR_PLATE_DAMPING_RATIO[1]:
+        raise ValueError(f"floor {name}: plate damping ratio {ratio} outside training's {FLOOR_PLATE_DAMPING_RATIO}")
+    return stiffness, ratio
+
+
+def _judgment_plate(env, env_ids, stiffnesses, damping_ratios) -> None:
+    """Each environment's plate (tasks/floor_plate.floor_plate with drawn values replaced by per-environment
+    ones): NaN stiffness keeps the static ground."""
+
+    import torch
+
+    from mjlab_microban.tasks.floor_plate import FLOOR_PLATE, FLOOR_PLATE_JOINTS, GROUND, UNUSED_FLOOR_DEPTH_M
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, torch.long)
+    mj_model = env.sim.mj_model
+    plate_id = mj_model.body(FLOOR_PLATE).id
+    mass = float(mj_model.body_mass[env.scene["robot"].indexing.body_ids.cpu().numpy()].sum())
+    mass += float(mj_model.body_mass[plate_id])
+    stiffness = torch.tensor(stiffnesses, device=env.device, dtype=torch.float32)[env_ids]
+    ratio = torch.tensor(damping_ratios, device=env.device, dtype=torch.float32)[env_ids]
+    rigid = torch.isnan(stiffness)
+    stiffness = torch.nan_to_num(stiffness, nan=0.0)
+    damping = torch.where(rigid, 0.0, 2.0 * torch.nan_to_num(ratio, nan=0.0) * torch.sqrt(stiffness * mass))
+    model = env.sim.model
+    for joint_name in FLOOR_PLATE_JOINTS:
+        joint = mj_model.joint(joint_name)
+        model.jnt_stiffness[env_ids, joint.id] = stiffness.to(model.jnt_stiffness.dtype)
+        model.dof_damping[env_ids, int(joint.dofadr[0])] = damping.to(model.dof_damping.dtype)
+    unused = torch.tensor([0.0, 0.0, UNUSED_FLOOR_DEPTH_M], device=env.device)
+    model.body_pos[env_ids, plate_id] = (env.scene.env_origins[env_ids] - rigid[:, None] * unused).to(model.body_pos.dtype)
+    plane = mj_model.geom(GROUND).id
+    env.sim.data.geom_xpos[env_ids, plane, 2] = torch.where(rigid, 0.0, -UNUSED_FLOOR_DEPTH_M).to(
+        env.sim.data.geom_xpos.dtype)
+
+
+def add_judgment_plates(cfg, per_env: list[tuple[float, float] | None]) -> None:
+    """Put environment i of ``cfg`` on a plate with the spring and damping ratio ``per_env[i]`` (None: the static
+    ground), training's plate (tasks/floor_plate.train_on_floor_plate: following the robot, its contacts as soft
+    as the ground's) with nothing drawn.  Nothing to do when no environment has one."""
+
+    from mjlab.managers.event_manager import requires_model_fields
+
+    from mjlab_microban.tasks.floor_plate import train_on_floor_plate
+
+    if len(per_env) != cfg.scene.num_envs:
+        raise ValueError(f"{len(per_env)} plates for {cfg.scene.num_envs} environments")
+    if all(plate is None for plate in per_env):
+        return
+    train_on_floor_plate(cfg)
+    term = cfg.events["floor_plate"]
+    term.func = requires_model_fields("body_pos", "jnt_stiffness", "dof_damping")(_judgment_plate)
+    term.params = {
+        "stiffnesses": [math.nan if plate is None else plate[0] for plate in per_env],
+        "damping_ratios": [math.nan if plate is None else plate[1] for plate in per_env],
+    }
 
 
 def _sole_floor(env, env_ids, frictions, time_constants, asset_cfg) -> None:
@@ -66,10 +155,11 @@ def _sole_floor(env, env_ids, frictions, time_constants, asset_cfg) -> None:
 
 
 def add_sole_floors(cfg, per_env: list[tuple[float | None, float]], geoms: tuple[str, ...] = SOLES) -> None:
-    """Give environment i of ``cfg`` the floor ``per_env[i]`` (friction or None, time constant s) at startup.
+    """Give environment i of ``cfg`` the floor ``per_env[i]`` (friction or None, time constant s) at startup, and
+    the plate of a ``Floor`` that has one (``add_judgment_plates``).
 
-    The event runs after the play env's startup events (foot_friction draws first) and draws nothing, so the
-    other randomization of an environment is the one it has without it.
+    The events run after the play env's startup events (foot_friction draws first) and draw nothing, so the
+    other randomization of an environment is the one it has without them.
     """
 
     from mjlab.managers.event_manager import EventTermCfg, requires_model_fields
@@ -87,6 +177,7 @@ def add_sole_floors(cfg, per_env: list[tuple[float | None, float]], geoms: tuple
             "time_constants": [float(t) for _, t in per_env],
         },
     )
+    add_judgment_plates(cfg, [getattr(floor, "plate", None) for floor in per_env])
 
 
 def add_body_floors(cfg, per_env: list[tuple[float | None, float]]) -> None:

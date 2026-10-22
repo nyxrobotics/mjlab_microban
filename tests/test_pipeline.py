@@ -96,12 +96,17 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.robot.microban_constants import FLOOR_FRICTION, FLOOR_TIME_CONSTANT_S
 
         judged = floors.parse(load_config(dry=False)["walk"]["judgment"]["floors"])
-        # Inside training's range, each softer or more slippery than the play floor (0.02 s, 0.3-1.2).
+        # Inside training's range, each softer or more slippery than the play floor (0.02 s, 0.3-1.2), or giving
+        # sideways at training's two ends.
         self.assertEqual(judged, {"soft_0.05": (None, 0.05), "soft_0.1": (None, 0.1), "slippery_0.3": (0.3, 0.02),
-                                  "soft_slippery": (0.3, 0.1)})
+                                  "soft_slippery": (0.3, 0.1), "plate_soft": (None, 0.02),
+                                  "plate_stiff": (None, 0.02)})
+        self.assertEqual({name: floor.plate for name, floor in judged.items() if floor.plate},
+                         {"plate_soft": (500.0, 0.3), "plate_stiff": (5000.0, 1.0)})
         self.assertEqual(floors.RIGID_TIME_CONSTANT_S, FLOOR_TIME_CONSTANT_S[0])
         for bad in ({"time_constant_s": 0.2}, {"time_constant_s": 0.01}, {"friction": FLOOR_FRICTION[0] - 0.01},
-                    {"friction": 2.0}, {"softness": 0.1}):
+                    {"friction": 2.0}, {"softness": 0.1}, {"plate": {"stiffness_n_m": 400.0, "damping_ratio": 0.3}},
+                    {"plate": {"stiffness_n_m": 500.0, "damping_ratio": 1.5}}, {"plate": {"stiffness_n_m": 500.0}}):
             with self.assertRaises(ValueError):
                 floors.parse({"bad": bad})
         cfg = SimpleNamespace(scene=SimpleNamespace(num_envs=2), events={})
@@ -174,11 +179,15 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 
         cfg = load_config(dry=False)
-        # A soft, a slippery and a soft-and-slippery floor, up to 0.05 s (where the get-up's stands hold).
+        # A soft, a slippery and a soft-and-slippery floor, up to 0.05 s (where the get-up's stands hold), and the
+        # floors that give sideways.
         judged_floors = floors.parse(cfg["getup"]["floors"])
-        self.assertEqual(sorted(judged_floors.values(), key=str),
-                         sorted(floors.parse({"a": {"time_constant_s": 0.05}, "b": {"friction": 0.3},
-                                              "c": {"time_constant_s": 0.05, "friction": 0.3}}).values(), key=str))
+        self.assertEqual(sorted(((tuple(f), f.plate) for f in judged_floors.values()), key=str),
+                         sorted(((tuple(f), f.plate) for f in floors.parse({
+                             "a": {"time_constant_s": 0.05}, "b": {"friction": 0.3},
+                             "c": {"time_constant_s": 0.05, "friction": 0.3},
+                             "d": {"plate": {"stiffness_n_m": 500.0, "damping_ratio": 0.3}},
+                             "e": {"plate": {"stiffness_n_m": 5000.0, "damping_ratio": 1.0}}}).values()), key=str))
         play = make_microban_getup_env_cfg(play=True)
         judged = make_microban_getup_env_cfg(play=True)
         judged.scene.num_envs = 2

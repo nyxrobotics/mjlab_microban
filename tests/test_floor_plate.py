@@ -1,5 +1,6 @@
 """The training floor that gives sideways (tasks/floor_plate.py): one plate per environment on two slide joints with
-a spring and a damper, a third of the environments on the static ground; play, walking and PICO keep the ground."""
+a spring and a damper, a third of the environments on the static ground, the plate following a robot that walks
+away; walking, PICO, the get-up and the whole-body train on it, play keeps the ground."""
 
 from __future__ import annotations
 
@@ -13,16 +14,21 @@ from mjlab_microban.tasks.floor_plate import (
     FLOOR_PLATE_JOINTS,
     GROUND,
     add_floor_plate,
+    FLOOR_PLATE_RECENTRE_M,
     floor_plate,
     floor_plate_contact_weight,
+    floor_plate_follow,
+    floor_plate_recentre,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
 from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 from mjlab_microban.wholebody.env_cfg import make_wholebody_env_cfg
 
-PLATE_TASKS = {"getup": make_microban_getup_env_cfg, "wholebody": make_wholebody_env_cfg}
-GROUND_TASKS = {"walk": make_microban_velocity_env_cfg, "pico": make_microban_teleop_v13_arm_overlay_env_cfg}
+PLATE_TASKS = {"getup": make_microban_getup_env_cfg, "wholebody": make_wholebody_env_cfg,
+               "walk": make_microban_velocity_env_cfg, "pico": make_microban_teleop_v13_arm_overlay_env_cfg}
+# The modes of the ground's contact sensors (the feet's; the get-up's hands too) in training: the plane and the plate.
+GROUND_SENSOR_MODES = {"getup": ["subtree", "subtree"], "wholebody": [], "walk": ["subtree"], "pico": ["subtree"]}
 NUM_ENVS = 12
 ROBOT_MASS_KG = 1.136
 PLATE_MASS_KG = 1.0
@@ -39,18 +45,15 @@ def test_training_switches_the_plate_on_and_play_keeps_the_ground(task):
     assert plate.params == {"stiffness_range": (500.0, 5000.0), "damping_ratio_range": (0.3, 1.0),
                             "rigid_fraction": 1.0 / 3.0}
     assert weight.func is floor_plate_contact_weight and weight.mode == "reset"
-    # The ground's contact sensors (the get-up's feet and hands) match its subtree: the plane and the plate.
+    recentre, follow = train.events["floor_plate_recentre"], train.events["floor_plate_follow"]
+    assert recentre.func is floor_plate_recentre and recentre.mode == "reset"
+    assert follow.func is floor_plate_follow and follow.mode == "step"
+    # The ground's contact sensors match its subtree: the plane and the plate.
     ground = [s.secondary.mode for s in train.scene.sensors if getattr(s, "secondary", None)
               and s.secondary.pattern == GROUND]
-    assert ground == (["subtree", "subtree"] if task == "getup" else [])
+    assert ground == GROUND_SENSOR_MODES[task]
     assert play.scene.spec_fn is None
-    assert "floor_plate" not in play.events and "floor_plate_contact_weight" not in play.events
-
-
-@pytest.mark.parametrize("task", GROUND_TASKS)
-def test_walking_and_pico_keep_the_ground(task):
-    for cfg in (GROUND_TASKS[task](), GROUND_TASKS[task](play=True)):
-        assert cfg.scene.spec_fn is None and "floor_plate" not in cfg.events
+    assert not [name for name in play.events if name.startswith("floor_plate")]
 
 
 @pytest.fixture(scope="module")
@@ -232,3 +235,24 @@ def test_a_load_resting_on_the_plate_sways_with_the_drawn_damping_at_5_ms():
     low = ratio == 0.3
     assert torch.all((measured[low] > 0.24) & (measured[low] < 0.33)), measured
     assert torch.all(overshoot[~low] < 0.01), overshoot
+
+
+def test_the_plate_follows_a_robot_that_walks_away_and_comes_back_at_reset(env):
+    robot = env.scene["robot"]
+    plate = env.sim.mj_model.body(FLOOR_PLATE).id
+    origins = env.scene.env_origins
+    pose = robot.data.root_link_pose_w.clone()
+    # Every other environment's robot 3 m away in x, the others 1 m away (within FLOOR_PLATE_RECENTRE_M).
+    far = torch.arange(env.num_envs) % 2 == 0
+    pose[:, 0] = origins[:, 0] + torch.where(far, FLOOR_PLATE_RECENTRE_M + 1.0, FLOOR_PLATE_RECENTRE_M - 1.0)
+    pose[:, 1] = origins[:, 1]
+    robot.write_root_link_pose_to_sim(pose)
+    env.sim.forward()
+    depth_before = env.sim.model.body_pos[:, plate, 2].clone()
+    floor_plate_follow(env, None)
+    centre = env.sim.model.body_pos[:, plate]
+    assert torch.allclose(centre[far, :2], pose[far, :2])
+    assert torch.allclose(centre[~far, :2], origins[~far, :2])
+    assert torch.equal(centre[:, 2], depth_before)  # a rigid floor's plate stays out of reach below the ground
+    floor_plate_recentre(env, torch.arange(env.num_envs))
+    assert torch.allclose(env.sim.model.body_pos[:, plate, :2], origins[:, :2])
