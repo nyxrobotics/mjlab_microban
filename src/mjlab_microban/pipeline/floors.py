@@ -126,6 +126,9 @@ def add_judgment_plates(cfg, per_env: list[tuple[float, float] | None]) -> None:
     if all(plate is None for plate in per_env):
         return
     train_on_floor_plate(cfg)
+    # The plate's box collider gives a sole up to eight contacts with it: the feet's contact sensors match more
+    # than the default 64 (the get-up's 500).
+    cfg.sim.contact_sensor_maxmatch = max(cfg.sim.contact_sensor_maxmatch, 500)
     term = cfg.events["floor_plate"]
     term.func = requires_model_fields("body_pos", "jnt_stiffness", "dof_damping")(_judgment_plate)
     term.params = {
