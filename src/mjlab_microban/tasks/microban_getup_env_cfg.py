@@ -56,6 +56,7 @@ alongside.  The play/evaluation config keeps the full IMU latency and no
 schedule (docs/getup_training_export.md).
 """
 
+import mujoco
 import numpy as np
 import torch
 from copy import deepcopy
@@ -196,9 +197,10 @@ SIM_CFG = SimulationCfg(
         ccd_iterations=100,
     ),
     # Tangled fallen poses generate far more contacts than walking; the
-    # auto-sized njmax overflowed (~700-800 needed). nconmax stays auto:
-    # setting it explicitly blew GPU memory.
-    njmax=1200,
+    # auto-sized njmax overflowed (~700-800 needed), and 1200 on the plate's
+    # model (up to 1725). nconmax stays auto: setting it explicitly blew GPU
+    # memory.
+    njmax=2400,
     # The self_collision sensor (trunk subtree vs itself) exceeded the
     # default 64 matches; mjlab's own G1/Go1 configs use 500 too.
     contact_sensor_maxmatch=500,
@@ -529,6 +531,18 @@ def make_microban_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         training_floor_and_delay(cfg)
         getup_floor_and_delay(cfg)
         train_on_floor_plate(cfg)
+        # Box-box contacts by native CCD, not the plate's box collider (tasks/floor_plate.py): with the box
+        # collider the get-up did not find standing by update 900-6600 in four runs, on the plate from the start
+        # or without the plate, with njmax 2400 or overflowing 1200; with native CCD on the plate's model (every
+        # floor rigid) it stood at update 500-600, as without the plate.  Its tangled fallen poses press the
+        # robot's own boxes together, where walking does not.
+        plate_spec = cfg.scene.spec_fn
+
+        def native_ccd_plate(spec: mujoco.MjSpec) -> None:
+            plate_spec(spec)
+            spec.option.disableflags &= ~int(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
+
+        cfg.scene.spec_fn = native_ccd_plate
         # Drawn at every reset, every environment rigid until the plate stage (GETUP_STAGES).
         cfg.events["floor_plate"] = EventTermCfg(
             func=getup_floor_plate,

@@ -40,7 +40,15 @@ SWAYING_MASS_KG = ROBOT_MASS_KG + PLATE_MASS_KG
 @pytest.mark.parametrize("task", PLATE_TASKS)
 def test_training_switches_the_plate_on_and_play_keeps_the_ground(task):
     train, play = PLATE_TASKS[task](), PLATE_TASKS[task](play=True)
-    assert train.scene.spec_fn is add_floor_plate
+    # The get-up's adds the plate and keeps native CCD (its config); the others add it as is.
+    assert train.scene.spec_fn is add_floor_plate or task == "getup"
+    spec = mujoco.MjSpec()
+    ground = spec.worldbody.add_body(name=GROUND)
+    ground.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0.0, 0.0, 0.05])
+    train.scene.spec_fn(spec)
+    assert spec.body(FLOOR_PLATE) is not None
+    native_ccd_off = bool(spec.option.disableflags & int(mujoco.mjtDisableBit.mjDSBL_NATIVECCD))
+    assert native_ccd_off == (task != "getup")
     plate, weight = train.events["floor_plate"], train.events["floor_plate_contact_weight"]
     # The get-up draws its floor at every reset, rigid until its plate stage (GETUP_STAGES); the others once.
     getup = task == "getup"
