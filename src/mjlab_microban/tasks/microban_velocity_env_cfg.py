@@ -108,8 +108,12 @@ SIM_CFG = SimulationCfg(
         ls_iterations=20,
         ccd_iterations=100,
     ),
-    # nconmax=256,
-    # njmax=1024,
+    # On the plate (tasks/floor_plate.py: box-box contacts by the box collider,
+    # up to eight per sole) the feet's contact sensor matched more than the
+    # default 64: walking c65f9736 logged 104172 overflow warnings (826 without
+    # the plate) and walked left at 0.017 m/s, right at 0.036, against 0.1;
+    # the sensor lists the right foot first.  The get-up's 500.
+    contact_sensor_maxmatch=500,
 )
 
 # The command envelope after the update-3000 stage (forward, lateral, yaw).

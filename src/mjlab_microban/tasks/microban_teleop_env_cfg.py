@@ -372,10 +372,6 @@ def make_microban_teleop_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # dropping contacts or constraints at the moment the policy is least stable.
     cfg.sim.nconmax = 512
     cfg.sim.njmax = 2048
-    # On the plate (tasks/floor_plate.py: box-box contacts by the box collider, up to eight per sole) the feet's
-    # contact sensor matched more than the default 64 (walking c65f9736: 104172 overflow warnings, 826 without the
-    # plate), and support_zmp reads its forces, torques and centroids.  The get-up's 500.
-    cfg.sim.contact_sensor_maxmatch = 500
     # The feet's floor contacts also report their centroid and the torque
     # about it (still one net force per foot): the support reward's centre
     # of pressure (mdp.feet_zmp).  Not observed; the walking task keeps its own.
