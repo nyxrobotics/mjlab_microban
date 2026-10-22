@@ -34,8 +34,11 @@ Warp's box contacts (convex collision) still differ from the plane's (analytic):
 with the same random actions for 8 s had 5.1 instead of 7.8 floor contacts per environment and step, sunk 0.82
 instead of 0.34 mm at the median and 7.6 instead of 2.9 mm at the 95th percentile, the same on a locked plate and on
 a 0.5 m one; the training's floor softness (time constant 0.02-0.1 s, sink growing with its square) spans more than
-that.  So a rigid environment does not lock the plate but keeps the plane: its plate sits 1 m below the ground, out
-of reach, and a compliant environment's plane sits 1 m below its plate.  The plane's height is set per environment in mjwarp's data: a static geom's pose is computed
+that.  So a rigid environment does not lock the plate but keeps the plane: its plate sits UNUSED_FLOOR_DEPTH_M below
+the ground, out of reach, and a compliant environment's plane sits as far below its plate.  That is farther than the
+walker's foot height scan reaches (1 m): at 1 m, a ray that passed a rigid environment's plane (a foot sunk into a
+soft floor) hit the plate below and read the foot 1 m up, in 2.3 % of a trained walker's airborne foot samples
+(none without the plate), and the swing-height penalty that followed kept walking from learning to step.  The plane's height is set per environment in mjwarp's data: a static geom's pose is computed
 once, when the data is made, and never again (mjwarp smooth.kinematics).
 
 Contact softness.  MuJoCo regularizes a contact by its two bodies' inverse weights (body_invweight0), which for
@@ -67,8 +70,9 @@ FLOOR_PLATE_TRAVEL_M = 0.01
 FLOOR_PLATE_STIFFNESS_N_M = (500.0, 5000.0)
 FLOOR_PLATE_DAMPING_RATIO = (0.3, 1.0)
 RIGID_FLOOR_FRACTION = 1.0 / 3.0
-# How far below the floor the unused one of the ground plane and the plate sits.
-UNUSED_FLOOR_DEPTH_M = 1.0
+# How far below the floor the unused one of the ground plane and the plate sits: beyond the foot height scan's
+# 1 m (module docstring).
+UNUSED_FLOOR_DEPTH_M = 2.0
 # A walking robot leaves the plate's centre (20 s at up to 0.7 m/s); the plate follows it from this far.
 FLOOR_PLATE_RECENTRE_M = 2.0
 
@@ -109,7 +113,7 @@ def add_floor_plate(spec: mujoco.MjSpec) -> None:
         material=plane.material,
         rgba=plane.rgba,
     )
-    # The plane and the plate never touch (the unused one sits 1 m below the other; MuJoCo's parent filter
+    # The plane and the plate never touch (the unused one sits 2 m below the other; MuJoCo's parent filter
     # leaves pairs with a body welded to the world).
     spec.add_exclude(bodyname1=GROUND, bodyname2=FLOOR_PLATE)
     # Box-box contacts by MuJoCo's box collider, not the general one (native CCD): on the plate the general one

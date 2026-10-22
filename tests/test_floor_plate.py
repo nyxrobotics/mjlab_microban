@@ -15,6 +15,7 @@ from mjlab_microban.tasks.floor_plate import (
     GROUND,
     add_floor_plate,
     FLOOR_PLATE_RECENTRE_M,
+    UNUSED_FLOOR_DEPTH_M,
     floor_plate,
     floor_plate_contact_weight,
     floor_plate_follow,
@@ -89,15 +90,15 @@ def test_each_environment_reads_back_its_floor(env):
     origins = env.scene.env_origins
     mj_model = env.sim.mj_model
     assert int(rigid.sum()) == round(NUM_ENVS / 3) == 4
-    # Rigid: the static ground at the floor, the plate 1 m below it with no spring or damper.
+    # Rigid: the static ground at the floor, the plate 2 m below it with no spring or damper.
     torch.testing.assert_close(plane_z[rigid], origins[rigid, 2])
-    torch.testing.assert_close(plate_pos[rigid], origins[rigid] - torch.tensor([0.0, 0.0, 1.0]))
+    torch.testing.assert_close(plate_pos[rigid], origins[rigid] - torch.tensor([0.0, 0.0, UNUSED_FLOOR_DEPTH_M]))
     assert torch.all(stiffness[rigid] == 0.0) and torch.all(damping[rigid] == 0.0)
-    # Compliant: the plate under the origin and the plane 1 m below it; one spring and one damper per environment,
+    # Compliant: the plate under the origin and the plane 2 m below it; one spring and one damper per environment,
     # the same in x and y, the damper of a damping ratio 0.3-1.0 for the robot's and the plate's mass.
     soft = ~rigid
     torch.testing.assert_close(plate_pos[soft], origins[soft])
-    torch.testing.assert_close(plane_z[soft], origins[soft, 2] - 1.0)
+    torch.testing.assert_close(plane_z[soft], origins[soft, 2] - UNUSED_FLOOR_DEPTH_M)
     assert torch.equal(stiffness[:, 0], stiffness[:, 1]) and torch.equal(damping[:, 0], damping[:, 1])
     k, c = stiffness[soft, 0], damping[soft, 0]
     assert torch.all((k >= 500.0) & (k <= 5000.0)) and len(set(k.tolist())) == int(soft.sum())
@@ -210,9 +211,9 @@ def test_a_load_resting_on_the_plate_sways_with_the_drawn_damping_at_5_ms():
         joint = mj_model.joint(name)
         sim.model.jnt_stiffness[:, joint.id] = stiffness
         sim.model.dof_damping[:, int(joint.dofadr[0])] = 2.0 * ratio * torch.sqrt(stiffness * SWAYING_MASS_KG)
-    # As in a compliant training environment: the plate's contacts as soft as the ground's, the plane 1 m below.
+    # As in a compliant training environment: the plate's contacts as soft as the ground's, the plane 2 m below.
     sim.model.body_invweight0[:, plate] = 0.0
-    sim.data.geom_xpos[:, mj_model.geom(GROUND).id, 2] = -1.0
+    sim.data.geom_xpos[:, mj_model.geom(GROUND).id, 2] = -UNUSED_FLOOR_DEPTH_M
     sim.forward()
     load = int(mj_model.jnt_qposadr[mj_model.body("load").jntadr[0]])
     for _ in range(100):  # the box settles on the plate
