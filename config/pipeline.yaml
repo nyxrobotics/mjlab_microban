@@ -93,12 +93,20 @@ pico:
   # (34859f41, update 14999) falls 13 times without a push in 6016 runs
   # (27 with friction 0.3) and 30 % of its crouched pushes; on 0.05 s and
   # friction 0.3 none without a push.
+  # The plate at its stiff end only (training keeps both ends): on the soft
+  # end (500 N/m, damping ratio 0.3) PICO's crouched pushes fall about 6.3 %
+  # against a line of about 5.3 % (the walker's standing and walking pushes
+  # + 5 points), whichever PICO: 07fd10db, never trained on the plate, 4.9,
+  # 6.6, 7.4 % at seeds 42, 44, 46; b096a04's 3e4b3373, trained on it, 6.6,
+  # 6.4, 5.5, 6.6 % at seeds 42-48, 6.2 % at 1000 N/m, 6.4 % at a damping
+  # ratio 0.6, 5.3 % at 2000 N/m (seed 42).  There 3e4b3373 falls in none of
+  # its unpushed runs at seeds 42-48 and in 1.7 % of its standing and
+  # walking pushes (seed 42).  The stiff end: 4.5 %, 3.5 % for 07fd10db.
   judgment:
     floors:
       soft_0.05: {time_constant_s: 0.05}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.05, friction: 0.3}
-      plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}}
       plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
   # The tracking checks of foot accuracy a release takes as they are (the gate
   # records each failing measurement and the robot shows it; steps.py

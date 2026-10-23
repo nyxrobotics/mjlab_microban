@@ -127,9 +127,10 @@ class StateTest(unittest.TestCase):
         from mjlab_microban.scripts import evaluate_teleop_v12_tracking as tracking
 
         cfg = load_config(dry=False)
-        # PICO trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s.
+        # PICO trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s, the plate at its
+        # stiff end only (config/pipeline.yaml).
         floors = cfg["pico"]["judgment"]["floors"]
-        self.assertEqual(floors, cfg["getup"]["floors"])
+        self.assertEqual(floors, {name: f for name, f in cfg["getup"]["floors"].items() if name != "plate_soft"})
         self.assertTrue(all(f.get("time_constant_s", 0.02) <= 0.05 for f in floors.values()))
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
@@ -160,7 +161,7 @@ class StateTest(unittest.TestCase):
             self.assertEqual([cmd for cmd in ran if cmd[0] == "stand_still"],
                              [["stand_still", "pico", [0.05], None]]
                              + [["stand_still", "pico", None, floor] for floor in plates])
-            self.assertEqual(len(plates), 2)
+            self.assertEqual(len(plates), 1)  # the plate's stiff end
             Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
             with self.assertRaises(core.JobStopped):  # a report not written is no judgment
                 pipeline.pico_failures(prefix, ("slippery_0.3_9x300",))
