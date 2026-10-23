@@ -47,11 +47,17 @@ walk:
     # too (9 and 42 unpushed).  Trained on the robot's floor only, the walker
     # (45d46ac9) passes the rigid floor and falls 12-27 of 90 pushed on 0.1 s
     # and 0.3.
+    # Floors up to 0.05 s, as PICO's and the get-up's (2026-10-21, with the
+    # user: judge the floors a policy on general rewards converges on, not the
+    # severe ones; training keeps 0.02-0.1 s).  Trained on the plate too
+    # (82e9585c, update 29999), the walker falls on none of the floors, 0.1 s
+    # included, but steps sideways 20-30 % slower (right on the rigid floor
+    # 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its right side
+    # step is below the line (0.015 and 0.014 m/s of 0.02; 9x300 -0.002).
     floors:
       soft_0.05: {time_constant_s: 0.05}
-      soft_0.1: {time_constant_s: 0.1}
       slippery_0.3: {friction: 0.3}
-      soft_slippery: {time_constant_s: 0.1, friction: 0.3}
+      soft_slippery: {time_constant_s: 0.05, friction: 0.3}
       # The floor that gives sideways (tasks/floor_plate.py) at training's
       # softest, least damped and stiffest, most damped ends (2026-10-22, with
       # the user: every policy trains and is judged on it).

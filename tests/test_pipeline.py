@@ -98,8 +98,8 @@ class StateTest(unittest.TestCase):
         judged = floors.parse(load_config(dry=False)["walk"]["judgment"]["floors"])
         # Inside training's range, each softer or more slippery than the play floor (0.02 s, 0.3-1.2), or giving
         # sideways at training's two ends.
-        self.assertEqual(judged, {"soft_0.05": (None, 0.05), "soft_0.1": (None, 0.1), "slippery_0.3": (0.3, 0.02),
-                                  "soft_slippery": (0.3, 0.1), "plate_soft": (None, 0.02),
+        self.assertEqual(judged, {"soft_0.05": (None, 0.05), "slippery_0.3": (0.3, 0.02),
+                                  "soft_slippery": (0.3, 0.05), "plate_soft": (None, 0.02),
                                   "plate_stiff": (None, 0.02)})
         self.assertEqual({name: floor.plate for name, floor in judged.items() if floor.plate},
                          {"plate_soft": (500.0, 0.3), "plate_stiff": (5000.0, 1.0)})
