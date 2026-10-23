@@ -43,7 +43,9 @@ process:
 * update 10000 ("effort"): shoulder roll joins the roll pose term, the
   target-vs-measured effort penalty and a 10x clip barrier, both only while
   both feet touch the floor (_add_calm_rewards);
-* update 15000 ("push"): +-0.3 m/s pushes every 3-6 s, to the end (18000).
+* update 15000 ("push"): +-0.3 m/s pushes every 3-6 s, to the end (18000),
+  and the charge on standing arm targets past their soft limits (an arm
+  pressed into its stop holds full torque; _add_calm_rewards).
 
 The pushes come after the effort stage: with pushes from the effort switch
 on, one arm stays pressed into its shoulder_roll stop (target on the +-pi
@@ -235,6 +237,7 @@ GETUP_STAGES = (
         GETUP_SCHEDULE["refine"],
         (
             Setting("reward", "standing_joint_vel", "weight", -4.0),
+            Setting("reward", "raw_target_clip_excess", "weight", -0.2),
             Setting("reward", "feet_lateral", "weight", 30.0),
             Setting("reward", "roll_pose", "weight", 60.0),
         ),
@@ -246,15 +249,17 @@ GETUP_STAGES = (
             Setting("reward", "roll_pose", "weight", 0.0),
             Setting("reward", "roll_pose_shoulder", "weight", 60.0),
             Setting("reward", "standing_target_error", "weight", -2.0),
-            # With the light barrier's -0.2 the 10x barrier (-2.0), only while both feet touch the floor.
+            # With refine's -0.2 the 10x barrier (-2.0), only while both feet touch the floor.
             Setting("reward", "raw_target_clip_excess_both_feet", "weight", -1.8),
-            Setting("reward", "standing_target_soft_limit_excess", "weight", -10.0),
         ),
     ),
     Stage(
         "push",
         GETUP_SCHEDULE["push"],
-        (Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),),
+        (
+            Setting("event", "push_robot", "params.velocity_range", {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}),
+            Setting("reward", "standing_target_soft_limit_excess", "weight", -10.0),
+        ),
     ),
 )
 
@@ -845,20 +850,24 @@ def standing_target_soft_limit_excess_l1_sum(
     height_threshold: float,
     head_asset_cfg: SceneEntityCfg,
     action_name: str,
+    asset_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """While standing on both feet: each joint's target before the +-pi clip, how far past its soft limits, over
-    half its soft range, summed (normalized_target_clip_excess_l1_sum against the soft limits).
+    """While standing on both feet: each of ``asset_cfg``'s joints' target before the +-pi clip, how far past its
+    soft limits, over half its soft range, summed (normalized_target_clip_excess_l1_sum against the soft limits).
 
     Trained on the plate, a get-up (fc141b6a) stood with its left shoulder roll's target at -380 deg (soft limits
     +9..171), clipped to -pi, the arm pressed into its 0-deg stop at 0.79 Nm in every standing step.  The clip
     barrier charges only the 3.5 rad past -pi, and the target-error and pose terms read the clipped target and the
-    measured angle, which do not move there.  Standing, a target past the soft range only presses a joint into its
-    stop: this sums 0.03 per standing step for the release get-up (185e584d), 5.25 for fc141b6a."""
+    measured angle, which do not move there.  Standing, an arm target past the soft range only presses the arm into
+    its stop: this sums 0.03 per standing step for the release get-up (185e584d), 5.25 for fc141b6a.  The arms only:
+    a standing leg needs targets past its soft limits for balancing torque (module docstring)."""
     action = env.action_manager.get_term(action_name)
+    columns = torch.isin(action.target_ids, torch.as_tensor(asset_cfg.joint_ids, device=env.device))
     target = action.raw_action * torch.as_tensor(action.scale, device=env.device) + torch.as_tensor(
         action.offset, device=env.device
     )
-    limits = action._entity.data.soft_joint_pos_limits[:, action.target_ids]
+    target = target[:, columns]
+    limits = action._entity.data.soft_joint_pos_limits[:, action.target_ids[columns]]
     lower, upper = limits[..., 0], limits[..., 1]
     excess = torch.clamp(lower - target, min=0.0) + torch.clamp(target - upper, min=0.0)
     standing = (_head_height(env, head_asset_cfg) > height_threshold).float()
@@ -871,16 +880,10 @@ def both_feet_clip_excess_l1_sum(env: ManagerBasedRlEnv, sensor_name: str, actio
 
 
 def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> None:
-    """The calm (refine) and effort terms, registered at weight 0, and the light clip barrier.
+    """The calm (refine) and effort terms, registered at weight 0.
 
     GETUP_STAGES sets their weights: refine at update 4000, effort at
     10000 (mjlab skips a zero-weight term, so they cost nothing before).
-
-    The light barrier (-0.2) charges raw output beyond the flat clip from the
-    first update: past the clip a raw output moves nothing, so it drifts.
-    Switched on at refine, it found a get-up's (fc141b6a) left shoulder_roll
-    412 rad past its soft limit at update 4000 and had brought it back to
-    3.5 rad past the clip by 17999.
 
     refine. Without it the standing policy holds its stance with bang-bang
     targets on the clip under a large action std and trembles, although a
@@ -888,7 +891,8 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
     commanded-target-rate penalty does not calm it, so the MEASURED joint
     velocity is penalized while standing. On its own that calms the stance
     by splaying it, so feet_lateral is tripled and a tight (8.6 deg)
-    roll_pose holds the roll joints near HOME.
+    roll_pose holds the roll joints near HOME. A light barrier penalizes raw
+    output beyond the flat clip.
 
     effort. The calm policy presses an arm into the 0-deg shoulder_roll stop
     while standing. Its target sits on the clip and its measured angle cannot
@@ -898,13 +902,20 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
     penalized, and the clip barrier is raised 10x so the raw output comes
     back to where the target responds. The effort penalty costs push
     tolerance; the pushes start later, at the push switch (with pushes from
-    this switch on, an arm stays pressed into its stop). On the plate an arm
-    stays pressed all the same (standing_target_soft_limit_excess_l1_sum), so
-    each standing target's excess past its soft limits is charged too; not
-    from refine, whose bang-bang stance holds leg targets past theirs.
+    this switch on, an arm stays pressed into its stop).
+
+    push. On the plate an arm stays pressed into its stop all the same, so
+    from the push switch each standing arm target's excess past its soft
+    limits is charged too (standing_target_soft_limit_excess_l1_sum).  Not earlier:
+    the policy observes its own raw output, so a raw output past the clip
+    drifts, and the barrier brings it back only ~20 rad per 1000 updates
+    (fc141b6a's left shoulder_roll: 412 rad past its soft limit at update
+    4000, 129 at 10000, 23.5 at 15000).  Switched on at 10000 the charge
+    would cost ~1200/s while standing on both feet, which a policy can
+    dodge by lifting a foot; at 15000 ~170/s.
 
     Both effort charges count only while both feet touch the floor; on one
-    foot or none the barrier keeps its light weight.  Standing still, the
+    foot or none the barrier keeps refine's weight.  Standing still, the
     get-up that reaches standing height on one foot with its leg targets far
     from the measured angles keeps stepping at ~3.9 Hz and falls 1-2.6 s
     later, and the effort switch doubled these falls (0.1 s floor, 15-35 ms
@@ -920,11 +931,11 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
         weight=0.0,
         params={**gated, "asset_cfg": SceneEntityCfg("robot", joint_names=(DOFS_FILTER,))},
     )
-    # Keeps raw output at the clip edge, where a small change moves the
-    # target (it may still sit at the edge for full torque).
+    # Brings raw output back to the clip edge, where a small change moves
+    # the target (it may still sit at the edge for full torque).
     cfg.rewards["raw_target_clip_excess"] = RewardTermCfg(
         func=normalized_target_clip_excess_l1_sum,
-        weight=-0.2,
+        weight=0.0,
         params={"action_name": "joint_pos"},
     )
     cfg.rewards["raw_target_clip_excess_both_feet"] = RewardTermCfg(
@@ -950,7 +961,12 @@ def _add_calm_rewards(cfg: ManagerBasedRlEnvCfg, sensors: dict[str, str]) -> Non
     cfg.rewards["standing_target_soft_limit_excess"] = RewardTermCfg(
         func=standing_target_soft_limit_excess_l1_sum,
         weight=0.0,
-        params={**gated, **feet, "action_name": "joint_pos"},
+        params={
+            **gated,
+            **feet,
+            "action_name": "joint_pos",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*shoulder.*", r".*elbow.*")),
+        },
     )
 
 

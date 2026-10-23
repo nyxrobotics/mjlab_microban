@@ -44,11 +44,11 @@ The switches are a table (`GETUP_SCHEDULE` / `GETUP_STAGES` in
 
 | Updates | What is active | Why |
 |---|---|---|
-| 0-2499 | HOME-stance rewards, pose curriculum (reward-driven), no IMU latency, entropy 0.01, clip barrier -0.2 (a raw output past the clip moves nothing and drifts without it) | learns to stand first; with the delay from the first update it learns to stand far later |
+| 0-2499 | HOME-stance rewards, pose curriculum (reward-driven), no IMU latency, entropy 0.01 | learns to stand first; with the delay from the first update it learns to stand far later |
 | 2500-3999 | + 0-3 tick IMU latency (the actor's delay buffers are allocated for 3 ticks and held at 0 before) | stands under the IMU latency of the evaluation and the robot |
-| 4000-9999 | refine: action std 0.5, fresh Adam moments, learning rate back to 1e-3, entropy 0.001 (runner); calm terms: standing joint velocity -4, roll pose (hip/ankle roll, 8.6 deg std) 60, feet width x3 | calms the standing tremble; otherwise the stance is held by bang-bang targets under a large action std |
-| 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2, clip barrier -2.0 and targets past the soft limits -10 while both feet touch the floor (otherwise the barrier stays -0.2; no pushes) | the arms let go of the shoulder_roll stops and the clip excess and target error level off within the stage |
-| 15000-17999 | push: +-0.3 m/s kicks every 3-6 s | the effort terms cost push tolerance; with pushes from the effort switch on, one arm stays pressed into its stop |
+| 4000-9999 | refine: action std 0.5, fresh Adam moments, learning rate back to 1e-3, entropy 0.001 (runner); calm terms: standing joint velocity -4, roll pose (hip/ankle roll, 8.6 deg std) 60, feet width x3, clip barrier -0.2 | calms the standing tremble; otherwise the stance is held by bang-bang targets under a large action std |
+| 10000-14999 | effort: roll pose with shoulder roll, target-vs-measured effort -2 and clip barrier -2.0 while both feet touch the floor (otherwise the barrier stays -0.2; no pushes) | the arms let go of the shoulder_roll stops and the clip excess and target error level off within the stage |
+| 15000-17999 | push: +-0.3 m/s kicks every 3-6 s; arm targets past their soft limits -10 while standing on both feet (the raw output observed back drifts past the clip; by now the barrier has brought it near) | the effort terms cost push tolerance; with pushes from the effort switch on, one arm stays pressed into its stop |
 
 Every update trains on one floor per environment (contact time constant
 0.02-0.1 s, on the odd environments 0.06-0.1 s, and friction 0.15-1.5 on every
