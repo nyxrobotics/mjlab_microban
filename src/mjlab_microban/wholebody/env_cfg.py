@@ -82,8 +82,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 import mujoco
-from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs import mdp
+from mjlab.envs import ManagerBasedRlEnvCfg, mdp
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -109,10 +108,10 @@ from mjlab_microban.robot.microban_constants import (
     with_training_goal_delay,
 )
 from mjlab_microban.tasks.floor_plate import train_on_floor_plate
-from mjlab_microban.tasks.mdp import contact_time_constant
-from mjlab_microban.tasks.microban_ik_tracking_mdp import (
+from mjlab_microban.tasks.mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
+    contact_time_constant,
 )
 from mjlab_microban.wholebody import observations as obs
 from mjlab_microban.wholebody import rewards as rew

@@ -92,8 +92,7 @@ STEP_INPUTS = {
     "ik_tracking": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_env_cfg.py",
                     "src/mjlab_microban/tasks/microban_ik_tracking_*.py",
                     "src/mjlab_microban/tasks/microban_policy_export.py"],
-    "getup": [*_COMMON, "src/mjlab_microban/tasks/microban_getup_*.py",
-              "src/mjlab_microban/tasks/microban_ik_tracking_mdp.py"],
+    "getup": [*_COMMON, "src/mjlab_microban/tasks/microban_getup_*.py"],
     "export": ["src/mjlab_microban/scripts/export_*.py", "src/mjlab_microban/policy_contract.py",
                "src/mjlab_microban/scripts/ik_tracking_v12_stage.py"],
 }
@@ -1285,7 +1284,7 @@ def print_status(state_dir: Path) -> int:
     print(json.dumps({k: data.get(k) for k in ("home", "dry_run", "prefix", "created")}, indent=1, default=str))
     for name in STEPS:
         record = data.get("steps", {}).get(name, {})
-        line = f"{name:8s} {record.get('status', '-'):8s} {record.get('started', '')} -> {record.get('ended', '')}"
+        line = f"{name:11s} {record.get('status', '-'):8s} {record.get('started', '')} -> {record.get('ended', '')}"
         if record.get("error"):
             line += f"  {record['error']}"
         print(line)

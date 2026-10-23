@@ -86,6 +86,8 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
   `--agent.max-iterations` を「総回数 − (k+1)」にする。新しい run ディレクトリに `model_<k+1>` から書かれ、段、IK トラッキングの
   補正の網と列の学習、適応学習率、起き上がりの refine、起き上がりの報酬で進む段（環境の数が同じなら、環境ごとのエピソード報酬も）は
   止めずに回したときと同じ回から効く（`tasks/curriculum.py` の `resume_run`）。
+  - 改名前（2026-10-23 まで）の IK トラッキングの run は `logs/rsl_rl/mjlab_microban_teleop_v12/` にある（実験名は今は
+    `mjlab_microban_ik_tracking_v12`）。そこから続けるときは `--agent.experiment-name mjlab_microban_teleop_v12` も足す。
   - 試しの再開では、本番の段階とは別の `--agent.run-name` を使う。本番は1本の学習で作るので、パイプラインは段階の run 名で
     再開した run（`params/agent.yaml` が `resume: false` でないもの）や `--agent.resume True` で動いている学習を採らず、
     理由を出して止まる（段階は running のまま。その run を移せば、次の実行で進む）。

@@ -15,7 +15,10 @@ from types import SimpleNamespace
 import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_from_euler_xyz, quat_mul
 
-from mjlab_microban.robot.microban_constants import HOME_ROOT_QUAT_WXYZ, HOME_TRUNK_PITCH_RAD
+from mjlab_microban.robot.microban_constants import (
+    HOME_ROOT_QUAT_WXYZ,
+    HOME_TRUNK_PITCH_RAD,
+)
 from mjlab_microban.tasks.mdp import FootTargetCommand, foot_target_tracking_error_exp
 
 STD = 0.03
@@ -179,9 +182,9 @@ class FootTrackingRewardTest(unittest.TestCase):
 
     def test_ik_tracking_pays_the_one_foot_up_rows_as_the_lift_at_every_stage(self) -> None:
         from mjlab_microban.tasks.microban_ik_tracking_env_cfg import (
+            IK_TRACKING_STAGES,
             MICROBAN_IK_TRACKING_SINGLE_FOOT_TRACKING_WEIGHT,
             MICROBAN_IK_TRACKING_UPPER_FOOT_LIFT_WEIGHT,
-            IK_TRACKING_STAGES,
         )
         from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
             make_microban_ik_tracking_v13_arm_overlay_env_cfg,

@@ -57,7 +57,7 @@ from mjlab_microban.policy_contract import (
     joint_ranges,
 )
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.tasks.microban_ik_tracking_mdp import (
+from mjlab_microban.tasks.mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
 )

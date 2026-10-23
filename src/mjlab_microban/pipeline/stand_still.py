@@ -63,7 +63,9 @@ def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seco
              time_constants: list[float] | None = None, floor: tuple[float | None, float] | None = None):
     from mjlab.tasks.registry import load_env_cfg
 
-    from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import _configure_fixed_twist
+    from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import (
+        _configure_fixed_twist,
+    )
 
     cfg = load_env_cfg(task, play=True)
     cfg.scene.num_envs = envs
@@ -107,14 +109,18 @@ def _policy(kind: str, task: str, checkpoint: str, wrapped, device: str):
         return runner.get_inference_policy(device=device)
     if kind == "walk":
         from mjlab_microban.scripts.ik_tracking_v12_bootstrap_gate import _legacy_model
-        from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import inspect_legacy_velocity_checkpoint
+        from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import (
+            inspect_legacy_velocity_checkpoint,
+        )
 
         digest = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()
         _identity, state = inspect_legacy_velocity_checkpoint(checkpoint, digest)
         actor = _legacy_model().to(device)
         actor.load_state_dict(state, strict=True)
     else:
-        from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import _load_actor
+        from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import (
+            _load_actor,
+        )
 
         actor, _iteration, _infos = _load_actor(Path(checkpoint), device=device)
     actor.eval()
@@ -190,7 +196,9 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
         for actuator in robot.actuators:
             actuator.set_lags(lag)
         if kind == "ik_tracking":
-            from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import _zero_neutral_targets
+            from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import (
+                _zero_neutral_targets,
+            )
 
             _zero_neutral_targets(env)
             obs = wrapped.get_observations()

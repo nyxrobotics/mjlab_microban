@@ -56,22 +56,6 @@ from mjlab_microban.tasks.mdp import (
 )
 from mjlab_microban.tasks.microban_policy_export import MICROBAN_HMD_JOINT_NAMES
 
-# Runtime command limits from microban/src/moves/hmd_head.py.  The event further
-# intersects these with Entity.data.soft_joint_pos_limits, so the effective
-# training bounds retain the articulation's 10% mechanical-limit margin.
-MICROBAN_HMD_RUNTIME_LIMITS_RAD: dict[str, tuple[float, float]] = {
-    "head": (-math.radians(85.0), math.radians(85.0)),
-    "neck_roll": (-math.radians(23.0), math.radians(23.0)),
-    "neck_pitch": (-math.radians(85.0), math.radians(23.0)),
-}
-
-# HmdHeadTrackingMove uses one 2.5 rad/s limiter for all three axes.  Matching
-# it here makes target motion no faster than deployment even when a random
-# waypoint is on the opposite side of the range.
-MICROBAN_HMD_SLEW_RATES_RAD_S: dict[str, float] = {
-    name: 2.5 for name in MICROBAN_HMD_JOINT_NAMES
-}
-
 MICROBAN_HMD_RETARGET_INTERVAL_S = (0.35, 1.50)
 
 # The live PICO bridge treats a support-foot target at or below this height as
@@ -81,67 +65,6 @@ MICROBAN_HMD_RETARGET_INTERVAL_S = (0.35, 1.50)
 MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M = 0.0025
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
-
-
-def _joint_position_action_tensors(
-    env: ManagerBasedRlEnv,
-    action_name: str,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    """Return raw, effective-raw, target, lower and upper action tensors."""
-
-    action = env.action_manager.get_term(action_name)
-    if not isinstance(action, JointPositionAction):
-        raise TypeError(f"{action_name!r} must be a JointPositionAction")
-    if action.cfg.clip is None or not hasattr(action, "_clip"):
-        raise ValueError(f"{action_name!r} must define absolute target clips")
-
-    raw = action.raw_action
-    scale = torch.as_tensor(action.scale, dtype=raw.dtype, device=raw.device)
-    offset = torch.as_tensor(action.offset, dtype=raw.dtype, device=raw.device)
-    if not bool(torch.isfinite(scale).all().item()) or not bool(
-        torch.all(scale > 0.0).item()
-    ):
-        raise ValueError("joint-position action scale must be finite and positive")
-    if not bool(torch.isfinite(offset).all().item()):
-        raise ValueError("joint-position action offset must be finite")
-
-    clip = action._clip
-    lower = clip[..., 0]
-    upper = clip[..., 1]
-    if not bool(torch.all(lower < upper).item()):
-        raise ValueError("joint-position action clips must have lower < upper")
-
-    target = raw * scale + offset
-    clipped_target = torch.clamp(target, min=lower, max=upper)
-    effective_raw = (clipped_target - offset) / scale
-    return raw, effective_raw, target, lower, upper
-
-
-def normalized_target_clip_excess_l1_sum(
-    env: ManagerBasedRlEnv,
-    action_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Return a non-vanishing, range-normalized target saturation barrier.
-
-    The absolute target excess is normalized by each soft range's half-width,
-    then summed over joints.  Values inside the target range are exactly zero.
-    L1 intentionally keeps a linear reward/return signal immediately outside
-    the boundary; the v3 joint-mean smooth-L1 term divided sparse violations by
-    18 and made that signal quadratic near the boundary, allowing deterministic
-    target clipping to grow despite a nominally large reward weight.
-    """
-
-    _, _, target, lower, upper = _joint_position_action_tensors(env, action_name)
-    clipped_target = torch.clamp(target, min=lower, max=upper)
-    half_range = 0.5 * (upper - lower)
-    normalized_excess = (target - clipped_target) / half_range
-    return torch.abs(normalized_excess).sum(dim=-1)
 
 
 def normalized_joint_soft_limit_guard_l1_sum(

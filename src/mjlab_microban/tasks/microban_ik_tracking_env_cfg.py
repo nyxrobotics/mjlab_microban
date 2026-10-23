@@ -36,45 +36,48 @@ from mjlab_microban.robot.home_pose import HOME
 from mjlab_microban.robot.microban_constants import (
     HOME_TRUNK_PITCH_RAD,
 )
-from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
 from mjlab_microban.schedules import IK_TRACKING_SCHEDULE
+from mjlab_microban.tasks.curriculum import Setting, Stage, StagedCurriculum
 from mjlab_microban.tasks.mdp import (
+    MICROBAN_HMD_RUNTIME_LIMITS_RAD,
+    MICROBAN_HMD_SLEW_RATES_RAD_S,
     UniformVelocityCommandWithRotationCfg,
     extreme_joint_velocity,
     foot_target_offset_b,
     foot_target_tracking_error_exp,
     lifted_support_feet,
+    normalized_target_clip_excess_l1_sum,
     support_zmp,
     upper_foot_lift,
 )
-from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_HMD_JOINT_NAMES,
-    MICROBAN_ACTION_JOINT_NAMES,
-    MICROBAN_IK_TRACKING_FINAL_BOTH_FEET_LIFT_UPPER_M,
+from mjlab_microban.tasks.microban_ik_tracking_foot_command import (
+    StationaryFootTargetCommandCfg,
 )
 from mjlab_microban.tasks.microban_ik_tracking_mdp import (
-    MICROBAN_HMD_RETARGET_INTERVAL_S,
-    MICROBAN_HMD_RUNTIME_LIMITS_RAD,
-    MICROBAN_HMD_SLEW_RATES_RAD_S,
-    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     IK_TRACKING_ARM_HOME_PROBABILITY,
     IK_TRACKING_ARM_RETARGET_INTERVAL_S,
+    MICROBAN_HMD_RETARGET_INTERVAL_S,
+    MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
     HmdNeckTargetMotion,
     IkTrackingArmOverlayJointPositionActionCfg,
     IkTrackingArmTargetMotion,
     arm_target_rel,
     normalized_joint_soft_limit_guard_l1_sum,
-    normalized_target_clip_excess_l1_sum,
 )
-from mjlab_microban.tasks.microban_ik_tracking_foot_command import StationaryFootTargetCommandCfg
 from mjlab_microban.tasks.microban_ik_tracking_velocity_rewards import (
     commanded_planar_velocity_progress,
     linear_velocity_tracking_error_l1,
     planar_velocity_tracking_exp,
     yaw_velocity_tracking_error_l1,
 )
-from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
-
+from mjlab_microban.tasks.microban_policy_export import (
+    MICROBAN_ACTION_JOINT_NAMES,
+    MICROBAN_HMD_JOINT_NAMES,
+    MICROBAN_IK_TRACKING_FINAL_BOTH_FEET_LIFT_UPPER_M,
+)
+from mjlab_microban.tasks.microban_velocity_env_cfg import (
+    make_microban_velocity_env_cfg,
+)
 
 # The velocity tracking stds of the earlier forward-lean IK tracking policy's final stages.
 MICROBAN_IK_TRACKING_LINEAR_TRACKING_STD_M_S = 0.5

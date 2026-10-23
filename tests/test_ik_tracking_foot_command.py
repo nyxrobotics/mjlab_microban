@@ -496,10 +496,10 @@ class StationaryFootTargetTest(unittest.TestCase):
 
     def test_ik_tracking_rewards_the_higher_foot_lift_from_the_foot_stage(self) -> None:
         from mjlab_microban.tasks.microban_ik_tracking_env_cfg import (
+            IK_TRACKING_STAGES,
             MICROBAN_IK_TRACKING_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             MICROBAN_IK_TRACKING_SUPPORT_ZMP_WEIGHT,
             MICROBAN_IK_TRACKING_UPPER_FOOT_LIFT_WEIGHT,
-            IK_TRACKING_STAGES,
         )
         from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
             make_microban_ik_tracking_v13_arm_overlay_env_cfg,
@@ -519,16 +519,20 @@ class StationaryFootTargetTest(unittest.TestCase):
     def test_ik_tracking_rewards_the_support_zmp_from_the_foot_stage(self) -> None:
         from mjlab_microban.robot.home_pose import HOME
         from mjlab_microban.tasks.microban_ik_tracking_env_cfg import (
+            IK_TRACKING_STAGES,
             MICROBAN_IK_TRACKING_SINGLE_SUPPORT_LIFT_THRESHOLD_M,
             MICROBAN_IK_TRACKING_SUPPORT_ZMP_WEIGHT,
             MICROBAN_IK_TRACKING_TRUNK_SHIFT_COM_SHARE,
-            IK_TRACKING_STAGES,
         )
-        from mjlab_microban.tasks.microban_ik_tracking_mdp import MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M
+        from mjlab_microban.tasks.microban_ik_tracking_mdp import (
+            MICROBAN_TELEOP_FOOT_INACTIVE_Z_MAX_M,
+        )
         from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
             make_microban_ik_tracking_v13_arm_overlay_env_cfg,
         )
-        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+        from mjlab_microban.tasks.microban_velocity_env_cfg import (
+            make_microban_velocity_env_cfg,
+        )
 
         settings = [(stage.name, s.path, s.value) for stage in IK_TRACKING_STAGES for s in stage.settings
                     if s.manager == "reward" and s.term == "support_zmp"]
@@ -573,8 +577,8 @@ class StationaryFootTargetTest(unittest.TestCase):
 
     def test_ik_tracking_penalizes_lifted_support_feet_from_the_arm_stage_instead_of_no_stepping(self) -> None:
         from mjlab_microban.tasks.microban_ik_tracking_env_cfg import (
-            MICROBAN_IK_TRACKING_LIFTED_SUPPORT_FEET_WEIGHT,
             IK_TRACKING_STAGES,
+            MICROBAN_IK_TRACKING_LIFTED_SUPPORT_FEET_WEIGHT,
         )
         from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
             make_microban_ik_tracking_v13_arm_overlay_env_cfg,
@@ -594,7 +598,9 @@ class StationaryFootTargetTest(unittest.TestCase):
     def test_the_contact_sensor_lists_the_right_foot_first(self) -> None:
         import mujoco
 
-        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+        from mjlab_microban.tasks.microban_velocity_env_cfg import (
+            make_microban_velocity_env_cfg,
+        )
 
         sensor = next(s for s in make_microban_velocity_env_cfg().scene.sensors if s.name == "feet_ground_contact")
         xml = Path(fc.__file__).resolve().parents[1] / "robot" / "microban" / "robot.xml"
@@ -626,7 +632,9 @@ class StationaryFootTargetTest(unittest.TestCase):
         from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
             make_microban_ik_tracking_v13_arm_overlay_env_cfg,
         )
-        from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
+        from mjlab_microban.tasks.microban_velocity_env_cfg import (
+            make_microban_velocity_env_cfg,
+        )
 
         cfg = make_microban_ik_tracking_v13_arm_overlay_env_cfg()
         xml = Path(fc.__file__).resolve().parents[1] / "robot" / "microban" / "robot.xml"
