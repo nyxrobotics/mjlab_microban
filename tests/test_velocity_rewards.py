@@ -1,10 +1,10 @@
-"""The velocity rewards of walking and PICO, and the PICO play environment.
+"""The velocity rewards of walking and IK tracking, and the IK tracking play environment.
 
 Walking tracks velocity with mjlab's two exp tracking terms in the
-HOME-levelled frame, PICO with its planar and yaw terms in that frame.  The
-reward term tables of both tasks are pinned, PICO's command envelope peaks at
-the robot's moving command limits, and the PICO play environment the 9x300
-source probe and the stage gates build on is pinned.
+HOME-levelled frame, IK tracking with its planar and yaw terms in that frame.
+The reward term tables of both tasks are pinned, IK tracking's command envelope
+peaks at the robot's moving command limits, and the IK tracking play
+environment the 9x300 source probe and the stage gates build on is pinned.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ import unittest
 from pathlib import Path
 
 from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
-from mjlab_microban.tasks.microban_teleop_env_cfg import MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
-from mjlab_microban.tasks.microban_teleop_velocity_rewards import (
+from mjlab_microban.tasks.microban_ik_tracking_env_cfg import MICROBAN_IK_TRACKING_FINAL_VELOCITY_ENVELOPE
+from mjlab_microban.tasks.microban_ik_tracking_velocity_rewards import (
     commanded_planar_velocity_progress,
     linear_velocity_tracking_error_l1,
     planar_velocity_tracking_exp,
     yaw_velocity_tracking_error_l1,
 )
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
-    make_microban_teleop_v13_arm_overlay_env_cfg,
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
+    make_microban_ik_tracking_v13_arm_overlay_env_cfg,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 from mjlab_microban.tasks.microban_velocity_tracking import (
@@ -31,7 +31,7 @@ from mjlab_microban.tasks.microban_velocity_tracking import (
     track_linear_velocity_home_frame,
 )
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "teleop_play_env_snapshot.json"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "ik_tracking_play_env_snapshot.json"
 # microban src/constants.py: VX_MAX, VY_MAX, VTHETA_MAX_MOVING (scale_velocity's
 # limits while translating).
 ROBOT_MOVING_COMMAND_LIMITS = (0.7, 0.3, 1.5)
@@ -42,7 +42,7 @@ WALK_REWARD_WEIGHTS = {
     "foot_swing_height": -0.25, "no_stepping": 0.0, "pose": 1.0, "self_collisions": -1.0,
     "track_angular_velocity": 2.0, "track_linear_velocity": 2.0, "upright": 1.0,
 }
-PICO_ONLY_REWARD_WEIGHTS = {
+IK_TRACKING_ONLY_REWARD_WEIGHTS = {
     "action_rate_l2": -0.1, "dof_pos_limits": -10.0, "feet_distance": -100.0, "foot_slip": -1.0,
     "foot_target_tracking": 1.0, "joint_soft_limit_guard": -5.0, "raw_target_clip_excess": -5.0, "lifted_support_feet": 0.0,
     "upper_foot_lift": 0.0, "support_zmp": 0.0,
@@ -52,7 +52,7 @@ PICO_ONLY_REWARD_WEIGHTS = {
 
 
 def play_env_snapshot(cfg) -> dict:
-    """The PICO play-env values the 9x300 probe and the stage gates run under."""
+    """The IK tracking play-env values the 9x300 probe and the stage gates run under."""
 
     twist = cfg.commands["twist"]
     names = (
@@ -87,10 +87,10 @@ class VelocityRewardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.walk = make_microban_velocity_env_cfg()
-        cls.pico = make_microban_teleop_v13_arm_overlay_env_cfg()
+        cls.ik_tracking = make_microban_ik_tracking_v13_arm_overlay_env_cfg()
 
-    def test_pico_envelope_peaks_at_the_robot_moving_limits(self) -> None:
-        envelope = MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
+    def test_ik_tracking_envelope_peaks_at_the_robot_moving_limits(self) -> None:
+        envelope = MICROBAN_IK_TRACKING_FINAL_VELOCITY_ENVELOPE
         peaks = tuple(
             max(abs(value) for value in envelope[axis]) for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z")
         )
@@ -106,8 +106,8 @@ class VelocityRewardTest(unittest.TestCase):
         self.assertAlmostEqual(angular.params["std"] ** 2, 0.5)
         for term in (linear, angular):
             self.assertEqual(term.params["trunk_pitch"], HOME_TRUNK_PITCH_RAD)
-        # PICO: planar exp tracking, progress and L1 errors, final stds.
-        terms = self.pico.rewards
+        # IK tracking: planar exp tracking, progress and L1 errors, final stds.
+        terms = self.ik_tracking.rewards
         self.assertIs(terms["track_linear_velocity"].func, planar_velocity_tracking_exp)
         self.assertEqual(terms["track_linear_velocity"].params["std"], 0.5)
         self.assertIs(terms["track_angular_velocity"].func, track_angular_velocity_home_frame)
@@ -131,25 +131,25 @@ class VelocityRewardTest(unittest.TestCase):
 
     def test_reward_tables(self) -> None:
         self.assertEqual({k: v.weight for k, v in self.walk.rewards.items()}, WALK_REWARD_WEIGHTS)
-        pico = {k: v.weight for k, v in self.pico.rewards.items()}
-        for name, weight in PICO_ONLY_REWARD_WEIGHTS.items():
-            self.assertEqual(pico.pop(name), weight, name)
-        for name, weight in pico.items():
+        ik_tracking = {k: v.weight for k, v in self.ik_tracking.rewards.items()}
+        for name, weight in IK_TRACKING_ONLY_REWARD_WEIGHTS.items():
+            self.assertEqual(ik_tracking.pop(name), weight, name)
+        for name, weight in ik_tracking.items():
             self.assertEqual(WALK_REWARD_WEIGHTS[name], weight, name)
 
-    def test_pico_play_env_is_unchanged(self) -> None:
-        current = play_env_snapshot(make_microban_teleop_v13_arm_overlay_env_cfg(play=True))
+    def test_ik_tracking_play_env_is_unchanged(self) -> None:
+        current = play_env_snapshot(make_microban_ik_tracking_v13_arm_overlay_env_cfg(play=True))
         self.assertEqual(current, json.loads(FIXTURE.read_text()))
 
-    def test_pico_training_samples_the_full_envelope_with_pushes(self) -> None:
-        twist = self.pico.commands["twist"]
-        envelope = MICROBAN_TELEOP_FINAL_VELOCITY_ENVELOPE
+    def test_ik_tracking_training_samples_the_full_envelope_with_pushes(self) -> None:
+        twist = self.ik_tracking.commands["twist"]
+        envelope = MICROBAN_IK_TRACKING_FINAL_VELOCITY_ENVELOPE
         self.assertEqual(twist.ranges.lin_vel_x, envelope["lin_vel_x"])
         self.assertEqual(twist.ranges.lin_vel_y, envelope["lin_vel_y"])
         self.assertEqual(twist.ranges.ang_vel_z, envelope["ang_vel_z"])
         self.assertEqual(twist.rotation_env_ang_vel_range, envelope["rotation_ang_vel_z"])
         self.assertEqual(
-            self.pico.events["push_robot"].params["velocity_range"], {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}
+            self.ik_tracking.events["push_robot"].params["velocity_range"], {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}
         )
 
 

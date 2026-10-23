@@ -1,6 +1,6 @@
 """Training's floors and servo-goal delay: one floor (friction, contact time constant) on every collision geom and
 one goal delay per environment, the delay redrawn at each reset; play and the judgments keep robot.xml's robot, its
-foot friction and its goal delay.  Walking and PICO draw no friction below 0.3 and put a third of their
+foot friction and its goal delay.  Walking and IK tracking draw no friction below 0.3 and put a third of their
 environments on hard slippery floors and a third on the play env's floor.  The get-up draws its goal delays up
 to 9 steps and its odd environments' floors from 0.06-0.1 s."""
 
@@ -28,7 +28,7 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     getup_floor_softness,
     make_microban_getup_env_cfg,
 )
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import make_microban_ik_tracking_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     WALK_FLOOR_FRICTION,
     WALK_ROBOT_FLOOR_FRACTION,
@@ -42,9 +42,9 @@ from mjlab_microban.tasks.microban_velocity_env_cfg import (
 TASKS = {
     "getup": make_microban_getup_env_cfg,
     "walk": make_microban_velocity_env_cfg,
-    "pico": make_microban_teleop_v13_arm_overlay_env_cfg,
+    "ik_tracking": make_microban_ik_tracking_v13_arm_overlay_env_cfg,
 }
-WALK_TASKS = ("walk", "pico")
+WALK_TASKS = ("walk", "ik_tracking")
 NUM_ENVS = 8
 COLLISION = re.compile(r".*_collision_\d+")
 SOLE = re.compile(r"(left|right)_foot_collision_[1-6]")

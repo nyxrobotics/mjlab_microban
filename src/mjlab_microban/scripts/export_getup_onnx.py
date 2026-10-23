@@ -29,7 +29,7 @@ from onnx.reference import ReferenceEvaluator
 
 from mjlab_microban import policy_contract
 from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_ACTION_JOINT_NAMES,
 )
 from mjlab_microban.robot.microban_constants import (
     HOME_PROJECTED_GRAVITY,
@@ -47,7 +47,7 @@ OBSERVATION_TERMS = (
     "actions",
 )
 OBSERVATION_WIDTH = 60
-ACTION_WIDTH = len(MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+ACTION_WIDTH = len(MICROBAN_ACTION_JOINT_NAMES)
 
 
 def _require_new_checkpoint(path: Path) -> tuple[str, str]:
@@ -156,7 +156,7 @@ def _validate_onnx(path: Path) -> None:
 
 def _action_contract(env: ManagerBasedRlEnv) -> tuple[np.ndarray, np.ndarray]:
     action = env.action_manager.get_term("joint_pos")
-    if tuple(action.target_names) != MICROBAN_TELEOP_ACTION_JOINT_NAMES:
+    if tuple(action.target_names) != MICROBAN_ACTION_JOINT_NAMES:
         raise ValueError("Get-up action joint order differs from the robot runtime")
     terms = tuple(env.observation_manager.active_terms["actor"])
     if terms != OBSERVATION_TERMS:

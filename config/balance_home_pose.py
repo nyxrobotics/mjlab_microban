@@ -129,7 +129,7 @@ START_ANKLE_RAD = 0.0
 
 # Shown when the training tasks refuse a HOME (see home_pose_training).
 TRAINING_LINE_HINT = (
-    "This checkout retrains only at HOMEs its tasks accept: shoulder pitch 0 (PICO "
+    "This checkout retrains only at HOMEs its tasks accept: shoulder pitch 0 (IK tracking "
     "contract v12) and an arm HOME / trunk pitch whose reachable hand targets stay inside "
     "the PICO receiver's +-0.064 m box (any trunk_pitch_deg is supported)."
 )

@@ -1,6 +1,6 @@
 """The walker's training twist: a fifth of the moving commands single-axis and small (WALK_SINGLE_AXIS_*), the
 rest mjlab's sampling as before (no rotation-only environments), kept by the train CLI; play, the judgments and
-PICO keep their commands."""
+IK tracking keep their commands."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import tyro
 from mjlab.scripts.train import TrainConfig
 
 from mjlab_microban.tasks.mdp import UniformVelocityCommandWithRotationCfg
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import make_microban_ik_tracking_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import (
     WALK_COMMAND_RANGES_FINAL,
     WALK_SINGLE_AXIS_FRACTION,
@@ -35,7 +35,7 @@ def test_only_the_walkers_training_draws_single_axis_commands():
     assert (twist.rel_standing_envs, twist.rel_forward_envs, twist.rel_rotation_envs) == (0.1, 0.2, 0.0)
     assert not isinstance(make_microban_velocity_env_cfg(play=True).commands["twist"], SingleAxisVelocityCommandCfg)
     for play in (False, True):
-        assert type(make_microban_teleop_v13_arm_overlay_env_cfg(play=play).commands["twist"]) \
+        assert type(make_microban_ik_tracking_v13_arm_overlay_env_cfg(play=play).commands["twist"]) \
             is UniformVelocityCommandWithRotationCfg
 
 

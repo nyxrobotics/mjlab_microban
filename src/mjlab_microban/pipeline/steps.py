@@ -1,4 +1,4 @@
-"""The steps of one release run: home -> walk -> pico -> getup -> export -> install -> commit.
+"""The steps of one release run: home -> walk -> ik_tracking -> getup -> export -> install -> commit.
 
 Each policy is one training process from scratch that runs its fixed number
 of updates (mjlab_microban/schedules.py) and is judged once, on its last
@@ -53,14 +53,18 @@ from mjlab_microban.pipeline.core import (
     sha256,
 )
 
-STEPS = ("home", "walk", "pico", "getup", "export", "install", "commit")
-WALK_EXP, PICO_EXP, GETUP_EXP = (
+STEPS = ("home", "walk", "ik_tracking", "getup", "export", "install", "commit")
+# The policy kind (ONNX metadata, manifest keys) each training step exports.
+# IK tracking keeps the kind "pico" its released ONNX and manifests carry.
+KIND_OF_STEP = {"walk": "walk", "ik_tracking": "pico", "getup": "getup"}
+STEP_OF_KIND = {kind: step for step, kind in KIND_OF_STEP.items()}
+WALK_EXP, IK_TRACKING_EXP, GETUP_EXP = (
     "mjlab_microban_velocity",
-    "mjlab_microban_teleop_v12",
+    "mjlab_microban_ik_tracking_v12",
     "mjlab_microban_getup",
 )
 PROBE_ROOT = REPO / "artifacts" / "legacy_teleop_probe"
-BOOTSTRAP_ROOT = REPO / "artifacts" / "teleop_v12_bootstrap"
+BOOTSTRAP_ROOT = REPO / "artifacts" / "ik_tracking_v12_bootstrap"
 DRY_RUN_POLICY_ALLOW_ENV = "MICROBAN_ALLOW_DRYRUN_POLICY"
 
 # The keys of a step's config/pipeline.yaml section the training reads (the
@@ -70,7 +74,7 @@ TRAINING_KEYS = ("task", "envs", "save_interval")
 # its stage table.
 STEP_SCHEDULE_KEYS = {
     "walk": ("walk_total",),
-    "pico": ("pico", "pico_total"),
+    "ik_tracking": ("ik_tracking", "ik_tracking_total"),
     "getup": ("getup", "getup_total"),
     "export": ("contract", "recipes"),
 }
@@ -85,13 +89,13 @@ _COMMON = ["config/home_pose.yaml", "src/mjlab_microban/robot",
 STEP_INPUTS = {
     "walk": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_*.py",
              "src/mjlab_microban/tasks/microban_getup_runner.py"],
-    "pico": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_env_cfg.py",
-             "src/mjlab_microban/tasks/microban_teleop_*.py",
-             "src/mjlab_microban/tasks/microban_policy_export.py"],
+    "ik_tracking": [*_COMMON, "src/mjlab_microban/tasks/microban_velocity_env_cfg.py",
+                    "src/mjlab_microban/tasks/microban_ik_tracking_*.py",
+                    "src/mjlab_microban/tasks/microban_policy_export.py"],
     "getup": [*_COMMON, "src/mjlab_microban/tasks/microban_getup_*.py",
-              "src/mjlab_microban/tasks/microban_teleop_mdp.py"],
+              "src/mjlab_microban/tasks/microban_ik_tracking_mdp.py"],
     "export": ["src/mjlab_microban/scripts/export_*.py", "src/mjlab_microban/policy_contract.py",
-               "src/mjlab_microban/scripts/teleop_v12_stage.py"],
+               "src/mjlab_microban/scripts/ik_tracking_v12_stage.py"],
 }
 
 
@@ -133,7 +137,7 @@ class Pipeline:
                 "from mjlab_microban.pipeline.steps import stage_tables; print(json.dumps({"
                 "'contract': p.POLICY_CONTRACT, 'recipes': dict(p.RECIPES), "
                 "'walk_total': s.WALK_TOTAL_UPDATES, 'getup_total': s.GETUP_TOTAL_UPDATES, "
-                "'pico_total': s.PICO_TOTAL_UPDATES, 'pico': s.pico_schedule_record(), "
+                "'ik_tracking_total': s.IK_TRACKING_TOTAL_UPDATES, 'ik_tracking': s.ik_tracking_schedule_record(), "
                 "'getup': s.GETUP_SCHEDULE, 'stages': stage_tables()}))")
         out = capture([*UV, "python", "-c", code], env=self.env, check=True, timeout=600)
         return json.loads(out.stdout.strip().splitlines()[-1])
@@ -189,8 +193,8 @@ class Pipeline:
             # trained policy again, its training is kept.
             self.log(f"[{step}] failed earlier ({str(record.get('error'))[:200]}); the judgment changed: "
                      "re-judging without retraining")
-            # The walker's source probe (the PICO entry gate of the trained
-            # run) is part of the training; it is kept.
+            # The walker's source probe (the IK tracking entry gate of the
+            # trained run) is part of the training; it is kept.
             for key in ("error", "ended"):
                 record.pop(key, None)
         if record.get("inputs") != inputs:
@@ -352,7 +356,7 @@ class Pipeline:
                                               str(checkpoint), str(probe_out), "--seeds", chk["seeds"],
                                               "--rules", json.dumps(rules)], "eval", env=self.env, check=False)
         self.jobs.run("walk_judgment_9x300", [*UV, "python", "-m",
-                                              "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
+                                              "mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env",
                                               "--checkpoint", str(checkpoint), "--expected-sha256",
                                               sha256(checkpoint), "--seed", str(chk["probe_seed"]),
                                               "--output", str(receipt), "--force"], "eval", env=self.env,
@@ -416,7 +420,7 @@ class Pipeline:
                       "eval", env=self.env, check=False)
         for name, receipt in receipts.items():
             self.jobs.run(f"walk_judgment_9x300_{name}", [*UV, "python", "-m",
-                                                          "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
+                                                          "mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env",
                                                           "--checkpoint", str(checkpoint), "--expected-sha256",
                                                           sha256(checkpoint), "--seed", str(chk["probe_seed"]),
                                                           "--output", str(receipt), "--force",
@@ -456,7 +460,7 @@ class Pipeline:
                     time_constants: list[float] | None = None, floor: dict[str, float] | None = None) -> dict[str, Any]:
         """Standing still with every goal delay and floor of config/pipeline.yaml ``stand_still`` (its report);
         with ``time_constants`` (s) on these soft floors in place of the rigid one; with ``floor`` (one of
-        ``getup.floors``, or a floor with a plate of walking's or PICO's) on that floor."""
+        ``getup.floors``, or a floor with a plate of walking's or IK tracking's) on that floor."""
 
         c = stand_still_config(self.cfg, kind)
         report.unlink(missing_ok=True)
@@ -479,7 +483,7 @@ class Pipeline:
         return result
 
     def install_walker(self, checkpoint: Path) -> Path:
-        """Copy the walker (and its params/) where the PICO provenance re-hashes it."""
+        """Copy the walker (and its params/) where the IK tracking provenance re-hashes it."""
 
         dest_dir = REPO / "checkpoints" / f"{self.prefix}_walk_{sha256(checkpoint)[:12]}"
         dest = dest_dir / checkpoint.name
@@ -492,12 +496,12 @@ class Pipeline:
 
     @staticmethod
     def walker_receipt(walker: Path) -> Path:
-        """Where the PICO entry probe of ``walker`` writes its receipt."""
+        """Where the IK tracking entry probe of ``walker`` writes its receipt."""
 
         return PROBE_ROOT / f"velocity_{sha256(walker)[:16]}_teleop81_arm_overlay_9x300.json"
 
     def walker_probe_record(self, walker: Path) -> dict[str, Any] | None:
-        """The entry probe ``walker``'s PICO runs were bootstrapped on, from its receipt (None: no receipt)."""
+        """The entry probe ``walker``'s IK tracking runs were bootstrapped on, from its receipt (None: no receipt)."""
 
         receipt = self.walker_receipt(walker)
         if not receipt.is_file():
@@ -506,13 +510,13 @@ class Pipeline:
                 "receipt_sha256": sha256(receipt)}
 
     def walker_probe(self, walker: Path) -> Path:
-        """The 9x300 source probe of the walker in the PICO env (seed 42); the PICO entry gate."""
+        """The 9x300 source probe of the walker in the IK tracking env (seed 42); the IK tracking entry gate."""
 
         digest = sha256(walker)
         receipt = self.walker_receipt(walker)
         PROBE_ROOT.mkdir(parents=True, exist_ok=True)
         self.jobs.run("probe_walker", [*UV, "python", "-m",
-                                        "mjlab_microban.scripts.probe_legacy_actor_in_teleop_env",
+                                        "mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env",
                                         "--checkpoint", str(walker), "--expected-sha256", digest,
                                         "--output", str(receipt), "--force"], "eval", env=self.env)
         verdict = probe_verdict(json.loads(receipt.read_text()))
@@ -521,13 +525,13 @@ class Pipeline:
                  f"minimums { {k: round(v, 3) for k, v in verdict['minimums'].items()} }, signed responses "
                  f"{ {k: round(v, 3) for k, v in verdict['responses'].items()} }, falls {verdict['falls']}, "
                  f"soft-limit overshoot {verdict['soft_limit_overshoot_rad']:.3f} rad")
-        self.state.step("pico")["walker_probe"] = {**verdict, "receipt": str(receipt),
-                                                   "receipt_sha256": sha256(receipt)}
+        self.state.step("ik_tracking")["walker_probe"] = {**verdict, "receipt": str(receipt),
+                                                          "receipt_sha256": sha256(receipt)}
         self.state.save()
         if verdict["ok"]:
             return receipt
         if not self.dry:
-            raise PipelineError(f"the walker fails the PICO source probe: {verdict['below']} (worst "
+            raise PipelineError(f"the walker fails the IK tracking source probe: {verdict['below']} (worst "
                                 f"{verdict['worst']} {verdict['worst_margin']:+.4f}, soft-limit overshoot "
                                 f"{verdict['soft_limit_overshoot_rad']:.3f} rad, falls {verdict['falls']}; "
                                 f"receipt {receipt})")
@@ -537,16 +541,16 @@ class Pipeline:
         self.log(f"dry run: the walker's probe failed; the chain bootstraps from {forced.name} (not deployable)")
         return forced
 
-    def step_pico(self) -> None:
-        inputs = self.inputs("pico", "walk")
-        if not self.begin("pico", inputs):
+    def step_ik_tracking(self) -> None:
+        inputs = self.inputs("ik_tracking", "walk")
+        if not self.begin("ik_tracking", inputs):
             return
-        c = self.cfg["pico"]
+        c = self.cfg["ik_tracking"]
         walker = Path(self.state.step("walk")["outputs"]["checkpoint"])
-        label = self.state.step("pico")["label"]
-        total = self.sched["pico_total"]
+        label = self.state.step("ik_tracking")["label"]
+        total = self.sched["ik_tracking_total"]
         fresh: list[str] = []
-        if find_checkpoint(PICO_EXP, label, total - 1) is None and running_training(label) is None:
+        if find_checkpoint(IK_TRACKING_EXP, label, total - 1) is None and running_training(label) is None:
             # A fresh run: its walker passes the entry probe and is bootstrapped.
             capture([*UV, "python", "-c", "import sys; from mjlab_microban.scripts.export_walk_onnx import "
                      "require_current_home_walk_checkpoint as c; c(sys.argv[1])", str(walker)],
@@ -554,7 +558,7 @@ class Pipeline:
             receipt = self.walker_probe(walker)
             walker_sha, receipt_sha = sha256(walker), sha256(receipt)
             self.jobs.run("bootstrap_gate", [*UV, "python", "-m",
-                                             "mjlab_microban.scripts.teleop_v12_bootstrap_gate",
+                                             "mjlab_microban.scripts.ik_tracking_v12_bootstrap_gate",
                                              "--checkpoint", str(walker), "--checkpoint-sha256", walker_sha,
                                              "--probe-receipt", str(receipt), "--probe-receipt-sha256",
                                              receipt_sha, "--output-dir",
@@ -562,51 +566,52 @@ class Pipeline:
                           "eval", env=self.env, gpu=False)
             fresh = ["--agent.legacy-velocity-checkpoint", str(walker),
                      "--agent.legacy-velocity-checkpoint-sha256", walker_sha,
-                     "--agent.legacy-teleop-probe-receipt", str(receipt),
-                     "--agent.legacy-teleop-probe-receipt-sha256", receipt_sha,
+                     "--agent.legacy-ik-tracking-probe-receipt", str(receipt),
+                     "--agent.legacy-ik-tracking-probe-receipt-sha256", receipt_sha,
                      "--agent.save-pristine-checkpoint", "True"]
-        elif "walker_probe" not in self.state.step("pico"):
+        elif "walker_probe" not in self.state.step("ik_tracking"):
             # A run trained (or training) already: the entry probe it was bootstrapped on.
             record = self.walker_probe_record(walker)
             if record is not None:
-                self.state.step("pico")["walker_probe"] = record
+                self.state.step("ik_tracking")["walker_probe"] = record
                 self.state.save()
-        final = self.train("pico", PICO_EXP, label, c["task"], total, c["envs"],
+        final = self.train("ik_tracking", IK_TRACKING_EXP, label, c["task"], total, c["envs"],
                            ["--agent.num-steps-per-env", "24", "--agent.save-interval", str(c["save_interval"])],
                            fresh_extra=fresh)
-        report_prefix, passed, failures = self.pico_judgment(final)
+        report_prefix, passed, failures = self.ik_tracking_judgment(final)
         if not passed and not self.dry:
-            raise PipelineError(f"PICO judgment failed for {final.parent.name}/{final.name}: {failures} "
+            raise PipelineError(f"IK tracking judgment failed for {final.parent.name}/{final.name}: {failures} "
                                 f"(reports {report_prefix}_*.json)")
         if not passed:
-            self.log(f"dry run: PICO judgment failed ({failures}); recorded, not enforced")
-        self.finish("pico", {"checkpoint": str(final), "sha256": sha256(final), "run": final.parent.name,
-                             "report_prefix": report_prefix,
-                             "passed": passed, "failures": failures}, [final])
+            self.log(f"dry run: IK tracking judgment failed ({failures}); recorded, not enforced")
+        self.finish("ik_tracking", {"checkpoint": str(final), "sha256": sha256(final), "run": final.parent.name,
+                                    "report_prefix": report_prefix,
+                                    "passed": passed, "failures": failures}, [final])
 
-    def pico_commands(self, checkpoint: Path, prefix: Path, seed: int) -> list[tuple[str, list[str]]]:
+    def ik_tracking_commands(self, checkpoint: Path, prefix: Path, seed: int) -> list[tuple[str, list[str]]]:
         digest = sha256(checkpoint)
         return [
-            ("loco", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_checkpoint",
+            ("loco", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint",
                       str(checkpoint), "--expected-sha256", digest, "--seed", str(seed),
                       "--output", f"{prefix}_9x300.json", "--force"]),
-            ("tracking", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_teleop_v12_tracking",
+            ("tracking", [*UV, "python", "-m", "mjlab_microban.scripts.evaluate_ik_tracking_v12_tracking",
                           str(checkpoint), "--expected-sha256", digest, "--seed", str(seed),
                           "--output", f"{prefix}_tracking.json", "--force"]),
-            ("onnx", [*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_onnx_gate", str(checkpoint),
+            ("onnx", [*UV, "python", "-m", "mjlab_microban.scripts.ik_tracking_v12_onnx_gate", str(checkpoint),
                       "--expected-sha256", digest, "--onnx", f"{prefix}.onnx", "--output", f"{prefix}_onnx.json",
                       "--force"]),
         ]
 
     @staticmethod
-    def pico_failures(prefix: Path, names: tuple[str, ...] = ("9x300", "tracking", "onnx", "stand_still")) -> list[str]:
-        """The failed checks of the PICO reports ``<prefix>_<name>.json``, named ``<name>:<check>``."""
+    def ik_tracking_failures(prefix: Path,
+                             names: tuple[str, ...] = ("9x300", "tracking", "onnx", "stand_still")) -> list[str]:
+        """The failed checks of the IK tracking reports ``<prefix>_<name>.json``, named ``<name>:<check>``."""
 
         failures = []
         for name in names:
             path = Path(f"{prefix}_{name}.json")
             if not path.is_file():
-                raise JobStopped(f"PICO evaluator {name} wrote no report ({path}): not a judgment "
+                raise JobStopped(f"IK tracking evaluator {name} wrote no report ({path}): not a judgment "
                                  "(rerun to evaluate again)")
             data = json.loads(path.read_text())
             failures += [f"{name}:{key}" for key, ok in sorted((data.get("checks") or {}).items()) if ok is not True]
@@ -614,39 +619,39 @@ class Pipeline:
                 failures.append(f"{name}:status")
         return failures
 
-    def pico_judgment(self, checkpoint: Path) -> tuple[str, bool, list[str]]:
-        """The three PICO evaluators (seed 42; the PICO judgment also 43) and standing still, on the rigid floor and
-        on each soft and slippery floor of ``pico.judgment.floors``, and, when all pass, the gate file (of the rigid
-        floor's reports)."""
+    def ik_tracking_judgment(self, checkpoint: Path) -> tuple[str, bool, list[str]]:
+        """The three IK tracking evaluators (seed 42; the IK tracking judgment also 43) and standing still, on the
+        rigid floor and on each soft and slippery floor of ``ik_tracking.judgment.floors``, and, when all pass, the
+        gate file (of the rigid floor's reports)."""
 
-        out_dir = self.state.dir / "pico_judgment"
+        out_dir = self.state.dir / "ik_tracking_judgment"
         out_dir.mkdir(exist_ok=True)
         prefix = out_dir / f"{checkpoint.parent.name}_{checkpoint.stem}"
         for name in ("9x300", "tracking", "onnx"):
             Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
-        for name, cmd in self.pico_commands(checkpoint, prefix, int(self.cfg["seed"])):
-            self.jobs.run(f"pico_judgment_{name}", cmd, "eval", env=self.env, check=False)
-        self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still.json"))
-        failures = self.pico_failures(prefix) + self.pico_floor_judgment(checkpoint, prefix)
-        waiver = self.cfg["pico"].get("tracking_waiver") or {}
+        for name, cmd in self.ik_tracking_commands(checkpoint, prefix, int(self.cfg["seed"])):
+            self.jobs.run(f"ik_tracking_judgment_{name}", cmd, "eval", env=self.env, check=False)
+        self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still.json"))
+        failures = self.ik_tracking_failures(prefix) + self.ik_tracking_floor_judgment(checkpoint, prefix)
+        waiver = self.cfg["ik_tracking"].get("tracking_waiver") or {}
         waived = waived_failures(failures, waiver, lambda source: Path(f"{prefix}_{source}.json"))
         passed = len(waived) == len(failures)
         if passed:
             rigid = sorted({failure.split(":", 1)[1] for failure in waived if failure.startswith("tracking:")})
-            capture([*UV, "python", "-m", "mjlab_microban.scripts.teleop_v12_stage", "create", str(checkpoint),
+            capture([*UV, "python", "-m", "mjlab_microban.scripts.ik_tracking_v12_stage", "create", str(checkpoint),
                      f"{prefix}_9x300.json", f"{prefix}_tracking.json", f"{prefix}_onnx.json",
                      f"{prefix}_gate.json", "--force",
                      *(["--waive-tracking-checks", ",".join(rigid), "--waiver-note", waiver["note"]] if rigid else [])],
                     env=self.env, check=True, timeout=1800)
-        self.log(f"PICO judgment of {checkpoint.parent.name}/{checkpoint.name}: "
+        self.log(f"IK tracking judgment of {checkpoint.parent.name}/{checkpoint.name}: "
                  + ((f"PASS with the tracking waiver of {waived}" if waived else "PASS") if passed
                     else f"FAIL {failures}"))
         return str(prefix), passed, failures
 
-    def pico_floor_judgment(self, checkpoint: Path, prefix: Path) -> list[str]:
-        """The PICO judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
+    def ik_tracking_floor_judgment(self, checkpoint: Path, prefix: Path) -> list[str]:
+        """The IK tracking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
 
-        The 9x300 and tracking evaluators on every floor of ``pico.judgment.floors`` (reports
+        The 9x300 and tracking evaluators on every floor of ``ik_tracking.judgment.floors`` (reports
         ``<prefix>_<floor>_9x300.json``, ``<prefix>_<floor>_tracking.json``) and standing still on the soft ones
         (``<prefix>_stand_still_soft.json``): the failures, named ``<floor>_9x300:<check>``,
         ``<floor>_tracking:<check>`` or ``stand_still_soft:<check>``.
@@ -654,7 +659,7 @@ class Pipeline:
 
         from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse
 
-        floors = (self.cfg["pico"].get("judgment") or {}).get("floors") or {}
+        floors = (self.cfg["ik_tracking"].get("judgment") or {}).get("floors") or {}
         if not floors:
             return []
         soft = sorted({t for _, t in parse(floors).values()} - {RIGID_TIME_CONSTANT_S})
@@ -663,20 +668,22 @@ class Pipeline:
             Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
         digest, seed = sha256(checkpoint), str(self.cfg["seed"])
         for floor, values in floors.items():
-            for part, module in (("9x300", "evaluate_teleop_v12_checkpoint"), ("tracking", "evaluate_teleop_v12_tracking")):
-                self.jobs.run(f"pico_judgment_{part}_{floor}",
+            for part, module in (("9x300", "evaluate_ik_tracking_v12_checkpoint"),
+                                 ("tracking", "evaluate_ik_tracking_v12_tracking")):
+                self.jobs.run(f"ik_tracking_judgment_{part}_{floor}",
                               [*UV, "python", "-m", f"mjlab_microban.scripts.{module}", str(checkpoint),
                                "--expected-sha256", digest, "--seed", seed, "--output", f"{prefix}_{floor}_{part}.json",
                                "--force", "--floor", json.dumps(values)], "eval", env=self.env, check=False)
         if soft:
-            self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still_soft.json"), time_constants=soft)
+            self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still_soft.json"), time_constants=soft)
             names += ("stand_still_soft",)
         for floor, values in floors.items():  # the floors that give sideways
             if parse({floor: values})[floor].plate:
-                self.stand_still("pico", checkpoint, Path(f"{prefix}_stand_still_{floor}.json"), floor=values)
+                self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still_{floor}.json"), floor=values)
                 names += (f"stand_still_{floor}",)
-        failures = self.pico_failures(prefix, names)
-        self.log(f"PICO judgment on the floors {list(floors)}{f' (standing still on {soft} s)' if soft else ''} of "
+        failures = self.ik_tracking_failures(prefix, names)
+        self.log(f"IK tracking judgment on the floors {list(floors)}"
+                 f"{f' (standing still on {soft} s)' if soft else ''} of "
                  f"{checkpoint.parent.name}/{checkpoint.name}: " + ("PASS" if not failures else f"FAIL {failures}"))
         return failures
 
@@ -755,7 +762,7 @@ class Pipeline:
         return summary
 
     def step_export(self) -> None:
-        inputs = self.inputs("export", "walk", "pico", "getup")
+        inputs = self.inputs("export", "walk", "ik_tracking", "getup")
         if not self.begin("export", inputs):
             return
         out = self.state.dir / "release"
@@ -763,7 +770,7 @@ class Pipeline:
         steps = self.state.data["steps"]
         checkpoints = {"walk": Path(steps["walk"]["outputs"]["checkpoint"]),
                        "getup": Path(steps["getup"]["outputs"]["checkpoint"]),
-                       "pico": Path(steps["pico"]["outputs"]["checkpoint"])}
+                       "pico": Path(steps["ik_tracking"]["outputs"]["checkpoint"])}
         files = {kind: out / name for kind, name in (("walk", "walk.onnx"), ("getup", "getup.onnx"),
                                                      ("pico", "pico_teleop.onnx"))}
         gates = self.write_gate_reports(out, checkpoints)
@@ -773,19 +780,20 @@ class Pipeline:
                                              "--gate-report", str(gates[kind]), "--replace",
                                              *(["--dry-run"] if self.dry else [])],
                           "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""}, gpu=False)
-        pico = steps["pico"]["outputs"]
-        prefix = pico["report_prefix"]
-        if pico["passed"]:
-            cmd = [*UV, "python", "-m", "mjlab_microban.scripts.export_teleop_v12_deployment",
-                   "--checkpoint", pico["checkpoint"], "--stage-gate", f"{prefix}_gate.json",
+        ik_tracking = steps["ik_tracking"]["outputs"]
+        prefix = ik_tracking["report_prefix"]
+        if ik_tracking["passed"]:
+            cmd = [*UV, "python", "-m", "mjlab_microban.scripts.export_ik_tracking_v12_deployment",
+                   "--checkpoint", ik_tracking["checkpoint"], "--stage-gate", f"{prefix}_gate.json",
                    "--output", str(files["pico"]), "--force"]
         else:  # dry run only (a real run stopped at the judgment)
-            cmd = [*UV, "python", "-m", "mjlab_microban.pipeline.dry", "package", pico["checkpoint"], prefix,
-                   str(out / "DRYRUN_pico_gate.json"), str(files["pico"])]
-        _, log = self.jobs.run("export_pico", cmd, "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""}, gpu=False)
+            cmd = [*UV, "python", "-m", "mjlab_microban.pipeline.dry", "package", ik_tracking["checkpoint"], prefix,
+                   str(out / "DRYRUN_ik_tracking_gate.json"), str(files["pico"])]
+        _, log = self.jobs.run("export_ik_tracking", cmd, "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""},
+                               gpu=False)
         receipt = last_json_line(log.read_text(errors="replace"))
         if receipt.get("status") != "pass" or receipt.get("output_sha256") != sha256(files["pico"]):
-            raise PipelineError(f"PICO packaging failed: {receipt}")
+            raise PipelineError(f"IK tracking packaging failed: {receipt}")
         manifest = self.manifest(files, checkpoints)
         manifest_path = out / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
@@ -796,7 +804,7 @@ class Pipeline:
         """The walk and get-up judgments as their exporters check them (policy_contract.gate_report)."""
 
         steps = self.state.data["steps"]
-        walk_probe = (steps["pico"].get("walker_probe")
+        walk_probe = (steps["ik_tracking"].get("walker_probe")
                       or self.walker_probe_record(Path(steps["walk"]["outputs"]["checkpoint"])) or {})
         evidence = {
             "walk": {"passed": bool(steps["walk"]["outputs"]["passed"]) and bool(walk_probe.get("ok")),
@@ -832,8 +840,8 @@ class Pipeline:
             "training_branch": git(REPO, "rev-parse", "--abbrev-ref", "HEAD"),
             "judgments": {
                 "walk": {k: steps["walk"]["outputs"][k] for k in ("summary", "passed", "failures")},
-                "walk_source_probe": steps["pico"].get("walker_probe"),
-                "pico": {k: steps["pico"]["outputs"][k] for k in ("passed", "failures")},
+                "walk_source_probe": steps["ik_tracking"].get("walker_probe"),
+                "pico": {k: steps["ik_tracking"]["outputs"][k] for k in ("passed", "failures")},
                 "getup": {k: steps["getup"]["outputs"][k] for k in ("summary", "passed", "failures")},
             },
             "checkpoints": {kind: path.name for kind, path in checkpoints.items()},
@@ -895,7 +903,7 @@ class Pipeline:
         steps = self.state.data["steps"]
         body = (f"HOME {h['tag']} (joint hash {h['joint_hash']}), policy contract {manifest['contract']}.\n\n"
                 + "".join(f"{entry['file']} sha256 {entry['sha256']}\n"
-                          f"  from {steps[name]['outputs']['run']}/{manifest['checkpoints'][name]} "
+                          f"  from {steps[STEP_OF_KIND[name]]['outputs']['run']}/{manifest['checkpoints'][name]} "
                           f"sha256 {entry['checkpoint_sha256']}\n"
                           for name, entry in manifest["policies"].items())
                 + f"\nRobot validator and tests pass ({steps['install']['outputs']['robot_tests']}).\n"
@@ -1008,11 +1016,11 @@ def stage_tables() -> dict[str, dict[str, int]]:
     from mjlab_microban.schedules import GETUP_SCHEDULE
     from mjlab_microban.tasks.microban_getup_env_cfg import GETUP_STAGES
     from mjlab_microban.tasks.microban_getup_runner import GETUP_REFINE_EXPLORATION_STAGE
-    from mjlab_microban.tasks.microban_teleop_env_cfg import TELEOP_STAGES
+    from mjlab_microban.tasks.microban_ik_tracking_env_cfg import IK_TRACKING_STAGES
     from mjlab_microban.tasks.microban_velocity_env_cfg import WALK_STAGES
 
     tables = {kind: {stage.name: stage.iteration for stage in stages}
-              for kind, stages in (("walk", WALK_STAGES), ("pico", TELEOP_STAGES), ("getup", GETUP_STAGES))}
+              for kind, stages in (("walk", WALK_STAGES), ("ik_tracking", IK_TRACKING_STAGES), ("getup", GETUP_STAGES))}
     tables["getup"][GETUP_REFINE_EXPLORATION_STAGE] = GETUP_SCHEDULE["refine"]
     return tables
 
@@ -1053,11 +1061,11 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
     0.1 / 0.2 m/s forward 0.04 / 0.08, backward 0.02 / 0.04, lateral 0.02,
     yaw 0.2; the margin is the signed response minus it); the measured joints
     may overshoot the soft limits by ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.
-    The neutral scenario is checked for completion only, as the PICO source
-    gate does.
+    The neutral scenario is checked for completion only, as the IK tracking
+    source gate does.
     """
 
-    from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+    from mjlab_microban.ik_tracking_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
     from mjlab_microban.twist_pass_line import axis_minimums, twist_passes, worst_margin
 
     summary = receipt["summary"]
@@ -1202,9 +1210,10 @@ def stand_still_summary(result: dict[str, Any]) -> dict[str, Any]:
             "judged_envs": result["judged_envs"], "envs": result["envs"]}
 
 
-# The PICO tracking checks config/pipeline.yaml ``pico.tracking_waiver`` may waive: accuracy only (the foot's
-# position, the lifted foot's height, the standing ZMP's centring), never a fall, a step, a drift, a sliding support
-# foot, walking or a safety check (teleop_v12_stage records the waiver in the gate and the robot shows it).
+# The tracking checks of the IK tracking judgment that config/pipeline.yaml ``ik_tracking.tracking_waiver`` may
+# waive: accuracy only (the foot's position, the lifted foot's height, the standing ZMP's centring), never a fall, a
+# step, a drift, a sliding support foot, walking or a safety check (ik_tracking_v12_stage records the waiver in the
+# gate and the robot shows it).
 PIPELINE_WAIVABLE_TRACKING_CHECKS = ("foot_error", "foot_lift", "standing_still")
 
 
@@ -1229,7 +1238,7 @@ def standing_still_fails_only_on_zmp(report: dict[str, Any]) -> bool:
 
 def waived_failures(failures: list[str], waiver: dict[str, Any],
                     report_of: Callable[[str], Path] | None = None) -> list[str]:
-    """The PICO judgment failures ``waiver`` covers: a tracking check of the rigid floor or of a judged floor
+    """The IK tracking judgment failures ``waiver`` covers: a tracking check of the rigid floor or of a judged floor
     (``tracking:<check>``, ``<floor>_tracking:<check>``) it names; standing_still only where its report
     (``report_of(source)``) fails it on the ZMP alone."""
 
@@ -1237,11 +1246,11 @@ def waived_failures(failures: list[str], waiver: dict[str, Any],
     if not checks:
         return []
     if not str(waiver.get("note") or "").strip():
-        raise PipelineError("pico.tracking_waiver needs a note recording on what it was decided", EXIT_INPUT)
+        raise PipelineError("ik_tracking.tracking_waiver needs a note recording on what it was decided", EXIT_INPUT)
     unknown = sorted(checks - set(PIPELINE_WAIVABLE_TRACKING_CHECKS))
     if unknown:
-        raise PipelineError(f"pico.tracking_waiver can waive only {list(PIPELINE_WAIVABLE_TRACKING_CHECKS)}, not "
-                            f"{unknown}", EXIT_INPUT)
+        raise PipelineError(f"ik_tracking.tracking_waiver can waive only {list(PIPELINE_WAIVABLE_TRACKING_CHECKS)}, "
+                            f"not {unknown}", EXIT_INPUT)
     covered = []
     for failure in failures:
         source, _, check = failure.rpartition(":")
@@ -1255,7 +1264,8 @@ def waived_failures(failures: list[str], waiver: dict[str, Any],
 
 
 def stand_still_config(cfg: dict[str, Any], kind: str) -> dict[str, Any]:
-    """config/pipeline.yaml ``stand_still`` for ``kind`` (walk, pico, getup), with its own ``stand_still`` keys."""
+    """config/pipeline.yaml ``stand_still`` for ``kind`` (walk, ik_tracking, getup), with its own ``stand_still``
+    keys."""
 
     return {**cfg["stand_still"], **((cfg.get(kind) or {}).get("stand_still") or {})}
 

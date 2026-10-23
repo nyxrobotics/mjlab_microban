@@ -55,7 +55,7 @@ Every update trains on one floor per environment (contact time constant
 collision geom: the get-up lies on its hands, knees and back) and one
 servo-goal delay per episode (3-9 physics steps, 15-40 ms in effect;
 `tasks/mdp.py` `training_floor_and_delay` and `getup_floor_and_delay` in
-`microban_getup_env_cfg.py`).  Walking and PICO train on training's floors
+`microban_getup_env_cfg.py`).  Walking and IK tracking train on training's floors
 (0.02-0.1 s) with friction 0.3-1.5, a third of their environments on hard
 slippery floors (0.02 s, friction 0.3-0.45), a third on the play floor, and
 3-8 steps.

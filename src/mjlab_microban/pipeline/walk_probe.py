@@ -6,7 +6,7 @@ mean HOME-levelled twist over steps 50..299 while up is compared with the
 command.  Six diagonal commands with and without pushes (world-frame kicks
 every 1.0 s: +0.30 m/s forward and 0.15 m/s against the commanded lateral
 sign), six single-axis commands and standing, three repeats each, on seeds
-101-105 -- never the PICO entry probe's seed 42.
+101-105 -- never the IK tracking entry probe's seed 42.
 
 Rules:
 
@@ -145,8 +145,8 @@ def run(checkpoint: str, seeds: list[int], reps: int,
     from tensordict import TensorDict
 
     from mjlab_microban.robot.microban_constants import HOME_TRUNK_PITCH_RAD
-    from mjlab_microban.scripts.teleop_v12_bootstrap_gate import _legacy_model
-    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import inspect_legacy_velocity_checkpoint
+    from mjlab_microban.scripts.ik_tracking_v12_bootstrap_gate import _legacy_model
+    from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import inspect_legacy_velocity_checkpoint
     from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
     if set(seeds) & {42, 43, 44}:

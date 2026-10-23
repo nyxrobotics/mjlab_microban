@@ -24,7 +24,7 @@
 | --- | --- |
 | `walk.onnx` | 歩行（入力 `obs` [1, 63]、出力 `actions` [1, 18]） |
 | `getup.onnx` | 起き上がり（入力 [1, 60]） |
-| `pico_teleop.onnx` | PICO（入力 [1, 81]） |
+| `pico_teleop.onnx` | IK トラッキング（入力 [1, 81]。ファイル名と種類名 `pico` は互換のため旧名のまま） |
 | `manifest.json` | 3つのファイルを1つのリリースに結びつける（下） |
 | `walk_gate.json`、`getup_gate.json` | 歩行と起き上がりの判定の記録（`gate_report_sha256` の元。実機にはコピーしない） |
 
@@ -47,7 +47,7 @@
 ```
 
 実機は `contract`、`home_tag`、`dry_run`、各ファイルの SHA-256、ONNX の `checkpoint_sha256` との一致、
-PICO の `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確かめる。最後の行のキーは記録用で、
+IK トラッキングの `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確かめる。最後の行のキーは記録用で、
 実機は読まない。
 
 ## 3つの ONNX に共通のメタデータ（値はすべて文字列）
@@ -55,27 +55,27 @@ PICO の `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確
 | キー | 値 |
 | --- | --- |
 | `microban_policy_contract` | `microban-policy-1` |
-| `microban_policy_kind` | `walk` / `getup` / `pico` |
+| `microban_policy_kind` | `walk` / `getup` / `pico`（IK トラッキング） |
 | `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-arm-overlay-residual-crouch-feedforward-track-velocity-1` |
 | `home_pose` | `{"joint_pos_rad":{21 関節},"root_pos_m":[3],"root_quat_wxyz":[4]}`（全精度） |
 | `joint_names`、`default_joint_pos` | 21 関節と、その順の HOME（`repr` の全精度） |
 | `action_joint_names` | 18 関節（実機の `OBSERVATION_DOF_ORDER`） |
 | `action_scale` | `1.0` |
 | `action_clip_lower` / `action_clip_upper` | 18 個の −π / +π（全精度） |
-| `observation_schema_json`、`observation_joint_names` | 観測の項と幅、関節の並び（PICO は首の3関節が先頭） |
+| `observation_schema_json`、`observation_joint_names` | 観測の項と幅、関節の並び（IK トラッキングは首の3関節が先頭） |
 | `previous_action_semantics` | `raw_policy_output` |
 | `base_ang_vel_frame`、`control_hz` | `imu_sensor_xyz`、`50` |
 | `checkpoint_filename`、`checkpoint_iteration`、`checkpoint_sha256` | `model_N.pt`、`N`、その SHA-256 |
-| `gate_status`、`gate_report_sha256` | `pass` と判定の記録の SHA-256（歩行・起き上がりは `*_gate.json`、PICO はステージゲート） |
+| `gate_status`、`gate_report_sha256` | `pass` と判定の記録の SHA-256（歩行・起き上がりは `*_gate.json`、IK トラッキングはステージゲート） |
 | `self_test_observations_json`、`self_test_actions_json` | 起動時の自己テストの観測と記録した出力 |
 | `dry_run_not_deployable` | 試運転のパッケージだけ `true` |
 
 自己テストの観測は、実在しうる状態の行だけを選ぶ（重力のノルム 1 ± 0.05、体の 18 関節が MJCF の範囲 + 5° の
 内側、関節速度 8.5 rad/s 以下）。歩行と起き上がりは書き出しのときに再生の env で種 0 のロールアウトを
 400 ステップ行い、10 ステップごとの観測から最大 32 行を取る（同じチェックポイントからの書き出しは
-バイト単位で同じになる）。PICO は判定の追従評価のロールアウトの観測から取る。
+バイト単位で同じになる）。IK トラッキングは判定の追従評価のロールアウトの観測から取る。
 
-PICO だけのキー: `pico_walk_checkpoint_sha256`（凍結した歩行器）、`pico_target_frame`、
+IK トラッキングだけのキー（名前は互換のため `pico_*` のまま）: `pico_walk_checkpoint_sha256`（凍結した歩行器）、`pico_target_frame`、
 足・両足の目標の範囲（`pico_*_target_lower_json` / `_upper_json`）、`pico_arm_target_json`（腕の目標の
 取り決め: 名前 `microban_pico_arm_target_rel_home_v1`、関節の名前、箱 `lower_rad`/`upper_rad`、速さ 4.0 rad/s）、
 `pico_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
@@ -84,19 +84,19 @@ PICO だけのキー: `pico_walk_checkpoint_sha256`（凍結した歩行器）�
 `microban_pico_crouch_feedforward_v2`、12 脚関節の名前、方策の周期 0.02 s と Δq の 1 周期の上限 0.2 rad、
 確かめの足の目標と、そこでの脚の角）。
 
-PICO の ONNX は方策の網だけで、しゃがみの脚の角は実機が足し引きする（`robot/crouch_feedforward.py`。
+IK トラッキングの ONNX は方策の網だけで、しゃがみの脚の角は実機が足し引きする（`robot/crouch_feedforward.py`。
 実機の `src/crouch_feedforward.py` は同じファイル）。公開中の両足の目標がともに帯 2.5 mm より上で、
 両足とも両足の範囲（xy ±10 mm、dz 20 mm 以下）の中のとき、(dx, dy の平均, 低い方の dz) に胴を下げ、
 両足の裏を HOME の位置に残す脚の角を IK の表から補間で求める。それ以外の行（目標なし、片足、歩行、
 範囲の外）ではこの角は 0。使う Δq は、この角へ 1 周期 0.2 rad（12 関節のノルム、10 rad/s）までの速さで
-近づく状態で、学習では env ごと、実機では PICO の動作ごとに持ち、始めに 0 にする。床の帯の出入り、
+近づく状態で、学習では env ごと、実機では IK トラッキングの動作ごとに持ち、始めに 0 にする。床の帯の出入り、
 範囲の出入り、実機で両足の目標が一度に消えるときの跳びは、この速さのランプになる。
 脚の目標を HOME + Δq + 生の出力にし、観測の脚の関節角を 実測 − HOME − Δq にする（観測の Δq は、
 次の行動が足す Δq と同じ）。前回の行動は生の出力のまま。実機は `pico_crouch_feedforward_json` の
 確かめの点で自分の角が記録と 1e-6 rad 以内で一致し、周期と上限が同じことを確かめる。
 
-PICO の観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME
-（左 pitch, roll, elbow、右 pitch, roll, elbow）。腕のサーボには方策の出力を使わない。PICO の自己テストの
+IK トラッキングの観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME
+（左 pitch, roll, elbow、右 pitch, roll, elbow）。腕のサーボには方策の出力を使わない。IK トラッキングの自己テストの
 行には、足の目標と腕の目標が 0 でない行を含め、腕の目標は箱の中（± 1e-6 rad）でなければならない。
 
 ## 実機側の検証
@@ -111,6 +111,6 @@ PYTHONPATH=src uv run --project <robot> --locked --with pytest python -m pytest 
 
 ## サーボのゲイン（実機の制御）
 
-- 学習した方策（歩行・起き上がり・PICO）が動いている間は、頭と首を含む全 21 サーボを P125
+- 学習した方策（歩行・起き上がり・IK トラッキング）が動いている間は、頭と首を含む全 21 サーボを P125
   （学習の `SERVO_KP_POLICY`）。
 - 学習した方策を使わずに静止しているときは全サーボ P900。

@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mjlab_microban import policy_contract as p  # noqa: E402
 from mjlab_microban.robot.home_pose import HOME  # noqa: E402
-from mjlab_microban.schedules import pico_schedule_record  # noqa: E402
+from mjlab_microban.schedules import ik_tracking_schedule_record  # noqa: E402
 
-# Every key the robot's parse_policy reads (common, then PICO only).
+# Every key the robot's parse_policy reads (common, then IK tracking only).
 ROBOT_COMMON_KEYS = {
     "microban_policy_contract", "microban_policy_kind", "microban_recipe", "home_pose", "joint_names",
     "default_joint_pos", "action_joint_names", "action_scale", "action_clip_lower", "action_clip_upper",
@@ -23,7 +23,7 @@ ROBOT_COMMON_KEYS = {
     "observation_joint_names", "checkpoint_filename", "checkpoint_iteration", "checkpoint_sha256",
     "gate_status", "gate_report_sha256", "self_test_observations_json", "self_test_actions_json",
 }
-ROBOT_PICO_KEYS = {
+ROBOT_IK_TRACKING_KEYS = {
     "pico_walk_checkpoint_sha256", "pico_target_frame", "pico_arm_target_json",
     "pico_foot_target_lower_json", "pico_foot_target_upper_json", "pico_both_feet_target_lower_json",
     "pico_both_feet_target_upper_json", "pico_raw_action_guard_json", "pico_curriculum_json", "pico_active_adapter_columns_json",
@@ -61,14 +61,14 @@ def _metadata(kind: str, rows: int = 8, **overrides) -> dict[str, str]:
 class PolicyContractTest(unittest.TestCase):
     def test_layout_is_the_training_layout(self) -> None:
         from mjlab_microban.tasks.microban_policy_export import (
+            MICROBAN_ACTION_JOINT_NAMES,
             MICROBAN_HMD_JOINT_NAMES,
-            MICROBAN_TELEOP_ACTION_JOINT_NAMES,
-            MICROBAN_TELEOP_OBSERVATION_SCHEMA,
+            MICROBAN_IK_TRACKING_OBSERVATION_SCHEMA,
         )
 
-        self.assertEqual(p.ACTION_JOINT_NAMES, MICROBAN_TELEOP_ACTION_JOINT_NAMES)
+        self.assertEqual(p.ACTION_JOINT_NAMES, MICROBAN_ACTION_JOINT_NAMES)
         self.assertEqual(p.HEAD_JOINTS, MICROBAN_HMD_JOINT_NAMES)
-        self.assertEqual(p.OBSERVATION_SCHEMAS["pico"], MICROBAN_TELEOP_OBSERVATION_SCHEMA)
+        self.assertEqual(p.OBSERVATION_SCHEMAS["pico"], MICROBAN_IK_TRACKING_OBSERVATION_SCHEMA)
         self.assertEqual(p.OBSERVATION_WIDTHS, {"walk": 63, "getup": 60, "pico": 81})
         self.assertEqual(p.SERVO_TARGET_RANGE_RAD, math.pi)
         self.assertEqual(set(p.joint_ranges()), set(HOME.joint_pos_rad))
@@ -109,8 +109,8 @@ class PolicyContractTest(unittest.TestCase):
         head = _row("pico")
         head[6] = 3.0
         self.assertIsNone(p.physical_row_problem("pico", head))
-        # An arm target outside the arm box is not a robot state; a PICO
-        # self-test needs rows with a lifted foot and a moved arm.
+        # An arm target outside the arm box is not a robot state; an IK
+        # tracking self-test needs rows with a lifted foot and a moved arm.
         arm = _row("pico")
         arm[76] = -0.01  # left shoulder roll below HOME, the box edge
         self.assertIsNotNone(p.physical_row_problem("pico", arm))
@@ -129,17 +129,17 @@ class PolicyContractTest(unittest.TestCase):
         self.assertEqual(picked[0][6], 0.0)
         self.assertAlmostEqual(picked[-1][6], 0.039)
 
-    def test_pico_keys(self) -> None:
-        record = pico_schedule_record()
-        self.assertEqual(tuple(record), p.PICO_CURRICULUM_KEYS)
-        keys = p.pico_metadata(walk_checkpoint_sha256=SHA, target_frame="robot_trunk_xyz_forward_left_up",
+    def test_ik_tracking_keys(self) -> None:
+        record = ik_tracking_schedule_record()
+        self.assertEqual(tuple(record), p.IK_TRACKING_CURRICULUM_KEYS)
+        keys = p.ik_tracking_metadata(walk_checkpoint_sha256=SHA, target_frame="robot_trunk_xyz_forward_left_up",
                                raw_action_guard=[1.0] * 18,
-                               curriculum=record, active_adapter_columns=p.PICO_ADAPTER_COLUMNS,
+                               curriculum=record, active_adapter_columns=p.IK_TRACKING_ADAPTER_COLUMNS,
                                checkpoint_iteration=record["total"] - 1)
-        self.assertEqual(set(keys), ROBOT_PICO_KEYS)
+        self.assertEqual(set(keys), ROBOT_IK_TRACKING_KEYS)
         self.assertEqual(json.loads(keys["pico_curriculum_json"]), record)
         self.assertEqual(json.loads(keys["pico_foot_target_upper_json"]), [0.03, 0.03, 0.05] * 2)
-        # The arm box of the robot's pico_arm_contract and its 4 rad/s slew.
+        # The arm box of the robot's ik_tracking_arm_contract and its 4 rad/s slew.
         self.assertEqual(
             json.loads(keys["pico_arm_target_json"]),
             {
@@ -153,17 +153,17 @@ class PolicyContractTest(unittest.TestCase):
                 "slew_rad_s": 4.0,
             },
         )
-        self.assertEqual(p.PICO_ADAPTER_COLUMNS, [6, 7, 8, 27, 28, 29, *range(69, 81)])
+        self.assertEqual(p.IK_TRACKING_ADAPTER_COLUMNS, [6, 7, 8, 27, 28, 29, *range(69, 81)])
         for bad in (dict(raw_action_guard=[0.0] * 18), dict(raw_action_guard=[1e39] * 18),
                     dict(checkpoint_iteration=record["foot_tighten"] - 2),
-                    dict(active_adapter_columns=p.PICO_ADAPTER_COLUMNS[:-1])):
+                    dict(active_adapter_columns=p.IK_TRACKING_ADAPTER_COLUMNS[:-1])):
             arguments = dict(walk_checkpoint_sha256=SHA, target_frame="f",
                              raw_action_guard=[1.0] * 18, curriculum=record,
-                             active_adapter_columns=p.PICO_ADAPTER_COLUMNS,
+                             active_adapter_columns=p.IK_TRACKING_ADAPTER_COLUMNS,
                              checkpoint_iteration=record["total"] - 1)
             arguments.update(bad)
             with self.assertRaises(p.PolicyContractError):
-                p.pico_metadata(**arguments)
+                p.ik_tracking_metadata(**arguments)
 
     def test_tracking_waiver_is_checked_as_the_robot_checks_it(self) -> None:
         waiver = {
@@ -175,7 +175,7 @@ class PolicyContractTest(unittest.TestCase):
         self.assertEqual(metadata["gate_status"], p.GATE_STATUS_WAIVED)
         self.assertEqual(json.loads(metadata[p.TRACKING_WAIVER_METADATA_KEY]), waiver)
         self.assertEqual(
-            set(p.PICO_WAIVABLE_TRACKING_CHECKS) & set(p.PICO_UNWAIVABLE_TRACKING_CHECKS), set()
+            set(p.IK_TRACKING_WAIVABLE_TRACKING_CHECKS) & set(p.IK_TRACKING_UNWAIVABLE_TRACKING_CHECKS), set()
         )
         entry = waiver["checks"]["foot_error"][0]
         for broken in (

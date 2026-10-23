@@ -1,6 +1,6 @@
 """The training floor that gives sideways (tasks/floor_plate.py): one plate per environment on two slide joints with
 a spring and a damper, a third of the environments on the static ground, the plate following a robot that walks
-away; walking, PICO, the get-up and the whole-body train on it, play keeps the ground."""
+away; walking, IK tracking, the get-up and the whole-body train on it, play keeps the ground."""
 
 from __future__ import annotations
 
@@ -22,14 +22,16 @@ from mjlab_microban.tasks.floor_plate import (
     floor_plate_recentre,
 )
 from mjlab_microban.tasks.microban_getup_env_cfg import getup_floor_plate, make_microban_getup_env_cfg
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import make_microban_teleop_v13_arm_overlay_env_cfg
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import make_microban_ik_tracking_v13_arm_overlay_env_cfg
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 from mjlab_microban.wholebody.env_cfg import make_wholebody_env_cfg
 
 PLATE_TASKS = {"getup": make_microban_getup_env_cfg, "wholebody": make_wholebody_env_cfg,
-               "walk": make_microban_velocity_env_cfg, "pico": make_microban_teleop_v13_arm_overlay_env_cfg}
+               "walk": make_microban_velocity_env_cfg,
+               "ik_tracking": make_microban_ik_tracking_v13_arm_overlay_env_cfg}
 # The modes of the ground's contact sensors (the feet's; the get-up's hands too) in training: the plane and the plate.
-GROUND_SENSOR_MODES = {"getup": ["subtree", "subtree"], "wholebody": [], "walk": ["subtree"], "pico": ["subtree"]}
+GROUND_SENSOR_MODES = {"getup": ["subtree", "subtree"], "wholebody": [], "walk": ["subtree"],
+                       "ik_tracking": ["subtree"]}
 NUM_ENVS = 12
 ROBOT_MASS_KG = 1.136
 PLATE_MASS_KG = 1.0
@@ -73,7 +75,7 @@ def env():
     from mjlab.envs import ManagerBasedRlEnv
 
     cfg = make_microban_getup_env_cfg()
-    # The floors drawn once, a third rigid (the walker's, PICO's and the whole-body's; the get-up past its plate
+    # The floors drawn once, a third rigid (the walker's, IK tracking's and the whole-body's; the get-up past its plate
     # stage draws the same at every reset).
     cfg.events["floor_plate"].func = floor_plate
     cfg.events["floor_plate"].mode = "startup"

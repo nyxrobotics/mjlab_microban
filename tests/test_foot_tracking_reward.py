@@ -177,34 +177,34 @@ class FootTrackingRewardTest(unittest.TestCase):
         torch.testing.assert_close(rows.reward(single_foot_weight=5.0), plain * torch.tensor(
             [5.0, 1.0, 1.0], dtype=torch.float64), rtol=0.0, atol=1e-12)
 
-    def test_pico_pays_the_one_foot_up_rows_as_the_lift_at_every_stage(self) -> None:
-        from mjlab_microban.tasks.microban_teleop_env_cfg import (
-            MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT,
-            MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT,
-            TELEOP_STAGES,
+    def test_ik_tracking_pays_the_one_foot_up_rows_as_the_lift_at_every_stage(self) -> None:
+        from mjlab_microban.tasks.microban_ik_tracking_env_cfg import (
+            MICROBAN_IK_TRACKING_SINGLE_FOOT_TRACKING_WEIGHT,
+            MICROBAN_IK_TRACKING_UPPER_FOOT_LIFT_WEIGHT,
+            IK_TRACKING_STAGES,
         )
-        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
-            make_microban_teleop_v13_arm_overlay_env_cfg,
+        from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
+            make_microban_ik_tracking_v13_arm_overlay_env_cfg,
         )
 
-        self.assertEqual(MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, MICROBAN_TELEOP_UPPER_FOOT_LIFT_WEIGHT)
-        term = make_microban_teleop_v13_arm_overlay_env_cfg().rewards["foot_target_tracking"]
+        self.assertEqual(MICROBAN_IK_TRACKING_SINGLE_FOOT_TRACKING_WEIGHT, MICROBAN_IK_TRACKING_UPPER_FOOT_LIFT_WEIGHT)
+        term = make_microban_ik_tracking_v13_arm_overlay_env_cfg().rewards["foot_target_tracking"]
         weight, single = term.weight, term.params["single_foot_weight"]
-        self.assertAlmostEqual(weight * single, MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, places=12)
-        for stage in TELEOP_STAGES:
+        self.assertAlmostEqual(weight * single, MICROBAN_IK_TRACKING_SINGLE_FOOT_TRACKING_WEIGHT, places=12)
+        for stage in IK_TRACKING_STAGES:
             for s in stage.settings:
                 if s.manager == "reward" and s.term == "foot_target_tracking":
                     weight = s.value if s.path == "weight" else weight
                     single = s.value if s.path == "params.single_foot_weight" else single
-            self.assertAlmostEqual(weight * single, MICROBAN_TELEOP_SINGLE_FOOT_TRACKING_WEIGHT, places=12,
+            self.assertAlmostEqual(weight * single, MICROBAN_IK_TRACKING_SINGLE_FOOT_TRACKING_WEIGHT, places=12,
                                    msg=stage.name)
 
-    def test_pico_uses_the_support_threshold(self) -> None:
-        from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
-            make_microban_teleop_v13_arm_overlay_env_cfg,
+    def test_ik_tracking_uses_the_support_threshold(self) -> None:
+        from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
+            make_microban_ik_tracking_v13_arm_overlay_env_cfg,
         )
 
-        cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
+        cfg = make_microban_ik_tracking_v13_arm_overlay_env_cfg()
         term = cfg.rewards["foot_target_tracking"]
         self.assertIs(term.func, foot_target_tracking_error_exp)
         self.assertEqual(term.params["lift_threshold"], cfg.rewards["support_zmp"].params["lift_threshold"])

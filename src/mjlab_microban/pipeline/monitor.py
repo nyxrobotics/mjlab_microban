@@ -3,7 +3,7 @@
 ``Monitor.poll`` runs every 30 s while a training job runs (and once after
 it ends).  It reads the new lines of the training log, and every
 ``Curriculum stage ... (update U)`` line must name a stage of the task's
-table (WALK_STAGES / TELEOP_STAGES / GETUP_STAGES, read by the pipeline) and
+table (WALK_STAGES / IK_TRACKING_STAGES / GETUP_STAGES, read by the pipeline) and
 come within a tolerance of its update; once the run ends
 (``require_stages``) every stage due by its last checkpoint must have been
 seen.  The tolerance is config/pipeline.yaml ``<step>.stage_tolerance``;

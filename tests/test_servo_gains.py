@@ -1,6 +1,6 @@
 """Every learned policy trains with one servo gain on all 21 joints.
 
-The robot runs walking, get-up and PICO at its KP_RL (125) on every servo,
+The robot runs walking, get-up and IK tracking at its KP_RL (125) on every servo,
 head and neck included; the gain is defined once (SERVO_KP_POLICY).
 """
 
@@ -11,8 +11,8 @@ import unittest
 from mjlab_microban.robot.microban_constants import MICROBAN_ROBOT_CFG, SERVO_KP_POLICY
 from mjlab_microban.robot.xc330_actuator import XC330ActuatorCfg
 from mjlab_microban.tasks.microban_getup_env_cfg import make_microban_getup_env_cfg
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
-    make_microban_teleop_v13_arm_overlay_env_cfg,
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
+    make_microban_ik_tracking_v13_arm_overlay_env_cfg,
 )
 from mjlab_microban.tasks.microban_velocity_env_cfg import make_microban_velocity_env_cfg
 
@@ -26,7 +26,7 @@ class ServoGainTest(unittest.TestCase):
         for name, cfg in (
             ("walk", make_microban_velocity_env_cfg()),
             ("getup", make_microban_getup_env_cfg()),
-            ("pico", make_microban_teleop_v13_arm_overlay_env_cfg()),
+            ("ik_tracking", make_microban_ik_tracking_v13_arm_overlay_env_cfg()),
         ):
             with self.subTest(name):
                 robot = cfg.scene.entities["robot"]

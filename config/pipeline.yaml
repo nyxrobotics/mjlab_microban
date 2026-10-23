@@ -5,8 +5,8 @@
 # run; editing its judgment re-judges, never retrains.  `dry:` overrides apply
 # to --dry-run only.
 #
-# Each policy trains once from scratch for its fixed number of updates
-# (walking 30000, PICO 15000, get-up 18000) and its last checkpoint is judged
+# Each policy trains once from scratch for its fixed number of updates (walking
+# 30000, IK tracking 15000, get-up 18000) and its last checkpoint is judged
 # once.  A failed item fails the step: the test is questioned first (a wrong
 # test is fixed and the rerun re-judges without retraining); a valid failing
 # test stops the release.  stage_tolerance: a curriculum stage may start at
@@ -20,11 +20,11 @@ walk:
   save_interval: 500
   stage_tolerance: 1
   # Judgment: the held-out walk probe (pipeline/walk_probe.py, seeds
-  # 101-105) and the 9x300 probe with seed 101 (the PICO source gate's probe,
-  # which judges the walker with seed 42 at the start of the PICO step).  The
-  # walking direction is judged by fixed signed-response minimums
+  # 101-105) and the 9x300 probe with seed 101 (the IK tracking source gate's
+  # probe, which judges the walker with seed 42 at the start of the IK tracking
+  # step).  The walking direction is judged by fixed signed-response minimums
   # (mjlab_microban/twist_pass_line.py); the measured joints may go 0.25 rad
-  # beyond the soft limits (teleop_v12_safety.py).
+  # beyond the soft limits (ik_tracking_v12_safety.py).
   judgment:
     seeds: "101,102,103,104,105"
     probe_seed: 101
@@ -47,13 +47,13 @@ walk:
     # too (9 and 42 unpushed).  Trained on the robot's floor only, the walker
     # (45d46ac9) passes the rigid floor and falls 12-27 of 90 pushed on 0.1 s
     # and 0.3.
-    # Floors up to 0.05 s, as PICO's and the get-up's (2026-10-21, with the
-    # user: judge the floors a policy on general rewards converges on, not the
-    # severe ones; training keeps 0.02-0.1 s).  Trained on the plate too
+    # Floors up to 0.05 s, as IK tracking's and the get-up's (2026-10-21, with
+    # the user: judge the floors a policy on general rewards converges on, not
+    # the severe ones; training keeps 0.02-0.1 s).  Trained on the plate too
     # (82e9585c, update 29999), the walker falls on none of the floors, 0.1 s
     # included, but steps sideways 20-30 % slower (right on the rigid floor
-    # 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its right side
-    # step is below the line (0.015 and 0.014 m/s of 0.02; 9x300 -0.002).
+    # 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its right side step
+    # is below the line (0.015 and 0.014 m/s of 0.02; 9x300 -0.002).
     floors:
       soft_0.05: {time_constant_s: 0.05}
       slippery_0.3: {friction: 0.3}
@@ -64,39 +64,39 @@ walk:
       plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}}
       plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
 
-pico:
-  task: Mjlab-Teleop-V13-ArmOverlay-Microban
+ik_tracking:
+  task: Mjlab-IkTracking-V13-ArmOverlay-Microban
   envs: 2048
   save_interval: 500
   stage_tolerance: 1
   # Judgment: the three evaluators and standing still on the rigid floor, then
-  # the 9x300 and tracking evaluators on each floor of walking's judgment
-  # (PICO trains on walking's floors) and standing still on the soft ones,
-  # with the rigid floor's lines (steps.Pipeline.pico_floor_judgment).
-  # The PICO that walked on the robot (v12, 343b5ed4, on its own code and
-  # servo model; never trained on soft floors) keeps the 9x300 lines with
-  # seed 42 on 0.05 s and friction 0.3 (worst margin, its left side step
-  # over 0.02 m/s: +0.020, +0.008).  On both 0.1 s floors it is at the
-  # line, as it is on the rigid floor at some seeds: rigid +0.012, +0.010,
-  # +0.017 (three runs of seed 42), +0.027, -0.002, +0.011 (seeds 43-45);
-  # 0.1 s +0.001, -0.001, then +0.010, -0.014, -0.001; 0.1 s with friction
-  # 0.3 -0.0025 (three runs), then +0.015, -0.019, -0.003.  It reaches both
-  # at some seeds, so neither is left out.  v13c (not run on the robot)
-  # falls in 1 of the 9 scenarios on 0.1 s with friction 0.3, but its own
-  # rigid 9x300 of seed 42 passes or fails from run to run (+0.008, -0.003,
-  # -0.010).  No PICO keeps the tracking lines on the rigid floor yet (v13c
-  # fails five of them); on these floors they are the same.  v13c stands
-  # still on 0.05 s and 0.1 s at 0.023 and 0.022 rad/s, no falls.
-  # Floors up to 0.05 s, as the get-up's (2026-10-21, with the user: judge
-  # the floors a policy on general rewards converges on, not the severe
-  # ones; training keeps 0.02-0.1 s).  On 0.1 s the PICO run from scratch
+  # the 9x300 and tracking evaluators on each floor of walking's judgment (IK
+  # tracking trains on walking's floors) and standing still on the soft ones,
+  # with the rigid floor's lines (steps.Pipeline.ik_tracking_floor_judgment).
+  # The IK tracking policy that walked on the robot (v12, 343b5ed4, on its own
+  # code and servo model; never trained on soft floors) keeps the 9x300 lines
+  # with seed 42 on 0.05 s and friction 0.3 (worst margin, its left side step
+  # over 0.02 m/s: +0.020, +0.008).  On both 0.1 s floors it is at the line, as
+  # it is on the rigid floor at some seeds: rigid +0.012, +0.010, +0.017 (three
+  # runs of seed 42), +0.027, -0.002, +0.011 (seeds 43-45); 0.1 s +0.001,
+  # -0.001, then +0.010, -0.014, -0.001; 0.1 s with friction 0.3 -0.0025 (three
+  # runs), then +0.015, -0.019, -0.003.  It reaches both at some seeds, so
+  # neither is left out.  v13c (not run on the robot) falls in 1 of the
+  # 9 scenarios on 0.1 s with friction 0.3, but its own rigid 9x300 of seed
+  # 42 passes or fails from run to run (+0.008, -0.003, -0.010).  No IK
+  # tracking policy keeps the tracking lines on the rigid floor yet (v13c fails
+  # five of them); on these floors they are the same.  v13c stands still on
+  # 0.05 s and 0.1 s at 0.023 and 0.022 rad/s, no falls.
+  # Floors up to 0.05 s, as the get-up's (2026-10-21, with the user: judge the
+  # floors a policy on general rewards converges on, not the severe ones;
+  # training keeps 0.02-0.1 s).  On 0.1 s the IK tracking run from scratch
   # (34859f41, update 14999) falls 13 times without a push in 6016 runs
   # (27 with friction 0.3) and 30 % of its crouched pushes; on 0.05 s and
   # friction 0.3 none without a push.
   # The plate at its stiff end only (training keeps both ends): on the soft
-  # end (500 N/m, damping ratio 0.3) PICO's crouched pushes fall about 6.3 %
+  # end (500 N/m, damping ratio 0.3) IK tracking's crouched pushes fall about 6.3 %
   # against a line of about 5.3 % (the walker's standing and walking pushes
-  # + 5 points), whichever PICO: 07fd10db, never trained on the plate, 4.9,
+  # + 5 points), whichever IK tracking policy: 07fd10db, never trained on the plate, 4.9,
   # 6.6, 7.4 % at seeds 42, 44, 46; b096a04's 3e4b3373, trained on it, 6.6,
   # 6.4, 5.5, 6.6 % at seeds 42-48, 6.2 % at 1000 N/m, 6.4 % at a damping
   # ratio 0.6, 5.3 % at 2000 N/m (seed 42).  There 3e4b3373 falls in none of
@@ -110,12 +110,13 @@ pico:
       plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
   # The tracking checks of foot accuracy a release takes as they are (the gate
   # records each failing measurement and the robot shows it; steps.py
-  # PIPELINE_WAIVABLE_TRACKING_CHECKS).  PICO 07fd10db (update 14999) passes
-  # every fall, step, drift, support-foot, walking and safety check on the
-  # rigid and the three judged floors; it misses the foot error lines (worst
-  # 1.37-1.41x the line), one lift (right_back_in with the arms reaching
-  # right: 27.0 mm of 28.0 rigid, 24.5 mm and 0.875 in the air on 0.05 s) and
-  # one crouch's ZMP centring (both_front_left, 15.480 mm of 15.478).
+  # PIPELINE_WAIVABLE_TRACKING_CHECKS).  The IK tracking run 07fd10db (update
+  # 14999) passes every fall, step, drift, support-foot, walking and safety
+  # check on the rigid and the three judged floors; it misses the foot error
+  # lines (worst 1.37-1.41x the line), one lift (right_back_in with the arms
+  # reaching right: 27.0 mm of 28.0 rigid, 24.5 mm and 0.875 in the air on
+  # 0.05 s) and one crouch's ZMP centring (both_front_left, 15.480 mm of
+  # 15.478).
   tracking_waiver:
     checks: [foot_error, foot_lift, standing_still]
     note: >-
@@ -194,17 +195,17 @@ getup:
   stand_still: {reps: 15, max_falls: 4}
 
 # Standing still (pipeline/stand_still.py), a judgment of every policy: the
-# walker and PICO stand at HOME on a zero command, the get-up from a fallen
-# start (judged once it stands), each environment with one servo goal delay of
-# 5-50 ms (the get-up: 15-40 ms, the delays its training draws) and one foot
-# friction of 0.3-1.2 and the training's observation
-# noise.  The noise is what shakes a policy that trembles: without it PICO
-# v13g2 (it shook standing on the robot and fell) measures 0.046 rad/s, below
-# the old walker's 0.063.  With it, the worst delay's leg-joint speed RMS
+# walker and the IK tracking policy stand at HOME on a zero command, the get-up
+# from a fallen start (judged once it stands), each environment with one servo
+# goal delay of 5-50 ms (the get-up: 15-40 ms, the delays its training draws)
+# and one foot friction of 0.3-1.2 and the training's observation noise.  The
+# noise is what shakes a policy that trembles: without it the IK tracking
+# policy v13g2 (it shook standing on the robot and fell) measures 0.046 rad/s,
+# below the old walker's 0.063.  With it, the worst delay's leg-joint speed RMS
 # (rad/s) of the whole-body policies is 0.030 (servo-refit run, update 12000)
 # and 0.057 (final2), of the old walker (a7c28c8a) 0.088, all without a fall;
-# v13g2 0.25 at 30 ms and 0.40 at 40 ms, 2 falls; the old get-up steps in
-# place (1.3-1.8 while up) and 60 of 80 fall after standing.  The line is the
+# v13g2 0.25 at 30 ms and 0.40 at 40 ms, 2 falls; the old get-up steps in place
+# (1.3-1.8 while up) and 60 of 80 fall after standing.  The line is the
 # geometric mean of the old walker's worst and v13g2's lowest trembling delay,
 # sqrt(0.088 x 0.253) = 0.15; standing still, nothing falls.
 # The walker stands again on the soft floors of walk.judgment.floors (every
@@ -233,7 +234,7 @@ dry:
   # stage_tolerance 3 here.
   schedule_scale: 0.001
   walk: {envs: 64, save_interval: 1, stage_tolerance: 3}
-  pico: {envs: 64, save_interval: 1, stage_tolerance: 3}
+  ik_tracking: {envs: 64, save_interval: 1, stage_tolerance: 3}
   getup:
     envs: 64
     save_interval: 1

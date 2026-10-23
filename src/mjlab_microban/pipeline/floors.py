@@ -1,8 +1,8 @@
 """The judgments' soft and slippery floors, one per environment.
 
 A floor is one contact time constant (solref[0], s) and one friction.  The
-walker's and PICO's are the soles': the play robot's soles have priority over
-the floor (robot/microban_constants.py FULL_COLLISION), so a sole contact
+walker's and IK tracking's are the soles': the play robot's soles have priority
+over the floor (robot/microban_constants.py FULL_COLLISION), so a sole contact
 takes the soles' values, as training's floors do on every collision geom
 (tasks/mdp.py training_floor_and_delay).  The get-up's are every collision
 geom's, as in training (it lies on its hands, knees and back): the robot's
@@ -11,8 +11,8 @@ robot (TRAINING_COLLISION; with the floor's values the contacts are the play
 robot's).  A friction of None keeps the play env's drawn sole friction
 (foot_friction, 0.3-1.2) and the other geoms' 1.  The rigid floor is MuJoCo's
 0.02 s, the play env's; config/pipeline.yaml ``walk.judgment.floors``,
-``pico.judgment.floors`` and ``getup.floors`` name the judged floors, inside
-training's range (FLOOR_TIME_CONSTANT_S, FLOOR_FRICTION).
+``ik_tracking.judgment.floors`` and ``getup.floors`` name the judged floors,
+inside training's range (FLOOR_TIME_CONSTANT_S, FLOOR_FRICTION).
 
 A floor may also give sideways like training's carpet (tasks/floor_plate.py):
 ``plate: {stiffness_n_m: k, damping_ratio: zeta}`` puts every environment of

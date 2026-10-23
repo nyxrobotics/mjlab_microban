@@ -1,4 +1,4 @@
-"""The PICO crouch offsets (robot/crouch_feedforward.py) and their use in the task."""
+"""The IK tracking crouch offsets (robot/crouch_feedforward.py) and their use in the task."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab_microban import policy_contract
 from mjlab_microban.robot import crouch_feedforward as cf
 from mjlab_microban.robot.home_pose import HOME, MICROBAN_XML
-from mjlab_microban.tasks import microban_teleop_mdp as mdp
-from mjlab_microban.tasks.microban_teleop_mirror import _TERM_MIRRORS
+from mjlab_microban.tasks import microban_ik_tracking_mdp as mdp
+from mjlab_microban.tasks.microban_ik_tracking_mirror import _TERM_MIRRORS
 from mjlab_microban.tasks.microban_velocity_mirror import joint_mirror
-from mjlab_microban.tasks.microban_teleop_v13_arm_overlay import (
-    MICROBAN_TELEOP_LEG_JOINT_NAMES,
-    make_microban_teleop_v13_arm_overlay_env_cfg,
+from mjlab_microban.tasks.microban_ik_tracking_v13_arm_overlay import (
+    MICROBAN_IK_TRACKING_LEG_JOINT_NAMES,
+    make_microban_ik_tracking_v13_arm_overlay_env_cfg,
 )
 
 TABLE = cf.build_table(HOME.joint_pos_rad, HOME.trunk_pitch_rad)
@@ -91,7 +91,7 @@ class KinematicsTest(unittest.TestCase):
         the straight-down crouch's less share (dx, dy), and HOME's is on it."""
 
         from mjlab_microban.robot.home_pose import _pose_model
-        from mjlab_microban.tasks.microban_teleop_env_cfg import MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE
+        from mjlab_microban.tasks.microban_ik_tracking_env_cfg import MICROBAN_IK_TRACKING_TRUNK_SHIFT_COM_SHARE
 
         pose = _pose_model(str(MICROBAN_XML.resolve()))
 
@@ -112,7 +112,7 @@ class KinematicsTest(unittest.TestCase):
             for dx, dy in ((0.01, 0.0), (0.0, -0.01), (-0.008, 0.008), (0.01, 0.01)):
                 with self.subTest(dx=dx, dy=dy, dz=dz):
                     shift = com_from_midpoint((dx, dy, dz)) - straight
-                    np.testing.assert_allclose(shift, -MICROBAN_TELEOP_TRUNK_SHIFT_COM_SHARE * np.array([dx, dy]),
+                    np.testing.assert_allclose(shift, -MICROBAN_IK_TRACKING_TRUNK_SHIFT_COM_SHARE * np.array([dx, dy]),
                                                atol=2.0e-4)
 
     def test_the_knees_bend_forward_and_more_with_dz(self) -> None:
@@ -188,10 +188,10 @@ class RowsTest(unittest.TestCase):
         np.testing.assert_allclose(mirrored, cf.leg_offsets(TABLE, feet)[:, leg_index] * leg_sign, atol=1e-9)
 
     def test_the_contract_record_reproduces_its_probes(self) -> None:
-        record = policy_contract.pico_crouch_record()
+        record = policy_contract.ik_tracking_crouch_record()
         self.assertEqual(record["contract"], "microban_pico_crouch_feedforward_v2")
         self.assertEqual((record["policy_dt_s"], record["max_step_rad"]), (0.02, 0.2))
-        self.assertEqual(record["joint_names"], list(MICROBAN_TELEOP_LEG_JOINT_NAMES))
+        self.assertEqual(record["joint_names"], list(MICROBAN_IK_TRACKING_LEG_JOINT_NAMES))
         offsets = np.asarray(record["leg_offsets_rad"])
         np.testing.assert_allclose(offsets, cf.leg_offsets(TABLE, np.asarray(record["foot_targets"])))
         self.assertTrue(np.any(offsets[:5] != 0.0))
@@ -272,7 +272,7 @@ class FollowTest(unittest.TestCase):
 
 class TaskTest(unittest.TestCase):
     def test_the_task_offsets_actions_and_actor_joints(self) -> None:
-        cfg = make_microban_teleop_v13_arm_overlay_env_cfg()
+        cfg = make_microban_ik_tracking_v13_arm_overlay_env_cfg()
         self.assertEqual(cfg.actions["joint_pos"].crouch_command_name, "foot_target")
         self.assertIs(cfg.observations["actor"].terms["joint_pos"].func, mdp.crouch_joint_pos_rel)
         self.assertEqual(cfg.observations["actor"].terms["joint_pos"].params["action_name"], "joint_pos")
@@ -297,13 +297,13 @@ class TaskTest(unittest.TestCase):
 
         # The action: legs HOME + offsets + raw, arms the overlay, raw kept.
         action_names = list(policy_contract.ACTION_JOINT_NAMES)
-        action = object.__new__(mdp.PicoArmOverlayJointPositionAction)
+        action = object.__new__(mdp.IkTrackingArmOverlayJointPositionAction)
         action.cfg = SimpleNamespace(crouch_command_name="foot_target", clip=True)
         action._raw_actions = torch.zeros(n, 18)
         action._scale = 1.0
         action._offset = torch.tensor([[HOME.joint_pos_rad[name] for name in action_names]]).repeat(n, 1)
         action._clip = torch.tensor([-torch.pi, torch.pi]).repeat(n, 18, 1)
-        action.arm_columns = torch.tensor([action_names.index(name) for name in policy_contract.PICO_ARM_JOINT_NAMES])
+        action.arm_columns = torch.tensor([action_names.index(name) for name in policy_contract.IK_TRACKING_ARM_JOINT_NAMES])
         action.arm_target_rad = action._offset[:, action.arm_columns].clone()
         action.arm_goal_rad = action.arm_target_rad.clone()
         action.arm_max_step_rad = 0.08

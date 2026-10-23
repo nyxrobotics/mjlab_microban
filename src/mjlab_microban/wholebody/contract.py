@@ -1,7 +1,7 @@
 """``microban-wholebody-1``: what the whole-body ONNX carries for the robot.
 
 A contract of its own (not ``microban-policy-1``: that release holds exactly
-walk, get-up and PICO, each with one input).  It reuses that contract's
+walk, get-up and IK tracking, each with one input).  It reuses that contract's
 parts: the HOME stamp, the SHA-256 records and the startup self-test rule
 (recorded rows with the torch actor's deterministic output, re-run in ONNX
 Runtime within the same bounds).
@@ -24,7 +24,7 @@ observes them.  Their targets are the reference's angles of these joints,
 clamped to NECK_LIMITS_RAD within the joint range and slewed at
 NECK_SLEW_RATES_RAD_S, starting at the clamped reference: the same
 computation as in training (wholebody.motion.ReferenceNeckTarget), not the
-HMD head tracking of the PICO policy.
+HMD head tracking of the IK tracking policy.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ from mjlab_microban.policy_contract import (
     joint_ranges,
 )
 from mjlab_microban.robot.home_pose import HOME
-from mjlab_microban.tasks.microban_teleop_mdp import (
+from mjlab_microban.tasks.microban_ik_tracking_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
 )

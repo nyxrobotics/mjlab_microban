@@ -1,6 +1,6 @@
 # HOMEを変えたときの全ポリシー再学習（`scripts/retrain_all_for_home.py`）
 
-HOMEは `config/home_pose.yaml` だけで決まる（`config/README.md`）。HOMEを変えたら、歩行・PICO・
+HOMEは `config/home_pose.yaml` だけで決まる（`config/README.md`）。HOMEを変えたら、歩行・IK トラッキング・
 起き上がりをすべて最初から学習し直し、判定し、ロボット側に入れて、両リポジトリにコミットする。
 その一連の流れを1つのコマンドにしたのが `scripts/retrain_all_for_home.py`
 （中身は `src/mjlab_microban/pipeline/`）。
@@ -38,8 +38,8 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | 段階 | 内容 | 止まる条件 |
 | --- | --- | --- |
 | home | `mjlab_microban.pipeline.home_check`（重心と足裏接地面）、`balance_home_pose.py --check`（警告のみ）、`home_pose_tool.py show`、学習側のテスト一式（CPU、約1分） | 重心が足裏の外、テストが1つでも落ちる |
-| walk | `Mjlab-Velocity-Microban` を最初から1本（4096 env、seed 42、30000 回）。速度の報酬は mjlab の track_linear/angular_velocity を HOME 基準の胴の座標で、重み 2 ずつ。最後に判定1回: 保持プローブと 9×300（下の表）。チェックポイントを `checkpoints/<prefix>_walk_<sha>/` に置く（PICO の来歴がそこを再ハッシュする） | 判定の不合格 |
-| pico | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、合格ラインは `twist_pass_line.py`）、bootstrap ゲート。`Mjlab-Teleop-V13-ArmOverlay-Microban` を1本（2048 env、critic の準備 1000 → 腕 → 足、合計 15000）。最後に判定1回: 歩行 9×300（seed 42）・PICO の判定（足、押し、止まれ、腕を動かした歩行。seed 42 と 43、各 64 env）・ONNX。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
+| walk | `Mjlab-Velocity-Microban` を最初から1本（4096 env、seed 42、30000 回）。速度の報酬は mjlab の track_linear/angular_velocity を HOME 基準の胴の座標で、重み 2 ずつ。最後に判定1回: 保持プローブと 9×300（下の表）。チェックポイントを `checkpoints/<prefix>_walk_<sha>/` に置く（IK トラッキングの来歴がそこを再ハッシュする） | 判定の不合格 |
+| ik_tracking | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、合格ラインは `twist_pass_line.py`）、bootstrap ゲート。`Mjlab-IkTracking-V13-ArmOverlay-Microban` を1本（2048 env、critic の準備 1000 → 腕 → 足、合計 15000）。最後に判定1回: 歩行 9×300（seed 42）・IK トラッキングの判定（足、押し、止まれ、腕を動かした歩行。seed 42 と 43、各 64 env）・ONNX。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
 | getup | `Mjlab-Getup-Microban` を1本（4096 env、18000 回。IMU 遅延 2500、calm と探索の切り替え 4000、押しなしの effort 10000、押し 15000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位で目標が切り詰め（±π）に張り付く割合 > 0.05 |
 | export | walk.onnx、getup.onnx、pico_teleop.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
 | install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents` とテスト一式を実行 | バリデータかテストが落ちる |
@@ -53,16 +53,16 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 
 ## 判定（閾値は `config/pipeline.yaml`）
 
-どの方策も、決まった回数（歩行 30000、PICO 15000、起き上がり 18000）を最初から1本で学習し、最後のチェックポイント
+どの方策も、決まった回数（歩行 30000、IK トラッキング 15000、起き上がり 18000）を最初から1本で学習し、最後のチェックポイント
 （`model_29999`、`model_14999`、`model_17999`）を 1 回だけ判定する。途中のチェックポイントを確かめて早く止めたり、
 選んだりはしない。
 
 | 方策 | 判定 |
 | --- | --- |
 | 歩行 | 保持プローブ（`pipeline/walk_probe.py`、シード 101-105）と 9×300（シード 101）。保持プローブの規則は3つ: `falls` は転倒、`direction` は単軸の指令の向きの速さが固定の最低値以上（前 0.2 m/s で 0.08、後ろ 0.04、横 0.1 m/s で 0.02、旋回 0.5 rad/s で 0.2）と止まれの流れ（0.05 m/s、0.05 m/s、0.2 rad/s 以内）、`standing_still` は止まれの着地が 0.5 回/秒以下。9×300 も固定の最低値（`twist_pass_line.py`）。関節の限界の超過は 0.25 rad まで。柔らかい床と滑る床（`walk.judgment.floors`: 足裏の接触の時定数 0.05 s と 0.1 s、摩擦 0.3、0.1 s で摩擦 0.3。`pipeline/floors.py`）でも、保持プローブ・9×300・静止（柔らかい床）を同じ合格ラインでもう一度判定する |
-| PICO | 歩行 9×300・追従（最終プロファイル）・ONNX、どれもシード 42。起き上がりと同じ柔らかい床と滑る床（`pico.judgment.floors`: 0.05 s、摩擦 0.3、0.05 s で摩擦 0.3）でも、9×300・追従・静止（柔らかい床）を同じ合格ラインでもう一度判定する。0.1 s の床は学習には入れるが、押さなくても倒れる（6016 回中 13 回）ので判定しない |
+| IK トラッキング | 歩行 9×300・追従（最終プロファイル）・ONNX、どれもシード 42。起き上がりと同じ柔らかい床と滑る床（`ik_tracking.judgment.floors`: 0.05 s、摩擦 0.3、0.05 s で摩擦 0.3）でも、9×300・追従・静止（柔らかい床）を同じ合格ラインでもう一度判定する。0.1 s の床は学習には入れるが、押さなくても倒れる（6016 回中 13 回）ので判定しない |
 | 起き上がり | `config/pipeline.yaml` の `getup.evals` の 4 つの評価（シード 11 と 5）と `getup.gate`。柔らかい床と滑る床（`getup.floors`: 0.05 s、摩擦 0.3、その両方を、手・膝・背中を含む全身の衝突の形に。`pipeline/floors.py`）でも、倒れた状態からの起立・押し・立っているときの震え（`stand` の 3 つの評価）と静止を、同じ合格ライン（起立 0.85 以上、押しで転倒 0.10 以下、震え 0.30 rad/s 以下、静止）でもう一度判定する。0.1 s の床（厚いスポンジのマットくらい）は学習には入れるが、立った直後に 5〜6 % 倒れるので判定しない。起き上がりの静止は立った直後の倒れを数えるので、床ごとに 360 環境で、倒れは歩行の押さない倒れと同じ 90 回に 1 回（4 回）まで（`getup.stand_still`） |
-| 3 つとも | 静止（`pipeline/stand_still.py`、`config/pipeline.yaml` の `stand_still`）。歩行と PICO は HOME で止まれの指令、起き上がりは倒れた状態から立ったあとの最後の 5 秒。環境ごとにサーボの指令の遅れ 5〜50 ms とひとつの足の摩擦 0.3〜1.2、学習の観測のノイズで回し、遅れごとの脚 12 関節の速さの RMS の最大が 0.15 rad/s 以下、倒れ 0 |
+| 3 つとも | 静止（`pipeline/stand_still.py`、`config/pipeline.yaml` の `stand_still`）。歩行と IK トラッキングは HOME で止まれの指令、起き上がりは倒れた状態から立ったあとの最後の 5 秒。環境ごとにサーボの指令の遅れ 5〜50 ms とひとつの足の摩擦 0.3〜1.2、学習の観測のノイズで回し、遅れごとの脚 12 関節の速さの RMS の最大が 0.15 rad/s 以下、倒れ 0 |
 
 学習中は、段の切り替えのログ（`Curriculum stage ... (update U)`）を表と照らす（`pipeline/monitor.py`）。
 表にない段が出たら、または表の時刻から `stage_tolerance`（1 回）より遅れたら中止する。
@@ -77,13 +77,13 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
   - failed の段階は、入力も判定（`src` と `config/pipeline.yaml`）も変わっていなければ理由を表示して止まる。
     入力が同じで判定だけが変わったとき（テストを直したとき）は、学習はそのままで判定をやり直す。
   - 入力は段階ごとに、学習が読むものだけ（`pipeline/steps.py` の `STEP_INPUTS`、`config/pipeline.yaml` の
-    その段階の節のうち `TRAINING_KEYS`（task、envs、save_interval）、上流の段階の出力）。PICO のコードを
+    その段階の節のうち `TRAINING_KEYS`（task、envs、save_interval）、上流の段階の出力）。IK トラッキングのコードを
     直しても歩行はやり直しにならず、判定の設定を直しても学習はやり直しにならない。
   - 段階の学習と同じ run 名の学習が動いていれば（同じコマンドで手で始めたもの。出力は
-    `<状態>/logs/<時刻>_train_<段階>.log`）、新しく始めずにそれを見守り、段の切り替えをそのログで照らす。
+    `<状態>/logs/<時刻>_train_<段階>.log`。IK トラッキングは `<時刻>_train_ik_tracking.log`）、新しく始めずにそれを見守り、段の切り替えをそのログで照らす。
 - 試しの学習は、途中のチェックポイント `model_<k>.pt` から続けられる。同じ `train` のコマンドに
   `--agent.resume True --agent.load-run '<run ディレクトリ名>' --agent.load-checkpoint model_<k>.pt` を足し、
-  `--agent.max-iterations` を「総回数 − (k+1)」にする。新しい run ディレクトリに `model_<k+1>` から書かれ、段、PICO の
+  `--agent.max-iterations` を「総回数 − (k+1)」にする。新しい run ディレクトリに `model_<k+1>` から書かれ、段、IK トラッキングの
   補正の網と列の学習、適応学習率、起き上がりの refine、起き上がりの報酬で進む段（環境の数が同じなら、環境ごとのエピソード報酬も）は
   止めずに回したときと同じ回から効く（`tasks/curriculum.py` の `resume_run`）。
   - 試しの再開では、本番の段階とは別の `--agent.run-name` を使う。本番は1本の学習で作るので、パイプラインは段階の run 名で
@@ -111,8 +111,8 @@ uv run --locked python scripts/retrain_all_for_home.py --dry-run --robot-repo ..
 
 - 64 env、すべての時刻を `config/pipeline.yaml` の `dry.schedule_scale`（0.001）倍にして、全段階・全部の
   切り替えを数十分で通す。数回しか学習しない方策は判定に通らないので、ドライランでは判定を記録だけして
-  続け（`pipeline/dry.py`: 入口のプローブと PICO の判定報告を合否欄だけ合格にした `DRYRUN_FORCED_PASS_*` の
-  複製で先へ進める。測った値は `dry_run_original_*` に残す）、PICO のパッケージには
+  続け（`pipeline/dry.py`: 入口のプローブと IK トラッキングの判定報告を合否欄だけ合格にした `DRYRUN_FORCED_PASS_*` の
+  複製で先へ進める。測った値は `dry_run_original_*` に残す）、IK トラッキングのパッケージには
   `dry_run_not_deployable` を付ける（ロボットは `MICROBAN_ALLOW_DRYRUN_POLICY=1` のときしか受け付けない）。
 - ロボット側はスクラッチのクローン（origin の push URL がローカルパス）でなければ拒否する。ロボットの
   コミットはローカルだけ、学習リポジトリにはコミットも push もしない。

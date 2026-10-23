@@ -21,7 +21,10 @@ Nothing here imports mjlab; the training modules import these constants.
 from __future__ import annotations
 
 from mjlab_microban.robot.home_pose import HOME, signed_degree_token
-from mjlab_microban.schedules import PICO_CRITIC_WARMUP, PICO_TOTAL_UPDATES
+from mjlab_microban.schedules import (
+    IK_TRACKING_CRITIC_WARMUP,
+    IK_TRACKING_TOTAL_UPDATES,
+)
 
 _TAG = HOME.tag
 _UPRIGHT = HOME.trunk_is_vertical
@@ -39,7 +42,7 @@ _V12_LEVELLED = "home_levelled_targets_level_hmd_receiver_box_hands"
 # Get-up checkpoints (microban_getup_runner).
 GETUP_CONTRACT_VERSION = _contract("getup_contract_version", f"v5_{_TAG}", f"v6_{_TAG}")
 
-# PICO contract v12 checkpoints, gates and packages (microban_teleop_v12_env_cfg).
+# IK tracking contract v12 checkpoints, gates and packages (microban_ik_tracking_v12_env_cfg).
 V12_HOME_POSE_REVISION = _contract(
     "v12_home_pose_revision",
     f"{_TAG}_hip_{_HIP}_ankle_{_ANKLE}_shoulder_zero_v5",
@@ -50,17 +53,17 @@ V12_RECIPE_REVISION = _contract(
     f"{_TAG}_{_V12_RECIPE_BASE}_v11",
     f"{_TAG}_{_V12_RECIPE_BASE}_{_V12_LEVELLED}_v17",
 )
-# The PICO recipe every run trains: the arms driven from outside (observed as
+# The IK tracking recipe every run trains: the arms driven from outside (observed as
 # arm targets), the legs released from the HOME pose reward for foot targets,
-# a 64x64 residual MLP on the frozen walker (microban_teleop_v12_actor), the
+# a 64x64 residual MLP on the frozen walker (microban_ik_tracking_v12_actor), the
 # legs working around the crouch pose of a two-foot target
 # (robot/crouch_feedforward.py), and one run with a critic warm-up
 # (mjlab_microban/schedules.py).
 V13_ARM_OVERLAY_RECIPE_REVISION = (
     f"{_TAG}_{_V12_RECIPE_BASE}{'' if _UPRIGHT else '_' + _V12_LEVELLED}"
     f"_arm_overlay_residual64x64_leg_pose_release_crouch_feedforward"
-    f"_one_run_warmup{PICO_CRITIC_WARMUP}"
-    f"_total{PICO_TOTAL_UPDATES}_v1"
+    f"_one_run_warmup{IK_TRACKING_CRITIC_WARMUP}"
+    f"_total{IK_TRACKING_TOTAL_UPDATES}_v1"
 )
 V12_PACKAGER_REVISION = f"microban_pico_packager_one_run_v1_{_TAG}_servo_range"
 
@@ -79,7 +82,7 @@ def contract_strings() -> dict[str, str]:
         "v12_recipe_revision": V12_RECIPE_REVISION,
         "v13_arm_overlay_recipe_revision": V13_ARM_OVERLAY_RECIPE_REVISION,
         "v12_packager_revision": V12_PACKAGER_REVISION,
-        # Frame of the PICO foot target columns (microban_hand_fk).
+        # Frame of the IK tracking foot target columns (microban_hand_fk).
         "v12_target_frame": _target_frame(),
     }
 

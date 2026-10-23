@@ -96,7 +96,7 @@ walking).
 Action-rate line (violence).  Per kind, the mean over steps of the sum over
 the 12 leg joints of the squared change of the servo target in one step (the
 form of the action_rate_l2 reward, rad^2) is at most ``MAX_LEG_ACTION_RATE``
-= 3.36: the PICO policy that runs on the robot without violent motion
+= 3.36: the IK tracking policy that runs on the robot without violent motion
 (mjlab_microban_teleop_v12 run 2026-10-11_23-19-20_home_481503d292_pico_v13_v13g2,
 model_14999) walking (its eight walking commands, arms at HOME, 128 rollouts
 of 10 s; standing, left out, measures 0.0003, and with it the 144 rollouts
@@ -121,7 +121,7 @@ counted per minute standing: a kind's or a set's falls over the time its
 pieces ran before their fall (a piece's whole run, the first second
 included, when it does not fall).  On an evaluation-only set (the operator's
 motions: the PICO recordings) at most ``MAX_FALLS_PER_MINUTE`` = 0.425: the
-PICO policy above in its push check (144 rollouts of 6 s, standing and
+IK tracking policy above in its push check (144 rollouts of 6 s, standing and
 walking in eight directions, pushed by 0.4 m/s every second) fell 6 times by
 the same tilt rule over 846.58 s standing, 6 of 144 rollouts (its reference
 is upright, so the rule under a leaning reference adds none there).  On the
@@ -182,7 +182,7 @@ START = "standing"
 SETTLE_S = 1.0
 LEG_JOINT_NAMES = tuple(name for name in ACTION_JOINT_NAMES if "shoulder" not in name and "elbow" not in name)
 MAX_LEG_ACTION_RATE = 3.36
-ACTION_RATE_FROM_S = 1.0  # the PICO policy was measured from 1 s into its rollouts
+ACTION_RATE_FROM_S = 1.0  # the IK tracking policy was measured from 1 s into its rollouts
 FALL_TILT_RAD = math.radians(45.0)
 FALL_REF_TILT_RAD = math.radians(30.0)
 # Under a reference past FALL_REF_TILT_RAD, the robot is down past it: its trunk past FALL_TILT_RAD and past the
@@ -200,8 +200,8 @@ FALL_REF_TILT_RAD = math.radians(30.0)
 FALL_PAST_REF_TILT_RAD = math.radians(30.0)
 FALL_BELOW_REF_M = 0.06
 FALL_PAST_REF_S = 0.5
-# The PICO policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).  Its reference (stand, walk) is
-# upright, where a robot past 45 deg is a fall at once, so the rule under a leaning reference adds none there.
+# The IK tracking policy's push check: 6 falls over 846.58 s standing (144 rollouts of 6 s).  Its reference (stand,
+# walk) is upright, where a robot past 45 deg is a fall at once, so the rule under a leaning reference adds none there.
 MAX_FALLS_PER_MINUTE = 60.0 * 6 / 846.58
 # A standing frame (a piece's start).  A sole is on the floor when its lowest corner is within 10 mm of it:
 # the PICO set's slow upright frames have the higher sole within 7 mm in 75 % and 13 mm in 90 % (tracking noise).

@@ -1,14 +1,15 @@
 """Standing still: the leg joints' speed and the falls of a policy that should stand.
 
-The walker and PICO stand at HOME on a zero command (PICO with its foot target
-and arms neutral) for 10 s, judged from 2 s on; the get-up starts fallen and
-is judged over the last 5 s of its 20 s (the robot's get-up timeout), on the
-environments standing through them.  Each environment holds one servo goal
-delay of DELAYS_MS (1-10 physics steps of 5 ms; play draws 3-6, training 3-8;
-the get-up: GETUP_DELAYS_MS) and one foot friction of FRICTIONS (the play
-env's range 0.3-1.2) on the play env's rigid floor, with the training's
-observation noise (without it a policy that trembled on the robot stands still
-here; config/pipeline.yaml ``stand_still`` has the measurements).
+The walker and the IK tracking policy stand at HOME on a zero command (the IK
+tracking policy with its foot target and arms neutral) for 10 s, judged from
+2 s on; the get-up starts fallen and is judged over the last 5 s of its 20 s
+(the robot's get-up timeout), on the environments standing through them.  Each
+environment holds one servo goal delay of DELAYS_MS (1-10 physics steps of
+5 ms; play draws 3-6, training 3-8; the get-up: GETUP_DELAYS_MS) and one foot
+friction of FRICTIONS (the play env's range 0.3-1.2) on the play env's rigid
+floor, with the training's observation noise (without it a policy that trembled
+on the robot stands still here; config/pipeline.yaml ``stand_still`` has the
+measurements).
 
 Measured, while up (the trunk-fixed head point above 0.9 x the standing head
 height, the get-up's standing line):
@@ -16,8 +17,8 @@ height, the get-up's standing line):
 * ``leg_speed_rms_rad_s``: per delay, the RMS over its environments, judged
   steps and the twelve leg joints of the simulated joint speed; the judged
   value is the worst delay's;
-* ``falls``: environments that went down (the walker and PICO: at any step;
-  the get-up: after standing 1 s);
+* ``falls``: environments that went down (the walker and the IK tracking
+  policy: at any step; the get-up: after standing 1 s);
 * touchdowns per second (both feet, recorded only).
 
 With ``--time-constants`` every (delay, friction) runs on each of these soft
@@ -28,7 +29,7 @@ floor, on every collision geom (pipeline/floors.py): the get-up judgment's
 soft and slippery floors, with the same lines.  A floor with a friction puts
 every sole at it too, with as many environments per delay as the frictions.
 
-usage: python -m mjlab_microban.pipeline.stand_still {walk,pico,getup} TASK CKPT OUT.json
+usage: python -m mjlab_microban.pipeline.stand_still {walk,ik_tracking,getup} TASK CKPT OUT.json
            --max-leg-speed-rms 0.05 --max-falls 0 [--device cuda:0] [--time-constants 0.05,0.1 | --floor JSON]
 Prints one ``RESULT {json}`` line; OUT.json has ``checks`` and ``status``.
 """
@@ -50,9 +51,10 @@ DELAYS_MS = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
 GETUP_DELAYS_MS = (15, 20, 25, 30, 35, 40)
 FRICTIONS = (0.3, 0.6, 0.9, 1.2)
 PHYSICS_STEP_MS = 5
-# (total s, first judged s) of a run: the walker and PICO from HOME at rest,
-# the get-up from a fallen start over the last 5 s of its 20 s.
-TIMING_S = {"walk": (10.0, 2.0), "pico": (10.0, 2.0), "getup": (20.0, 15.0)}
+# (total s, first judged s) of a run: the walker and the IK tracking policy
+# from HOME at rest, the get-up from a fallen start over the last 5 s of its
+# 20 s.
+TIMING_S = {"walk": (10.0, 2.0), "ik_tracking": (10.0, 2.0), "getup": (20.0, 15.0)}
 GETUP_STOOD_STEPS = 50  # 1 s up before a get-up's drop counts as a fall
 LEG_JOINT_KEYS = ("hip", "knee", "ankle")
 
@@ -61,7 +63,7 @@ def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seco
              time_constants: list[float] | None = None, floor: tuple[float | None, float] | None = None):
     from mjlab.tasks.registry import load_env_cfg
 
-    from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import _configure_fixed_twist
+    from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import _configure_fixed_twist
 
     cfg = load_env_cfg(task, play=True)
     cfg.scene.num_envs = envs
@@ -85,7 +87,7 @@ def _env_cfg(kind: str, task: str, envs: int, seed: int, delays: list[int], seco
         from mjlab_microban.pipeline.floors import add_body_floors  # after the build
 
         add_body_floors(cfg, [floor] * envs)
-    elif floor is not None:  # the soles' floor and its plate, as the walk probe and PICO's evaluators
+    elif floor is not None:  # the soles' floor and its plate, as the walk probe and IK tracking's evaluators
         from mjlab_microban.pipeline.floors import add_sole_floors
 
         add_sole_floors(cfg, [floor] * envs)
@@ -104,15 +106,15 @@ def _policy(kind: str, task: str, checkpoint: str, wrapped, device: str):
         runner.load(checkpoint, load_cfg={"actor": True}, strict=True, map_location=device)
         return runner.get_inference_policy(device=device)
     if kind == "walk":
-        from mjlab_microban.scripts.teleop_v12_bootstrap_gate import _legacy_model
-        from mjlab_microban.tasks.microban_teleop_v12_bootstrap import inspect_legacy_velocity_checkpoint
+        from mjlab_microban.scripts.ik_tracking_v12_bootstrap_gate import _legacy_model
+        from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import inspect_legacy_velocity_checkpoint
 
         digest = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()
         _identity, state = inspect_legacy_velocity_checkpoint(checkpoint, digest)
         actor = _legacy_model().to(device)
         actor.load_state_dict(state, strict=True)
     else:
-        from mjlab_microban.scripts.evaluate_teleop_v12_checkpoint import _load_actor
+        from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import _load_actor
 
         actor, _iteration, _infos = _load_actor(Path(checkpoint), device=device)
     actor.eval()
@@ -187,8 +189,8 @@ def run(kind: str, task: str, checkpoint: str, *, device: str, seed: int, reps: 
         obs, _ = wrapped.reset()
         for actuator in robot.actuators:
             actuator.set_lags(lag)
-        if kind == "pico":
-            from mjlab_microban.scripts.probe_legacy_actor_in_teleop_env import _zero_neutral_targets
+        if kind == "ik_tracking":
+            from mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env import _zero_neutral_targets
 
             _zero_neutral_targets(env)
             obs = wrapped.get_observations()
@@ -297,7 +299,7 @@ def main() -> None:
     parser.add_argument("--time-constants", help="comma-separated soft floors (sole contact time constants, s) "
                         "in place of the rigid one, e.g. 0.05,0.1")
     parser.add_argument("--floor", help="JSON of a floor of config/pipeline.yaml in place of the rigid one: the "
-                        "get-up's on every collision geom, walking's and PICO's (with a plate) on the soles")
+                        "get-up's on every collision geom, walking's and IK tracking's (with a plate) on the soles")
     args = parser.parse_args()
     started = time.time()
     time_constants = floor = None

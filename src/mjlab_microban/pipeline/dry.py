@@ -1,13 +1,13 @@
 """DRY-RUN ONLY stand-ins of scripts/retrain_all_for_home.py --dry-run.
 
 A dry run trains every policy for a few updates (schedules scaled by
-``MICROBAN_SCHEDULE_SCALE``), so its walker cannot pass the PICO source probe
-and its PICO checkpoint cannot pass the judgment.  Where a release would stop,
-a dry run continues with these stand-ins, so every later step runs on real
-files.  Everything they produce is marked: file names start with
+``MICROBAN_SCHEDULE_SCALE``), so its walker cannot pass the IK tracking source
+probe and its IK tracking checkpoint cannot pass the judgment.  Where a release
+would stop, a dry run continues with these stand-ins, so every later step runs
+on real files.  Everything they produce is marked: file names start with
 ``DRYRUN_FORCED_PASS_``, JSON carries ``dry_run_*`` keys with the measured
-values, and the PICO package carries ``dry_run_not_deployable`` (the packager
-refuses all of this without ``dry_run=True``; the robot refuses such a
+values, and the IK tracking package carries ``dry_run_not_deployable`` (the
+packager refuses all of this without ``dry_run=True``; the robot refuses such a
 package unless MICROBAN_ALLOW_DRYRUN_POLICY=1).
 
 usage (subprocesses of the pipeline):
@@ -26,10 +26,10 @@ FORCED_PREFIX = "DRYRUN_FORCED_PASS_"
 # The robot's startup self-test needs at least 8 possible-state rows; a
 # fallen DRYRUN policy may record fewer, so its possible ones are cycled to
 # this many.  With enough of them all are kept, so the packager's even spread
-# still reaches the late arm-target rows (the PICO self-test needs one).
+# still reaches the late arm-target rows (the IK tracking self-test needs one).
 SMOKE_ROWS = 16
 # Fields the v12 source-probe validator requires of a passing receipt
-# (microban_teleop_v12_bootstrap.validate_legacy_teleop_probe_receipt).
+# (microban_ik_tracking_v12_bootstrap.validate_legacy_ik_tracking_probe_receipt).
 PROBE_PASS_SUMMARY = {
     "scenario_count": 9,
     "completed_scenario_count": 9,
@@ -73,7 +73,7 @@ def forced_probe_report(report: dict, max_overshoot_rad: float) -> dict:
 
 
 def force_probe(source: str, output: str) -> int:
-    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+    from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import (
         ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     )
 
@@ -106,7 +106,7 @@ def forced_reports(report_prefix: str, out_dir: Path, max_overshoot_rad: float) 
 
             possible = [row for row in rows if physical_row_problem("pico", row) is None]
             if not possible:
-                raise ValueError("the dry PICO policy recorded no possible-state observation")
+                raise ValueError("the dry IK tracking policy recorded no possible-state observation")
             report["dry_run_smoke_rows_original_count"] = len(rows)
             report["runtime_smoke_observations"] = (
                 possible
@@ -120,7 +120,7 @@ def forced_reports(report_prefix: str, out_dir: Path, max_overshoot_rad: float) 
 
 
 def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str) -> int:
-    """The real PICO packager on a dry checkpoint whose judgment failed on performance.
+    """The real IK tracking packager on a dry checkpoint whose judgment failed on performance.
 
     The locomotion/tracking reports are copied with status forced to "pass"
     (their threshold validation is skipped), the gate carries
@@ -128,9 +128,9 @@ def package(checkpoint: str, report_prefix: str, gate_out: str, onnx_out: str) -
     ``dry_run_not_deployable``.  Prints the packager receipt (JSON).
     """
 
-    from mjlab_microban.scripts import export_teleop_v12_deployment as deployment
-    from mjlab_microban.scripts import teleop_v12_stage as stage
-    from mjlab_microban.tasks.microban_teleop_v12_bootstrap import (
+    from mjlab_microban.scripts import export_ik_tracking_v12_deployment as deployment
+    from mjlab_microban.scripts import ik_tracking_v12_stage as stage
+    from mjlab_microban.tasks.microban_ik_tracking_v12_bootstrap import (
         ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
     )
 

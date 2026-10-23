@@ -39,7 +39,7 @@ Here is a video of the trained agent being transferred to the real robot: [https
 
 ## HOME pose
 
-Every policy (walking, get-up, PICO teleop) is trained and deployed at one
+Every policy (walking, get-up, IK tracking) is trained and deployed at one
 HOME pose, defined only in [`config/home_pose.yaml`](config/README.md).
 Root height, gravity at HOME, get-up targets, hand FK bounds and the HOME
 identity strings are derived from it by MuJoCo FK
@@ -66,11 +66,11 @@ Start the training with:
 uv run train Mjlab-Velocity-Microban --env.scene.num-envs 4096
 ```
 
-The walking, get-up and PICO teleop policies of a HOME are retrained from
+The walking, get-up and IK tracking policies of a HOME are retrained from
 scratch, gated, exported and installed into the robot repository by one
 command, `scripts/retrain_all_for_home.py` (see
-[`docs/home_pose_workflow.md`](docs/home_pose_workflow.md); the PICO package
-is described in [`docs/teleop_v12_deployment.md`](docs/teleop_v12_deployment.md)).
+[`docs/home_pose_workflow.md`](docs/home_pose_workflow.md); the IK tracking
+package is described in [`docs/ik_tracking_v12_deployment.md`](docs/ik_tracking_v12_deployment.md)).
 
 Once training is complete, play back a checkpoint with:
 
@@ -105,7 +105,7 @@ A ONNX is generated during training with the latest checkpoint, but if you want 
 uv run python -m mjlab_microban.scripts.export_walk_onnx --checkpoint [path to your checkpoint] --gate-report [release]/walk_gate.json --output walk.onnx
 ```
 
-The robot's `walk.onnx` carries the passed judgment of its checkpoint: `[release]/walk_gate.json` is the gate report `scripts/retrain_all_for_home.py` writes into its release directory (`<state dir>/release/`), where it also exports the get-up and PICO policies.
+The robot's `walk.onnx` carries the passed judgment of its checkpoint: `[release]/walk_gate.json` is the gate report `scripts/retrain_all_for_home.py` writes into its release directory (`<state dir>/release/`), where it also exports the get-up and IK tracking policies.
 
 ## License
 

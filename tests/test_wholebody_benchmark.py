@@ -225,13 +225,13 @@ def test_a_kind_is_judged_on_its_judged_seconds():
 
 
 def test_the_action_rate_line_holds_on_every_kind():
-    # The PICO policy on the robot walks at 3.355 (rad^2 per step over the 12 leg joints).
+    # The IK tracking policy on the robot walks at 3.355 (rad^2 per step over the 12 leg joints).
     assert benchmark.MAX_LEG_ACTION_RATE == 3.36
     assert len(benchmark.LEG_JOINT_NAMES) == 12
     assert not any("shoulder" in name or "elbow" in name for name in benchmark.LEG_JOINT_NAMES)
     kinds = {"walk": _kind(1.0), "run": _kind(1.0), "sprint": _kind(0.95)}
     assert benchmark.verdicts(kinds)["final"]["pass"]
-    for rate in (3.5, None):  # rougher than the PICO policy, or not measured
+    for rate in (3.5, None):  # rougher than the IK tracking policy, or not measured
         rough = benchmark.verdicts({**kinds, "sprint": _kind(0.95, rate=rate)})
         assert rough["final"]["kinds_above_action_rate_line"] == ["sprint"]
         assert not rough["final"]["pass"]
@@ -240,7 +240,7 @@ def test_the_action_rate_line_holds_on_every_kind():
 
 
 def test_the_fall_line_holds_on_the_operators_motions():
-    # The PICO policy fell 6 times in its 144 pushed rollouts of 6 s, over 846.58 s standing.
+    # The IK tracking policy fell 6 times in its 144 pushed rollouts of 6 s, over 846.58 s standing.
     assert benchmark.MAX_FALLS_PER_MINUTE == pytest.approx(0.425, abs=5e-4)
     pico = {"picoteleopit": _kind(0.95, falls=1, standing_seconds=400.0),
             "picotwist": _kind(0.95, falls=0, standing_seconds=300.0),

@@ -59,11 +59,11 @@ class MonitorTest(unittest.TestCase):
 
     def test_the_pipeline_reads_the_task_tables(self) -> None:
         from mjlab_microban.pipeline.steps import stage_tables
-        from mjlab_microban.schedules import GETUP_SCHEDULE, PICO_SCHEDULE, WALK_WIDEN_UPDATE
+        from mjlab_microban.schedules import GETUP_SCHEDULE, IK_TRACKING_SCHEDULE, WALK_WIDEN_UPDATE
 
         tables = stage_tables()
         self.assertEqual(tables["walk"], {"penalize stepping + increase velocity": WALK_WIDEN_UPDATE})
-        self.assertEqual(sorted(tables["pico"].values()), sorted(PICO_SCHEDULE.values()))
+        self.assertEqual(sorted(tables["ik_tracking"].values()), sorted(IK_TRACKING_SCHEDULE.values()))
         self.assertEqual(tables["getup"]["refine exploration (std, Adam, learning rate, entropy)"],
                          GETUP_SCHEDULE["refine"])
         self.assertEqual(set(tables["getup"]), {"start without IMU latency", *GETUP_SCHEDULE,

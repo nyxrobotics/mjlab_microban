@@ -1,8 +1,8 @@
 """Training lengths and switch updates of the three policies, in one place.
 
 Every number is a PPO update (iteration) of one training run.  The task
-configs, the PICO adapter, the evaluators, the exporters and the pipeline
-(scripts/retrain_all_for_home.py) read them from here; under
+configs, the IK tracking adapter, the evaluators, the exporters and the
+pipeline (scripts/retrain_all_for_home.py) read them from here; under
 ``MICROBAN_SCHEDULE_SCALE`` (dry runs) every value is scaled
 (``scaled``).  This module imports nothing, so the pipeline and the HOME
 contracts can read it without loading mjlab.
@@ -60,36 +60,36 @@ GETUP_SCHEDULE = {
 }
 GETUP_TOTAL_UPDATES = scaled(18000)
 
-# PICO: the critic of the frozen walker's adapter warms up for
-# PICO_WARMUP_UPDATES (no actor column trains before the arms move), then the
-# externally driven arms and the moving HMD (with their columns), feet 3000
-# updates later (tightened 2000 later) and 9000 more updates with everything
-# active and tightened.
-PICO_STEPS_PER_UPDATE = 24
-PICO_WARMUP_UPDATES = 1000
-PICO_CRITIC_WARMUP = scaled(PICO_WARMUP_UPDATES)
-PICO_SCHEDULE = {
-    "arm": PICO_CRITIC_WARMUP,
-    "foot": scaled(PICO_WARMUP_UPDATES + 3000),
-    "foot_tighten": scaled(PICO_WARMUP_UPDATES + 5000),
+# IK tracking: the critic of the frozen walker's adapter warms up for
+# IK_TRACKING_WARMUP_UPDATES (no actor column trains before the arms move),
+# then the externally driven arms and the moving HMD (with their columns), feet
+# 3000 updates later (tightened 2000 later) and 9000 more updates with
+# everything active and tightened.
+IK_TRACKING_STEPS_PER_UPDATE = 24
+IK_TRACKING_WARMUP_UPDATES = 1000
+IK_TRACKING_CRITIC_WARMUP = scaled(IK_TRACKING_WARMUP_UPDATES)
+IK_TRACKING_SCHEDULE = {
+    "arm": IK_TRACKING_CRITIC_WARMUP,
+    "foot": scaled(IK_TRACKING_WARMUP_UPDATES + 3000),
+    "foot_tighten": scaled(IK_TRACKING_WARMUP_UPDATES + 5000),
 }
-PICO_TOTAL_UPDATES = scaled(PICO_WARMUP_UPDATES + 14000)
-# Recorded in every PICO checkpoint and package: the adapter's gradient
+IK_TRACKING_TOTAL_UPDATES = scaled(IK_TRACKING_WARMUP_UPDATES + 14000)
+# Recorded in every IK tracking checkpoint and package: the adapter's gradient
 # schedule (which actor columns train after which update; the residual MLP
 # trains with the HMD and arm columns).
-PICO_ADAPTER_SCHEDULE_REVISION = (
-    f"freeze_extra_residual_to{PICO_SCHEDULE['arm']}_then_hmd_arm_residual_to{PICO_SCHEDULE['foot']}"
-    f"_then_all_v4"
+IK_TRACKING_ADAPTER_SCHEDULE_REVISION = (
+    f"freeze_extra_residual_to{IK_TRACKING_SCHEDULE['arm']}"
+    f"_then_hmd_arm_residual_to{IK_TRACKING_SCHEDULE['foot']}_then_all_v4"
 )
 
 
-def pico_schedule_record() -> dict[str, int]:
-    """The PICO curriculum as the package records it (pico_curriculum_json)."""
+def ik_tracking_schedule_record() -> dict[str, int]:
+    """The IK tracking curriculum as the package records it (pico_curriculum_json)."""
 
     return {
-        "critic_warmup": PICO_CRITIC_WARMUP,
-        "arm_start": PICO_SCHEDULE["arm"],
-        "foot_start": PICO_SCHEDULE["foot"],
-        "foot_tighten": PICO_SCHEDULE["foot_tighten"],
-        "total": PICO_TOTAL_UPDATES,
+        "critic_warmup": IK_TRACKING_CRITIC_WARMUP,
+        "arm_start": IK_TRACKING_SCHEDULE["arm"],
+        "foot_start": IK_TRACKING_SCHEDULE["foot"],
+        "foot_tighten": IK_TRACKING_SCHEDULE["foot_tighten"],
+        "total": IK_TRACKING_TOTAL_UPDATES,
     }

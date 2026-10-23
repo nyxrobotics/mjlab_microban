@@ -33,12 +33,13 @@ them (an arm down is shoulder_roll 0), so the limit penalty and the reset
 clip start at the MJCF range (soft limit factor 1.0, not the 0.9 of the
 other tasks).
 
-Collision.  This task's robot (not robot.xml, so walking, get-up and PICO are
-unchanged) names the collision geoms ``<body>_collision_<n>`` (the friction
-randomization covers all of them) and adds one box per head, shoulder,
-upper-arm and hip-yaw link, the bounding box of its visual meshes, that
-touches only the floor: robot geoms are contype 3 / conaffinity 2, the boxes
-1 / 0 and the floor 1 / 1, so a box never overlaps the robot's own geoms.
+Collision.  This task's robot (not robot.xml, so walking, get-up and IK
+tracking are unchanged) names the collision geoms ``<body>_collision_<n>``
+(the friction randomization covers all of them) and adds one box per head,
+shoulder, upper-arm and hip-yaw link, the bounding box of its visual meshes,
+that touches only the floor: robot geoms are contype 3 / conaffinity 2, the
+boxes 1 / 0 and the floor 1 / 1, so a box never overlaps the robot's own
+geoms.
 
 Floor and delay (training only; evaluation and play keep the rigid floor, the
 robot's foot friction and its 15-30 ms goal delay).  The robot's collision
@@ -109,7 +110,7 @@ from mjlab_microban.robot.microban_constants import (
 )
 from mjlab_microban.tasks.floor_plate import train_on_floor_plate
 from mjlab_microban.tasks.mdp import contact_time_constant
-from mjlab_microban.tasks.microban_teleop_mdp import (
+from mjlab_microban.tasks.microban_ik_tracking_mdp import (
     MICROBAN_HMD_RUNTIME_LIMITS_RAD,
     MICROBAN_HMD_SLEW_RATES_RAD_S,
 )
@@ -450,7 +451,7 @@ def make_wholebody_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             distance=1.0, elevation=-10.0, azimuth=120.0,
         ),
         sim=SimulationCfg(
-            # PICO's contact capacity; get-up's sensor match capacity for the
+            # IK tracking's contact capacity; get-up's sensor match capacity for the
             # trunk-subtree self-contact sensor.
             nconmax=512,
             njmax=2048,

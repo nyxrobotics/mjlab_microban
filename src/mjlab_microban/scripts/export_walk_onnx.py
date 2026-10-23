@@ -50,7 +50,7 @@ from mjlab_microban.robot.microban_constants import (
 from mjlab_microban.tasks.microban_getup_runner import HOME_ROOT_RECORDED_ATOL
 from mjlab_microban.tasks.microban_velocity_runner import require_walk_home_pose
 from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_ACTION_JOINT_NAMES,
 )
 
 TASK = "Mjlab-Velocity-Microban"
@@ -65,7 +65,7 @@ OBSERVATION_TERMS = (
     "actions",
     "command",
 )
-ACTION_JOINT_NAMES = MICROBAN_TELEOP_ACTION_JOINT_NAMES
+ACTION_JOINT_NAMES = MICROBAN_ACTION_JOINT_NAMES
 ACTION_WIDTH = len(ACTION_JOINT_NAMES)
 OBSERVATION_TERM_DIMS = (3, 3, ACTION_WIDTH, ACTION_WIDTH, ACTION_WIDTH, 3)
 OBSERVATION_WIDTH = sum(OBSERVATION_TERM_DIMS)
@@ -208,7 +208,7 @@ def require_current_home_walk_checkpoint(path: Path) -> None:
     """Refuse a walking checkpoint not trained at the current HOME.
 
     Checks both the run's recorded params/env.yaml and the checkpoint's own
-    HOME stamp (consumers such as the teleop v12 bootstrap call this).
+    HOME stamp (consumers such as the IK tracking v12 bootstrap call this).
     """
 
     path = Path(path).resolve(strict=True)

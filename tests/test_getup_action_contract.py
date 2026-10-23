@@ -32,7 +32,7 @@ from mjlab_microban.tasks.microban_getup_env_cfg import (
     make_microban_getup_env_cfg,
 )
 from mjlab_microban.tasks.microban_policy_export import (
-    MICROBAN_TELEOP_ACTION_JOINT_NAMES,
+    MICROBAN_ACTION_JOINT_NAMES,
 )
 
 
@@ -72,7 +72,7 @@ class GetupActionObservationContractTest(unittest.TestCase):
 
         default_joint_pos = cfg.scene.entities["robot"].init_state.joint_pos
         default_pose = torch.tensor(
-            [[default_joint_pos[name] for name in MICROBAN_TELEOP_ACTION_JOINT_NAMES]],
+            [[default_joint_pos[name] for name in MICROBAN_ACTION_JOINT_NAMES]],
             dtype=torch.float32,
         )
         raw = torch.linspace(-4.0, 4.0, default_pose.shape[-1]).unsqueeze(0)

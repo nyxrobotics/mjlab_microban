@@ -1,6 +1,6 @@
 # HOME姿勢の設定
 
-全ポリシー（歩行・起き上がり・PICO v12）が使うHOME姿勢は、このディレクトリの
+全ポリシー（歩行・起き上がり・IK トラッキング v12）が使うHOME姿勢は、このディレクトリの
 `home_pose.yaml` だけで決まる。ほかの値はすべて `src/mjlab_microban/robot/home_pose.py`
 が `robot.xml` の MuJoCo FK で計算する。
 
@@ -33,8 +33,8 @@
 | yaml | `config/home_pose.yaml`（`tests/fixtures/home_pose_forward_lean.yaml` と同じ値） | 編集したyaml |
 | `tag` | `forward_lean_home` | `<label>_<hash>` |
 | 起き上がりの契約 | `v6` | `v5_<tag>` / `v6_<tag>` |
-| PICO v12 HOME / recipe | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
-| PICO の学習レシピ | `forward_lean_home_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total15000_v1` | `<tag>_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total15000_v1` |
+| IK トラッキング v12 HOME / recipe | `forward_lean10_hip_minus14p166561199931_..._v6`、recipe `..._v17` | `<tag>_hip_..._v5`/`_v6`、`<tag>_...` |
+| IK トラッキングの学習レシピ | `forward_lean_home_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total15000_v1` | `<tag>_..._arm_overlay_residual64x64_leg_pose_release_one_run_warmup1000_total15000_v1` |
 | 固定値 | root z 0.170430569776402、股・足首ピッチは全桁の値（yamlは12桁の正準値） | FK値 |
 | HOMEスタンプの比較 | 完全一致（記録envの root は atol 1e-12） | 1e-9 の許容（FK の最終桁の揺れ） |
 
@@ -56,13 +56,13 @@ root z は FK 値を 1e-12 m に丸めて公開する。前傾HOMEは公開済�
 | --- | --- | --- |
 | HOME の root 姿勢・重力 | クォータニオン (cos p/2, 0, sin p/2, 0)、重力 (sin p, 0, −cos p) | 単位クォータニオン、(0, 0, −1) |
 | 歩行の upright 報酬 | 目標ピッチ p | 0 |
-| 歩行・テレオペの速度報酬 | HOME水平化座標系 R_trunk·R_y(−p) で速度を読む（`track_*_home_frame`、`trunk_pitch` パラメータ） | mjlab の項そのもの |
+| 歩行・IK トラッキングの速度報酬 | HOME水平化座標系 R_trunk·R_y(−p) で速度を読む（`track_*_home_frame`、`trunk_pitch` パラメータ） | mjlab の項そのもの |
 | リセットのヨー | ワールド z 軸まわり（`reset_root_state_uniform_world_yaw`。起き上がりの near-HOME リセットも） | mjlab の `reset_root_state_uniform` |
 | 起き上がりの直立報酬 | `upright_standing` の目標重力 (sin p, 0)（`pitch` パラメータ） | (0, 0) |
 | 頭高さ・足の横間隔 | FK（前傾 0.2953 / 0.0941 m） | FK（体幹 0° の中心HOME 0.2965 / 0.0935 m） |
-| PICO 足・手目標 | HOME水平化座標系、ラベル `robot_home_levelled_trunk_xyz_forward_left_up`、手先FK v4（受信箱 ±64 mm で棄却サンプリング） | 体幹座標系、`robot_trunk_xyz_forward_left_up`、手先FK v2 |
+| IK トラッキングの足・手目標 | HOME水平化座標系、ラベル `robot_home_levelled_trunk_xyz_forward_left_up`、手先FK v4（受信箱 ±64 mm で棄却サンプリング） | 体幹座標系、`robot_trunk_xyz_forward_left_up`、手先FK v2 |
 | HMD 中立 | neck_pitch = −p（水平なヘッドセット） | HOME（default_joint_pos） |
-| エクスポータ | 重力 = HOME 重力（歩行・起き上がりのスモーク、PICO の parity 入力） | (0, 0, −1) |
+| エクスポータ | 重力 = HOME 重力（歩行・起き上がりのスモーク、IK トラッキングの parity 入力） | (0, 0, −1) |
 | ロボット | 起き上がりの立ち上がり判定・引き渡し前の静定判定を HOME 重力からの傾きで測る、首の安定化の基準を p だけずらす、シミュレータの IMU 遅延を HOME 姿勢で初期化 | 鉛直基準の元の判定 |
 
 転倒判定（重力 z > −0.5、鉛直から 60°）は物理的な姿勢なので、どの p でも鉛直基準のまま。
@@ -79,16 +79,16 @@ root z は FK 値を 1e-12 m に丸めて公開する。前傾HOMEは公開済�
 ローダーが読めるHOMEでも、このチェックアウトの学習タスクが受け付けないものがある。
 `home_pose_tool.py show` と `balance_home_pose.py` は、候補のHOMEを別プロセスで
 `mjlab_microban.robot.home_pose.HOME` に入れて `mjlab_microban.tasks` をimportし（歩行・起き上がり各段階・
-PICO の全タスクの環境設定が組み立てられる、GPU不要、数秒）、結果を「training line」として表示する
+IK トラッキングの全タスクの環境設定が組み立てられる、GPU不要、数秒）、結果を「training line」として表示する
 （`mjlab_microban/robot/home_pose_training.py`）。規則の一覧を手で持たず、タスク自身に聞いている。
 
 | 変えたい値 | この学習ライン |
 | --- | --- |
-| 膝（左右同じ） | 可。`balance_home_pose.py --write` で股・足首を合わせればよい。膝 20° で歩行と起き上がりの数回の学習、v12 の開始時HOME照合とテレオペ環境のプローブが動くことを確認済み |
+| 膝（左右同じ） | 可。`balance_home_pose.py --write` で股・足首を合わせればよい。膝 20° で歩行と起き上がりの数回の学習、v12 の開始時HOME照合と IK トラッキングの環境のプローブが動くことを確認済み |
 | 股・足首ロール（左右反転）、股ヨー | 足裏が床に平らに着く組み合わせだけ（ふつうは 足首ロール = −股ロール、股ヨー 0）。股ロールだけを変えると足裏がロールしてローダーが拒否する |
 | 首ピッチ | 可 |
 | 体幹ピッチ | 可（±90° 未満）。0 とそれ以外で学習の仕組みが分かれる（上の表） |
-| 肩ピッチ | 0 だけ（PICO contract v12 のHOME revision） |
+| 肩ピッチ | 0 だけ（IK トラッキング contract v12 のHOME revision） |
 | 肘・肩ロール | 体幹 0° では、手先の到達範囲が PICO 受信側で検証済みの ±0.064 m の箱に収まる範囲だけ。今の腕HOMEで x がすでに 0.0630 m なので、1つだけ動かす場合の目安は 肘 −22.4°〜−19.1°、肩ロール（左）−2.6°〜44.7°（MJCFの範囲内で）。体幹 ≠ 0° では箱の外の目標を棄却して学習するので、評価姿勢（F/B/f/b）が箱に入る範囲 |
 | 首ヨー `head`、`neck_roll` | 0 だけ（左右対称でなくなるため、ローダーが拒否） |
 
@@ -110,7 +110,7 @@ uv run --locked python scripts/retrain_all_for_home.py --robot-repo ../microban_
     --robot-branch home-<label> --training-branch home-<label>
 ```
 
-コマンドは、HOME の確認と学習側のテスト一式（CPU）のあと、歩行・PICO・起き上がりをそれぞれ最初から
+コマンドは、HOME の確認と学習側のテスト一式（CPU）のあと、歩行・IK トラッキング・起き上がりをそれぞれ最初から
 1 本ずつ学習し、1 回ずつ判定し、書き出し、ロボット側に入れて検証し、両リポジトリにコミットする。判定に
 落ちたら止まる（救済はしない。原因を直して同じコマンドを回すと、済んだ段階は飛ばされる）。配線の確認は
 `--dry-run`（数十分）。詳細は [`docs/home_pose_workflow.md`](../docs/home_pose_workflow.md)。

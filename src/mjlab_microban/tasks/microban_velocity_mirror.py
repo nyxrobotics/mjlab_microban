@@ -6,7 +6,7 @@ not: one side's lateral walk is weak, and which side changes during training
 (0.1 m/s left on the 0.1 s floor with friction 0.3: 0.009-0.020 m/s, right
 0.032-0.035).  rsl_rl's ``symmetry_cfg`` with ``use_mirror_loss`` adds
 ``coeff * MSE(pi(M o), M pi(o))`` to the PPO loss so that one run learns one
-gait for both sides.  PICO (microban_teleop_mirror) uses the same mirror.
+gait for both sides.  IK tracking (microban_ik_tracking_mirror) uses the same mirror.
 
 The mirror is the reflection across the robot's sagittal (x-z) plane: left
 and right joints, feet and arms swap, a joint's angle keeps its sign when
@@ -39,7 +39,7 @@ TermMirror = tuple[list[int], list[float]]
 Mirror = tuple[torch.Tensor, torch.Tensor]
 
 # Sign of a joint angle under the mirror, by joint (the partner's angle is
-# this sign times the joint's).  tests/test_teleop_mirror.py derives it from
+# this sign times the joint's).  tests/test_ik_tracking_mirror.py derives it from
 # the MJCF joint axes.
 MIRROR_JOINT_SIGNS = {
     "shoulder_pitch": 1.0,

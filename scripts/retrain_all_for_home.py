@@ -11,10 +11,12 @@ Steps (src/mjlab_microban/pipeline/steps.py; docs/home_pose_workflow.md):
 2. walk     one walking run from scratch (Mjlab-Velocity-Microban, 30000
             updates), then its judgment (walk probe, 9x300 probe, standing
             still; on the rigid floor and on the soft and slippery ones);
-3. pico     the walker's 9x300 source probe (seed 42) and bootstrap gate,
-            one PICO run (critic warm-up, hands, feet; 15000 updates), then
-            its judgment (locomotion, tracking, ONNX, standing still; seed 42;
-            on the rigid floor and on the soft and slippery ones) and gate file;
+3. ik_tracking
+            the walker's 9x300 source probe (seed 42) and bootstrap gate,
+            one IK tracking run (critic warm-up, hands, feet; 15000 updates),
+            then its judgment (locomotion, tracking, ONNX, standing still;
+            seed 42; on the rigid floor and on the soft and slippery ones) and
+            gate file;
 4. getup    one get-up run (scheduled IMU latency, calm, effort/push; 18000
             updates), then its judgment (fallen-start stands, push, tremble,
             posture, clip, standing still; the fallen-start stands, push,

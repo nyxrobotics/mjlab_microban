@@ -127,7 +127,7 @@ from mjlab_microban.tasks.microban_getup_action import (
     GetupJointPositionActionCfg,
     raw_getup_action,
 )
-from mjlab_microban.tasks.microban_teleop_mdp import normalized_target_clip_excess_l1_sum
+from mjlab_microban.tasks.microban_ik_tracking_mdp import normalized_target_clip_excess_l1_sum
 
 GETUP_EPISODE_LENGTH_S = 20.0  # Match the robot's automatic get-up timeout.
 # Servo goal range on all 18 body joints (see module docstring).

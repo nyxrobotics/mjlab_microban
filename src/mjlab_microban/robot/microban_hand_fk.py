@@ -1,7 +1,7 @@
 """Exact Microban arm forward kinematics for reachable hand commands.
 
-The PICO policy no longer tracks hand targets (its arms are driven from
-outside, microban_teleop_mdp); the FK draws its arm targets clear of the
+The IK tracking policy no longer tracks hand targets (its arms are driven from
+outside, microban_ik_tracking_mdp); the FK draws its arm targets clear of the
 trunk, and the hand-target record below is still written to the robot's HOME
 file (``hand_target_fk``), whose target frame the teleop reads.
 

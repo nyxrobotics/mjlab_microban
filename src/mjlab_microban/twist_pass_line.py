@@ -1,7 +1,7 @@
 """Pass line of every judgment of the walking direction: fixed signed-response minimums.
 
-Walking and PICO track velocity with exp tracking terms
-(tasks/microban_velocity_tracking.py, tasks/microban_teleop_velocity_rewards.py),
+The walking and IK tracking policies track velocity with exp tracking terms
+(tasks/microban_velocity_tracking.py, tasks/microban_ik_tracking_velocity_rewards.py),
 so the walking direction is judged by fixed signed-response minimums:
 
 * a single-axis command passes when the mean twist moves along that axis the
@@ -15,10 +15,10 @@ so the walking direction is judged by fixed signed-response minimums:
 * a standing command passes when the drift stays within 0.05 m/s forward,
   0.05 m/s lateral and 0.2 rad/s yaw.
 
-The twist is the mean over the measurement window.  The PICO reports record
+The twist is the mean over the measurement window.  The IK tracking reports record
 the result as ``twist_direction``.  The measured joints may overshoot the
-soft limits by ``teleop_v12_safety.ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD``
-(0.25 rad) in the walking and PICO judgments.
+soft limits by ``ik_tracking_v12_safety.ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD``
+(0.25 rad) in the walking and IK tracking judgments.
 """
 
 from __future__ import annotations

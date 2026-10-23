@@ -25,7 +25,7 @@ def get_spec() -> mujoco.MjSpec:
 
 from mjlab_microban.robot.home_pose import HOME
 
-# Shared reference pose of every policy (walking, PICO teleop, get-up), loaded
+# Shared reference pose of every policy (walking, IK tracking, get-up), loaded
 # from config/home_pose.yaml (the single source of truth; see config/README.md).
 # Everything below is derived from that file by MuJoCo FK
 # (robot/home_pose.py): the soles are flat at the HOME trunk pitch and the
@@ -84,7 +84,7 @@ bam.actuators.actuators["xc330"] = lambda: XC330Actuator(Pendulum)
 # pack-level V/Nm coefficient (battery + wiring resistance across all 21
 # servos), not derivable from a single motor's R/kt.
 # Firmware position P gain of all 21 servos while a learned policy (walking,
-# get-up, PICO) runs, in training and on the robot (the robot's KP_RL).  The
+# get-up, IK tracking) runs, in training and on the robot (the robot's KP_RL).  The
 # robot holds static poses without a policy at its own, stiffer gain.
 SERVO_KP_POLICY = 125
 
@@ -118,7 +118,7 @@ MICROBAN_ROBOT_CFG = EntityCfg(
 )
 
 # Training's floors and servo-goal delay, for every learned policy (walking,
-# PICO, get-up, whole-body).  Evaluation and play keep MICROBAN_ROBOT_CFG:
+# IK tracking, get-up, whole-body).  Evaluation and play keep MICROBAN_ROBOT_CFG:
 # MuJoCo's 0.02 s contact time constant (a hard floor), the sole friction of
 # the foot_friction event and the 3-6-step goal delay redrawn every step.
 # Each environment draws one floor: one contact time constant (solref[0])
@@ -169,7 +169,7 @@ def with_training_goal_delay(robot: EntityCfg) -> EntityCfg:
     )))
 
 
-# Training's robot (walking, PICO, get-up): MICROBAN_ROBOT_CFG with
+# Training's robot (walking, IK tracking, get-up): MICROBAN_ROBOT_CFG with
 # TRAINING_COLLISION and the training goal delay.
 MICROBAN_TRAIN_ROBOT_CFG = with_training_goal_delay(
     replace(MICROBAN_ROBOT_CFG, spec_fn=collision_named_spec, collisions=(TRAINING_COLLISION,))

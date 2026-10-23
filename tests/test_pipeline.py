@@ -123,13 +123,13 @@ class StateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             floors.add_sole_floors(cfg, [(None, 0.05)])
 
-    def test_the_pico_judgment_on_soft_and_slippery_floors(self) -> None:
-        from mjlab_microban.scripts import evaluate_teleop_v12_tracking as tracking
+    def test_the_ik_tracking_judgment_on_soft_and_slippery_floors(self) -> None:
+        from mjlab_microban.scripts import evaluate_ik_tracking_v12_tracking as tracking
 
         cfg = load_config(dry=False)
-        # PICO trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s, the plate at its
-        # stiff end only (config/pipeline.yaml).
-        floors = cfg["pico"]["judgment"]["floors"]
+        # IK tracking trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s, the plate
+        # at its stiff end only (config/pipeline.yaml).
+        floors = cfg["ik_tracking"]["judgment"]["floors"]
         self.assertEqual(floors, {name: f for name, f in cfg["getup"]["floors"].items() if name != "plate_soft"})
         self.assertTrue(all(f.get("time_constant_s", 0.02) <= 0.05 for f in floors.values()))
         with tempfile.TemporaryDirectory() as directory:
@@ -150,23 +150,23 @@ class StateTest(unittest.TestCase):
             pipeline.jobs = SimpleNamespace(run=run)
             pipeline.stand_still = stand_still
             checkpoint = Path(directory) / "model_9.pt"
-            checkpoint.write_bytes(b"pico")
+            checkpoint.write_bytes(b"ik_tracking")
             prefix = Path(directory) / "run_model_9"
-            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), ["soft_slippery_tracking:push_falls"])
+            self.assertEqual(pipeline.ik_tracking_floor_judgment(checkpoint, prefix), ["soft_slippery_tracking:push_falls"])
             evaluated = [cmd for cmd in ran if cmd[0] != "stand_still"]
             self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in evaluated],
                              [floor for floor in floors.values() for _ in range(2)])
             # Standing still on the soft floors, then on each floor that gives sideways.
             plates = [floor for floor in floors.values() if "plate" in floor]
             self.assertEqual([cmd for cmd in ran if cmd[0] == "stand_still"],
-                             [["stand_still", "pico", [0.05], None]]
-                             + [["stand_still", "pico", None, floor] for floor in plates])
+                             [["stand_still", "ik_tracking", [0.05], None]]
+                             + [["stand_still", "ik_tracking", None, floor] for floor in plates])
             self.assertEqual(len(plates), 1)  # the plate's stiff end
             Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
             with self.assertRaises(core.JobStopped):  # a report not written is no judgment
-                pipeline.pico_failures(prefix, ("slippery_0.3_9x300",))
-            pipeline.cfg = {**cfg, "pico": {**cfg["pico"], "judgment": {}}}
-            self.assertEqual(pipeline.pico_floor_judgment(checkpoint, prefix), [])
+                pipeline.ik_tracking_failures(prefix, ("slippery_0.3_9x300",))
+            pipeline.cfg = {**cfg, "ik_tracking": {**cfg["ik_tracking"], "judgment": {}}}
+            self.assertEqual(pipeline.ik_tracking_floor_judgment(checkpoint, prefix), [])
         # The tracking evaluator puts the floor on every environment; the rigid floor has none.
         rigid, _ = tracking._cfg(42, 10)
         soft, _ = tracking._cfg(42, 10, (0.3, 0.1))
@@ -302,14 +302,14 @@ class StateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
             pipeline.prefix = "home_h"
-            pipeline.begin("pico", "a" * 64)
-            self.assertEqual(pipeline.state.step("pico")["label"], "home_h_pico_aaaaaaaa")
-            pipeline.state.step("pico")["label"] = "home_h_pico_kept"
+            pipeline.begin("ik_tracking", "a" * 64)
+            self.assertEqual(pipeline.state.step("ik_tracking")["label"], "home_h_ik_tracking_aaaaaaaa")
+            pipeline.state.step("ik_tracking")["label"] = "home_h_ik_tracking_kept"
             pipeline.state.save()
             again = fake_pipeline(Path(directory) / "state")
             again.prefix = "home_h"
-            again.begin("pico", "a" * 64)
-            self.assertEqual(again.state.step("pico")["label"], "home_h_pico_kept")
+            again.begin("ik_tracking", "a" * 64)
+            self.assertEqual(again.state.step("ik_tracking")["label"], "home_h_ik_tracking_kept")
 
     def test_a_failed_step_is_judged_again_only_when_its_judgment_changed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -360,10 +360,10 @@ class StateTest(unittest.TestCase):
     def test_running_steps_are_entered_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
-            pipeline.begin("pico", "a" * 64)  # then the process died
+            pipeline.begin("ik_tracking", "a" * 64)  # then the process died
             again = fake_pipeline(Path(directory) / "state")
-            self.assertTrue(again.begin("pico", "a" * 64))
-            self.assertEqual(again.state.step("pico")["inputs"], "a" * 64)
+            self.assertTrue(again.begin("ik_tracking", "a" * 64))
+            self.assertEqual(again.state.step("ik_tracking")["inputs"], "a" * 64)
 
     def test_a_crashed_or_stalled_training_is_run_again_and_a_refusal_fails(self) -> None:
         def run(state_dir: Path, cmd: list[str], kind: str) -> steps.Pipeline:
@@ -477,7 +477,7 @@ class StateTest(unittest.TestCase):
                         pipeline.train("walk", "exp", "lbl", "T", 10, 64, [])
             (run / "params" / "agent.yaml").write_text("resume: false\n")
             self.assertFalse(core.resumed_run(run))
-            # mjlab writes python tags into params (a PICO run's wandb_tags, for one).
+            # mjlab writes python tags into params (an IK tracking run's wandb_tags, for one).
             (run / "params" / "agent.yaml").write_text("wandb_tags: !!python/tuple []\nresume: false\n")
             self.assertFalse(core.resumed_run(run))
             self.assertTrue(core.resumes("train T --agent.resume=true"))
@@ -496,10 +496,10 @@ class InputsTest(unittest.TestCase):
     def test_step_inputs_cover_only_their_training_files(self) -> None:
         walk = set(steps.STEP_INPUTS["walk"])
         self.assertIn("src/mjlab_microban/tasks/microban_velocity_*.py", walk)
-        self.assertFalse(any("teleop" in pattern or "getup_env" in pattern for pattern in walk))
+        self.assertFalse(any("ik_tracking" in pattern or "getup_env" in pattern for pattern in walk))
         self.assertFalse(any("velocity" in pattern for pattern in steps.STEP_INPUTS["getup"]))
-        # PICO trains on the walking task's config (its base) and rewards.
-        self.assertIn("src/mjlab_microban/tasks/microban_velocity_env_cfg.py", steps.STEP_INPUTS["pico"])
+        # IK tracking trains on the walking task's config (its base) and rewards.
+        self.assertIn("src/mjlab_microban/tasks/microban_velocity_env_cfg.py", steps.STEP_INPUTS["ik_tracking"])
 
     def test_hash_changes_with_a_listed_file_only(self) -> None:
         with tempfile.TemporaryDirectory(dir=core.REPO / "logs" if (core.REPO / "logs").is_dir() else None) \
@@ -536,7 +536,7 @@ class ConfigTest(unittest.TestCase):
 
 
 class JudgmentTest(unittest.TestCase):
-    def test_pico_tracking_waiver_covers_accuracy_only(self) -> None:
+    def test_ik_tracking_tracking_waiver_covers_accuracy_only(self) -> None:
         failures = ["tracking:foot_error", "soft_0.05_tracking:foot_lift", "slippery_0.3_tracking:push_falls"]
         waiver = {"checks": ["foot_error", "foot_lift"], "note": "why"}
         self.assertEqual(steps.waived_failures(failures, waiver), failures[:2])
@@ -563,18 +563,18 @@ class JudgmentTest(unittest.TestCase):
                                                            {"checks": ["standing_still"], "note": "why"},
                                                            lambda source: report), ["tracking:standing_still"] if waived else [])
 
-    def test_pico_gate_records_the_waiver_of_the_rigid_floor(self) -> None:
+    def test_ik_tracking_gate_records_the_waiver_of_the_rigid_floor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
             pipeline.env, pipeline.log = {}, lambda message: None
-            pipeline.cfg = {**pipeline.cfg, "pico": {**pipeline.cfg["pico"],
-                                                     "tracking_waiver": {"checks": ["foot_error"], "note": "why"}}}
+            pipeline.cfg = {**pipeline.cfg, "ik_tracking": {**pipeline.cfg["ik_tracking"],
+                                                            "tracking_waiver": {"checks": ["foot_error"], "note": "why"}}}
             pipeline.jobs = SimpleNamespace(run=lambda *a, **k: (0, None))
             pipeline.stand_still = lambda *a, **k: None
             created = []
             checkpoint = Path(directory) / "run" / "model_9.pt"
             checkpoint.parent.mkdir()
-            checkpoint.write_bytes(b"pico")
+            checkpoint.write_bytes(b"ik_tracking")
             for failures, passed, flags in (
                 (["tracking:foot_error", "soft_0.05_tracking:foot_error"], True,
                  ["--waive-tracking-checks", "foot_error", "--waiver-note", "why"]),
@@ -583,11 +583,11 @@ class JudgmentTest(unittest.TestCase):
             ):
                 created.clear()
                 with mock.patch.object(steps, "capture", lambda cmd, **k: created.append(cmd)), \
-                        mock.patch.object(pipeline, "pico_failures", lambda prefix: [f for f in failures if
+                        mock.patch.object(pipeline, "ik_tracking_failures", lambda prefix: [f for f in failures if
                                                                                      f.startswith("tracking:")]), \
-                        mock.patch.object(pipeline, "pico_floor_judgment", lambda c, prefix: [
+                        mock.patch.object(pipeline, "ik_tracking_floor_judgment", lambda c, prefix: [
                             f for f in failures if not f.startswith("tracking:")]):
-                    _, result, reported = pipeline.pico_judgment(checkpoint)
+                    _, result, reported = pipeline.ik_tracking_judgment(checkpoint)
                 self.assertEqual((result, reported), (passed, failures))
                 if flags is None:
                     self.assertEqual(created, [])

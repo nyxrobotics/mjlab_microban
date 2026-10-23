@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from mjlab_microban.teleop_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+from mjlab_microban.ik_tracking_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
 from mjlab_microban.twist_pass_line import (
     axis_minimums,
     twist_judgment,
@@ -13,7 +13,7 @@ from mjlab_microban.twist_pass_line import (
     worst_margin,
 )
 
-# The single-axis minimums: the 9x300 probe and the PICO locomotion judgment,
+# The single-axis minimums: the 9x300 probe and the IK tracking locomotion judgment,
 # the walking judgment's commands.
 NINE_BY_300 = {
     (0.1, 0.0, 0.0): 0.04, (0.2, 0.0, 0.0): 0.08, (-0.1, 0.0, 0.0): 0.02, (-0.2, 0.0, 0.0): 0.04,

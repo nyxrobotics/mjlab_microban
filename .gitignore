@@ -8,7 +8,7 @@ src/mjlab_microban/robot/microban/scad/
 logs/*
 # Gates, probes and evaluations, and the release pipeline's state and files.
 artifacts/*
-# Walker checkpoints the release pipeline keeps for the PICO provenance.
+# Walker checkpoints the release pipeline keeps for the IK tracking provenance.
 checkpoints/
 wandb/*
 

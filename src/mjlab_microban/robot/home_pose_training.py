@@ -3,7 +3,7 @@
 Some HOME edits are valid poses (``home_pose.py`` loads them) but the
 training tasks of this checkout still refuse them, for example:
 
-* shoulder pitch other than 0: the PICO contract v12 HOME revision;
+* shoulder pitch other than 0: the IK tracking contract v12 HOME revision;
 * with a vertical trunk, an arm HOME whose reachable hand box leaves the PICO
   receiver's runtime-validated +-0.064 m box (``microban_hand_fk``);
 * with a pitched trunk, an arm HOME / trunk pitch whose HOME-levelled hand
@@ -19,7 +19,7 @@ Instead of a hand-kept list of such rules, ``check_training_line`` asks the
 tasks themselves: a fresh Python process installs the candidate HOME as
 ``mjlab_microban.robot.home_pose.HOME`` and imports ``mjlab_microban.tasks``,
 which builds the env configs of every registered Microban task (walking,
-get-up and the PICO pose-release task).  If that import fails, none of
+get-up and the IK tracking pose-release task).  If that import fails, none of
 them can be retrained at the HOME, and the first error says why.  It takes a
 few seconds (torch + mjlab import) and needs no GPU.
 """

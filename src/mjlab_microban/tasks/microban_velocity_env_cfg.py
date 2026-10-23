@@ -137,13 +137,13 @@ WALK_STAGES = (
     ),
 )
 
-# Walking (and PICO, which inherits its config) trains on training's floors
+# Walking (and IK tracking, which inherits its config) trains on training's floors
 # (robot/microban_constants.py) with no friction below the play env's lowest
 # sole friction (0.3), and a third of its environments on the play env's
 # floor (MuJoCo's 0.02 s, soles 0.3-1.2): on 0.15-1.5 on every environment
 # the walker failed the rigid floor's judgment.  Kept here, not with the
 # get-up's floors in tasks/mdp.py, so that a change of the walker's floors
-# retrains the walker and PICO only.
+# retrains the walker and the IK tracking policy only.
 WALK_FLOOR_FRICTION = (0.3, 1.5)
 WALK_ROBOT_FLOOR_FRACTION = 1 / 3
 # Half of the drawn floors (a third of all environments) are hard and
@@ -603,8 +603,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # friction from 0.3, a third of the environments on hard slippery floors
     # and a third on the play env's floor (walk_training_floor_and_delay),
     # and two thirds on a floor that gives sideways like a carpet
-    # (tasks/floor_plate.py); play and the judgments keep the robot's.  PICO
-    # inherits this config.
+    # (tasks/floor_plate.py); play and the judgments keep the robot's.  IK
+    # tracking inherits this config.
     if not play:
         walk_training_floor_and_delay(cfg)
         train_on_floor_plate(cfg)
@@ -624,8 +624,8 @@ def make_microban_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     #---------------------------- Play mode -------------------------
     # No curriculum, standing or rotation-only commands, pushes or observation
-    # noise.  The command ranges stay the initial ones: the PICO play env (its
-    # 9x300 probe and stage gates, tests/fixtures/teleop_play_env_snapshot.json)
+    # noise.  The command ranges stay the initial ones: the IK tracking play env (its
+    # 9x300 probe and stage gates, tests/fixtures/ik_tracking_play_env_snapshot.json)
     # inherits them, and the walk evaluators write their commands directly.
     if play:
         cfg.curriculum = {}
