@@ -54,10 +54,6 @@ from mjlab_microban.pipeline.core import (
 )
 
 STEPS = ("home", "walk", "ik_tracking", "getup", "export", "install", "commit")
-# The policy kind (ONNX metadata, manifest keys) each training step exports.
-# IK tracking keeps the kind "pico" its released ONNX and manifests carry.
-KIND_OF_STEP = {"walk": "walk", "ik_tracking": "pico", "getup": "getup"}
-STEP_OF_KIND = {kind: step for step, kind in KIND_OF_STEP.items()}
 WALK_EXP, IK_TRACKING_EXP, GETUP_EXP = (
     "mjlab_microban_velocity",
     "mjlab_microban_ik_tracking_v12",
@@ -785,9 +781,9 @@ class Pipeline:
         steps = self.state.data["steps"]
         checkpoints = {"walk": Path(steps["walk"]["outputs"]["checkpoint"]),
                        "getup": Path(steps["getup"]["outputs"]["checkpoint"]),
-                       "pico": Path(steps["ik_tracking"]["outputs"]["checkpoint"])}
+                       "ik_tracking": Path(steps["ik_tracking"]["outputs"]["checkpoint"])}
         files = {kind: out / name for kind, name in (("walk", "walk.onnx"), ("getup", "getup.onnx"),
-                                                     ("pico", "pico_teleop.onnx"))}
+                                                     ("ik_tracking", "ik_tracking.onnx"))}
         gates = self.write_gate_reports(out, checkpoints)
         for kind, module in (("walk", "export_walk_onnx"), ("getup", "export_getup_onnx")):
             self.jobs.run(f"export_{kind}", [*UV, "python", "-m", f"mjlab_microban.scripts.{module}",
@@ -800,14 +796,14 @@ class Pipeline:
         if ik_tracking["passed"]:
             cmd = [*UV, "python", "-m", "mjlab_microban.scripts.export_ik_tracking_v12_deployment",
                    "--checkpoint", ik_tracking["checkpoint"], "--stage-gate", f"{prefix}_gate.json",
-                   "--output", str(files["pico"]), "--force"]
+                   "--output", str(files["ik_tracking"]), "--force"]
         else:  # dry run only (a real run stopped at the judgment)
             cmd = [*UV, "python", "-m", "mjlab_microban.pipeline.dry", "package", ik_tracking["checkpoint"], prefix,
-                   str(out / "DRYRUN_ik_tracking_gate.json"), str(files["pico"])]
+                   str(out / "DRYRUN_ik_tracking_gate.json"), str(files["ik_tracking"])]
         _, log = self.jobs.run("export_ik_tracking", cmd, "eval", env={**self.env, "CUDA_VISIBLE_DEVICES": ""},
                                gpu=False)
         receipt = last_json_line(log.read_text(errors="replace"))
-        if receipt.get("status") != "pass" or receipt.get("output_sha256") != sha256(files["pico"]):
+        if receipt.get("status") != "pass" or receipt.get("output_sha256") != sha256(files["ik_tracking"]):
             raise PipelineError(f"IK tracking packaging failed: {receipt}")
         manifest = self.manifest(files, checkpoints)
         manifest_path = out / "manifest.json"
@@ -856,7 +852,7 @@ class Pipeline:
             "judgments": {
                 "walk": {k: steps["walk"]["outputs"][k] for k in ("summary", "passed", "failures")},
                 "walk_source_probe": steps["ik_tracking"].get("walker_probe"),
-                "pico": {k: steps["ik_tracking"]["outputs"][k] for k in ("passed", "failures")},
+                "ik_tracking": {k: steps["ik_tracking"]["outputs"][k] for k in ("passed", "failures")},
                 "getup": {k: steps["getup"]["outputs"][k] for k in ("summary", "passed", "failures")},
             },
             "checkpoints": {kind: path.name for kind, path in checkpoints.items()},
@@ -886,7 +882,7 @@ class Pipeline:
         release = Path(self.state.step("export")["outputs"]["dir"])
         agents = self.robot / "src" / "agents"
         agents.mkdir(parents=True, exist_ok=True)
-        for name in ("walk.onnx", "getup.onnx", "pico_teleop.onnx", "manifest.json"):
+        for name in ("walk.onnx", "getup.onnx", "ik_tracking.onnx", "manifest.json"):
             shutil.copyfile(release / name, agents / name)
         capture([*UV, "python", "config/home_pose_tool.py", "write-robot", "--microban-repo", str(self.robot)],
                 check=True, timeout=1200)
@@ -918,7 +914,7 @@ class Pipeline:
         steps = self.state.data["steps"]
         body = (f"HOME {h['tag']} (joint hash {h['joint_hash']}), policy contract {manifest['contract']}.\n\n"
                 + "".join(f"{entry['file']} sha256 {entry['sha256']}\n"
-                          f"  from {steps[STEP_OF_KIND[name]]['outputs']['run']}/{manifest['checkpoints'][name]} "
+                          f"  from {steps[name]['outputs']['run']}/{manifest['checkpoints'][name]} "
                           f"sha256 {entry['checkpoint_sha256']}\n"
                           for name, entry in manifest["policies"].items())
                 + f"\nRobot validator and tests pass ({steps['install']['outputs']['robot_tests']}).\n"
@@ -929,9 +925,9 @@ class Pipeline:
         # dry-run package of this pipeline) change in the same commit as the
         # policies that need them.
         fixtures = [f"tests/fixtures/policies/{name}"
-                    for name in ("walk.onnx", "getup.onnx", "pico_teleop.onnx", "manifest.json")]
+                    for name in ("walk.onnx", "getup.onnx", "ik_tracking.onnx", "manifest.json")]
         robot_paths = ["config/home_pose.yaml", "src/agents/walk.onnx", "src/agents/getup.onnx",
-                       "src/agents/pico_teleop.onnx", "src/agents/manifest.json", "src/policy_contract.py",
+                       "src/agents/ik_tracking.onnx", "src/agents/manifest.json", "src/policy_contract.py",
                        *fixtures]
         robot_commit = commit(self.robot, robot_paths, f"{title}\n\n{body}")
         self.log(f"robot commit {robot_commit[:12]} on {self.robot_branch}")

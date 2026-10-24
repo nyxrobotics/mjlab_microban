@@ -38,20 +38,20 @@ POLICY_CONTRACT = "microban-policy-1"
 # The training recipe of each kind (the robot accepts exactly these).  A recipe
 # id changes with the reward family or a target meaning; fixing a failed run
 # inside the family (weights, switch updates) does not change it.  The IK
-# tracking recipe (kind "pico", the name its released ONNX and manifests carry)
-# names its structure too: the frozen walker with a residual MLP, whose leg
-# targets and observed leg joints the robot offsets by the crouch pose of a
-# two-foot target (robot/crouch_feedforward.py, ik_tracking_crouch_record).
+# tracking recipe names its structure too: the frozen walker with a residual
+# MLP, whose leg targets and observed leg joints the robot offsets by the
+# crouch pose of a two-foot target (robot/crouch_feedforward.py,
+# ik_tracking_crouch_record).
 RECIPES: Mapping[str, str] = {
     "walk": "microban-walk-track-velocity-1",
     "getup": "microban-getup-single-run-1",
-    "pico": "microban-pico-arm-overlay-residual-crouch-feedforward-track-velocity-1",
+    "ik_tracking": "microban-ik-tracking-arm-overlay-residual-crouch-feedforward-track-velocity-1",
 }
 KINDS = tuple(RECIPES)
 POLICY_FILES: Mapping[str, str] = {
     "walk": "walk.onnx",
     "getup": "getup.onnx",
-    "pico": "pico_teleop.onnx",
+    "ik_tracking": "ik_tracking.onnx",
 }
 DRY_RUN_METADATA_KEY = "dry_run_not_deployable"
 # An IK tracking release whose behaviour checks failed may still be installed
@@ -104,7 +104,7 @@ OBSERVATION_SCHEMAS: Mapping[str, tuple[tuple[str, int], ...]] = {
         ("base_ang_vel", 3), ("projected_gravity", 3), ("joint_pos", ACTION_WIDTH),
         ("joint_vel", ACTION_WIDTH), ("actions", ACTION_WIDTH),
     ),
-    "pico": (
+    "ik_tracking": (
         ("base_ang_vel", 3), ("projected_gravity", 3), ("joint_pos", 21), ("joint_vel", 21),
         ("actions", ACTION_WIDTH), ("command", 3), ("foot_target", 6), ("arm_target", 6),
     ),
@@ -113,7 +113,7 @@ OBSERVATION_WIDTHS = {kind: sum(width for _, width in schema) for kind, schema i
 OBSERVATION_JOINT_NAMES: Mapping[str, tuple[str, ...]] = {
     "walk": ACTION_JOINT_NAMES,
     "getup": ACTION_JOINT_NAMES,
-    "pico": (*HEAD_JOINTS, *ACTION_JOINT_NAMES),
+    "ik_tracking": (*HEAD_JOINTS, *ACTION_JOINT_NAMES),
 }
 PREVIOUS_ACTION_SEMANTICS = "raw_policy_output"
 BASE_ANG_VEL_FRAME = "imu_sensor_xyz"
@@ -141,9 +141,9 @@ IK_TRACKING_BOTH_FEET_TARGET_UPPER = [0.01, 0.01, 0.02] * 2
 # arm servos minus HOME, left then right, each (shoulder_pitch, shoulder_roll,
 # elbow).  The box is the robot's ik_tracking_arm_contract (absolute angles)
 # and the slew its arm overlay's rate (moves/ik_tracking_arms.py).
-IK_TRACKING_ARM_TARGET_CONTRACT = "microban_pico_arm_target_rel_home_v1"
+IK_TRACKING_ARM_TARGET_CONTRACT = "microban_ik_tracking_arm_target_rel_home_v1"
 IK_TRACKING_ARM_JOINT_NAMES = ("left_shoulder_pitch", "left_shoulder_roll", "left_elbow",
-                        "right_shoulder_pitch", "right_shoulder_roll", "right_elbow")
+                               "right_shoulder_pitch", "right_shoulder_roll", "right_elbow")
 IK_TRACKING_ARM_LOWER_RAD = [math.radians(value) for value in (-100.0, 10.0, -110.0, -100.0, -120.0, -110.0)]
 IK_TRACKING_ARM_UPPER_RAD = [math.radians(value) for value in (100.0, 120.0, 0.0, 100.0, -10.0, 0.0)]
 IK_TRACKING_ARM_SLEW_RATE_RAD_S = 4.0
@@ -398,7 +398,7 @@ def contract_metadata(
             raise PolicyContractError(f"self-test row {index}: {problem}")
     if any(len(row) != ACTION_WIDTH or not all(math.isfinite(v) for v in row) for row in actions):
         raise PolicyContractError(f"self-test actions must be finite rows of {ACTION_WIDTH}")
-    if kind == "pico":
+    if kind == "ik_tracking":
         terms = _term_slices(kind)
         for term in ("foot_target", "arm_target"):
             if not any(any(value != 0.0 for value in row[terms[term]]) for row in rows):
@@ -433,7 +433,7 @@ def contract_metadata(
 
 
 def ik_tracking_arm_target_record() -> dict[str, Any]:
-    """The arm-target contract the robot checks (pico_arm_target_json)."""
+    """The arm-target contract the robot checks (ik_tracking_arm_target_json)."""
 
     return {
         "contract": IK_TRACKING_ARM_TARGET_CONTRACT,
@@ -445,7 +445,7 @@ def ik_tracking_arm_target_record() -> dict[str, Any]:
 
 
 def ik_tracking_crouch_record() -> dict[str, Any]:
-    """The crouch offsets the robot adds (pico_crouch_feedforward_json): the
+    """The crouch offsets the robot adds (ik_tracking_crouch_feedforward_json): the
     ONNX is the policy alone; the robot computes the offsets with its copy of
     crouch_feedforward, must reproduce these probes and must follow them at
     the same rate per policy step."""
@@ -473,7 +473,7 @@ def ik_tracking_metadata(
     active_adapter_columns: Sequence[int],
     checkpoint_iteration: int,
 ) -> dict[str, str]:
-    """IK tracking's additional keys (named ``pico_*`` as the robot reads them)."""
+    """IK tracking's additional keys (``ik_tracking_*``)."""
 
     guard = [float(value) for value in raw_action_guard]
     with np.errstate(over="ignore"):
@@ -488,19 +488,19 @@ def ik_tracking_metadata(
     if list(active_adapter_columns) != IK_TRACKING_ADAPTER_COLUMNS:
         raise PolicyContractError("the IK tracking checkpoint did not train every adapter column")
     if len(walk_checkpoint_sha256) != 64:
-        raise PolicyContractError("pico_walk_checkpoint_sha256 must be a SHA-256")
+        raise PolicyContractError("ik_tracking_walk_checkpoint_sha256 must be a SHA-256")
     return {
-        "pico_walk_checkpoint_sha256": walk_checkpoint_sha256,
-        "pico_target_frame": target_frame,
-        "pico_foot_target_lower_json": _json(IK_TRACKING_FOOT_TARGET_LOWER),
-        "pico_foot_target_upper_json": _json(IK_TRACKING_FOOT_TARGET_UPPER),
-        "pico_both_feet_target_lower_json": _json(IK_TRACKING_BOTH_FEET_TARGET_LOWER),
-        "pico_both_feet_target_upper_json": _json(IK_TRACKING_BOTH_FEET_TARGET_UPPER),
-        "pico_arm_target_json": _json(ik_tracking_arm_target_record()),
-        "pico_crouch_feedforward_json": _json(ik_tracking_crouch_record()),
-        "pico_raw_action_guard_json": _json(guard),
-        "pico_curriculum_json": _json(record),
-        "pico_active_adapter_columns_json": _json(list(active_adapter_columns)),
+        "ik_tracking_walk_checkpoint_sha256": walk_checkpoint_sha256,
+        "ik_tracking_target_frame": target_frame,
+        "ik_tracking_foot_target_lower_json": _json(IK_TRACKING_FOOT_TARGET_LOWER),
+        "ik_tracking_foot_target_upper_json": _json(IK_TRACKING_FOOT_TARGET_UPPER),
+        "ik_tracking_both_feet_target_lower_json": _json(IK_TRACKING_BOTH_FEET_TARGET_LOWER),
+        "ik_tracking_both_feet_target_upper_json": _json(IK_TRACKING_BOTH_FEET_TARGET_UPPER),
+        "ik_tracking_arm_target_json": _json(ik_tracking_arm_target_record()),
+        "ik_tracking_crouch_feedforward_json": _json(ik_tracking_crouch_record()),
+        "ik_tracking_raw_action_guard_json": _json(guard),
+        "ik_tracking_curriculum_json": _json(record),
+        "ik_tracking_active_adapter_columns_json": _json(list(active_adapter_columns)),
     }
 
 
@@ -514,8 +514,8 @@ def check_self_test(onnx_path: Path, metadata: Mapping[str, str]) -> float:
 
     rows = np.asarray(json.loads(metadata["self_test_observations_json"]), dtype=np.float32)
     expected = np.asarray(json.loads(metadata["self_test_actions_json"]), dtype=np.float64)
-    guard = (np.asarray(json.loads(metadata["pico_raw_action_guard_json"]), dtype=np.float64)
-             if "pico_raw_action_guard_json" in metadata else None)
+    guard = (np.asarray(json.loads(metadata["ik_tracking_raw_action_guard_json"]), dtype=np.float64)
+             if "ik_tracking_raw_action_guard_json" in metadata else None)
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     worst = 0.0
     for index, (row, want) in enumerate(zip(rows, expected, strict=True)):

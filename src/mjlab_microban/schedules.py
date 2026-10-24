@@ -84,7 +84,7 @@ IK_TRACKING_ADAPTER_SCHEDULE_REVISION = (
 
 
 def ik_tracking_schedule_record() -> dict[str, int]:
-    """The IK tracking curriculum as the package records it (pico_curriculum_json)."""
+    """The IK tracking curriculum as the package records it (ik_tracking_curriculum_json)."""
 
     return {
         "critic_warmup": IK_TRACKING_CRITIC_WARMUP,

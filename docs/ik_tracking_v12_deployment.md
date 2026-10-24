@@ -14,7 +14,7 @@ uv run --locked python -m \
   mjlab_microban.scripts.export_ik_tracking_v12_deployment \
   --checkpoint logs/rsl_rl/mjlab_microban_ik_tracking_v12/<run>/model_14999.pt \
   --stage-gate <state>/ik_tracking_judgment/<run>_model_14999_gate.json \
-  --output <state>/release/pico_teleop.onnx --force
+  --output <state>/release/ik_tracking.onnx --force
 ```
 
 `--force` only permits the final atomic rename to replace an existing file
@@ -97,8 +97,8 @@ CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
 CUDA_VISIBLE_DEVICES='' uv run --locked python -m \
   mjlab_microban.scripts.export_ik_tracking_v12_deployment \
   --checkpoint "$CKPT" --stage-gate "${PREFIX}_gate.json" \
-  --output "$OUT/pico_teleop.onnx" --force
-sha256sum -- "$CKPT" "$OUT/pico_teleop.onnx" "${PREFIX}"*.json
+  --output "$OUT/ik_tracking.onnx" --force
+sha256sum -- "$CKPT" "$OUT/ik_tracking.onnx" "${PREFIX}"*.json
 ```
 
 `set -e` is intentional: a judgment writes its failed report and exits 1, so

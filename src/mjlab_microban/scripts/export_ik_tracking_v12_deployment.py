@@ -167,7 +167,7 @@ def _self_test_rows(tracking: Mapping[str, Any]) -> list[list[float]]:
     ):
         raise ValueError("Final tracking report lacks its actor observations")
     try:
-        return policy_contract.select_self_test_rows("pico", rows)
+        return policy_contract.select_self_test_rows("ik_tracking", rows)
     except policy_contract.PolicyContractError as exc:
         raise ValueError(str(exc)) from exc
 
@@ -304,8 +304,8 @@ def build_v12_deployment_metadata(
         raise ValueError("Final checkpoint did not activate all v12 adapter columns")
     observation_joints = [*MICROBAN_HMD_JOINT_NAMES, *MICROBAN_ACTION_JOINT_NAMES]
     if (
-        tuple(observation_joints) != policy_contract.OBSERVATION_JOINT_NAMES["pico"]
-        or tuple(MICROBAN_IK_TRACKING_OBSERVATION_SCHEMA) != policy_contract.OBSERVATION_SCHEMAS["pico"]
+        tuple(observation_joints) != policy_contract.OBSERVATION_JOINT_NAMES["ik_tracking"]
+        or tuple(MICROBAN_IK_TRACKING_OBSERVATION_SCHEMA) != policy_contract.OBSERVATION_SCHEMAS["ik_tracking"]
         or home_pose["joint_names"] != observation_joints
         or home_pose["joint_pos_rad"] != [float(HOME_FRAME.joint_pos[name]) for name in observation_joints]
     ):
@@ -321,7 +321,7 @@ def build_v12_deployment_metadata(
     require_bilateral_site_order(infos)
     try:
         metadata = policy_contract.contract_metadata(
-            "pico",
+            "ik_tracking",
             joint_names=observation_joints,
             checkpoint=checkpoint,
             checkpoint_sha256=checkpoint_sha256,

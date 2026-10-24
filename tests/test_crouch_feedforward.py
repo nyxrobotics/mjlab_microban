@@ -189,7 +189,7 @@ class RowsTest(unittest.TestCase):
 
     def test_the_contract_record_reproduces_its_probes(self) -> None:
         record = policy_contract.ik_tracking_crouch_record()
-        self.assertEqual(record["contract"], "microban_pico_crouch_feedforward_v2")
+        self.assertEqual(record["contract"], "microban_ik_tracking_crouch_feedforward_v2")
         self.assertEqual((record["policy_dt_s"], record["max_step_rad"]), (0.02, 0.2))
         self.assertEqual(record["joint_names"], list(MICROBAN_IK_TRACKING_LEG_JOINT_NAMES))
         offsets = np.asarray(record["leg_offsets_rad"])

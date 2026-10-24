@@ -269,24 +269,24 @@ def test_metadata_is_the_ik_tracking_contract_and_derives_guard(tmp_path: Path) 
     )
     assert all(isinstance(value, str) for value in metadata.values())
     assert metadata["microban_policy_contract"] == POLICY_CONTRACT
-    assert metadata["microban_policy_kind"] == "pico"
+    assert metadata["microban_policy_kind"] == "ik_tracking"
     assert metadata["gate_report_sha256"] == _sha(gate_path)
     assert metadata["checkpoint_iteration"] == str(IK_TRACKING_TOTAL_UPDATES - 1)
     assert metadata["previous_action_semantics"] == "raw_policy_output"
     assert {
         key: metadata[key] for key in deployment.TRAINING_GIT_METADATA_KEYS
     } == _git_provenance()
-    assert json.loads(metadata["pico_raw_action_guard_json"]) == [24.0] * 18
-    assert json.loads(metadata["pico_curriculum_json"]) == ik_tracking_schedule_record()
-    assert metadata["pico_walk_checkpoint_sha256"] == LEGACY_VELOCITY_CHECKPOINT_SHA256
+    assert json.loads(metadata["ik_tracking_raw_action_guard_json"]) == [24.0] * 18
+    assert json.loads(metadata["ik_tracking_curriculum_json"]) == ik_tracking_schedule_record()
+    assert metadata["ik_tracking_walk_checkpoint_sha256"] == LEGACY_VELOCITY_CHECKPOINT_SHA256
     assert "pico_hand_target_lower_json" not in metadata
-    assert json.loads(metadata["pico_arm_target_json"])["slew_rad_s"] == 4.0
+    assert json.loads(metadata["ik_tracking_arm_target_json"])["slew_rad_s"] == 4.0
     assert json.loads(metadata["self_test_observations_json"]) == rows
     assert metadata["joint_names"].split(",")[:3] == ["head", "neck_roll", "neck_pitch"]
     defaults = [float(value) for value in metadata["default_joint_pos"].split(",")]
     assert len(defaults) == 21
     if home_tag() == FORWARD_LEAN_HOME_TAG:
-        assert metadata["pico_target_frame"] == "robot_home_levelled_trunk_xyz_forward_left_up"
+        assert metadata["ik_tracking_target_frame"] == "robot_home_levelled_trunk_xyz_forward_left_up"
     for key in ("action_clip_lower", "action_clip_upper"):
         assert [abs(float(value)) for value in metadata[key].split(",")] == [math.pi] * 18
 

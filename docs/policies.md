@@ -24,7 +24,7 @@
 | --- | --- |
 | `walk.onnx` | 歩行（入力 `obs` [1, 63]、出力 `actions` [1, 18]） |
 | `getup.onnx` | 起き上がり（入力 [1, 60]） |
-| `pico_teleop.onnx` | IK トラッキング（入力 [1, 81]。ファイル名と種類名 `pico` は互換のため旧名のまま） |
+| `ik_tracking.onnx` | IK トラッキング（入力 [1, 81]） |
 | `manifest.json` | 3つのファイルを1つのリリースに結びつける（下） |
 | `walk_gate.json`、`getup_gate.json` | 歩行と起き上がりの判定の記録（`gate_report_sha256` の元。実機にはコピーしない） |
 
@@ -37,9 +37,9 @@
   "training_commit": "<学習リポジトリの 40 桁の commit>",
   "dry_run": false,
   "policies": {
-    "walk":  {"file": "walk.onnx",        "sha256": "...", "checkpoint_sha256": "..."},
-    "getup": {"file": "getup.onnx",       "sha256": "...", "checkpoint_sha256": "..."},
-    "pico":  {"file": "pico_teleop.onnx", "sha256": "...", "checkpoint_sha256": "..."}
+    "walk":        {"file": "walk.onnx",        "sha256": "...", "checkpoint_sha256": "..."},
+    "getup":       {"file": "getup.onnx",       "sha256": "...", "checkpoint_sha256": "..."},
+    "ik_tracking": {"file": "ik_tracking.onnx", "sha256": "...", "checkpoint_sha256": "..."}
   },
   "home_joint_hash": "...", "home_yaml_sha256": "...", "training_branch": "...",
   "judgments": {...}, "checkpoints": {"walk": "model_N.pt", ...}, "created": "..."
@@ -47,7 +47,7 @@
 ```
 
 実機は `contract`、`home_tag`、`dry_run`、各ファイルの SHA-256、ONNX の `checkpoint_sha256` との一致、
-IK トラッキングの `pico_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確かめる。最後の行のキーは記録用で、
+IK トラッキングの `ik_tracking_walk_checkpoint_sha256 == policies.walk.checkpoint_sha256` を確かめる。最後の行のキーは記録用で、
 実機は読まない。
 
 ## 3つの ONNX に共通のメタデータ（値はすべて文字列）
@@ -55,8 +55,8 @@ IK トラッキングの `pico_walk_checkpoint_sha256 == policies.walk.checkpoin
 | キー | 値 |
 | --- | --- |
 | `microban_policy_contract` | `microban-policy-1` |
-| `microban_policy_kind` | `walk` / `getup` / `pico`（IK トラッキング） |
-| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-pico-arm-overlay-residual-crouch-feedforward-track-velocity-1` |
+| `microban_policy_kind` | `walk` / `getup` / `ik_tracking` |
+| `microban_recipe` | `microban-walk-track-velocity-1` / `microban-getup-single-run-1` / `microban-ik-tracking-arm-overlay-residual-crouch-feedforward-track-velocity-1` |
 | `home_pose` | `{"joint_pos_rad":{21 関節},"root_pos_m":[3],"root_quat_wxyz":[4]}`（全精度） |
 | `joint_names`、`default_joint_pos` | 21 関節と、その順の HOME（`repr` の全精度） |
 | `action_joint_names` | 18 関節（実機の `OBSERVATION_DOF_ORDER`） |
@@ -75,13 +75,13 @@ IK トラッキングの `pico_walk_checkpoint_sha256 == policies.walk.checkpoin
 400 ステップ行い、10 ステップごとの観測から最大 32 行を取る（同じチェックポイントからの書き出しは
 バイト単位で同じになる）。IK トラッキングは判定の追従評価のロールアウトの観測から取る。
 
-IK トラッキングだけのキー（名前は互換のため `pico_*` のまま）: `pico_walk_checkpoint_sha256`（凍結した歩行器）、`pico_target_frame`、
-足・両足の目標の範囲（`pico_*_target_lower_json` / `_upper_json`）、`pico_arm_target_json`（腕の目標の
-取り決め: 名前 `microban_pico_arm_target_rel_home_v1`、関節の名前、箱 `lower_rad`/`upper_rad`、速さ 4.0 rad/s）、
-`pico_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`pico_curriculum_json`
+IK トラッキングだけのキー: `ik_tracking_walk_checkpoint_sha256`（凍結した歩行器）、`ik_tracking_target_frame`、
+足・両足の目標の範囲（`ik_tracking_*_target_lower_json` / `_upper_json`）、`ik_tracking_arm_target_json`（腕の目標の
+取り決め: 名前 `microban_ik_tracking_arm_target_rel_home_v1`、関節の名前、箱 `lower_rad`/`upper_rad`、速さ 4.0 rad/s）、
+`ik_tracking_raw_action_guard_json`（最終の追従評価から max(v12, 元の歩行器 + 差) × 6）、`ik_tracking_curriculum_json`
 （`critic_warmup`、`arm_start`、`foot_start`、`foot_tighten`、`total`。更新回数）、
-`pico_active_adapter_columns_json`、`pico_crouch_feedforward_json`（しゃがみの脚の角: 名前
-`microban_pico_crouch_feedforward_v2`、12 脚関節の名前、方策の周期 0.02 s と Δq の 1 周期の上限 0.2 rad、
+`ik_tracking_active_adapter_columns_json`、`ik_tracking_crouch_feedforward_json`（しゃがみの脚の角: 名前
+`microban_ik_tracking_crouch_feedforward_v2`、12 脚関節の名前、方策の周期 0.02 s と Δq の 1 周期の上限 0.2 rad、
 確かめの足の目標と、そこでの脚の角）。
 
 IK トラッキングの ONNX は方策の網だけで、しゃがみの脚の角は実機が足し引きする（`robot/crouch_feedforward.py`。
@@ -92,7 +92,7 @@ IK トラッキングの ONNX は方策の網だけで、しゃがみの脚の�
 近づく状態で、学習では env ごと、実機では IK トラッキングの動作ごとに持ち、始めに 0 にする。床の帯の出入り、
 範囲の出入り、実機で両足の目標が一度に消えるときの跳びは、この速さのランプになる。
 脚の目標を HOME + Δq + 生の出力にし、観測の脚の関節角を 実測 − HOME − Δq にする（観測の Δq は、
-次の行動が足す Δq と同じ）。前回の行動は生の出力のまま。実機は `pico_crouch_feedforward_json` の
+次の行動が足す Δq と同じ）。前回の行動は生の出力のまま。実機は `ik_tracking_crouch_feedforward_json` の
 確かめの点で自分の角が記録と 1e-6 rad 以内で一致し、周期と上限が同じことを確かめる。
 
 IK トラッキングの観測は 81 列で、最後の 6 列（75〜80）は直前の制御周期で腕の 6 サーボに書いた目標角 − HOME

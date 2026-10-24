@@ -41,7 +41,7 @@ tail -f artifacts/home_pipeline/<prefix>_<tag>/STATUS.log
 | walk | `Mjlab-Velocity-Microban` を最初から1本（4096 env、seed 42、30000 回）。速度の報酬は mjlab の track_linear/angular_velocity を HOME 基準の胴の座標で、重み 2 ずつ。最後に判定1回: 保持プローブと 9×300（下の表）。チェックポイントを `checkpoints/<prefix>_walk_<sha>/` に置く（IK トラッキングの来歴がそこを再ハッシュする） | 判定の不合格 |
 | ik_tracking | 入口: 歩行器の契約の確認、9×300 プローブ（seed 42、合格ラインは `twist_pass_line.py`）、bootstrap ゲート。`Mjlab-IkTracking-V13-ArmOverlay-Microban` を1本（2048 env、critic の準備 1000 → 腕 → 足、合計 15000）。最後に判定1回: 歩行 9×300（seed 42）・IK トラッキングの判定（足、押し、止まれ、腕を動かした歩行。seed 42 と 43、各 64 env）・ONNX。合格ならゲートファイルを作る | 入口のプローブ不合格、判定の不合格 |
 | getup | `Mjlab-Getup-Microban` を1本（4096 env、18000 回。IMU 遅延 2500、calm と探索の切り替え 4000、押しなしの effort 10000、押し 15000）。最後に判定1回（`mjlab_microban.pipeline.getup_eval`、遅延 0-3 とノイズの2シード、0.3 m/s 押し、姿勢） | 倒れた状態からの起立 < 0.85、押しで転倒 > 0.10、立位の関節速度 > 0.30 rad/s、姿勢 < 0.80、立位で目標が切り詰め（±π）に張り付く割合 > 0.05 |
-| export | walk.onnx、getup.onnx、pico_teleop.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
+| export | walk.onnx、getup.onnx、ik_tracking.onnx と manifest.json（`docs/policies.md`）を `<状態>/release/` に書く | 書き出しの検査（パリティ、グラフ、メタデータ） |
 | install | ロボットの worktree に 3 つの ONNX と manifest.json、ロボット用 `config/home_pose.yaml` を書き、ロボットの `tools/validate_policies.py src/agents` とテスト一式を実行 | バリデータかテストが落ちる |
 | commit | ロボットのブランチにコミットして push、学習側は `config/home_pose.yaml` をコミットして push | |
 

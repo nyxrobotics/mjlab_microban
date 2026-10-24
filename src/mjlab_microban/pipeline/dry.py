@@ -104,7 +104,7 @@ def forced_reports(report_prefix: str, out_dir: Path, max_overshoot_rad: float) 
         if suffix == "_tracking.json" and isinstance(rows, list) and rows:
             from mjlab_microban.policy_contract import physical_row_problem
 
-            possible = [row for row in rows if physical_row_problem("pico", row) is None]
+            possible = [row for row in rows if physical_row_problem("ik_tracking", row) is None]
             if not possible:
                 raise ValueError("the dry IK tracking policy recorded no possible-state observation")
             report["dry_run_smoke_rows_original_count"] = len(rows)
