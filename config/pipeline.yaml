@@ -57,9 +57,10 @@ walk:
     # floors, 0.1 s included, but steps sideways 20-30 % slower (right on the
     # rigid floor 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its
     # right side step is below the full line (0.015 and 0.014 m/s of 0.02;
-    # 9x300 -0.002); the previous release's walker 27323b65 steps sideways
-    # 0.024-0.039 m/s there.  Half the line (0.01 m/s) passes both, and a
-    # walker that does not step sideways still fails.
+    # the 9x300's -0.002 and -0.003, +0.008 and +0.007 at half the line); the
+    # previous release's walker 27323b65 steps sideways 0.024-0.039 m/s
+    # there.  Half the line (0.01 m/s) passes both, and a walker that does not
+    # step sideways still fails.
     floors:
       soft_0.05: {time_constant_s: 0.05}
       soft_0.1: {time_constant_s: 0.1, lines: {twist_minimum_scale: 0.5}}

@@ -114,6 +114,7 @@ from mjlab_microban.tasks.microban_ik_tracking_v12_runner import (
     validate_ik_tracking_v12_environment_contract,
 )
 from mjlab_microban.ik_tracking_v12_safety import ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
+from mjlab_microban.pipeline.floors import LINE_RANGES
 from mjlab_microban.twist_pass_line import twist_pass_line_record, twist_passes
 
 FINAL_PROFILE = "pico_feet_push_still_arms_v1"
@@ -802,6 +803,9 @@ def run_evaluation(
     floor: tuple[float | None, float] | None = None,
     push_fall_rate_margin: float = PUSH_FALL_RATE_MARGIN,
 ) -> dict[str, Any]:
+    low, high = LINE_RANGES["push_fall_rate_margin"]
+    if not low < push_fall_rate_margin <= high:  # before any rollout, as the 9x300's scale
+        raise ValueError(f"A push fall rate margin is a share: {low} < margin <= {high}, got {push_fall_rate_margin}")
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
     if expected_sha256 is not None and digest != expected_sha256:
