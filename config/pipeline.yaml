@@ -38,26 +38,34 @@ walk:
     # constant, s, and friction; no friction: the play env's 0.3-1.2), inside
     # training's range (robot/microban_constants.py).  The walk probe, the
     # 9x300 probe and standing still (on the soft ones) run again on each,
-    # with the rigid floor's lines: the walker that walked on the robot
-    # (a7c28c8a), on the servo model it was trained on, keeps them on every
-    # one (rigid: falls 0/1/0 of 90/90/90, 9x300 worst margin +0.028; here
-    # falls 0/0/0, margins +0.023 to +0.055, standing 0.033 rad/s).
+    # with the rigid floor's lines but a floor's own `lines`
+    # (pipeline/floors.py: twist_minimum_scale multiplies the direction's
+    # minimums, the walk probe's and the 9x300's, not the standing drift; the
+    # falls and standing still keep their lines on every floor): the walker
+    # that walked on the robot (a7c28c8a), on the servo model it was trained
+    # on, keeps the rigid floor's on every one (rigid: falls 0/1/0 of
+    # 90/90/90, 9x300 worst margin +0.028; here falls 0/0/0, margins +0.023
+    # to +0.055, standing 0.033 rad/s).
     # Friction 0.15 is left out: there it falls 10 of 90 unpushed and 50
     # pushed and turns 0.01-0.05 rad/s on 0.5, and the other walkers fall
     # too (9 and 42 unpushed).  Trained on the robot's floor only, the walker
     # (45d46ac9) passes the rigid floor and falls 12-27 of 90 pushed on 0.1 s
     # and 0.3.
-    # Floors up to 0.05 s, as IK tracking's and the get-up's (2026-10-21, with
-    # the user: judge the floors a policy on general rewards converges on, not
-    # the severe ones; training keeps 0.02-0.1 s).  Trained on the plate too
-    # (82e9585c, update 29999), the walker falls on none of the floors, 0.1 s
-    # included, but steps sideways 20-30 % slower (right on the rigid floor
-    # 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its right side step
-    # is below the line (0.015 and 0.014 m/s of 0.02; 9x300 -0.002).
+    # The 0.1 s floors at half the direction's minimums (2026-10-24: on soft
+    # floors the performance lines loosen, the fall lines never).  Trained on
+    # the plate too (82e9585c, update 29999), the walker falls on none of the
+    # floors, 0.1 s included, but steps sideways 20-30 % slower (right on the
+    # rigid floor 0.029 m/s, 27323b65 0.040), and on both 0.1 s floors its
+    # right side step is below the full line (0.015 and 0.014 m/s of 0.02;
+    # 9x300 -0.002); the previous release's walker 27323b65 steps sideways
+    # 0.024-0.039 m/s there.  Half the line (0.01 m/s) passes both, and a
+    # walker that does not step sideways still fails.
     floors:
       soft_0.05: {time_constant_s: 0.05}
+      soft_0.1: {time_constant_s: 0.1, lines: {twist_minimum_scale: 0.5}}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+      soft_slippery_0.1: {time_constant_s: 0.1, friction: 0.3, lines: {twist_minimum_scale: 0.5}}
       # The floor that gives sideways (tasks/floor_plate.py) at training's
       # softest, least damped and stiffest, most damped ends (2026-10-22, with
       # the user: every policy trains and is judged on it).
@@ -72,7 +80,8 @@ ik_tracking:
   # Judgment: the three evaluators and standing still on the rigid floor, then
   # the 9x300 and tracking evaluators on each floor of walking's judgment (IK
   # tracking trains on walking's floors) and standing still on the soft ones,
-  # with the rigid floor's lines (steps.Pipeline.ik_tracking_floor_judgment).
+  # with the rigid floor's lines but a floor's own `lines` (pipeline/floors.py;
+  # steps.Pipeline.ik_tracking_floor_judgment).
   # The IK tracking policy that walked on the robot (v12, 343b5ed4, on its own
   # code and servo model; never trained on soft floors) keeps the 9x300 lines
   # with seed 42 on 0.05 s and friction 0.3 (worst margin, its left side step
@@ -93,20 +102,22 @@ ik_tracking:
   # (34859f41, update 14999) falls 13 times without a push in 6016 runs
   # (27 with friction 0.3) and 30 % of its crouched pushes; on 0.05 s and
   # friction 0.3 none without a push.
-  # The plate at its stiff end only (training keeps both ends): on the soft
-  # end (500 N/m, damping ratio 0.3) IK tracking's crouched pushes fall about 6.3 %
-  # against a line of about 5.3 % (the walker's standing and walking pushes
-  # + 5 points), whichever IK tracking policy: 07fd10db, never trained on the plate, 4.9,
-  # 6.6, 7.4 % at seeds 42, 44, 46; b096a04's 3e4b3373, trained on it, 6.6,
-  # 6.4, 5.5, 6.6 % at seeds 42-48, 6.2 % at 1000 N/m, 6.4 % at a damping
-  # ratio 0.6, 5.3 % at 2000 N/m (seed 42).  There 3e4b3373 falls in none of
-  # its unpushed runs at seeds 42-48 and in 1.7 % of its standing and
-  # walking pushes (seed 42).  The stiff end: 4.5 %, 3.5 % for 07fd10db.
+  # Both plate ends.  On the soft end (500 N/m, damping ratio 0.3) the pushed
+  # falls may exceed the walker's standing and walking rate by 8 points, not
+  # 5 (lines.push_fall_rate_margin; the unpushed falls keep their line, none):
+  # there the crouched pushes fall 6.6, 6.4, 5.5 and 6.6 % for b096a04's
+  # 3e4b3373 at seeds 42-48 (the walker's 0.26-0.43 % taken off, +5.2 to
+  # +6.3 points), 4.9, 6.6 and 7.4 % for 07fd10db, never trained on the
+  # plate (up to +7.2 points), and 8.4 % for a50cc247, trained before
+  # b096a04's foot reward (+8.1 points): 8 points passes the first two and
+  # not a50cc247.  Unpushed, 3e4b3373 falls in none of its runs there (seeds
+  # 42-48).  The stiff end: 4.5 %, 3.5 % for 07fd10db.
   judgment:
     floors:
       soft_0.05: {time_constant_s: 0.05}
       slippery_0.3: {friction: 0.3}
       soft_slippery: {time_constant_s: 0.05, friction: 0.3}
+      plate_soft: {plate: {stiffness_n_m: 500.0, damping_ratio: 0.3}, lines: {push_fall_rate_margin: 0.08}}
       plate_stiff: {plate: {stiffness_n_m: 5000.0, damping_ratio: 1.0}}
   # The tracking checks of foot accuracy a release takes as they are (the gate
   # records each failing measurement and the robot shows it; steps.py

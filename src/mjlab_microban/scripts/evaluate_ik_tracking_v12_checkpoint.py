@@ -2,7 +2,8 @@
 
 With ``--floor`` the scenarios run on a soft or slippery floor of the walking
 judgment (pipeline/floors.py) in place of the play env's rigid one, with the
-same lines.
+same lines; ``--twist-minimum-scale`` (a judged floor's
+``lines.twist_minimum_scale``) multiplies the direction's minimums there.
 """
 
 from __future__ import annotations
@@ -78,8 +79,8 @@ LOCOMOTION_MOVING_SCENARIOS = (
 )
 
 
-def locomotion_twist_judgments(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """The walking reward's pass line on each moving scenario's mean body twist."""
+def locomotion_twist_judgments(results: list[dict[str, Any]], scale: float = 1.0) -> dict[str, Any]:
+    """The walking reward's pass line on each moving scenario's mean body twist (its minimums times ``scale``)."""
 
     judgments = {}
     for result in results:
@@ -87,7 +88,7 @@ def locomotion_twist_judgments(results: list[dict[str, Any]]) -> dict[str, Any]:
         if all(value == 0.0 for value in command):
             continue
         twist = [float(result["measured_velocity_body"][axis]["mean"]) for axis in _AXES]
-        judgments[result["name"]] = twist_judgment(command, twist)
+        judgments[result["name"]] = twist_judgment(command, twist, scale)
     return judgments
 
 
@@ -174,8 +175,8 @@ def _load_actor(
     return actor, iteration, infos
 
 
-def _acceptance(results: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
-    judgments = locomotion_twist_judgments(results)
+def _acceptance(results: list[dict[str, Any]], scale: float = 1.0) -> tuple[dict[str, bool], str]:
+    judgments = locomotion_twist_judgments(results, scale)
     directional = {
         result["name"]: result["directional_response"] for result in results[1:]
     }
@@ -217,6 +218,7 @@ def run_evaluation(
     steps: int,
     settle_steps: int,
     floor: tuple[float | None, float] | None = None,
+    twist_minimum_scale: float = 1.0,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -224,6 +226,8 @@ def run_evaluation(
         raise ValueError(f"Checkpoint SHA-256 mismatch: {digest}")
     if steps != 300 or settle_steps != 50:
         raise ValueError("The v12 locomotion evaluation runs 300 steps after a 50-step settle")
+    if not 0.0 < twist_minimum_scale <= 1.0:
+        raise ValueError(f"A minimum scale loosens the line: 0 < scale <= 1, got {twist_minimum_scale}")
     configure_torch_backends(allow_tf32=False, deterministic=True)
     torch.use_deterministic_algorithms(True, warn_only=True)
     policy, iteration, _infos = _load_actor(checkpoint, device=device)
@@ -308,7 +312,7 @@ def run_evaluation(
         if device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    checks, status = _acceptance(results)
+    checks, status = _acceptance(results, twist_minimum_scale)
     directional = [
         result["directional_response"]
         for result in results
@@ -341,9 +345,11 @@ def run_evaluation(
                 ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD
             ),
             "twist_pass_line": twist_pass_line_record(),
+            # a judged floor's own line; the rigid floor's report stays as the stage gate reads it
+            **({"twist_minimum_scale": twist_minimum_scale} if twist_minimum_scale != 1.0 else {}),
         },
         "checks": checks,
-        "twist_judgment": locomotion_twist_judgments(results),
+        "twist_judgment": locomotion_twist_judgments(results, twist_minimum_scale),
         "results": results,
         "summary": {
             "scenario_count": len(results),
@@ -383,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--floor", help='a soft or slippery floor of the walking judgment, JSON '
                         '{"time_constant_s": s, "friction": mu or null} (pipeline/floors.py); default the play floor')
+    parser.add_argument("--twist-minimum-scale", type=float, default=1.0,
+                        help="multiplies the direction's minimums, 0 < scale <= 1 (a judged floor's "
+                        "lines.twist_minimum_scale; default %(default)s)")
     return parser
 
 
@@ -401,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         steps=args.steps,
         settle_steps=args.settle_steps,
         floor=floor,
+        twist_minimum_scale=args.twist_minimum_scale,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

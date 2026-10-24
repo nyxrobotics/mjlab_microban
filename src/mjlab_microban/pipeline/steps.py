@@ -96,6 +96,9 @@ STEP_INPUTS = {
     "export": ["src/mjlab_microban/scripts/export_*.py", "src/mjlab_microban/policy_contract.py",
                "src/mjlab_microban/scripts/ik_tracking_v12_stage.py"],
 }
+# The lines a floor of ik_tracking.judgment.floors may set (pipeline/floors.py LINE_RANGES): the 9x300's direction
+# and the tracking evaluator's pushed falls.
+IK_TRACKING_FLOOR_LINES = ("twist_minimum_scale", "push_fall_rate_margin")
 
 
 class Pipeline:
@@ -394,20 +397,23 @@ class Pipeline:
         return failures, summary
 
     def walk_floor_judgment(self, checkpoint: Path, out: Path, rules: dict[str, Any]) -> tuple[list[str], dict]:
-        """The walking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
+        """The walking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines,
+        the direction's minimums (the walk probe's and the 9x300's) times a floor's ``lines.twist_minimum_scale``.
 
         The walk probe on every floor of ``walk.judgment.floors`` (one env per push), the 9x300 probe on each and
         standing still on the soft ones (every delay and sole friction of ``stand_still`` on each softness):
         (failures named ``<floor>:<rule>``, ``<floor>:9x300`` or ``stand_still_soft``; the reports).
         """
 
-        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse
+        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse, physics
+        from mjlab_microban.pipeline.walk_probe import FLOOR_LINES, twist_minimum_scales
 
         chk = self.cfg["walk"]["judgment"]
         floors = chk.get("floors") or {}
         if not floors:
             return [], {"summary": {}}
-        parsed = parse(floors)
+        parsed = parse(floors, lines=FLOOR_LINES)
+        scales = twist_minimum_scales(parsed)
         stem = f"{checkpoint.parent.name}_{checkpoint.stem}"
         probe_out = out / f"{stem}_walk_probe_floors.json"
         receipts = {name: out / f"{stem}_9x300_seed{chk['probe_seed']}_{name}.json" for name in floors}
@@ -423,7 +429,7 @@ class Pipeline:
                                                           "--checkpoint", str(checkpoint), "--expected-sha256",
                                                           sha256(checkpoint), "--seed", str(chk["probe_seed"]),
                                                           "--output", str(receipt), "--force",
-                                                          "--floor", json.dumps(floors[name])],
+                                                          "--floor", json.dumps(physics(floors[name]))],
                           "eval", env=self.env, check=False)
         for path in (probe_out, *receipts.values()):
             if not path.is_file():
@@ -431,12 +437,12 @@ class Pipeline:
                                  "(rerun to evaluate again)")
         probe = json.loads(probe_out.read_text())
         probe.pop("rows", None)
-        nines = {name: probe_verdict(json.loads(path.read_text())) for name, path in receipts.items()}
+        nines = {name: probe_verdict(json.loads(path.read_text()), scales[name]) for name, path in receipts.items()}
         soft = sorted({t for _, t in parsed.values()} - {RIGID_TIME_CONSTANT_S})
         still = self.stand_still("walk", checkpoint, out / f"{stem}_stand_still_soft.json",
                                  time_constants=soft) if soft else None
         on_plates = {name: self.stand_still("walk", checkpoint, out / f"{stem}_stand_still_{name}.json",
-                                            floor=floors[name])
+                                            floor=physics(floors[name]))
                      for name, floor in parsed.items() if floor.plate}
         failures = floor_failures(list(floors), probe, nines) + (
             [] if still is None or still["status"] == "pass" else ["stand_still_soft"]) + [
@@ -446,7 +452,9 @@ class Pipeline:
                    "single_signed": {k: round(v, 3) for k, v in verdict["single_signed"].items()},
                    "still_touchdowns_per_s": round(verdict["still_touchdowns_per_s"], 2),
                    "9x300": nines[name]["ok"],
-                   "9x300_worst_margin": [nines[name]["worst"], round(nines[name]["worst_margin"], 4)]}
+                   "9x300_worst_margin": [nines[name]["worst"], round(nines[name]["worst_margin"], 4)],
+                   # the floor's own line: the walk probe's and the 9x300's direction minimums times this
+                   "twist_minimum_scale": scales[name]}
             for name, verdict in probe.get("floors", {}).items() if name in nines}
         if still is not None:
             summary["stand_still_soft"] = {**stand_still_summary(still), "time_constants_s": soft}
@@ -648,7 +656,9 @@ class Pipeline:
         return str(prefix), passed, failures
 
     def ik_tracking_floor_judgment(self, checkpoint: Path, prefix: Path) -> list[str]:
-        """The IK tracking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines.
+        """The IK tracking judgment on the soft and slippery floors (pipeline/floors.py) with the rigid floor's lines,
+        but a floor's own ``lines``: the 9x300's direction minimums times its ``twist_minimum_scale``, the pushed
+        falls' margin over the walker its ``push_fall_rate_margin``.
 
         The 9x300 and tracking evaluators on every floor of ``ik_tracking.judgment.floors`` (reports
         ``<prefix>_<floor>_9x300.json``, ``<prefix>_<floor>_tracking.json``) and standing still on the soft ones
@@ -656,33 +666,39 @@ class Pipeline:
         ``<floor>_tracking:<check>`` or ``stand_still_soft:<check>``.
         """
 
-        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse
+        from mjlab_microban.pipeline.floors import RIGID_TIME_CONSTANT_S, parse, physics
 
         floors = (self.cfg["ik_tracking"].get("judgment") or {}).get("floors") or {}
         if not floors:
             return []
-        soft = sorted({t for _, t in parse(floors).values()} - {RIGID_TIME_CONSTANT_S})
+        parsed = parse(floors, lines=IK_TRACKING_FLOOR_LINES)
+        soft = sorted({t for _, t in parsed.values()} - {RIGID_TIME_CONSTANT_S})
         names = tuple(f"{floor}_{part}" for floor in floors for part in ("9x300", "tracking"))
         for name in names:
             Path(f"{prefix}_{name}.json").unlink(missing_ok=True)
         digest, seed = sha256(checkpoint), str(self.cfg["seed"])
         for floor, values in floors.items():
-            for part, module in (("9x300", "evaluate_ik_tracking_v12_checkpoint"),
-                                 ("tracking", "evaluate_ik_tracking_v12_tracking")):
+            lines = parsed[floor].lines
+            for part, module, line in (("9x300", "evaluate_ik_tracking_v12_checkpoint", "twist_minimum_scale"),
+                                       ("tracking", "evaluate_ik_tracking_v12_tracking", "push_fall_rate_margin")):
+                flag = ["--" + line.replace("_", "-"), str(lines[line])] if line in lines else []
                 self.jobs.run(f"ik_tracking_judgment_{part}_{floor}",
                               [*UV, "python", "-m", f"mjlab_microban.scripts.{module}", str(checkpoint),
                                "--expected-sha256", digest, "--seed", seed, "--output", f"{prefix}_{floor}_{part}.json",
-                               "--force", "--floor", json.dumps(values)], "eval", env=self.env, check=False)
+                               "--force", "--floor", json.dumps(physics(values)), *flag], "eval", env=self.env,
+                              check=False)
         if soft:
             self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still_soft.json"), time_constants=soft)
             names += ("stand_still_soft",)
         for floor, values in floors.items():  # the floors that give sideways
-            if parse({floor: values})[floor].plate:
-                self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still_{floor}.json"), floor=values)
+            if parsed[floor].plate:
+                self.stand_still("ik_tracking", checkpoint, Path(f"{prefix}_stand_still_{floor}.json"),
+                                 floor=physics(values))
                 names += (f"stand_still_{floor}",)
         failures = self.ik_tracking_failures(prefix, names)
+        own = {floor: f.lines for floor, f in parsed.items() if f.lines}
         self.log(f"IK tracking judgment on the floors {list(floors)}"
-                 f"{f' (standing still on {soft} s)' if soft else ''} of "
+                 f"{f' (standing still on {soft} s)' if soft else ''}{f', their own lines {own}' if own else ''} of "
                  f"{checkpoint.parent.name}/{checkpoint.name}: " + ("PASS" if not failures else f"FAIL {failures}"))
         return failures
 
@@ -1052,13 +1068,14 @@ def commit(repo: Path, paths: list[str], message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
+def probe_verdict(receipt: dict[str, Any], scale: float = 1.0) -> dict[str, Any]:
     """Pass/fail and worst margin of one 9x300 walker probe receipt.
 
     Each moving scenario passes when its mean body twist moves the commanded
     axis the commanded way by the fixed minimum (mjlab_microban/twist_pass_line.py:
     0.1 / 0.2 m/s forward 0.04 / 0.08, backward 0.02 / 0.04, lateral 0.02,
-    yaw 0.2; the margin is the signed response minus it); the measured joints
+    yaw 0.2; the margin is the signed response minus it), times ``scale`` on a
+    judged floor that sets one (its ``lines.twist_minimum_scale``); the measured joints
     may overshoot the soft limits by ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD.
     The neutral scenario is checked for completion only, as the IK tracking
     source gate does.
@@ -1078,12 +1095,12 @@ def probe_verdict(receipt: dict[str, Any]) -> dict[str, Any]:
         twists[name] = twist
         if all(x == 0.0 for x in command):
             continue
-        minimums[name] = min(axis_minimums(command).values())
-        margins[name] = worst_margin(command, twist)
+        minimums[name] = min(axis_minimums(command, scale).values())
+        margins[name] = worst_margin(command, twist, scale)
         response = result.get("directional_response") or {}
         if response.get("signed_response") is not None:
             responses[name] = float(response["signed_response"])
-        if not twist_passes(command, twist):
+        if not twist_passes(command, twist, scale):
             below.append(name)
     worst = min(margins, key=lambda key: margins[key] if margins[key] == margins[key] else float("-inf"))
     overshoot = float(summary.get("maximum_actual_soft_limit_violation_rad", float("inf")))

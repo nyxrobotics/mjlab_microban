@@ -19,6 +19,35 @@ GATE = {**load_config(dry=False)["getup"]["gate"],
         **steps.stand_still_lines(steps.stand_still_config(load_config(dry=False), "getup"))}
 
 
+NINE_BY_300 = {
+    "forward_0p1": (0.1, 0.0, 0.0), "forward_0p2": (0.2, 0.0, 0.0),
+    "backward_0p1": (-0.1, 0.0, 0.0), "backward_0p2": (-0.2, 0.0, 0.0),
+    "lateral_left_0p1": (0.0, 0.1, 0.0), "lateral_right_0p1": (0.0, -0.1, 0.0),
+    "yaw_left_0p5": (0.0, 0.0, 0.5), "yaw_right_0p5": (0.0, 0.0, -0.5),
+}
+
+
+def nine_by_300_receipt(measured, overshoot=0.2) -> dict:
+    """A 9x300 walker probe receipt whose moving scenarios measure ``measured(command)``."""
+
+    axes = ("vx_m_s", "vy_m_s", "yaw_rad_s")
+
+    def result(name, twist, mean):
+        index = next((i for i, v in enumerate(twist) if v != 0.0), None)
+        return {"scenario": name, "command": dict(zip(axes, twist, strict=True)),
+                "measured_velocity_body": {a: {"mean": m} for a, m in zip(axes, mean, strict=True)},
+                "directional_response": None if index is None else {
+                    "signed_response": mean[index] * (1 if twist[index] > 0 else -1)}}
+
+    return {
+        "summary": {"completed_scenario_count": 9, "fall_scenario_count": 0, "nonfinite_scenario_count": 0,
+                    "directionally_correct_scenario_count": 8, "raw_action_recurrence_all_steps": True,
+                    "maximum_actual_soft_limit_violation_rad": overshoot},
+        "results": [result("neutral", (0.0, 0.0, 0.0), (0.03, 0.0, 0.0))]
+        + [result(name, twist, measured(twist)) for name, twist in NINE_BY_300.items()],
+    }
+
+
 def fake_pipeline(state_dir: Path) -> steps.Pipeline:
     pipeline = steps.Pipeline.__new__(steps.Pipeline)
     pipeline.state = State(state_dir)
@@ -91,24 +120,91 @@ class StateTest(unittest.TestCase):
                                               {"soft": {"ok": False}, "slippery": {"ok": True}}),
                          ["soft:9x300", "slippery:falls", "corner:missing"])
 
+    def test_the_walking_judgment_takes_each_floors_own_lines(self) -> None:
+        # The walk probe reads every floor with its lines; the 9x300 probes and standing still take a floor's physics,
+        # and each 9x300 is judged with its floor's twist_minimum_scale (the 0.1 s floors: 0.5).
+        from mjlab_microban.pipeline.floors import physics
+
+        floors = load_config(dry=False)["walk"]["judgment"]["floors"]
+        ran: list[list] = []
+        with tempfile.TemporaryDirectory() as directory:
+
+            def run(name, cmd, kind, **_):
+                ran.append(cmd)
+                if "mjlab_microban.pipeline.walk_probe" in cmd:
+                    good = {"checks": {"falls": True, "direction": True, "standing_still": True}, "falls": [0, 0, 0],
+                            "single_signed": {"LR": 0.015}, "still_touchdowns_per_s": 0.0}
+                    judged = json.loads(cmd[cmd.index("--floors") + 1])
+                    Path(cmd[cmd.index("mjlab_microban.pipeline.walk_probe") + 2]).write_text(
+                        json.dumps({"floors": {floor: good for floor in judged}}))
+                else:  # every 9x300 probe at 0.3 of each command: below the minimums, above half of them
+                    Path(cmd[cmd.index("--output") + 1]).write_text(
+                        json.dumps(nine_by_300_receipt(lambda c: [0.3 * x for x in c])))
+
+            def stand_still(kind, checkpoint, report, time_constants=None, floor=None):
+                ran.append(["stand_still", time_constants, floor])
+                return {"status": "pass", "leg_speed_rms_rad_s": 0.05, "worst_delay_ms": 50, "falls": 0,
+                        "judged_envs": 80, "envs": 80}
+
+            pipeline = fake_pipeline(Path(directory) / "state")
+            pipeline.jobs, pipeline.env, pipeline.stand_still = SimpleNamespace(run=run), {}, stand_still
+            checkpoint = Path(directory) / "run" / "model_9.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.write_bytes(b"walker")
+            failures, reports = pipeline.walk_floor_judgment(checkpoint, Path(directory), {"max_falls": [1, 5]})
+        probe = next(cmd for cmd in ran if "mjlab_microban.pipeline.walk_probe" in cmd)
+        self.assertEqual(json.loads(probe[probe.index("--floors") + 1]), floors)
+        nines = [cmd for cmd in ran if "mjlab_microban.scripts.probe_legacy_actor_in_ik_tracking_env" in cmd]
+        self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in nines],
+                         [physics(floor) for floor in floors.values()])
+        self.assertEqual([cmd for cmd in ran if cmd[0] == "stand_still"],
+                         [["stand_still", [0.05, 0.1], None]]
+                         + [["stand_still", None, physics(floor)] for floor in floors.values() if "plate" in floor])
+        scaled = {"soft_0.1", "soft_slippery_0.1"}
+        self.assertEqual(failures, [f"{name}:9x300" for name in floors if name not in scaled])
+        self.assertEqual({name: reports["summary"][name]["twist_minimum_scale"] for name in floors},
+                         {name: 0.5 if name in scaled else 1.0 for name in floors})
+
     def test_the_judged_floors(self) -> None:
-        from mjlab_microban.pipeline import floors
+        from mjlab_microban.pipeline import floors, walk_probe
         from mjlab_microban.robot.microban_constants import FLOOR_FRICTION, FLOOR_TIME_CONSTANT_S
 
-        judged = floors.parse(load_config(dry=False)["walk"]["judgment"]["floors"])
+        judged = floors.parse(load_config(dry=False)["walk"]["judgment"]["floors"], lines=walk_probe.FLOOR_LINES)
         # Inside training's range, each softer or more slippery than the play floor (0.02 s, 0.3-1.2), or giving
-        # sideways at training's two ends.
-        self.assertEqual(judged, {"soft_0.05": (None, 0.05), "slippery_0.3": (0.3, 0.02),
-                                  "soft_slippery": (0.3, 0.05), "plate_soft": (None, 0.02),
-                                  "plate_stiff": (None, 0.02)})
+        # sideways at training's two ends; the 0.1 s floors at half the direction's minimums.
+        self.assertEqual(judged, {"soft_0.05": (None, 0.05), "soft_0.1": (None, 0.1), "slippery_0.3": (0.3, 0.02),
+                                  "soft_slippery": (0.3, 0.05), "soft_slippery_0.1": (0.3, 0.1),
+                                  "plate_soft": (None, 0.02), "plate_stiff": (None, 0.02)})
         self.assertEqual({name: floor.plate for name, floor in judged.items() if floor.plate},
                          {"plate_soft": (500.0, 0.3), "plate_stiff": (5000.0, 1.0)})
+        self.assertEqual({name: floor.lines for name, floor in judged.items() if floor.lines},
+                         {"soft_0.1": {"twist_minimum_scale": 0.5}, "soft_slippery_0.1": {"twist_minimum_scale": 0.5}})
+        self.assertEqual(walk_probe.twist_minimum_scales(judged),
+                         {name: 0.5 if name.endswith("0.1") else 1.0 for name in judged})
         self.assertEqual(floors.RIGID_TIME_CONSTANT_S, FLOOR_TIME_CONSTANT_S[0])
         for bad in ({"time_constant_s": 0.2}, {"time_constant_s": 0.01}, {"friction": FLOOR_FRICTION[0] - 0.01},
                     {"friction": 2.0}, {"softness": 0.1}, {"plate": {"stiffness_n_m": 400.0, "damping_ratio": 0.3}},
                     {"plate": {"stiffness_n_m": 500.0, "damping_ratio": 1.5}}, {"plate": {"stiffness_n_m": 500.0}}):
             with self.assertRaises(ValueError):
                 floors.parse({"bad": bad})
+        # A floor's lines: each in its range, only those the judgment applies (walking: the direction's), apart from
+        # the physics an evaluator's --floor takes.
+        both = floors.LINE_RANGES.keys()
+        self.assertEqual(floors.parse({"f": {"time_constant_s": 0.1, "lines": {"twist_minimum_scale": 1}}},
+                                      lines=walk_probe.FLOOR_LINES)["f"].lines, {"twist_minimum_scale": 1.0})
+        self.assertEqual(floors.parse({"f": {"lines": {"push_fall_rate_margin": 0.2}}}, lines=tuple(both))["f"].lines,
+                         {"push_fall_rate_margin": 0.2})
+        for bad, judging in (({"twist_minimum_scale": 0.0}, both), ({"twist_minimum_scale": 1.01}, both),
+                             ({"twist_minimum_scale": "0.5"}, both), ({"twist_minimum_scale": True}, both),
+                             ({"push_fall_rate_margin": 0.0}, both), ({"push_fall_rate_margin": 0.21}, both),
+                             ({"twist_minimum": 0.5}, both), ([0.5], both),
+                             ({"push_fall_rate_margin": 0.08}, walk_probe.FLOOR_LINES),
+                             ({"twist_minimum_scale": 0.5}, ())):
+            with self.subTest(lines=bad, judging=judging), self.assertRaises(ValueError):
+                floors.parse({"bad": {"time_constant_s": 0.1, "lines": bad}}, lines=tuple(judging))
+        floor = {"time_constant_s": 0.1, "friction": 0.3, "lines": {"twist_minimum_scale": 0.5}}
+        self.assertEqual(floors.physics(floor), {"time_constant_s": 0.1, "friction": 0.3})
+        self.assertEqual(floors.parse({"f": floors.physics(floor)})["f"], (0.3, 0.1))
         cfg = SimpleNamespace(scene=SimpleNamespace(num_envs=2), events={})
         floors.add_sole_floors(cfg, [(None, 0.05), (0.3, 0.1)])
         params = cfg.events["judgment_floor"].params
@@ -124,13 +220,16 @@ class StateTest(unittest.TestCase):
             floors.add_sole_floors(cfg, [(None, 0.05)])
 
     def test_the_ik_tracking_judgment_on_soft_and_slippery_floors(self) -> None:
+        from mjlab_microban.pipeline.floors import physics
         from mjlab_microban.scripts import evaluate_ik_tracking_v12_tracking as tracking
 
         cfg = load_config(dry=False)
-        # IK tracking trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s, the plate
-        # at its stiff end only (config/pipeline.yaml).
+        # IK tracking trains on walking's floors and is judged, as the get-up, on the floors up to 0.05 s and both
+        # plate ends, the soft end with its own pushed-falls margin, 8 points (config/pipeline.yaml).
         floors = cfg["ik_tracking"]["judgment"]["floors"]
-        self.assertEqual(floors, {name: f for name, f in cfg["getup"]["floors"].items() if name != "plate_soft"})
+        self.assertEqual({name: physics(f) for name, f in floors.items()}, cfg["getup"]["floors"])
+        self.assertEqual({name: f["lines"] for name, f in floors.items() if "lines" in f},
+                         {"plate_soft": {"push_fall_rate_margin": 0.08}})
         self.assertTrue(all(f.get("time_constant_s", 0.02) <= 0.05 for f in floors.values()))
         with tempfile.TemporaryDirectory() as directory:
             pipeline = fake_pipeline(Path(directory) / "state")
@@ -154,17 +253,31 @@ class StateTest(unittest.TestCase):
             prefix = Path(directory) / "run_model_9"
             self.assertEqual(pipeline.ik_tracking_floor_judgment(checkpoint, prefix), ["soft_slippery_tracking:push_falls"])
             evaluated = [cmd for cmd in ran if cmd[0] != "stand_still"]
+            # The evaluators take each floor's physics; a floor's own line goes to the evaluator that judges it.
             self.assertEqual([json.loads(cmd[cmd.index("--floor") + 1]) for cmd in evaluated],
-                             [floor for floor in floors.values() for _ in range(2)])
+                             [physics(floor) for floor in floors.values() for _ in range(2)])
+            flags = {Path(cmd[cmd.index("--output") + 1]).name: cmd[cmd.index("--force") + 3:] for cmd in evaluated}
+            self.assertEqual({name: flag for name, flag in flags.items() if flag},
+                             {f"{prefix.name}_plate_soft_tracking.json": ["--push-fall-rate-margin", "0.08"]})
             # Standing still on the soft floors, then on each floor that gives sideways.
-            plates = [floor for floor in floors.values() if "plate" in floor]
+            plates = [physics(floor) for floor in floors.values() if "plate" in floor]
             self.assertEqual([cmd for cmd in ran if cmd[0] == "stand_still"],
                              [["stand_still", "ik_tracking", [0.05], None]]
                              + [["stand_still", "ik_tracking", None, floor] for floor in plates])
-            self.assertEqual(len(plates), 1)  # the plate's stiff end
+            self.assertEqual(len(plates), 2)  # both plate ends
             Path(f"{prefix}_slippery_0.3_9x300.json").unlink()
             with self.assertRaises(core.JobStopped):  # a report not written is no judgment
                 pipeline.ik_tracking_failures(prefix, ("slippery_0.3_9x300",))
+            # A floor's direction scale goes to the 9x300 evaluator; a line IK tracking does not judge is refused.
+            ran.clear()
+            scaled = {"soft_0.05": {"time_constant_s": 0.05, "lines": {"twist_minimum_scale": 0.5}}}
+            pipeline.cfg = {**cfg, "ik_tracking": {**cfg["ik_tracking"], "judgment": {"floors": scaled}}}
+            pipeline.ik_tracking_floor_judgment(checkpoint, prefix)
+            self.assertEqual([cmd[cmd.index("--force") + 3:] for cmd in ran if cmd[0] != "stand_still"],
+                             [["--twist-minimum-scale", "0.5"], []])
+            pipeline.cfg["ik_tracking"]["judgment"] = {"floors": {"f": {"lines": {"still_touchdowns_per_s": 1.0}}}}
+            with self.assertRaises(ValueError):
+                pipeline.ik_tracking_floor_judgment(checkpoint, prefix)
             pipeline.cfg = {**cfg, "ik_tracking": {**cfg["ik_tracking"], "judgment": {}}}
             self.assertEqual(pipeline.ik_tracking_floor_judgment(checkpoint, prefix), [])
         # The tracking evaluator puts the floor on every environment; the rigid floor has none.
@@ -612,29 +725,7 @@ class JudgmentTest(unittest.TestCase):
         # Each moving scenario passes at the fixed signed-response minimum
         # (0.1 / 0.2 forward 0.04 / 0.08, backward 0.02 / 0.04, lateral 0.02,
         # yaw 0.2); the joints may overshoot 0.25 rad.
-        commands = {
-            "forward_0p1": (0.1, 0.0, 0.0), "forward_0p2": (0.2, 0.0, 0.0),
-            "backward_0p1": (-0.1, 0.0, 0.0), "backward_0p2": (-0.2, 0.0, 0.0),
-            "lateral_left_0p1": (0.0, 0.1, 0.0), "lateral_right_0p1": (0.0, -0.1, 0.0),
-            "yaw_left_0p5": (0.0, 0.0, 0.5), "yaw_right_0p5": (0.0, 0.0, -0.5),
-        }
-        axes = ("vx_m_s", "vy_m_s", "yaw_rad_s")
-
-        def result(name, twist, measured):
-            index = next((i for i, v in enumerate(twist) if v != 0.0), None)
-            return {"scenario": name, "command": dict(zip(axes, twist, strict=True)),
-                    "measured_velocity_body": {a: {"mean": m} for a, m in zip(axes, measured, strict=True)},
-                    "directional_response": None if index is None else {
-                        "signed_response": measured[index] * (1 if twist[index] > 0 else -1)}}
-
-        def receipt(measured, overshoot=0.2):
-            return {
-                "summary": {"completed_scenario_count": 9, "fall_scenario_count": 0, "nonfinite_scenario_count": 0,
-                            "directionally_correct_scenario_count": 8, "raw_action_recurrence_all_steps": True,
-                            "maximum_actual_soft_limit_violation_rad": overshoot},
-                "results": [result("neutral", (0.0, 0.0, 0.0), (0.03, 0.0, 0.0))]
-                + [result(name, twist, measured(twist)) for name, twist in commands.items()],
-            }
+        receipt = nine_by_300_receipt
 
         # Half of every command: 0.01 above the backward / lateral minimums.
         verdict = steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c]))
@@ -656,6 +747,14 @@ class JudgmentTest(unittest.TestCase):
         # The joints may overshoot the soft limits by 0.25 rad.
         self.assertTrue(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.25))["ok"])
         self.assertFalse(steps.probe_verdict(receipt(lambda c: [0.5 * x for x in c], 0.2501))["ok"])
+        # A judged floor's twist_minimum_scale: 0.3 of every command is below the minimums, above half of them.
+        slow = receipt(lambda c: [0.3 * x for x in c])
+        self.assertEqual(steps.probe_verdict(slow)["below"],
+                         ["forward_0p1", "forward_0p2", "yaw_left_0p5", "yaw_right_0p5"])
+        verdict = steps.probe_verdict(slow, 0.5)
+        self.assertTrue(verdict["ok"])
+        self.assertEqual((verdict["worst"], round(verdict["worst_margin"], 9), verdict["minimums"]["lateral_left_0p1"]),
+                         ("forward_0p1", 0.01, 0.01))
 
     def test_getup_summary(self) -> None:
         stand = {"fallen_standing_fraction": 0.9, "standing_joint_abs_vel_rad_s": 0.1,

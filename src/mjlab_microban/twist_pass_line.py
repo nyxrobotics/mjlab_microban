@@ -15,6 +15,10 @@ so the walking direction is judged by fixed signed-response minimums:
 * a standing command passes when the drift stays within 0.05 m/s forward,
   0.05 m/s lateral and 0.2 rad/s yaw.
 
+A judged floor may loosen the moving commands' minimums (``scale``, its
+``lines.twist_minimum_scale`` in config/pipeline.yaml, pipeline/floors.py):
+every minimum times the scale (0 < scale <= 1), the standing drift unchanged.
+
 The twist is the mean over the measurement window.  The IK tracking reports record
 the result as ``twist_direction``.  The measured joints may overshoot the
 soft limits by ``ik_tracking_v12_safety.ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD``
@@ -41,22 +45,27 @@ def is_standing(command: Sequence[float]) -> bool:
     return all(float(x) == 0.0 for x in command)
 
 
-def axis_minimums(command: Sequence[float]) -> dict[int, float]:
-    """The signed response each commanded axis must reach, by axis index."""
+def axis_minimums(command: Sequence[float], scale: float = 1.0) -> dict[int, float]:
+    """The signed response each commanded axis must reach, by axis index; ``scale`` (0 < scale <= 1) multiplies
+    each minimum (a judged floor's own line)."""
 
     values = [float(x) for x in command]
     if len(values) != 3:
         raise ValueError("a command is (v_x, v_y, w_z)")
+    if not 0.0 < scale <= 1.0:
+        raise ValueError(f"a minimum scale loosens the line: 0 < scale <= 1, got {scale}")
     axes = [i for i, value in enumerate(values) if value != 0.0]
     if len(axes) == 1:
         i = axes[0]
         kind = ("forward" if values[0] > 0 else "backward") if i == 0 else ("lateral" if i == 1 else "yaw")
-        return {i: round(SINGLE_AXIS_MINIMUM_SHARE[kind] * abs(values[i]), 9)}
-    return {i: MIXED_AXIS_MINIMUM[i] for i in axes}
+        return {i: round(SINGLE_AXIS_MINIMUM_SHARE[kind] * abs(values[i]) * scale, 9)}
+    return {i: round(MIXED_AXIS_MINIMUM[i] * scale, 9) for i in axes}
 
 
-def twist_judgment(command: Sequence[float], twist: Sequence[float]) -> dict[str, Any]:
-    """One measurement's record: the signed response per commanded axis, its minimum and the verdict."""
+def twist_judgment(command: Sequence[float], twist: Sequence[float], scale: float = 1.0) -> dict[str, Any]:
+    """One measurement's record: the signed response per commanded axis, its minimum (times ``scale``) and the
+    verdict.  A scale other than 1 is recorded as ``minimum_scale``; with 1 the record is the rigid floor's as it
+    always was (the IK tracking stage gate recomputes the stored ones)."""
 
     c = [float(x) for x in command]
     v = [float(x) for x in twist]
@@ -68,22 +77,23 @@ def twist_judgment(command: Sequence[float], twist: Sequence[float]) -> dict[str
         passed = finite and all(abs(v[i]) <= STANDING_DRIFT_MAX[i] for i in range(3))
         return {"command": c, "mean_twist": recorded, "standing_drift_max": list(STANDING_DRIFT_MAX),
                 "passed": passed}
-    minimums = axis_minimums(c)
+    minimums = axis_minimums(c, scale)
     signed = {AXES[i]: (v[i] * (1.0 if c[i] > 0 else -1.0) if finite else None) for i in minimums}
     minimum = {AXES[i]: value for i, value in minimums.items()}
     passed = finite and all(signed[axis] >= minimum[axis] for axis in minimum)
     return {"command": c, "mean_twist": recorded, "signed_response": signed,
-            "minimum_signed_response": minimum, "passed": passed}
+            "minimum_signed_response": minimum, **({"minimum_scale": float(scale)} if scale != 1.0 else {}),
+            "passed": passed}
 
 
-def twist_passes(command: Sequence[float], twist: Sequence[float]) -> bool:
-    return bool(twist_judgment(command, twist)["passed"])
+def twist_passes(command: Sequence[float], twist: Sequence[float], scale: float = 1.0) -> bool:
+    return bool(twist_judgment(command, twist, scale)["passed"])
 
 
-def worst_margin(command: Sequence[float], twist: Sequence[float]) -> float:
-    """The smallest signed response minus its minimum (a moving command; nan if not finite)."""
+def worst_margin(command: Sequence[float], twist: Sequence[float], scale: float = 1.0) -> float:
+    """The smallest signed response minus its minimum (times ``scale``; a moving command; nan if not finite)."""
 
-    judgment = twist_judgment(command, twist)
+    judgment = twist_judgment(command, twist, scale)
     if "signed_response" not in judgment:
         raise ValueError("worst_margin is for moving commands")
     if not all(math.isfinite(float(x)) for x in twist):

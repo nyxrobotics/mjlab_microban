@@ -55,6 +55,32 @@ class PassLineTest(unittest.TestCase):
         self.assertFalse(twist_judgment((0.1, 0.0, 0.0), (float("inf"), 0.0, 0.0))["passed"])
         self.assertFalse(twist_passes((0.0, 0.0, 0.0), (float("nan"), 0.0, 0.0)))
 
+    def test_a_judged_floor_may_loosen_the_moving_minimums(self) -> None:
+        # A floor's twist_minimum_scale (config/pipeline.yaml lines): every minimum times the scale, the standing
+        # drift kept.  At 0.5 the 0.1 m/s side step needs 0.01 m/s: the walker 82e9585c's 0.015 on the 0.1 s floor
+        # passes, a walker that does not step sideways does not.
+        for table in (NINE_BY_300, WALK_SINGLE):
+            for command, minimum in table.items():
+                (value,) = axis_minimums(command, 0.5).values()
+                self.assertAlmostEqual(value, 0.5 * minimum, places=12, msg=command)
+        self.assertEqual(axis_minimums((0.35, 0.15, 0.75), 0.5), {0: 0.02, 1: 0.01, 2: 0.1})
+        self.assertFalse(twist_passes((0.0, -0.1, 0.0), (0.0, -0.015, 0.0)))
+        self.assertTrue(twist_passes((0.0, -0.1, 0.0), (0.0, -0.015, 0.0), 0.5))
+        self.assertFalse(twist_passes((0.0, -0.1, 0.0), (0.0, -0.0099, 0.0), 0.5))
+        self.assertAlmostEqual(worst_margin((0.0, -0.1, 0.0), (0.0, -0.015, 0.0), 0.5), 0.005, places=12)
+        self.assertFalse(twist_passes((0, 0, 0), (0.051, 0.0, 0.0), 0.5))
+        # Scale 1 is the rigid floor's line, recorded as it always was (the IK tracking stage gate recomputes stored
+        # reports); another scale is recorded with the judgment.
+        record = twist_judgment((0.1, 0.0, 0.0), (0.06, 0.01, 0.05))
+        self.assertEqual(twist_judgment((0.1, 0.0, 0.0), (0.06, 0.01, 0.05), 1.0), record)
+        self.assertEqual(set(record), {"command", "mean_twist", "signed_response", "minimum_signed_response", "passed"})
+        loose = twist_judgment((0.1, 0.0, 0.0), (0.03, 0.0, 0.0), 0.5)
+        self.assertEqual((loose["minimum_signed_response"], loose["minimum_scale"], loose["passed"]),
+                         ({"vx_m_s": 0.02}, 0.5, True))
+        for scale in (0.0, -0.5, 1.01, float("nan")):
+            with self.subTest(scale=scale), self.assertRaises(ValueError):
+                axis_minimums((0.1, 0.0, 0.0), scale)
+
     def test_record_is_reproducible(self) -> None:
         self.assertEqual(twist_pass_line_record(), twist_pass_line_record())
         record = twist_judgment((0.1, 0.0, 0.0), (0.06, 0.01, 0.05))

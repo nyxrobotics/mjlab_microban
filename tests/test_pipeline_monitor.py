@@ -124,6 +124,17 @@ class WalkRulesTest(unittest.TestCase):
         self.assertFalse(verdict["floors"]["slippery"]["checks"]["falls"] or verdict["passed"])
         good = [{**r, "floor": "soft"} for r in self.rows()]
         self.assertTrue(evaluate_floors(good, rules)["passed"])
+        # A floor's twist_minimum_scale loosens its direction's minimums alone (0.5: 0.2 m/s forward 0.04); the
+        # standing drift, the falls and standing still keep their lines.
+        slow = self.rows(single=0.079)
+        verdict = evaluate_floors([{**r, "floor": "soft"} for r in slow] + [{**r, "floor": "slippery"} for r in slow],
+                                  rules, {"soft": 0.5})
+        self.assertEqual({name: (v["checks"]["direction"], v["twist_minimum_scale"])
+                          for name, v in verdict["floors"].items()}, {"soft": (True, 0.5), "slippery": (False, 1.0)})
+        self.assertFalse(evaluate(self.rows(single=0.039), rules, 0.5)["checks"]["direction"])
+        self.assertFalse(evaluate(self.rows(still=(0.06, 0.0, 0.0)), rules, 0.5)["checks"]["direction"])
+        self.assertFalse(evaluate(self.rows(falls=2), rules, 0.5)["checks"]["falls"])
+        self.assertFalse(evaluate(self.rows(touchdowns=7.9), rules, 0.5)["checks"]["standing_still"])
 
 
 if __name__ == "__main__":

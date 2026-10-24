@@ -27,7 +27,9 @@ The signed single-axis responses are recorded with each verdict.
 With ``--floors`` (config/pipeline.yaml ``walk.judgment.floors``) every
 command runs on each soft and slippery floor (pipeline/floors.py), one floor
 per environment, in place of the play env's rigid floor, and the rules are
-judged per floor with the same lines.
+judged per floor with the same lines, the direction's minimums times the
+floor's ``lines.twist_minimum_scale`` where it sets one (FLOOR_LINES; the falls
+and standing still keep theirs).
 
 usage: python -m mjlab_microban.pipeline.walk_probe CKPT OUT.json --rules JSON [--seeds 101,...] [--floors JSON]
 Prints one ``RESULT {json}`` line (the rule verdicts and their numbers).
@@ -58,6 +60,8 @@ SINGLE = {
 SINGLE_AXIS = {"F": 0, "BK": 0, "LL": 1, "LR": 1, "YL": 2, "YR": 2}
 PUSHES = {"none": None, "p30_15": (0.30, 0.15)}
 STEPS, SETTLE = 300, 50
+# The lines a floor of walk.judgment.floors may set (pipeline/floors.py LINE_RANGES): the direction's.
+FLOOR_LINES = ("twist_minimum_scale",)
 
 
 def _mean(values: list[float]) -> float:
@@ -94,8 +98,9 @@ def _cell(rows: list[dict], push: str, commands: list[str]) -> dict[str, Any]:
     return {"falls": sum(r["fell"] for r in selected), "per": per}
 
 
-def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
-    """The three rules' verdicts and the numbers they were taken on."""
+def evaluate(rows: list[dict], rules: dict[str, Any], scale: float = 1.0) -> dict[str, Any]:
+    """The three rules' verdicts and the numbers they were taken on; ``scale`` multiplies the direction's minimums
+    (twist_pass_line.py), not the standing drift."""
 
     none = _cell(rows, "none", list(DIAGONAL))
     pushed = _cell(rows, "p30_15", list(DIAGONAL))
@@ -108,7 +113,8 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
     checks = {
         "falls": none["falls"] <= rules["max_falls"][0] and pushed["falls"] <= rules["max_falls"][1]
         and single["falls"] == 0,
-        "direction": len(moving) == len(SINGLE_AXIS) and all(twist_passes(v["twist"], v["mean"]) for v in moving.values())
+        "direction": len(moving) == len(SINGLE_AXIS)
+        and all(twist_passes(v["twist"], v["mean"], scale) for v in moving.values())
         and twist_passes(SINGLE["S"], still),
         "standing_still": math.isfinite(still_touchdowns) and still_touchdowns <= rules["still_touchdowns_per_s"],
     }
@@ -119,15 +125,24 @@ def evaluate(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
         "single_signed": single_signed,
         "still": still,
         "still_touchdowns_per_s": still_touchdowns,
+        "twist_minimum_scale": scale,
     }
 
 
-def evaluate_floors(rows: list[dict], rules: dict[str, Any]) -> dict[str, Any]:
-    """The three rules on each floor of ``rows`` (``floor``) with the floors' lines (``rules``)."""
+def evaluate_floors(rows: list[dict], rules: dict[str, Any], scales: dict[str, float] | None = None) -> dict[str, Any]:
+    """The three rules on each floor of ``rows`` (``floor``) with the floors' lines (``rules``), the direction's
+    minimums times the floor's ``scales`` entry (``twist_minimum_scales``; 1 without one)."""
 
-    floors = {name: evaluate([r for r in rows if r["floor"] == name], rules)
+    scales = scales or {}
+    floors = {name: evaluate([r for r in rows if r["floor"] == name], rules, scales.get(name, 1.0))
               for name in dict.fromkeys(r["floor"] for r in rows)}
     return {"floors": floors, "passed": all(v["passed"] for v in floors.values())}
+
+
+def twist_minimum_scales(floors: dict[str, Any]) -> dict[str, float]:
+    """{name: twist_minimum_scale} of parsed floors (pipeline/floors.py ``parse``); 1 where a floor sets none."""
+
+    return {name: floor.lines.get("twist_minimum_scale", 1.0) for name, floor in floors.items()}
 
 
 def run(checkpoint: str, seeds: list[int], reps: int,
@@ -261,16 +276,18 @@ def main() -> None:
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--rules", required=True, help="JSON of config/pipeline.yaml walk.judgment")
     parser.add_argument("--floors", help="JSON of config/pipeline.yaml walk.judgment.floors: judge on these "
-                        "floors (with --rules the floors' lines) instead of the play env's rigid floor")
+                        "floors (with --rules the floors' lines, and each floor's own lines) instead of the play "
+                        "env's rigid floor")
     args = parser.parse_args()
     started = time.time()
     floors = None
     if args.floors:
         from mjlab_microban.pipeline.floors import parse
 
-        floors = parse(json.loads(args.floors))
+        floors = parse(json.loads(args.floors), lines=FLOOR_LINES)
     rows = run(args.checkpoint, [int(s) for s in args.seeds.split(",")], args.reps, floors)
-    verdict = evaluate_floors(rows, json.loads(args.rules)) if floors else evaluate(rows, json.loads(args.rules))
+    rules = json.loads(args.rules)
+    verdict = evaluate_floors(rows, rules, twist_minimum_scales(floors)) if floors else evaluate(rows, rules)
     result = {"checkpoint": args.checkpoint, **verdict, "seconds": time.time() - started}
     with open(args.output, "w") as stream:
         json.dump({**result, "rows": rows}, stream, indent=1)

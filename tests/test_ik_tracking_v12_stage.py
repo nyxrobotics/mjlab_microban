@@ -24,8 +24,15 @@ from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import (
 from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import (
     _acceptance as _locomotion_acceptance,
 )
+from mjlab_microban.scripts.evaluate_ik_tracking_v12_checkpoint import (
+    build_parser as build_locomotion_parser,
+)
+from mjlab_microban.scripts.evaluate_ik_tracking_v12_tracking import (
+    build_parser as build_tracking_parser,
+)
 from mjlab_microban.scripts.evaluate_ik_tracking_v12_tracking import (
     FINAL_PROFILE,
+    PUSH_FALL_RATE_MARGIN,
     SEED_COUNT,
     TRACKING_PROFILES,
     ZMP_CENTRE_MAX_M,
@@ -463,6 +470,34 @@ class IkTrackingV12StageTest(unittest.TestCase):
             item["falls"] = {"pico": 0} if item["name"] in crouched else {"pico": 0, "walker": 0}
         _find(results["push"], "neutral")["falls"]["pico"] = 58
         self.assertFalse(_acceptance(results)[0]["push_falls"])
+        # A judged floor's own margin (lines.push_fall_rate_margin, --push-fall-rate-margin; the soft plate's 8
+        # points) in place of the 5 points, recorded with the report's thresholds.
+        results = _results()
+        for item in results["push"]:
+            item["falls"] = {"pico": 0} if item["name"] in crouched else {"pico": 0, "walker": 0}
+        _find(results["push"], "both_up16")["falls"]["pico"] = 40  # 40/512 < 8 points
+        self.assertFalse(_acceptance(results)[0]["push_falls"])
+        self.assertTrue(_acceptance(results, 0.08)[0]["push_falls"])
+        _find(results["push"], "both_up16")["falls"]["pico"] = 41
+        self.assertFalse(_acceptance(results, 0.08)[0]["push_falls"])
+        self.assertEqual((thresholds()["push_fall_rate_margin"], thresholds(0.08)["push_fall_rate_margin"]),
+                         (PUSH_FALL_RATE_MARGIN, 0.08))
+        self.assertEqual([build_tracking_parser().parse_args(["model.pt", *flag]).push_fall_rate_margin
+                          for flag in ([], ["--push-fall-rate-margin", "0.08"])], [PUSH_FALL_RATE_MARGIN, 0.08])
+
+    def test_a_judged_floor_may_loosen_the_9x300_direction(self) -> None:
+        # A floor's twist_minimum_scale (--twist-minimum-scale): 0.3 of every command is below the minimums and
+        # above half of them.  The rigid floor's records stay as the stage gate recomputes them.
+        results = _locomotion_report({"sha256": "a" * 64, "iteration": 0, "completed_updates": 1})["results"]
+        for result in results[1:]:
+            response = result["directional_response"]
+            result["measured_velocity_body"][response["axis"]]["mean"] = 0.3 * response["command"]
+        self.assertFalse(_locomotion_acceptance(results)[0]["twist_direction"])
+        self.assertTrue(_locomotion_acceptance(results, 0.5)[0]["twist_direction"])
+        self.assertEqual({item["minimum_scale"] for item in locomotion_twist_judgments(results, 0.5).values()}, {0.5})
+        self.assertFalse(any("minimum_scale" in item for item in locomotion_twist_judgments(results).values()))
+        self.assertEqual([build_locomotion_parser().parse_args(["model.pt", *flag]).twist_minimum_scale
+                          for flag in ([], ["--twist-minimum-scale", "0.5"])], [1.0, 0.5])
 
     def test_standing_still_with_the_head_and_arms_moving(self) -> None:
         stepping = _results()

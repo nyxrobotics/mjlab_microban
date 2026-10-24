@@ -30,7 +30,8 @@ action guard, and the recorded actor observations its startup self-test.
 
 With ``--floor`` every part runs on a soft or slippery floor of the walking
 judgment (pipeline/floors.py; the walker of J2 on the same floor) in place of
-the play env's rigid one, with the same lines.
+the play env's rigid one, with the same lines; ``--push-fall-rate-margin`` (a
+judged floor's ``lines.push_fall_rate_margin``) replaces J2's 5 points there.
 """
 
 from __future__ import annotations
@@ -191,7 +192,7 @@ CHECK_NAMES = frozenset(
 )
 
 
-def thresholds() -> dict[str, Any]:
+def thresholds(push_fall_rate_margin: float = PUSH_FALL_RATE_MARGIN) -> dict[str, Any]:
     return {
         "actual_soft_limit_violation_rad_max": ACTUAL_DYNAMIC_SOFT_LIMIT_OVERSHOOT_MAX_RAD,
         "hmd_target_peak_to_peak_rad_min": HMD_TARGET_PEAK_TO_PEAK_MIN_RAD,
@@ -201,7 +202,7 @@ def thresholds() -> dict[str, Any]:
         "foot_error_share": FOOT_ERROR_SHARE,
         "foot_error_floor_m": FOOT_ERROR_FLOOR_M,
         "support_foot_move_max_m": SUPPORT_FOOT_MOVE_MAX_M,
-        "push_fall_rate_margin": PUSH_FALL_RATE_MARGIN,
+        "push_fall_rate_margin": push_fall_rate_margin,
         "still_touchdowns_per_s_max": STILL_TOUCHDOWNS_PER_S_MAX,
         "zmp_centre_max_m": ZMP_CENTRE_MAX_M,
         "arm_walk_min_share": ARM_WALK_MIN_SHARE,
@@ -303,16 +304,16 @@ def push_fall_rates_by_group(push: list[dict[str, Any]]) -> dict[str, dict[str, 
     return rates
 
 
-def push_fall_rate_limit(push: list[dict[str, Any]]) -> float:
+def push_fall_rate_limit(push: list[dict[str, Any]], margin: float = PUSH_FALL_RATE_MARGIN) -> float:
     """The IK tracking policy's largest fall rate in either group: the walker's standing and walking rate
-    + 5 points."""
+    + 5 points (``margin``: a judged floor's own)."""
 
-    return push_fall_rates_by_group(push)["standing_and_walking"]["walker"] + PUSH_FALL_RATE_MARGIN
+    return push_fall_rates_by_group(push)["standing_and_walking"]["walker"] + margin
 
 
-def _push_check(push: list[dict[str, Any]]) -> bool:
+def _push_check(push: list[dict[str, Any]], margin: float) -> bool:
     groups = push_groups(push)
-    limit = push_fall_rate_limit(push)
+    limit = push_fall_rate_limit(push, margin)
     return all(groups.values()) and all(
         rates["pico"] <= limit for rates in push_fall_rates_by_group(push).values()
     )
@@ -360,7 +361,9 @@ def _arm_walk_check(arms: list[dict[str, Any]]) -> bool:
     return walking
 
 
-def _acceptance(results: dict[str, Any]) -> tuple[dict[str, bool], str]:
+def _acceptance(
+    results: dict[str, Any], push_fall_rate_margin: float = PUSH_FALL_RATE_MARGIN
+) -> tuple[dict[str, bool], str]:
     safety = results["safety"]
     feet, push, arms = results["feet"], results["push"], results["arms"]
     soft = _number(safety["maximum_actual_soft_limit_violation_rad"])
@@ -381,7 +384,7 @@ def _acceptance(results: dict[str, Any]) -> tuple[dict[str, bool], str]:
         "no_falls_without_push": bool(feet) and bool(arms)
         and all(int(item["falls"]) == 0 for item in (*feet, *arms)),
         **_feet_checks(feet),
-        "push_falls": _push_check(push),
+        "push_falls": _push_check(push, push_fall_rate_margin),
         "standing_still": _standing_check(feet, arms),
         "walking_with_arms": _arm_walk_check(arms),
     }
@@ -797,6 +800,7 @@ def run_evaluation(
     device: str,
     seed: int,
     floor: tuple[float | None, float] | None = None,
+    push_fall_rate_margin: float = PUSH_FALL_RATE_MARGIN,
 ) -> dict[str, Any]:
     checkpoint = checkpoint.expanduser().resolve()
     digest = sha256_file(checkpoint)
@@ -869,7 +873,7 @@ def run_evaluation(
             "posed_zero_steps": ctx.posed_zero_steps,
         },
     }
-    checks, status = _acceptance(results)
+    checks, status = _acceptance(results, push_fall_rate_margin)
     envelope = {
         "joint_names": list(MICROBAN_ACTION_JOINT_NAMES),
         "scenario_count": sum(len(results[part]) for part in ("feet", "push", "arms")),
@@ -896,7 +900,7 @@ def run_evaluation(
             **({"floor": {"friction": floor[0], "time_constant_s": floor[1], "sole_floor": sole_floor}}
                if floor is not None else {}),
         },
-        "thresholds": thresholds(),
+        "thresholds": thresholds(push_fall_rate_margin),
         "checks": checks,
         "push_fall_rates": push_fall_rates_by_group(results["push"]),
         "raw_action_envelope": envelope,
@@ -935,6 +939,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--floor", help='a soft or slippery floor of the walking judgment, JSON '
                         '{"time_constant_s": s, "friction": mu or null} (pipeline/floors.py); default the play floor')
+    parser.add_argument("--push-fall-rate-margin", type=float, default=PUSH_FALL_RATE_MARGIN,
+                        help="J2: how much more often the IK tracking policy's pushed rollouts may fall than the "
+                        "walker's standing and walking ones (a judged floor's lines.push_fall_rate_margin; "
+                        "default %(default)s)")
     return parser
 
 
@@ -951,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         seed=args.seed,
         floor=floor,
+        push_fall_rate_margin=args.push_fall_rate_margin,
     )
     if args.output is not None:
         if args.output.expanduser().exists() and not args.force:

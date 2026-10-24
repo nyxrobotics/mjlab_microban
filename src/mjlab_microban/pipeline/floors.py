@@ -18,6 +18,18 @@ A floor may also give sideways like training's carpet (tasks/floor_plate.py):
 ``plate: {stiffness_n_m: k, damping_ratio: zeta}`` puts every environment of
 it on the plate with that spring and damping ratio (``add_judgment_plates``),
 inside training's range (FLOOR_PLATE_STIFFNESS_N_M, FLOOR_PLATE_DAMPING_RATIO).
+
+A floor of walking's or IK tracking's judgment may loosen its own lines
+(``lines``, LINE_RANGES): ``twist_minimum_scale`` multiplies the walking
+direction's minimums (twist_pass_line.py; not the standing drift), and
+``push_fall_rate_margin`` is how much more often IK tracking's pushed rollouts
+may fall than the walker's standing and walking ones
+(evaluate_ik_tracking_v12_tracking.py PUSH_FALL_RATE_MARGIN, 0.05).  The other
+fall lines and standing still are the same on every floor, and a floor without
+``lines`` has the rigid floor's.  The walk probe reads them from its
+``--floors``; the other evaluators take a floor's physics (``physics``) and a
+line as its own argument (``--twist-minimum-scale``,
+``--push-fall-rate-margin``), and refuse a floor with ``lines``.
 """
 
 from __future__ import annotations
@@ -29,37 +41,74 @@ SOLES = (r".*left_foot_collision.*", r".*right_foot_collision.*")
 # Every collision geom of training's robot spec (robot/microban_constants.py collision_named_spec), the soles too.
 BODY = (r".*_collision_\d+$",)
 RIGID_TIME_CONSTANT_S = 0.02
+# The lines a judged floor may set, each in (low, high]: a scale loosens the minimums, never drops or tightens
+# them; a margin of at most 20 points.
+LINE_RANGES = {"twist_minimum_scale": (0.0, 1.0), "push_fall_rate_margin": (0.0, 0.2)}
 
 
 class Floor(tuple):
     """(friction or None, time constant s), carrying the floor's plate (spring N/m, damping ratio) or None as
-    ``plate``: the evaluators pass it on as the pair, and ``add_sole_floors`` puts the plate in."""
+    ``plate`` and the lines it sets ({key: value}, none: {}) as ``lines``: the evaluators pass it on as the pair,
+    and ``add_sole_floors`` puts the plate in."""
 
     plate: tuple[float, float] | None
+    lines: dict[str, float]
 
-    def __new__(cls, friction: float | None, time_constant: float, plate: tuple[float, float] | None = None):
+    def __new__(cls, friction: float | None, time_constant: float, plate: tuple[float, float] | None = None,
+                lines: dict[str, float] | None = None):
         floor = super().__new__(cls, (friction, time_constant))
         floor.plate = plate
+        floor.lines = dict(lines or {})
         return floor
 
 
-def parse(floors: dict[str, dict[str, Any]]) -> dict[str, tuple[float | None, float]]:
-    """{name: (friction or None, time constant s)} of config/pipeline.yaml's floors, checked against training's range."""
+def parse(floors: dict[str, dict[str, Any]], lines: tuple[str, ...] = ()) -> dict[str, Floor]:
+    """{name: (friction or None, time constant s) with its plate and lines} of config/pipeline.yaml's floors, checked
+    against training's range; ``lines``: the keys of a floor's ``lines`` the caller judges with (any other is refused:
+    it would not apply)."""
 
     from mjlab_microban.robot.microban_constants import FLOOR_FRICTION, FLOOR_TIME_CONSTANT_S
 
     parsed = {}
     for name, floor in floors.items():
-        if set(floor) - {"friction", "time_constant_s", "plate"}:
-            raise ValueError(f"floor {name}: unknown keys {sorted(set(floor) - {'friction', 'time_constant_s', 'plate'})}")
+        if set(floor) - {"friction", "time_constant_s", "plate", "lines"}:
+            raise ValueError(f"floor {name}: unknown keys "
+                             f"{sorted(set(floor) - {'friction', 'time_constant_s', 'plate', 'lines'})}")
         friction = floor.get("friction")
         time_constant = float(floor.get("time_constant_s", RIGID_TIME_CONSTANT_S))
         if not FLOOR_TIME_CONSTANT_S[0] <= time_constant <= FLOOR_TIME_CONSTANT_S[1]:
             raise ValueError(f"floor {name}: time constant {time_constant} s outside training's {FLOOR_TIME_CONSTANT_S}")
         if friction is not None and not FLOOR_FRICTION[0] <= float(friction) <= FLOOR_FRICTION[1]:
             raise ValueError(f"floor {name}: friction {friction} outside training's {FLOOR_FRICTION}")
-        parsed[name] = Floor(None if friction is None else float(friction), time_constant, parse_plate(name, floor))
+        parsed[name] = Floor(None if friction is None else float(friction), time_constant, parse_plate(name, floor),
+                             parse_lines(name, floor, lines))
     return parsed
+
+
+def parse_lines(name: str, floor: dict[str, Any], judged: tuple[str, ...]) -> dict[str, float]:
+    """{key: value} of a floor's ``lines``, checked against LINE_RANGES and the keys ``judged``; {} without them."""
+
+    lines = floor.get("lines")
+    if lines is None:
+        return {}
+    if not isinstance(lines, dict):
+        raise ValueError(f"floor {name}: lines take {{key: value}} of {sorted(LINE_RANGES)}, got {lines!r}")
+    if set(lines) - set(judged):
+        raise ValueError(f"floor {name}: lines {sorted(set(lines) - set(judged))} are not judged here "
+                         f"(this judgment takes {sorted(judged)})")
+    parsed = {}
+    for key, value in lines.items():
+        low, high = LINE_RANGES[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low < float(value) <= high:
+            raise ValueError(f"floor {name}: {key} {value!r} outside ({low}, {high}]")
+        parsed[key] = float(value)
+    return parsed
+
+
+def physics(floor: dict[str, Any]) -> dict[str, Any]:
+    """A floor of config/pipeline.yaml as an evaluator's ``--floor`` takes it: without its ``lines``."""
+
+    return {key: value for key, value in floor.items() if key != "lines"}
 
 
 def parse_plate(name: str, floor: dict[str, Any]) -> tuple[float, float] | None:
